@@ -7,6 +7,7 @@
 package youtube
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,10 +28,11 @@ type Operation string
 
 // Known YouTube Data API v3 operations used by this wrapper.
 const (
-	OpSubscriptionsList Operation = "subscriptions_list"
-	OpChannelsList      Operation = "channels_list"
-	OpPlaylistItemsList Operation = "playlist_items_list"
-	OpVideosList        Operation = "videos_list"
+	OpSubscriptionsList   Operation = "subscriptions_list"
+	OpChannelsList        Operation = "channels_list"
+	OpPlaylistItemsList   Operation = "playlist_items_list"
+	OpVideosList          Operation = "videos_list"
+	OpPlaylistItemsInsert Operation = "playlist_items_insert"
 )
 
 // CostRecorder is invoked after each API call with the operation type and the
@@ -380,6 +382,70 @@ func bestThumbnail(t thumbnails) string {
 		return t.Medium.URL
 	}
 	return t.Default.URL
+}
+
+// InsertPlaylistItem adds videoID to playlistID. It returns an error if the
+// API call fails.
+func (c *Client) InsertPlaylistItem(ctx context.Context, playlistID, videoID string) error {
+	body := map[string]any{
+		"snippet": map[string]any{
+			"playlistId": playlistID,
+			"resourceId": map[string]string{
+				"kind":    "youtube#video",
+				"videoId": videoID,
+			},
+		},
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal insert body: %w", err)
+	}
+
+	q := url.Values{"part": {"snippet"}}
+	if _, err := c.post(ctx, "/playlistItems", q, OpPlaylistItemsInsert, payload); err != nil {
+		return fmt.Errorf("insert playlist item: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) post(ctx context.Context, path string, q url.Values, op Operation, payload []byte) ([]byte, error) {
+	u, err := url.Parse(c.baseURL + path)
+	if err != nil {
+		return nil, fmt.Errorf("build url: %w", err)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	c.logger.DebugContext(ctx, "youtube api request", "method", "POST", "path", path, "op", op)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("youtube api %s returned %d: %s", path, resp.StatusCode, string(body))
+	}
+
+	if c.recorder != nil {
+		if err := c.recorder(ctx, op, 1); err != nil {
+			return nil, fmt.Errorf("record quota: %w", err)
+		}
+	}
+
+	return body, nil
 }
 
 func (c *Client) get(ctx context.Context, path string, q url.Values, op Operation, calls int) ([]byte, error) {
