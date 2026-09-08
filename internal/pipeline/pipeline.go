@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
+	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
+	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
@@ -28,20 +30,43 @@ type ActionExecutor interface {
 	Execute(ctx context.Context, runID, videoID int64, matches []RouteMatch) (state.VideoFinalOutcome, error)
 }
 
+// Versioner returns the active configuration version ID for a run.
+type Versioner interface {
+	ActiveVersionID(ctx context.Context) (*int64, error)
+}
+
+// AdvisoryGenerator scans channel statistics after a production run and creates
+// evidence-backed advisories. The system never acts autonomously.
+type AdvisoryGenerator interface {
+	GenerateAdvisories(ctx context.Context) error
+}
+
+// ConfigStore creates and retrieves configuration snapshots. It is a subset of
+// config.Store used by the pipeline to persist draft configurations for dry-run
+// and backtest modes.
+type ConfigStore interface {
+	Create(ctx context.Context, snapshot config.Snapshot, description string) (int64, error)
+	Get(ctx context.Context, id int64) (*config.ConfigVersion, error)
+}
+
 // Pipeline orchestrates the four-phase run lifecycle.
 type Pipeline struct {
-	db         *sql.DB
-	machine    *state.Machine
-	stateStore *state.Store
-	discovery  *discovery.Engine
-	detector   *duplicate.Detector
-	router     *router.Engine
-	executor   ActionExecutor
-	ledger     *quota.Ledger
-	meta       *metadata.Manager
-	auth       *auth.Service
-	broadcast  *Broadcaster
-	logger     *slog.Logger
+	db                *sql.DB
+	machine           *state.Machine
+	stateStore        *state.Store
+	discovery         *discovery.Engine
+	detector          *duplicate.Detector
+	router            *router.Engine
+	executor          ActionExecutor
+	ledger            *quota.Ledger
+	meta              *metadata.Manager
+	auth              *auth.Service
+	broadcast         *Broadcaster
+	versioner         Versioner
+	queueStore        *queue.Store
+	configStore       ConfigStore
+	advisoryGenerator AdvisoryGenerator
+	logger            *slog.Logger
 }
 
 // Option configures a Pipeline.
@@ -52,6 +77,46 @@ func WithLogger(l *slog.Logger) Option {
 	return func(p *Pipeline) {
 		if l != nil {
 			p.logger = l
+		}
+	}
+}
+
+// WithVersioner sets the config versioner used to link runs to the active
+// configuration snapshot.
+func WithVersioner(v Versioner) Option {
+	return func(p *Pipeline) {
+		if v != nil {
+			p.versioner = v
+		}
+	}
+}
+
+// WithQueueStore sets the queue store used to process deferred work and create
+// error entries on retry failure.
+func WithQueueStore(qs *queue.Store) Option {
+	return func(p *Pipeline) {
+		if qs != nil {
+			p.queueStore = qs
+		}
+	}
+}
+
+// WithConfigStore sets the config store used to persist draft configurations
+// for dry-run and backtest modes.
+func WithConfigStore(cs ConfigStore) Option {
+	return func(p *Pipeline) {
+		if cs != nil {
+			p.configStore = cs
+		}
+	}
+}
+
+// WithAdvisoryGenerator sets the generator that creates evidence-backed
+// advisories after production runs complete.
+func WithAdvisoryGenerator(g AdvisoryGenerator) Option {
+	return func(p *Pipeline) {
+		if g != nil {
+			p.advisoryGenerator = g
 		}
 	}
 }
@@ -108,6 +173,13 @@ func (p *Pipeline) StartRun(ctx context.Context, runType state.RunType) (*state.
 		RunType:   runType,
 		Status:    state.RunStatusRunning,
 	}
+	if p.versioner != nil {
+		cfgID, err := p.versioner.ActiveVersionID(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("pipeline: active config version: %w", err)
+		}
+		run.ConfigVersionID = cfgID
+	}
 	id, err := p.stateStore.CreateRun(ctx, run)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: create run: %w", err)
@@ -119,6 +191,9 @@ func (p *Pipeline) StartRun(ctx context.Context, runType state.RunType) (*state.
 }
 
 // Execute runs all four phases for runID. It is safe to call in a goroutine.
+// If runID refers to an interrupted run, execution resumes from the last
+// recorded phase. For new production runs, pending deferred work is processed
+// before new discoveries.
 func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 	logger := p.logger.With("run_id", runID)
 	logger.InfoContext(ctx, "pipeline execute started")
@@ -132,42 +207,80 @@ func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 		}
 	}()
 
-	if err := p.meta.RunLifecycle(ctx); err != nil {
-		logger.WarnContext(ctx, "metadata lifecycle failed", "error", err)
-	}
-
-	videos, err := p.phaseDiscovery(ctx, runID)
+	run, err := p.stateStore.GetRun(ctx, runID)
 	if err != nil {
-		logger.ErrorContext(ctx, "discovery phase failed", "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
-		p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
-		p.completeRun(ctx, runID)
+		logger.ErrorContext(ctx, "load run failed", "error", err)
 		return
 	}
 
-	if err := p.phaseDuplicateDetection(ctx, runID, videos); err != nil {
-		logger.ErrorContext(ctx, "duplicate detection phase failed", "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
-		p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
-		p.completeRun(ctx, runID)
-		return
+	startPhase := PhaseDiscovery
+	isResume := run.Status == state.RunStatusInterrupted
+	if isResume && run.CurrentPhase != nil {
+		startPhase = Phase(*run.CurrentPhase)
 	}
 
-	routed, err := p.phaseRouting(ctx, runID, videos)
-	if err != nil {
-		logger.ErrorContext(ctx, "routing phase failed", "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
-		p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
-		p.completeRun(ctx, runID)
-		return
+	if p.meta != nil {
+		if err := p.meta.RunLifecycle(ctx); err != nil {
+			logger.WarnContext(ctx, "metadata lifecycle failed", "error", err)
+		}
 	}
 
-	if err := p.phaseActionExecution(ctx, runID, routed); err != nil {
-		logger.ErrorContext(ctx, "action execution phase failed", "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
-		p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
-		p.completeRun(ctx, runID)
-		return
+	// Process deferred work before new discoveries for production runs.
+	if !isResume && startPhase == PhaseDiscovery && p.isProductionRun(run.RunType) {
+		if err := p.processDeferredItems(ctx, runID); err != nil {
+			logger.ErrorContext(ctx, "deferred work processing failed", "error", err)
+		}
+	}
+
+	var videos []*state.Video
+
+	if startPhase == PhaseDiscovery {
+		videos, err = p.phaseDiscovery(ctx, runID)
+		if err != nil {
+			p.failRun(ctx, runID, "discovery phase failed", err)
+			return
+		}
+		startPhase = PhaseDuplicateDetect
+	}
+
+	if videos == nil {
+		videos, err = p.listRunVideos(ctx, runID)
+		if err != nil {
+			p.failRun(ctx, runID, "list run videos failed", err)
+			return
+		}
+	}
+
+	if startPhase == PhaseDuplicateDetect {
+		if err := p.phaseDuplicateDetection(ctx, runID, videos); err != nil {
+			p.failRun(ctx, runID, "duplicate detection phase failed", err)
+			return
+		}
+		startPhase = PhaseRouting
+	}
+
+	var routed []*state.Video
+	if startPhase == PhaseRouting {
+		routed, err = p.phaseRouting(ctx, runID, videos)
+		if err != nil {
+			p.failRun(ctx, runID, "routing phase failed", err)
+			return
+		}
+		startPhase = PhaseActionExecution
+	}
+
+	if startPhase == PhaseActionExecution {
+		if routed == nil {
+			routed, err = p.videosWithMatchedDecisions(ctx, runID, videos)
+			if err != nil {
+				p.failRun(ctx, runID, "load matched videos failed", err)
+				return
+			}
+		}
+		if err := p.phaseActionExecution(ctx, runID, routed); err != nil {
+			p.failRun(ctx, runID, "action execution phase failed", err)
+			return
+		}
 	}
 
 	p.completeRun(ctx, runID)
@@ -183,6 +296,13 @@ func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
 	if run == nil {
 		return
 	}
+
+	if p.isProductionRun(run.RunType) && p.advisoryGenerator != nil {
+		if err := p.advisoryGenerator.GenerateAdvisories(ctx); err != nil {
+			p.logger.WarnContext(ctx, "advisory generation failed", "run_id", runID, "error", err)
+		}
+	}
+
 	p.broadcastEvent(runID, EventRunCompleted, payload(completedPayload{
 		RunID:                 run.ID,
 		Status:                string(run.Status),
@@ -195,7 +315,25 @@ func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
 	}))
 }
 
+func (p *Pipeline) failRun(ctx context.Context, runID int64, message string, err error) {
+	p.logger.ErrorContext(ctx, message, "run_id", runID, "error", err)
+	_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
+	p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
+	p.completeRun(ctx, runID)
+}
+
+func (p *Pipeline) isProductionRun(runType state.RunType) bool {
+	return runType == state.RunTypeScheduled || runType == state.RunTypeManual
+}
+
+func (p *Pipeline) setPhase(ctx context.Context, runID int64, phase Phase) {
+	if err := p.stateStore.SetRunPhase(ctx, runID, string(phase)); err != nil {
+		p.logger.WarnContext(ctx, "failed to record run phase", "run_id", runID, "phase", phase, "error", err)
+	}
+}
+
 func (p *Pipeline) phaseDiscovery(ctx context.Context, runID int64) ([]*state.Video, error) {
+	p.setPhase(ctx, runID, PhaseDiscovery)
 	p.broadcastPhase(runID, PhaseDiscovery)
 
 	result, err := p.discovery.Run(ctx, runID)
@@ -219,9 +357,20 @@ func (p *Pipeline) phaseDiscovery(ctx context.Context, runID int64) ([]*state.Vi
 }
 
 func (p *Pipeline) phaseDuplicateDetection(ctx context.Context, runID int64, videos []*state.Video) error {
+	p.setPhase(ctx, runID, PhaseDuplicateDetect)
 	p.broadcastPhase(runID, PhaseDuplicateDetect)
 
 	for _, v := range videos {
+		// Idempotency: skip videos that already have a duplicate match recorded
+		// for this run (e.g. when resuming from an interrupt).
+		alreadyMatched, err := p.hasDuplicateMatchInRun(ctx, v.ID)
+		if err != nil {
+			return fmt.Errorf("check duplicate match for %s: %w", v.VideoID, err)
+		}
+		if alreadyMatched {
+			continue
+		}
+
 		meta, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
 		if err != nil {
 			p.logger.DebugContext(ctx, "duplicate detection using degraded metadata", "video_id", v.VideoID, "error", err)
@@ -246,10 +395,32 @@ func (p *Pipeline) phaseDuplicateDetection(ctx context.Context, runID int64, vid
 }
 
 func (p *Pipeline) phaseRouting(ctx context.Context, runID int64, videos []*state.Video) ([]*state.Video, error) {
+	p.setPhase(ctx, runID, PhaseRouting)
 	p.broadcastPhase(runID, PhaseRouting)
 
 	var routed []*state.Video
 	for _, v := range videos {
+		// Idempotency: skip videos already routed in this run.
+		decisions, err := p.stateStore.GetRouteDecisionsForVideo(ctx, v.ID)
+		if err != nil {
+			return nil, fmt.Errorf("load decisions for video %d: %w", v.ID, err)
+		}
+		if len(decisions) > 0 {
+			for _, d := range decisions {
+				if d.Decision == state.RouteDecisionMatched {
+					routed = append(routed, v)
+					break
+				}
+			}
+			continue
+		}
+
+		// Move into evaluating before route conditions are checked.
+		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
+			state.VideoStateNotYetEvaluated, state.VideoStateEvaluating); err != nil {
+			return nil, fmt.Errorf("transition video %s to evaluating: %w", v.VideoID, err)
+		}
+
 		meta, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
 		if err != nil {
 			p.logger.DebugContext(ctx, "routing using degraded metadata", "video_id", v.VideoID, "error", err)
@@ -263,11 +434,15 @@ func (p *Pipeline) phaseRouting(ctx context.Context, runID int64, videos []*stat
 		}
 
 		if len(result.MatchedRoutes) > 0 {
+			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
+				state.VideoStateEvaluating, state.VideoStateEvaluated); err != nil {
+				return nil, fmt.Errorf("mark video %s evaluated: %w", v.VideoID, err)
+			}
 			routed = append(routed, v)
 		} else {
 			// No route matched: mark rejected.
 			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
-				state.VideoStateNotYetEvaluated, state.VideoStateEvaluated,
+				state.VideoStateEvaluating, state.VideoStateEvaluated,
 				state.WithFinalOutcome(state.FinalOutcomeRejected)); err != nil {
 				return nil, fmt.Errorf("mark video %s rejected: %w", v.VideoID, err)
 			}
@@ -278,39 +453,83 @@ func (p *Pipeline) phaseRouting(ctx context.Context, runID int64, videos []*stat
 }
 
 func (p *Pipeline) phaseActionExecution(ctx context.Context, runID int64, videos []*state.Video) error {
+	p.setPhase(ctx, runID, PhaseActionExecution)
 	p.broadcastPhase(runID, PhaseActionExecution)
 
 	for _, v := range videos {
-		// Collect matched route IDs for the video.
-		decisions, err := p.stateStore.GetRouteDecisionsForVideo(ctx, v.ID)
-		if err != nil {
-			return fmt.Errorf("load decisions for video %d: %w", v.ID, err)
+		if _, err := p.executeVideoActions(ctx, runID, v); err != nil {
+			return err
 		}
-
-		var matched []RouteMatch
-		for _, d := range decisions {
-			if d.Decision == state.RouteDecisionMatched {
-				matched = append(matched, RouteMatch{
-					RouteDecisionID: d.ID,
-					RouteID:         d.RouteID,
-				})
-			}
-		}
-
-		outcome, err := p.executor.Execute(ctx, runID, v.ID, matched)
-		if err != nil {
-			return fmt.Errorf("execute actions for video %d: %w", v.ID, err)
-		}
-
-		if outcome == state.FinalOutcomeAccepted {
-			if err := duplicate.SetDuplicateReference(ctx, p.db, v.VideoID, true); err != nil {
-				return fmt.Errorf("mark duplicate reference for %s: %w", v.VideoID, err)
-			}
-		}
-
-		p.broadcastVideo(runID, v, outcome, len(matched) > 0)
 	}
 	return nil
+}
+
+func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *state.Video) (state.VideoFinalOutcome, error) {
+	// Collect matched route IDs for the video.
+	decisions, err := p.stateStore.GetRouteDecisionsForVideo(ctx, v.ID)
+	if err != nil {
+		return state.FinalOutcomeFailed, fmt.Errorf("load decisions for video %d: %w", v.ID, err)
+	}
+
+	var matched []RouteMatch
+	for _, d := range decisions {
+		if d.Decision == state.RouteDecisionMatched {
+			matched = append(matched, RouteMatch{
+				RouteDecisionID: d.ID,
+				RouteID:         d.RouteID,
+			})
+		}
+	}
+
+	if len(matched) == 0 {
+		return state.FinalOutcomeRejected, nil
+	}
+
+	// Transition into acted before executing. If resuming at action execution,
+	// the video may already be in acted or evaluated state; try evaluated first.
+	fromState := state.VideoStateEvaluated
+	if v.ProcessingState == state.VideoStateActed {
+		fromState = state.VideoStateActed
+	}
+	if _, err := p.machine.TransitionVideoState(ctx, v.ID, fromState, state.VideoStateActed); err != nil {
+		return state.FinalOutcomeFailed, fmt.Errorf("transition video %d to acted: %w", v.ID, err)
+	}
+
+	outcome, err := p.executor.Execute(ctx, runID, v.ID, matched)
+	if err != nil {
+		if _, terr := p.machine.TransitionVideoState(ctx, v.ID,
+			state.VideoStateActed, state.VideoStateFailed,
+			state.WithErrorMessage(err.Error())); terr != nil {
+			return state.FinalOutcomeFailed, fmt.Errorf("execute actions for video %d: %w", v.ID, terr)
+		}
+		return state.FinalOutcomeFailed, fmt.Errorf("execute actions for video %d: %w", v.ID, err)
+	}
+
+	switch outcome {
+	case state.FinalOutcomeAccepted:
+		if err := duplicate.SetDuplicateReference(ctx, p.db, v.VideoID, true); err != nil {
+			return outcome, fmt.Errorf("mark duplicate reference for %s: %w", v.VideoID, err)
+		}
+		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
+			state.VideoStateActed, state.VideoStateCompleted,
+			state.WithFinalOutcome(state.FinalOutcomeAccepted)); err != nil {
+			return outcome, fmt.Errorf("transition video %d to completed: %w", v.ID, err)
+		}
+	case state.FinalOutcomeDeferred:
+		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
+			state.VideoStateActed, state.VideoStateDeferred,
+			state.WithDeferredReason("quota_exhausted")); err != nil {
+			return outcome, fmt.Errorf("transition video %d to deferred: %w", v.ID, err)
+		}
+	case state.FinalOutcomeFailed:
+		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
+			state.VideoStateActed, state.VideoStateFailed); err != nil {
+			return outcome, fmt.Errorf("transition video %d to failed: %w", v.ID, err)
+		}
+	}
+
+	p.broadcastVideo(runID, v, outcome, len(matched) > 0)
+	return outcome, nil
 }
 
 func (p *Pipeline) listRunVideos(ctx context.Context, runID int64) ([]*state.Video, error) {
@@ -347,6 +566,107 @@ func (p *Pipeline) recordDuplicateMatch(ctx context.Context, videoID int64, matc
 		                              match_type, threshold_used)
 		 VALUES (?, ?, ?, ?, ?);`,
 		videoID, fpID, match.Similarity, string(match.Type), duplicate.DefaultThreshold)
+	return err
+}
+
+func (p *Pipeline) hasDuplicateMatchInRun(ctx context.Context, videoID int64) (bool, error) {
+	var n int
+	err := p.db.QueryRowContext(ctx,
+		`SELECT 1 FROM duplicate_match WHERE video_id = ? LIMIT 1;`, videoID).Scan(&n)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (p *Pipeline) videosWithMatchedDecisions(ctx context.Context, runID int64, videos []*state.Video) ([]*state.Video, error) {
+	var routed []*state.Video
+	for _, v := range videos {
+		decisions, err := p.stateStore.GetRouteDecisionsForVideo(ctx, v.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range decisions {
+			if d.Decision == state.RouteDecisionMatched {
+				routed = append(routed, v)
+				break
+			}
+		}
+	}
+	return routed, nil
+}
+
+// processDeferredItems retries pending deferred videos before new discoveries.
+// Items are processed oldest-first (FIFO). Quota checks are delegated to the
+// action executor; if quota is exhausted the remaining items stay pending.
+func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64) error {
+	if p.queueStore == nil {
+		return nil
+	}
+
+	items, err := p.queueStore.ListDeferredItems(ctx, queue.DeferredStatusPending)
+	if err != nil {
+		return fmt.Errorf("list deferred items: %w", err)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+
+	p.logger.InfoContext(ctx, "processing deferred items", "count", len(items))
+	for _, item := range items {
+		if err := p.processDeferredItem(ctx, runID, item); err != nil {
+			return fmt.Errorf("process deferred item %d: %w", item.ID, err)
+		}
+	}
+	return nil
+}
+
+func (p *Pipeline) processDeferredItem(ctx context.Context, runID int64, item queue.DeferredItem) error {
+	video, err := p.stateStore.GetVideo(ctx, item.VideoID)
+	if err != nil {
+		return fmt.Errorf("load deferred video %d: %w", item.VideoID, err)
+	}
+
+	if err := p.queueStore.MarkDeferredRetrying(ctx, item.ID); err != nil {
+		return fmt.Errorf("mark deferred item retrying: %w", err)
+	}
+
+	outcome, execErr := p.executeVideoActions(ctx, runID, video)
+	if execErr != nil {
+		// Non-quota failure: move to error queue and mark deferred completed.
+		if outcome == state.FinalOutcomeFailed {
+			if err := p.createErrorEntryFromDeferred(ctx, item, execErr); err != nil {
+				return err
+			}
+			return p.queueStore.MarkDeferredCompleted(ctx, item.ID)
+		}
+		// Quota deferral: revert to pending so the next run can retry.
+		return p.queueStore.MarkDeferredPending(ctx, item.ID)
+	}
+
+	if outcome == state.FinalOutcomeDeferred {
+		return p.queueStore.MarkDeferredPending(ctx, item.ID)
+	}
+
+	return p.queueStore.MarkDeferredCompleted(ctx, item.ID)
+}
+
+func (p *Pipeline) createErrorEntryFromDeferred(ctx context.Context, item queue.DeferredItem, execErr error) error {
+	if p.queueStore == nil {
+		return nil
+	}
+	_, err := p.queueStore.CreateErrorEntry(ctx, &queue.ErrorEntry{
+		VideoID:         item.VideoID,
+		ExternalVideoID: item.ExternalVideoID,
+		RunID:           item.RunID,
+		Category:        queue.ErrorCategoryRuntime,
+		Message:         execErr.Error(),
+		Status:          queue.ErrorStatusActive,
+		CreatedAt:       time.Now().UTC(),
+	})
 	return err
 }
 

@@ -19,6 +19,13 @@ func NewEngine(store *Store) *Engine {
 	return &Engine{store: store}
 }
 
+// Routes returns the active route set loaded from the route store. It is
+// exposed so callers such as the dry-run executor can simulate actions against
+// the same definitions used for evaluation.
+func (e *Engine) Routes(ctx context.Context) ([]Route, error) {
+	return e.store.LoadActiveRoutes(ctx)
+}
+
 // Evaluate loads active routes and evaluates video against them. It records
 // route decisions and condition audits via machine.
 func (e *Engine) Evaluate(ctx context.Context, runID int64, videoID int64,
@@ -28,6 +35,14 @@ func (e *Engine) Evaluate(ctx context.Context, runID int64, videoID int64,
 	if err != nil {
 		return nil, fmt.Errorf("router: load routes: %w", err)
 	}
+	return e.EvaluateWithRoutes(ctx, runID, videoID, vc, machine, routes)
+}
+
+// EvaluateWithRoutes evaluates video against an explicit set of routes. It is
+// used by dry-run and backtest modes that need to evaluate against a
+// configuration snapshot without mutating the active route table.
+func (e *Engine) EvaluateWithRoutes(ctx context.Context, runID int64, videoID int64,
+	vc VideoContext, machine *state.Machine, routes []Route) (*EvaluationResult, error) {
 
 	result := &EvaluationResult{}
 	finalMatched := false

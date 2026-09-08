@@ -90,7 +90,8 @@ func defaultYouTubeFactory(ctx context.Context, token *oauth2.Token, recorder yo
 }
 
 // Execute runs all actions for the matched routes. It returns the final outcome
-// for the video: accepted, deferred, or failed.
+// for the video: accepted, deferred, or failed. On successful execution it
+// increments the channel's total_routed counter.
 func (e *Executor) Execute(ctx context.Context, runID, videoID int64, matches []RouteMatch) (state.VideoFinalOutcome, error) {
 	if len(matches) == 0 {
 		return state.FinalOutcomeRejected, nil
@@ -148,9 +149,25 @@ func (e *Executor) Execute(ctx context.Context, runID, videoID int64, matches []
 	}
 
 	if allSucceeded {
+		if err := e.incrementChannelRouted(ctx, videoID); err != nil {
+			e.logger.WarnContext(ctx, "failed to increment channel routed counter", "video_id", videoID, "error", err)
+		}
 		return state.FinalOutcomeAccepted, nil
 	}
 	return state.FinalOutcomeFailed, nil
+}
+
+func (e *Executor) incrementChannelRouted(ctx context.Context, videoID int64) error {
+	var channelID string
+	if err := e.db.QueryRowContext(ctx, `SELECT channel_id FROM video WHERE id = ?;`, videoID).Scan(&channelID); err != nil {
+		return fmt.Errorf("load channel id for video %d: %w", videoID, err)
+	}
+	_, err := e.db.ExecContext(ctx,
+		`UPDATE channel SET total_routed = total_routed + 1 WHERE channel_id = ?;`, channelID)
+	if err != nil {
+		return fmt.Errorf("increment routed for channel %s: %w", channelID, err)
+	}
+	return nil
 }
 
 type action struct {

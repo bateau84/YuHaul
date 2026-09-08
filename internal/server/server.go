@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/pipeline"
 	"github.com/bateau84/YuHaul/internal/state"
 )
@@ -19,13 +20,28 @@ import (
 type Pipeline interface {
 	StartRun(ctx context.Context, runType state.RunType) (*state.Run, error)
 	Execute(ctx context.Context, runID int64)
+	DryRun(ctx context.Context, draft *config.Snapshot) (*state.Run, error)
+	ExecuteDryRun(ctx context.Context, runID int64)
+}
+
+// ConfigHandler is the subset of config.Handler used by the server.
+type ConfigHandler interface {
+	Handler() http.Handler
+}
+
+// AnalyticsHandler serves statistics and advisory endpoints.
+type AnalyticsHandler interface {
+	Handler() http.Handler
 }
 
 // Server serves the YuHaul REST API and SSE endpoints.
 type Server struct {
-	pipeline  Pipeline
-	broadcast *pipeline.Broadcaster
-	logger    *slog.Logger
+	pipeline         Pipeline
+	broadcast        *pipeline.Broadcaster
+	configHandler    ConfigHandler
+	analyticsHandler AnalyticsHandler
+	advisoryHandler  AnalyticsHandler
+	logger           *slog.Logger
 }
 
 // Option configures a Server.
@@ -40,12 +56,42 @@ func WithServerLogger(l *slog.Logger) Option {
 	}
 }
 
+// WithConfigHandler registers the configuration-version HTTP handler.
+func WithConfigHandler(h ConfigHandler) Option {
+	return func(s *Server) {
+		if h != nil {
+			s.configHandler = h
+		}
+	}
+}
+
+// WithAnalyticsHandler registers the statistics HTTP handler.
+func WithAnalyticsHandler(h AnalyticsHandler) Option {
+	return func(s *Server) {
+		if h != nil {
+			s.analyticsHandler = h
+		}
+	}
+}
+
+// WithAdvisoryHandler registers the advisory HTTP handler.
+func WithAdvisoryHandler(h AnalyticsHandler) Option {
+	return func(s *Server) {
+		if h != nil {
+			s.advisoryHandler = h
+		}
+	}
+}
+
 // NewServer returns an API server.
 func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Option) *Server {
 	s := &Server{
-		pipeline:  pipeline,
-		broadcast: broadcast,
-		logger:    slog.Default(),
+		pipeline:         pipeline,
+		broadcast:        broadcast,
+		configHandler:    &noopHandler{},
+		analyticsHandler: &noopHandler{},
+		advisoryHandler:  &noopHandler{},
+		logger:           slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -53,11 +99,28 @@ func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Optio
 	return s
 }
 
+type noopHandler struct{}
+
+func (n *noopHandler) Handler() http.Handler {
+	return http.NewServeMux()
+}
+
 // Handler returns the HTTP handler for the API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/runs", s.handleStartRun)
+	mux.HandleFunc("POST /api/runs/dry-run", s.handleDryRun)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
+
+	// Configuration-version endpoints are served by a dedicated handler.
+	mux.Handle("/api/config/", s.configHandler.Handler())
+	mux.Handle("/api/settings/", s.configHandler.Handler())
+
+	// Advisory routes are more specific than the analytics prefix; register
+	// them first so they take precedence over the broader analytics handler.
+	mux.Handle("/api/analytics/advisories", s.advisoryHandler.Handler())
+	mux.Handle("/api/analytics/channels/{id}/advisories", s.advisoryHandler.Handler())
+	mux.Handle("/api/analytics/", s.analyticsHandler.Handler())
 	return mux
 }
 
@@ -80,6 +143,43 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"run_id": run.ID,
 		"status": string(run.Status),
+	})
+}
+
+func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DraftConfiguration *config.Snapshot `json:"draft_configuration"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+		s.logger.ErrorContext(r.Context(), "failed to decode dry-run body", "error", err)
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if body.DraftConfiguration != nil {
+		if body.DraftConfiguration.DuplicateThreshold < 0.0 || body.DraftConfiguration.DuplicateThreshold > 1.0 {
+			writeError(w, http.StatusBadRequest, "duplicate_threshold must be between 0.0 and 1.0")
+			return
+		}
+	}
+
+	run, err := s.pipeline.DryRun(r.Context(), body.DraftConfiguration)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "failed to start dry-run", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to start dry-run")
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		s.pipeline.ExecuteDryRun(ctx, run.ID)
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"run_id":   run.ID,
+		"run_type": string(run.RunType),
+		"status":   string(run.Status),
 	})
 }
 

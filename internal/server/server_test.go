@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/pipeline"
+	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
 )
@@ -45,6 +48,8 @@ type fakePipeline struct {
 	started bool
 	run     *state.Run
 	execute int64
+	dryRun  *state.Run
+	draft   *config.Snapshot
 	done    chan struct{}
 }
 
@@ -58,6 +63,19 @@ func (f *fakePipeline) StartRun(ctx context.Context, runType state.RunType) (*st
 }
 
 func (f *fakePipeline) Execute(ctx context.Context, runID int64) {
+	f.execute = runID
+	close(f.done)
+}
+
+func (f *fakePipeline) DryRun(ctx context.Context, draft *config.Snapshot) (*state.Run, error) {
+	f.draft = draft
+	if f.dryRun == nil {
+		f.dryRun = f.run
+	}
+	return f.dryRun, nil
+}
+
+func (f *fakePipeline) ExecuteDryRun(ctx context.Context, runID int64) {
 	f.execute = runID
 	close(f.done)
 }
@@ -140,4 +158,203 @@ func TestHandleRunStreamInvalidID(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestHandleDryRun(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeDryRun, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	run.ID = runID
+
+	fp := newFakePipeline(run)
+	broadcast := pipeline.NewBroadcaster()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(fp, broadcast, WithServerLogger(logger))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/dry-run", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Nil(t, fp.draft)
+	select {
+	case <-fp.done:
+		assert.Equal(t, runID, fp.execute)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pipeline ExecuteDryRun")
+	}
+	assert.Contains(t, rec.Body.String(), `"run_type":"dry_run"`)
+}
+
+func TestHandleDryRun_WithDraftConfig(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeDryRun, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	run.ID = runID
+
+	fp := newFakePipeline(run)
+	broadcast := pipeline.NewBroadcaster()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(fp, broadcast, WithServerLogger(logger))
+
+	body := `{"draft_configuration":{"duplicate_threshold":0.75,"duplicate_behavior":"skip","routes":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/dry-run", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	require.NotNil(t, fp.draft)
+	assert.Equal(t, 0.75, fp.draft.DuplicateThreshold)
+}
+
+func setupConfigHandlerTest(t *testing.T) (*sql.DB, *config.Store, *config.Service, *config.Handler, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+	db, err := store.Open(ctx, path)
+	require.NoError(t, err)
+
+	stateStore, err := state.NewStore(db)
+	require.NoError(t, err)
+	_ = stateStore
+
+	routerStore := router.NewStore(db)
+	cfgStore := config.NewStore(db)
+	versioner := config.NewService(routerStore, cfgStore)
+	routerStore.WithOnChange(versioner.Snapshot)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := config.NewHandler(versioner, logger)
+
+	cleanup := func() {
+		_ = db.Close()
+		_ = os.Remove(path)
+	}
+	return db, cfgStore, versioner, handler, cleanup
+}
+
+func TestHandleListConfigVersions(t *testing.T) {
+	ctx := context.Background()
+	_, cfgStore, _, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	_, err := cfgStore.Create(ctx, config.Snapshot{DuplicateThreshold: 0.5}, "first")
+	require.NoError(t, err)
+	_, err = cfgStore.Create(ctx, config.Snapshot{DuplicateThreshold: 0.5}, "second")
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+	req := httptest.NewRequest(http.MethodGet, "/api/config/versions", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "first")
+	assert.Contains(t, body, "second")
+}
+
+func TestHandleGetConfigVersion(t *testing.T) {
+	ctx := context.Background()
+	_, cfgStore, _, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	id, err := cfgStore.Create(ctx, config.Snapshot{DuplicateThreshold: 0.5}, "detail")
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+	req := httptest.NewRequest(http.MethodGet, "/api/config/versions/"+strconv.FormatInt(id, 10), nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "detail")
+}
+
+func TestHandleGetConfigVersion_NotFound(t *testing.T) {
+	_, _, _, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+	req := httptest.NewRequest(http.MethodGet, "/api/config/versions/999", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandleDiffConfigVersion(t *testing.T) {
+	ctx := context.Background()
+	_, cfgStore, _, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	_, err := cfgStore.Create(ctx, config.Snapshot{DuplicateThreshold: 0.5, DuplicateBehavior: "skip"}, "first")
+	require.NoError(t, err)
+	id2, err := cfgStore.Create(ctx, config.Snapshot{DuplicateThreshold: 0.9, DuplicateBehavior: "skip"}, "second")
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+	req := httptest.NewRequest(http.MethodGet, "/api/config/versions/"+strconv.FormatInt(id2, 10)+"/diff", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "duplicate_threshold")
+}
+
+func TestHandleRestoreConfigVersion(t *testing.T) {
+	ctx := context.Background()
+	_, cfgStore, _, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	id, err := cfgStore.Create(ctx, config.Snapshot{DuplicateThreshold: 0.5}, "original")
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+	req := httptest.NewRequest(http.MethodPost, "/api/config/versions/"+strconv.FormatInt(id, 10)+"/restore", strings.NewReader(`{"description":"restored"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code)
+	assert.Contains(t, rec.Body.String(), "restored")
+}
+
+func TestHandleGetDuplicateThreshold(t *testing.T) {
+	_, _, _, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/duplicate-threshold", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "0.5")
+}
+
+func TestHandleSetDuplicateThreshold(t *testing.T) {
+	ctx := context.Background()
+	_, _, versioner, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+	req := httptest.NewRequest(http.MethodPut, "/api/settings/duplicate-threshold", strings.NewReader(`{"threshold":0.75}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	v, err := versioner.DuplicateThreshold(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0.75, v)
 }

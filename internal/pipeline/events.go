@@ -113,9 +113,15 @@ func (b *Broadcaster) Unsubscribe(runID int64, ch chan Event) {
 // Broadcast sends an event to all subscribers of runID. It never blocks.
 func (b *Broadcaster) Broadcast(runID int64, ev Event) {
 	b.mu.RLock()
-	subs := b.subscribers[runID]
+	subsForRun := b.subscribers[runID]
+	// Copy channel references while holding the read lock so iteration below
+	// cannot race with Unsubscribe mutations.
+	subs := make([]chan Event, 0, len(subsForRun))
+	for ch := range subsForRun {
+		subs = append(subs, ch)
+	}
 	b.mu.RUnlock()
-	for ch := range subs {
+	for _, ch := range subs {
 		select {
 		case ch <- ev:
 		default:

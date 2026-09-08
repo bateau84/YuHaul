@@ -41,6 +41,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			snapshot TEXT NOT NULL,
 			change_description TEXT
 		);`,
+		`CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);`,
+		`INSERT OR IGNORE INTO settings (key, value) VALUES ('duplicate_threshold', '0.5');`,
+		`INSERT OR IGNORE INTO settings (key, value) VALUES ('duplicate_behavior', 'skip');`,
 		`CREATE TABLE IF NOT EXISTS route (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
@@ -67,7 +73,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			videos_not_yet_evaluated INTEGER DEFAULT 0,
 			quota_cost INTEGER DEFAULT 0,
 			duration_seconds REAL,
-			interrupt_reason TEXT
+			interrupt_reason TEXT,
+			current_phase TEXT
 		);`,
 		`CREATE TABLE IF NOT EXISTS video (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,13 +141,40 @@ func (s *Store) CreateRun(ctx context.Context, run *Run) (int64, error) {
 	return id, nil
 }
 
+// ListInterruptedRuns returns all runs with status interrupted, oldest first.
+func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
+		        videos_discovered, videos_accepted, videos_rejected, videos_deferred,
+		        videos_failed, videos_not_yet_evaluated, quota_cost, duration_seconds,
+		        interrupt_reason, current_phase
+		 FROM run WHERE status = ? ORDER BY started_at ASC;`, RunStatusInterrupted)
+	if err != nil {
+		return nil, fmt.Errorf("listing interrupted runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning interrupted run: %w", err)
+		}
+		out = append(out, *r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating interrupted runs: %w", err)
+	}
+	return out, nil
+}
+
 // GetRun loads a run by ID.
 func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_deferred,
 		        videos_failed, videos_not_yet_evaluated, quota_cost, duration_seconds,
-		        interrupt_reason
+		        interrupt_reason, current_phase
 		 FROM run WHERE id = ?;`, id)
 	r, err := scanRun(row)
 	if err != nil {
@@ -175,6 +209,21 @@ func (s *Store) InterruptRun(ctx context.Context, id int64, reason string) error
 		RunStatusInterrupted, reason, id)
 	if err != nil {
 		return fmt.Errorf("interrupting run %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// SetRunPhase records the phase a run has reached. It is used both for resume
+// and for coarse-grained progress observation.
+func (s *Store) SetRunPhase(ctx context.Context, id int64, phase string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE run SET current_phase = ? WHERE id = ?;`,
+		phase, id)
+	if err != nil {
+		return fmt.Errorf("setting run %d phase: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("run %d: %w", id, ErrNotFound)
@@ -302,6 +351,60 @@ func (s *Store) GetRouteDecisionsForVideo(ctx context.Context, videoID int64) ([
 	return out, nil
 }
 
+// GetRouteDecisionsForVideoInRun returns route decisions for a specific video
+// within a specific run, ordered by evaluation order.
+func (s *Store) GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]RouteDecision, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, video_id, run_id, route_id, evaluation_order, decision,
+		        skip_reason, rejection_reason
+		 FROM route_decision WHERE video_id = ? AND run_id = ? ORDER BY evaluation_order;`,
+		videoID, runID)
+	if err != nil {
+		return nil, fmt.Errorf("querying route decisions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RouteDecision
+	for rows.Next() {
+		d, err := scanRouteDecision(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning route decision: %w", err)
+		}
+		out = append(out, *d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating route decisions: %w", err)
+	}
+	return out, nil
+}
+
+// ListPendingVideos returns videos that are eligible for dry-run evaluation:
+// those in the not_yet_evaluated state and not already processed or rejected.
+func (s *Store) ListPendingVideos(ctx context.Context) ([]Video, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
+		        processing_state, final_outcome, deferred_reason, error_message, completed_at
+		 FROM video WHERE processing_state = ? ORDER BY discovered_at;`,
+		VideoStateNotYetEvaluated)
+	if err != nil {
+		return nil, fmt.Errorf("listing pending videos: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Video
+	for rows.Next() {
+		v, err := scanVideo(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning pending video: %w", err)
+		}
+		out = append(out, *v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating pending videos: %w", err)
+	}
+	return out, nil
+}
+
 // CreateExecutedAction persists an executed action.
 func (s *Store) CreateExecutedAction(ctx context.Context, a *ExecutedAction) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
@@ -416,15 +519,17 @@ func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 // ErrNotFound indicates that a requested entity does not exist.
 var ErrNotFound = errors.New("state: not found")
 
-func scanRun(row *sql.Row) (*Run, error) {
+func scanRun(sc interface {
+	Scan(dest ...any) error
+}) (*Run, error) {
 	r := &Run{}
-	var completedAt, interruptReason sql.NullString
+	var completedAt, interruptReason, currentPhase sql.NullString
 	var durationSeconds sql.NullFloat64
 	var configVersionID sql.NullInt64
-	err := row.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
+	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
 		&r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.QuotaCost,
-		&durationSeconds, &interruptReason)
+		&durationSeconds, &interruptReason, &currentPhase)
 	if err != nil {
 		return nil, err
 	}
@@ -440,6 +545,9 @@ func scanRun(row *sql.Row) (*Run, error) {
 	}
 	if interruptReason.Valid {
 		r.InterruptReason = &interruptReason.String
+	}
+	if currentPhase.Valid {
+		r.CurrentPhase = &currentPhase.String
 	}
 	return r, nil
 }
