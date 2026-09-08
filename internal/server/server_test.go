@@ -45,12 +45,16 @@ func setupServerTest(t *testing.T) (*sql.DB, *state.Store, *state.Machine, func(
 }
 
 type fakePipeline struct {
-	started bool
-	run     *state.Run
-	execute int64
-	dryRun  *state.Run
-	draft   *config.Snapshot
-	done    chan struct{}
+	started          bool
+	run              *state.Run
+	execute          int64
+	dryRun           *state.Run
+	draft            *config.Snapshot
+	replay           *state.Run
+	replayConfigID   *int64
+	backtest         *state.Run
+	backtestProposed config.Snapshot
+	done             chan struct{}
 }
 
 func newFakePipeline(run *state.Run) *fakePipeline {
@@ -76,6 +80,32 @@ func (f *fakePipeline) DryRun(ctx context.Context, draft *config.Snapshot) (*sta
 }
 
 func (f *fakePipeline) ExecuteDryRun(ctx context.Context, runID int64) {
+	f.execute = runID
+	close(f.done)
+}
+
+func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64) (*state.Run, error) {
+	f.replayConfigID = configVersionID
+	if f.replay == nil {
+		f.replay = f.run
+	}
+	return f.replay, nil
+}
+
+func (f *fakePipeline) ExecuteReplay(ctx context.Context, runID int64) {
+	f.execute = runID
+	close(f.done)
+}
+
+func (f *fakePipeline) Backtest(ctx context.Context, proposed config.Snapshot) (*state.Run, error) {
+	f.backtestProposed = proposed
+	if f.backtest == nil {
+		f.backtest = f.run
+	}
+	return f.backtest, nil
+}
+
+func (f *fakePipeline) ExecuteBacktest(ctx context.Context, runID int64) {
 	f.execute = runID
 	close(f.done)
 }
@@ -213,6 +243,162 @@ func TestHandleDryRun_WithDraftConfig(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 	require.NotNil(t, fp.draft)
 	assert.Equal(t, 0.75, fp.draft.DuplicateThreshold)
+}
+
+func TestHandleReplay(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeReplay, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	run.ID = runID
+
+	fp := newFakePipeline(run)
+	broadcast := pipeline.NewBroadcaster()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(fp, broadcast, WithServerLogger(logger))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/replay", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Nil(t, fp.replayConfigID)
+	select {
+	case <-fp.done:
+		assert.Equal(t, runID, fp.execute)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pipeline ExecuteReplay")
+	}
+	assert.Contains(t, rec.Body.String(), `"run_type":"replay"`)
+}
+
+func TestHandleReplay_WithConfigVersionID(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeReplay, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	run.ID = runID
+
+	fp := newFakePipeline(run)
+	broadcast := pipeline.NewBroadcaster()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(fp, broadcast, WithServerLogger(logger))
+
+	body := `{"config_version_id":7}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/replay", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	require.NotNil(t, fp.replayConfigID)
+	assert.Equal(t, int64(7), *fp.replayConfigID)
+}
+
+func TestHandleReplay_WithConfigVersionIDQueryParam(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeReplay, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	run.ID = runID
+
+	fp := newFakePipeline(run)
+	broadcast := pipeline.NewBroadcaster()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(fp, broadcast, WithServerLogger(logger))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/replay?config_version_id=9", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	require.NotNil(t, fp.replayConfigID)
+	assert.Equal(t, int64(9), *fp.replayConfigID)
+}
+
+func TestHandleReplay_InvalidConfigVersionIDQueryParam(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeReplay, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	run.ID = runID
+
+	fp := newFakePipeline(run)
+	broadcast := pipeline.NewBroadcaster()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(fp, broadcast, WithServerLogger(logger))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/replay?config_version_id=abc", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestHandleBacktest(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeBacktest, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	run.ID = runID
+
+	fp := newFakePipeline(run)
+	broadcast := pipeline.NewBroadcaster()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(fp, broadcast, WithServerLogger(logger))
+
+	body := `{"proposed_configuration":{"duplicate_threshold":0.8,"duplicate_behavior":"skip","routes":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/backtest", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, 0.8, fp.backtestProposed.DuplicateThreshold)
+	select {
+	case <-fp.done:
+		assert.Equal(t, runID, fp.execute)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pipeline ExecuteBacktest")
+	}
+	assert.Contains(t, rec.Body.String(), `"run_type":"backtest"`)
+}
+
+func TestHandleBacktest_InvalidThreshold(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeBacktest, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	run.ID = runID
+
+	fp := newFakePipeline(run)
+	broadcast := pipeline.NewBroadcaster()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(fp, broadcast, WithServerLogger(logger))
+
+	body := `{"proposed_configuration":{"duplicate_threshold":1.5,"duplicate_behavior":"skip","routes":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/backtest", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, 0.0, fp.backtestProposed.DuplicateThreshold)
 }
 
 func setupConfigHandlerTest(t *testing.T) (*sql.DB, *config.Store, *config.Service, *config.Handler, func()) {

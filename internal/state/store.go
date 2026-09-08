@@ -378,6 +378,32 @@ func (s *Store) GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, run
 	return out, nil
 }
 
+// ListRetainedVideos returns all videos in the corpus ordered by discovered_at.
+// This is the observation set used by replay and backtest modes.
+func (s *Store) ListRetainedVideos(ctx context.Context) ([]Video, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
+		        processing_state, final_outcome, deferred_reason, error_message, completed_at
+		 FROM video ORDER BY discovered_at;`)
+	if err != nil {
+		return nil, fmt.Errorf("listing retained videos: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Video
+	for rows.Next() {
+		v, err := scanVideo(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning retained video: %w", err)
+		}
+		out = append(out, *v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating retained videos: %w", err)
+	}
+	return out, nil
+}
+
 // ListPendingVideos returns videos that are eligible for dry-run evaluation:
 // those in the not_yet_evaluated state and not already processed or rejected.
 func (s *Store) ListPendingVideos(ctx context.Context) ([]Video, error) {
@@ -512,6 +538,40 @@ func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 		runID)
 	if err != nil {
 		return fmt.Errorf("recomputing run %d counters: %w", runID, err)
+	}
+	return nil
+}
+
+// RecomputeRunCountersFromDecisions recomputes outcome counters for a
+// replay/backtest run from the route decisions recorded in the run. Videos are
+// counted as accepted when at least one route matched, rejected when no route
+// matched, and discovered when any route decision was recorded.
+func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE run SET
+		  videos_discovered = (SELECT COUNT(DISTINCT video_id) FROM route_decision WHERE run_id = ?),
+		  videos_accepted = (
+		      SELECT COUNT(DISTINCT video_id)
+		      FROM route_decision
+		      WHERE run_id = ? AND decision = ?
+		  ),
+		  videos_rejected = (
+		      SELECT COUNT(DISTINCT video_id)
+		      FROM route_decision rd
+		      WHERE rd.run_id = ? AND rd.decision = ?
+		        AND rd.video_id NOT IN (
+		            SELECT video_id FROM route_decision WHERE run_id = ? AND decision = ?
+		        )
+		  ),
+		  videos_deferred = 0,
+		  videos_failed = 0,
+		  videos_not_yet_evaluated = 0
+		 WHERE id = ?;`,
+		runID, runID, RouteDecisionMatched,
+		runID, RouteDecisionNotMatched, runID, RouteDecisionMatched,
+		runID)
+	if err != nil {
+		return fmt.Errorf("recomputing run %d counters from decisions: %w", runID, err)
 	}
 	return nil
 }

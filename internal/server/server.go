@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,10 @@ type Pipeline interface {
 	Execute(ctx context.Context, runID int64)
 	DryRun(ctx context.Context, draft *config.Snapshot) (*state.Run, error)
 	ExecuteDryRun(ctx context.Context, runID int64)
+	Replay(ctx context.Context, configVersionID *int64) (*state.Run, error)
+	ExecuteReplay(ctx context.Context, runID int64)
+	Backtest(ctx context.Context, proposed config.Snapshot) (*state.Run, error)
+	ExecuteBacktest(ctx context.Context, runID int64)
 }
 
 // ConfigHandler is the subset of config.Handler used by the server.
@@ -110,6 +115,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/runs", s.handleStartRun)
 	mux.HandleFunc("POST /api/runs/dry-run", s.handleDryRun)
+	mux.HandleFunc("POST /api/runs/replay", s.handleReplay)
+	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
 
 	// Configuration-version endpoints are served by a dedicated handler.
@@ -174,6 +181,87 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 		s.pipeline.ExecuteDryRun(ctx, run.ID)
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"run_id":   run.ID,
+		"run_type": string(run.RunType),
+		"status":   string(run.Status),
+	})
+}
+
+func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
+	var cfgID *int64
+
+	if q := r.URL.Query().Get("config_version_id"); q != "" {
+		id, err := strconv.ParseInt(q, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid config_version_id")
+			return
+		}
+		cfgID = &id
+	} else {
+		var body struct {
+			ConfigVersionID *int64 `json:"config_version_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+			s.logger.ErrorContext(r.Context(), "failed to decode replay body", "error", err)
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		cfgID = body.ConfigVersionID
+	}
+
+	run, err := s.pipeline.Replay(r.Context(), cfgID)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "failed to start replay", "error", err)
+		if errors.Is(err, state.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "config version not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to start replay")
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		s.pipeline.ExecuteReplay(ctx, run.ID)
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"run_id":   run.ID,
+		"run_type": string(run.RunType),
+		"status":   string(run.Status),
+	})
+}
+
+func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ProposedConfiguration config.Snapshot `json:"proposed_configuration"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.logger.ErrorContext(r.Context(), "failed to decode backtest body", "error", err)
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if body.ProposedConfiguration.DuplicateThreshold < 0.0 || body.ProposedConfiguration.DuplicateThreshold > 1.0 {
+		writeError(w, http.StatusBadRequest, "duplicate_threshold must be between 0.0 and 1.0")
+		return
+	}
+
+	run, err := s.pipeline.Backtest(r.Context(), body.ProposedConfiguration)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "failed to start backtest", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to start backtest")
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		s.pipeline.ExecuteBacktest(ctx, run.ID)
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]any{

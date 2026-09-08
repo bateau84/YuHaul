@@ -262,6 +262,25 @@ func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 	return m.store.GetRun(ctx, runID)
 }
 
+// CompleteHistoricalRun finalizes a replay/backtest run and recomputes its
+// counters from route decisions rather than discovered_in_run_id.
+func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run, error) {
+	started := m.now().UTC()
+	run, err := m.store.GetRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := started.Sub(run.StartedAt).Seconds()
+	if err := m.store.CompleteRun(ctx, runID, duration); err != nil {
+		return nil, err
+	}
+	if err := m.store.RecomputeRunCountersFromDecisions(ctx, runID); err != nil {
+		return nil, err
+	}
+	return m.store.GetRun(ctx, runID)
+}
+
 // txer is satisfied by *sql.DB and *sql.Tx so we can share scanning helpers.
 type txer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
