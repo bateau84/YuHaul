@@ -345,6 +345,51 @@ func (s *Store) GetExecutedActionsForVideo(ctx context.Context, videoID int64) (
 	return out, nil
 }
 
+// GetConditionAuditsForDecision returns the condition audit trail for a route
+// decision, ordered by condition_index.
+func (s *Store) GetConditionAuditsForDecision(ctx context.Context, decisionID int64) ([]ConditionAudit, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, route_decision_id, condition_index, field, operator,
+		        expected_value, actual_value, matched
+		 FROM condition_audit WHERE route_decision_id = ? ORDER BY condition_index;`,
+		decisionID)
+	if err != nil {
+		return nil, fmt.Errorf("querying condition audits: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ConditionAudit
+	for rows.Next() {
+		a, err := scanConditionAudit(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning condition audit: %w", err)
+		}
+		out = append(out, *a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating condition audits: %w", err)
+	}
+	return out, nil
+}
+
+// CreateConditionAudit persists a condition audit record.
+func (s *Store) CreateConditionAudit(ctx context.Context, a *ConditionAudit) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO condition_audit (route_decision_id, condition_index, field,
+		                              operator, expected_value, actual_value, matched)
+		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
+		a.RouteDecisionID, a.ConditionIndex, a.Field, a.Operator,
+		a.ExpectedValue, a.ActualValue, a.Matched)
+	if err != nil {
+		return 0, fmt.Errorf("creating condition audit: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading condition audit id: %w", err)
+	}
+	return id, nil
+}
+
 // RecomputeRunCounters recomputes outcome counters for a run from video rows.
 func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 	_, err := s.db.ExecContext(ctx,
@@ -459,6 +504,22 @@ func scanExecutedAction(sc interface {
 	if executedAt.Valid {
 		t, _ := time.Parse(time.RFC3339Nano, executedAt.String)
 		a.ExecutedAt = &t
+	}
+	return a, nil
+}
+
+func scanConditionAudit(sc interface {
+	Scan(dest ...any) error
+}) (*ConditionAudit, error) {
+	a := &ConditionAudit{}
+	var actualValue sql.NullString
+	err := sc.Scan(&a.ID, &a.RouteDecisionID, &a.ConditionIndex, &a.Field,
+		&a.Operator, &a.ExpectedValue, &actualValue, &a.Matched)
+	if err != nil {
+		return nil, err
+	}
+	if actualValue.Valid {
+		a.ActualValue = &actualValue.String
 	}
 	return a, nil
 }

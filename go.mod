@@ -4,15 +4,16 @@ go 1.26.3
 
 require (
 	github.com/golang-migrate/migrate/v4 v4.20.0
+	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/oauth2 v0.37.0
+	golang.org/x/text v0.42.0
 	modernc.org/sqlite v1.58.0
 )
 
 require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

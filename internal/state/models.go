@@ -1,9 +1,9 @@
 // Package state implements YuHaul's three-tier outcome model state machine.
 //
 // The tiers are:
-//   1. Video processing state — overall lifecycle position of a video within a run.
-//   2. RouteDecision — per-route outcome for a video.
-//   3. ExecutedAction — per-action outcome for a route decision.
+//  1. Video processing state — overall lifecycle position of a video within a run.
+//  2. RouteDecision — per-route outcome for a video.
+//  3. ExecutedAction — per-action outcome for a route decision.
 package state
 
 import "time"
@@ -84,47 +84,47 @@ const (
 
 // Run is a single execution of the processing pipeline.
 type Run struct {
-	ID                     int64
-	StartedAt              time.Time
-	CompletedAt            *time.Time
-	RunType                RunType
-	Status                 RunStatus
-	ConfigVersionID        *int64
-	VideosDiscovered       int
-	VideosAccepted         int
-	VideosRejected         int
-	VideosDeferred         int
-	VideosFailed           int
-	VideosNotYetEvaluated  int
-	QuotaCost              int
-	DurationSeconds        *float64
-	InterruptReason        *string
+	ID                    int64
+	StartedAt             time.Time
+	CompletedAt           *time.Time
+	RunType               RunType
+	Status                RunStatus
+	ConfigVersionID       *int64
+	VideosDiscovered      int
+	VideosAccepted        int
+	VideosRejected        int
+	VideosDeferred        int
+	VideosFailed          int
+	VideosNotYetEvaluated int
+	QuotaCost             int
+	DurationSeconds       *float64
+	InterruptReason       *string
 }
 
 // Video represents a discovered video and its processing state.
 type Video struct {
-	ID               int64
-	VideoID          string
-	ChannelID        string
-	DiscoveredAt     time.Time
+	ID                int64
+	VideoID           string
+	ChannelID         string
+	DiscoveredAt      time.Time
 	DiscoveredInRunID int64
-	ProcessingState  VideoProcessingState
-	FinalOutcome     VideoFinalOutcome
-	DeferredReason   *string
-	ErrorMessage     *string
-	CompletedAt      *time.Time
+	ProcessingState   VideoProcessingState
+	FinalOutcome      VideoFinalOutcome
+	DeferredReason    *string
+	ErrorMessage      *string
+	CompletedAt       *time.Time
 }
 
 // RouteDecision records the outcome of evaluating one route against one video.
 type RouteDecision struct {
-	ID               int64
-	VideoID          int64
-	RunID            int64
-	RouteID          int64
-	EvaluationOrder  int
-	Decision         RouteDecisionType
-	SkipReason       *SkipReason
-	RejectionReason  *string
+	ID              int64
+	VideoID         int64
+	RunID           int64
+	RouteID         int64
+	EvaluationOrder int
+	Decision        RouteDecisionType
+	SkipReason      *SkipReason
+	RejectionReason *string
 }
 
 // ExecutedAction records the outcome of executing one action.
@@ -138,6 +138,18 @@ type ExecutedAction struct {
 	Outcome          ActionOutcome
 	ErrorMessage     *string
 	ExecutedAt       *time.Time
+}
+
+// ConditionAudit records the evaluation of one condition within a route decision.
+type ConditionAudit struct {
+	ID              int64
+	RouteDecisionID int64
+	ConditionIndex  int
+	Field           string
+	Operator        string
+	ExpectedValue   string
+	ActualValue     *string
+	Matched         bool
 }
 
 // Valid returns true if s is a known processing state.

@@ -224,6 +224,26 @@ func (m *Machine) RecordExecutedAction(ctx context.Context, a *ExecutedAction) (
 	return a, nil
 }
 
+// RecordConditionAudit persists a condition audit record.
+func (m *Machine) RecordConditionAudit(ctx context.Context, a *ConditionAudit) (*ConditionAudit, error) {
+	if a.RouteDecisionID == 0 {
+		return nil, errors.New("state: RouteDecisionID is required")
+	}
+	if a.Field == "" {
+		return nil, errors.New("state: Field is required")
+	}
+	if a.Operator == "" {
+		return nil, errors.New("state: Operator is required")
+	}
+
+	id, err := m.store.CreateConditionAudit(ctx, a)
+	if err != nil {
+		return nil, fmt.Errorf("recording condition audit: %w", err)
+	}
+	a.ID = id
+	return a, nil
+}
+
 // CompleteRun finalizes a run and recomputes its outcome counters.
 func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 	started := m.now().UTC()
