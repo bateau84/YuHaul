@@ -289,7 +289,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS title_fingerprint_fts USING fts5(
     content_rowid='id'
 );
 
--- Keep the FTS5 index synchronized with the source table
+-- Keep the FTS5 index synchronized with the source table.
+-- The FTS5 virtual table is backed by title_fingerprint (external content),
+-- so index maintenance uses ordinary DELETE/INSERT against the virtual table.
 CREATE TRIGGER IF NOT EXISTS title_fingerprint_fts_insert AFTER INSERT ON title_fingerprint
 BEGIN
     INSERT INTO title_fingerprint_fts(rowid, fingerprint_tokens) VALUES (NEW.id, NEW.fingerprint_tokens);
@@ -297,11 +299,11 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS title_fingerprint_fts_delete AFTER DELETE ON title_fingerprint
 BEGIN
-    INSERT INTO title_fingerprint_fts(title_fingerprint_fts) VALUES('delete', OLD.id);
+    DELETE FROM title_fingerprint_fts WHERE rowid = OLD.id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS title_fingerprint_fts_update AFTER UPDATE ON title_fingerprint
 BEGIN
-    INSERT INTO title_fingerprint_fts(title_fingerprint_fts) VALUES('delete', OLD.id);
+    DELETE FROM title_fingerprint_fts WHERE rowid = OLD.id;
     INSERT INTO title_fingerprint_fts(rowid, fingerprint_tokens) VALUES (NEW.id, NEW.fingerprint_tokens);
 END;
