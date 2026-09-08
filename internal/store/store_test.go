@@ -27,7 +27,7 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	err := db.QueryRowContext(context.Background(),
 		"SELECT version FROM schema_migrations LIMIT 1;").Scan(&version)
 	require.NoError(t, err)
-	require.Equal(t, 4, version)
+	require.Equal(t, 7, version)
 }
 
 func TestSchemaContainsAllEntities(t *testing.T) {
@@ -64,6 +64,7 @@ func TestSchemaContainsAllEntities(t *testing.T) {
 		"route_decision",
 		"route_exclusion",
 		"run",
+		"settings",
 		"title_fingerprint",
 		"transient_metadata",
 		"video",
