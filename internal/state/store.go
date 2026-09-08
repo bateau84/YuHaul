@@ -1,0 +1,464 @@
+package state
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// Store persists and queries the three-tier outcome model.
+type Store struct {
+	db *sql.DB
+}
+
+// NewStore opens the state store on db, creating required tables if they do
+// not already exist. The caller retains ownership of db.
+func NewStore(db *sql.DB) (*Store, error) {
+	if db == nil {
+		return nil, errors.New("state: db is required")
+	}
+	s := &Store{db: db}
+	if err := s.migrate(context.Background()); err != nil {
+		return nil, fmt.Errorf("state: migrating store: %w", err)
+	}
+	return s, nil
+}
+
+// migrate creates the tables required by the state machine. It is idempotent.
+func (s *Store) migrate(ctx context.Context) error {
+	// PRAGMA foreign_keys must be enabled per connection for SQLite. We enable
+	// it here; for connection pools it should be set via _fk=true on the DSN.
+	if _, err := s.db.ExecContext(ctx, "PRAGMA foreign_keys = ON;"); err != nil {
+		return fmt.Errorf("enabling foreign keys: %w", err)
+	}
+
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS config_version (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at TIMESTAMP NOT NULL,
+			snapshot TEXT NOT NULL,
+			change_description TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS route (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			description TEXT,
+			evaluation_order INTEGER NOT NULL UNIQUE,
+			is_final BOOLEAN DEFAULT false,
+			is_enabled BOOLEAN DEFAULT true,
+			condition_composition TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS run (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			started_at TIMESTAMP NOT NULL,
+			completed_at TIMESTAMP,
+			run_type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			config_version_id INTEGER REFERENCES config_version(id),
+			videos_discovered INTEGER DEFAULT 0,
+			videos_accepted INTEGER DEFAULT 0,
+			videos_rejected INTEGER DEFAULT 0,
+			videos_deferred INTEGER DEFAULT 0,
+			videos_failed INTEGER DEFAULT 0,
+			videos_not_yet_evaluated INTEGER DEFAULT 0,
+			quota_cost INTEGER DEFAULT 0,
+			duration_seconds REAL,
+			interrupt_reason TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS video (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			video_id TEXT NOT NULL UNIQUE,
+			channel_id TEXT NOT NULL,
+			discovered_at TIMESTAMP NOT NULL,
+			discovered_in_run_id INTEGER NOT NULL REFERENCES run(id),
+			processing_state TEXT NOT NULL,
+			final_outcome TEXT NOT NULL,
+			deferred_reason TEXT,
+			error_message TEXT,
+			completed_at TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_video_run ON video(discovered_in_run_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_video_state ON video(processing_state);`,
+		`CREATE TABLE IF NOT EXISTS route_decision (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			video_id INTEGER NOT NULL REFERENCES video(id),
+			run_id INTEGER NOT NULL REFERENCES run(id),
+			route_id INTEGER NOT NULL REFERENCES route(id),
+			evaluation_order INTEGER NOT NULL,
+			decision TEXT NOT NULL,
+			skip_reason TEXT,
+			rejection_reason TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_route_decision_video ON route_decision(video_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_route_decision_run ON route_decision(run_id);`,
+		`CREATE TABLE IF NOT EXISTS executed_action (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			route_decision_id INTEGER NOT NULL REFERENCES route_decision(id),
+			run_id INTEGER NOT NULL REFERENCES run(id),
+			video_id INTEGER NOT NULL REFERENCES video(id),
+			action_type TEXT NOT NULL,
+			target_playlist_id TEXT NOT NULL,
+			outcome TEXT NOT NULL,
+			error_message TEXT,
+			executed_at TIMESTAMP,
+			UNIQUE(run_id, video_id, target_playlist_id, action_type)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_executed_action_video ON executed_action(video_id);`,
+	}
+
+	for _, stmt := range stmts {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("executing schema: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreateRun persists a new run and returns its generated ID.
+func (s *Store) CreateRun(ctx context.Context, run *Run) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO run (started_at, run_type, status, config_version_id)
+		 VALUES (?, ?, ?, ?);`,
+		run.StartedAt, run.RunType, run.Status, run.ConfigVersionID)
+	if err != nil {
+		return 0, fmt.Errorf("creating run: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading run id: %w", err)
+	}
+	return id, nil
+}
+
+// GetRun loads a run by ID.
+func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
+		        videos_discovered, videos_accepted, videos_rejected, videos_deferred,
+		        videos_failed, videos_not_yet_evaluated, quota_cost, duration_seconds,
+		        interrupt_reason
+		 FROM run WHERE id = ?;`, id)
+	r, err := scanRun(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("run %d: %w", id, ErrNotFound)
+		}
+		return nil, fmt.Errorf("loading run %d: %w", id, err)
+	}
+	return r, nil
+}
+
+// CompleteRun marks a run as completed and records final counters.
+func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE run
+		 SET status = ?, completed_at = ?, duration_seconds = ?
+		 WHERE id = ?;`,
+		RunStatusCompleted, time.Now().UTC(), durationSeconds, id)
+	if err != nil {
+		return fmt.Errorf("completing run %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// InterruptRun marks a run as interrupted with a reason.
+func (s *Store) InterruptRun(ctx context.Context, id int64, reason string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE run SET status = ?, interrupt_reason = ? WHERE id = ?;`,
+		RunStatusInterrupted, reason, id)
+	if err != nil {
+		return fmt.Errorf("interrupting run %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// CreateVideo persists a video record.
+func (s *Store) CreateVideo(ctx context.Context, v *Video) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id,
+		                   processing_state, final_outcome, deferred_reason, error_message, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		v.VideoID, v.ChannelID, v.DiscoveredAt, v.DiscoveredInRunID,
+		v.ProcessingState, v.FinalOutcome, v.DeferredReason, v.ErrorMessage, v.CompletedAt)
+	if err != nil {
+		return 0, fmt.Errorf("creating video: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading video id: %w", err)
+	}
+	return id, nil
+}
+
+// GetVideo loads a video by internal ID.
+func (s *Store) GetVideo(ctx context.Context, id int64) (*Video, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
+		        processing_state, final_outcome, deferred_reason, error_message, completed_at
+		 FROM video WHERE id = ?;`, id)
+	v, err := scanVideo(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("video %d: %w", id, ErrNotFound)
+		}
+		return nil, fmt.Errorf("loading video %d: %w", id, err)
+	}
+	return v, nil
+}
+
+// GetVideoByExternalID loads a video by its YouTube video ID.
+func (s *Store) GetVideoByExternalID(ctx context.Context, videoID string) (*Video, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
+		        processing_state, final_outcome, deferred_reason, error_message, completed_at
+		 FROM video WHERE video_id = ?;`, videoID)
+	v, err := scanVideo(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("video %s: %w", videoID, ErrNotFound)
+		}
+		return nil, fmt.Errorf("loading video %s: %w", videoID, err)
+	}
+	return v, nil
+}
+
+// UpdateVideoState atomically updates a video's processing state and final
+// outcome. Callers should validate the transition via the state machine.
+func (s *Store) UpdateVideoState(ctx context.Context, id int64, state VideoProcessingState,
+	outcome VideoFinalOutcome, deferredReason, errorMessage *string) error {
+
+	var completedAt *time.Time
+	if outcome == FinalOutcomeAccepted || outcome == FinalOutcomeRejected ||
+		outcome == FinalOutcomeFailed {
+		now := time.Now().UTC()
+		completedAt = &now
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE video
+		 SET processing_state = ?, final_outcome = ?, deferred_reason = ?,
+		     error_message = ?, completed_at = ?
+		 WHERE id = ?;`,
+		state, outcome, deferredReason, errorMessage, completedAt, id)
+	if err != nil {
+		return fmt.Errorf("updating video %d state: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("video %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// CreateRouteDecision persists a route decision.
+func (s *Store) CreateRouteDecision(ctx context.Context, d *RouteDecision) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order,
+		                             decision, skip_reason, rejection_reason)
+		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
+		d.VideoID, d.RunID, d.RouteID, d.EvaluationOrder, d.Decision, d.SkipReason, d.RejectionReason)
+	if err != nil {
+		return 0, fmt.Errorf("creating route decision: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading route decision id: %w", err)
+	}
+	return id, nil
+}
+
+// GetRouteDecisionsForVideo returns all route decisions for a video, ordered by
+// evaluation order.
+func (s *Store) GetRouteDecisionsForVideo(ctx context.Context, videoID int64) ([]RouteDecision, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, video_id, run_id, route_id, evaluation_order, decision,
+		        skip_reason, rejection_reason
+		 FROM route_decision WHERE video_id = ? ORDER BY evaluation_order;`, videoID)
+	if err != nil {
+		return nil, fmt.Errorf("querying route decisions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RouteDecision
+	for rows.Next() {
+		d, err := scanRouteDecision(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning route decision: %w", err)
+		}
+		out = append(out, *d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating route decisions: %w", err)
+	}
+	return out, nil
+}
+
+// CreateExecutedAction persists an executed action.
+func (s *Store) CreateExecutedAction(ctx context.Context, a *ExecutedAction) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO executed_action (route_decision_id, run_id, video_id, action_type,
+		                              target_playlist_id, outcome, error_message, executed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
+		a.RouteDecisionID, a.RunID, a.VideoID, a.ActionType,
+		a.TargetPlaylistID, a.Outcome, a.ErrorMessage, a.ExecutedAt)
+	if err != nil {
+		return 0, fmt.Errorf("creating executed action: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading executed action id: %w", err)
+	}
+	return id, nil
+}
+
+// GetExecutedActionsForVideo returns all executed actions for a video.
+func (s *Store) GetExecutedActionsForVideo(ctx context.Context, videoID int64) ([]ExecutedAction, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, route_decision_id, run_id, video_id, action_type,
+		        target_playlist_id, outcome, error_message, executed_at
+		 FROM executed_action WHERE video_id = ?;`, videoID)
+	if err != nil {
+		return nil, fmt.Errorf("querying executed actions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ExecutedAction
+	for rows.Next() {
+		a, err := scanExecutedAction(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning executed action: %w", err)
+		}
+		out = append(out, *a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating executed actions: %w", err)
+	}
+	return out, nil
+}
+
+// RecomputeRunCounters recomputes outcome counters for a run from video rows.
+func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE run SET
+		  videos_discovered = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ?),
+		  videos_accepted = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
+		  videos_rejected = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
+		  videos_deferred = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
+		  videos_failed = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
+		  videos_not_yet_evaluated = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?)
+		 WHERE id = ?;`,
+		runID, runID, FinalOutcomeAccepted,
+		runID, FinalOutcomeRejected,
+		runID, FinalOutcomeDeferred,
+		runID, FinalOutcomeFailed,
+		runID, FinalOutcomeNotYetEvaluated,
+		runID)
+	if err != nil {
+		return fmt.Errorf("recomputing run %d counters: %w", runID, err)
+	}
+	return nil
+}
+
+// ErrNotFound indicates that a requested entity does not exist.
+var ErrNotFound = errors.New("state: not found")
+
+func scanRun(row *sql.Row) (*Run, error) {
+	r := &Run{}
+	var completedAt, interruptReason sql.NullString
+	var durationSeconds sql.NullFloat64
+	var configVersionID sql.NullInt64
+	err := row.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
+		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
+		&r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.QuotaCost,
+		&durationSeconds, &interruptReason)
+	if err != nil {
+		return nil, err
+	}
+	if completedAt.Valid {
+		t, _ := time.Parse(time.RFC3339Nano, completedAt.String)
+		r.CompletedAt = &t
+	}
+	if configVersionID.Valid {
+		r.ConfigVersionID = &configVersionID.Int64
+	}
+	if durationSeconds.Valid {
+		r.DurationSeconds = &durationSeconds.Float64
+	}
+	if interruptReason.Valid {
+		r.InterruptReason = &interruptReason.String
+	}
+	return r, nil
+}
+
+func scanVideo(sc interface {
+	Scan(dest ...any) error
+}) (*Video, error) {
+	v := &Video{}
+	var deferredReason, errorMessage, completedAt sql.NullString
+	err := sc.Scan(&v.ID, &v.VideoID, &v.ChannelID, &v.DiscoveredAt, &v.DiscoveredInRunID,
+		&v.ProcessingState, &v.FinalOutcome, &deferredReason, &errorMessage, &completedAt)
+	if err != nil {
+		return nil, err
+	}
+	if deferredReason.Valid {
+		v.DeferredReason = &deferredReason.String
+	}
+	if errorMessage.Valid {
+		v.ErrorMessage = &errorMessage.String
+	}
+	if completedAt.Valid {
+		t, _ := time.Parse(time.RFC3339Nano, completedAt.String)
+		v.CompletedAt = &t
+	}
+	return v, nil
+}
+
+func scanRouteDecision(sc interface {
+	Scan(dest ...any) error
+}) (*RouteDecision, error) {
+	d := &RouteDecision{}
+	var skipReason, rejectionReason sql.NullString
+	err := sc.Scan(&d.ID, &d.VideoID, &d.RunID, &d.RouteID, &d.EvaluationOrder,
+		&d.Decision, &skipReason, &rejectionReason)
+	if err != nil {
+		return nil, err
+	}
+	if skipReason.Valid {
+		sr := SkipReason(skipReason.String)
+		d.SkipReason = &sr
+	}
+	if rejectionReason.Valid {
+		s := rejectionReason.String
+		d.RejectionReason = &s
+	}
+	return d, nil
+}
+
+func scanExecutedAction(sc interface {
+	Scan(dest ...any) error
+}) (*ExecutedAction, error) {
+	a := &ExecutedAction{}
+	var errorMessage, executedAt sql.NullString
+	err := sc.Scan(&a.ID, &a.RouteDecisionID, &a.RunID, &a.VideoID, &a.ActionType,
+		&a.TargetPlaylistID, &a.Outcome, &errorMessage, &executedAt)
+	if err != nil {
+		return nil, err
+	}
+	if errorMessage.Valid {
+		a.ErrorMessage = &errorMessage.String
+	}
+	if executedAt.Valid {
+		t, _ := time.Parse(time.RFC3339Nano, executedAt.String)
+		a.ExecutedAt = &t
+	}
+	return a, nil
+}
