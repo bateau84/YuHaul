@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: yuhaul
+  namespace: default
+  labels:
+    app: yuhaul
+  annotations:
+    # If your cluster uses a different ingress class, change this value.
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  rules:
+    - host: yuhaul.bateau.cloud
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: yuhaul
+                port:
+                  number: 80
