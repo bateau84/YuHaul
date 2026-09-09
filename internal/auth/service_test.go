@@ -394,6 +394,80 @@ func TestHandlerInitiateAndCallback(t *testing.T) {
 	}
 }
 
+func TestHandlerCallbackRedirectsBrowser(t *testing.T) {
+	key := newTestKey(t)
+	store := newTestStore(t, key)
+	states := NewInMemoryStateStore()
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "mock-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	cfg := &ServiceConfig{
+		ClientID:      "id",
+		ClientSecret:  "secret",
+		RedirectURL:   "http://localhost/callback",
+		EncryptionKey: string(key),
+		Scopes:        DefaultScopes(),
+		HTTPClient:    tokenServer.Client(),
+	}
+	svc, err := NewService(cfg, store, states)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	svc.oauthConfig.Endpoint = oauth2.Endpoint{
+		AuthURL:  "https://accounts.google.com/o/oauth2/v2/auth",
+		TokenURL: tokenServer.URL,
+	}
+
+	authHandler := svc.Handler()
+
+	// Initiate to obtain a valid state.
+	req := httptest.NewRequest(http.MethodPost, "/initiate", nil)
+	rec := httptest.NewRecorder()
+	authHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initiate status = %d, want 200", rec.Code)
+	}
+	var initiateResp OAuthInitiateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &initiateResp); err != nil {
+		t.Fatalf("unmarshal initiate response: %v", err)
+	}
+
+	// Browser callback: must redirect with 303 and auth=connected.
+	callbackURL := fmt.Sprintf("/callback?code=code&state=%s", url.QueryEscape(initiateResp.State))
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.Header.Set("Accept", "text/html")
+	rec = httptest.NewRecorder()
+	authHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want 303", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/settings?auth=connected" {
+		t.Fatalf("location = %q, want /settings?auth=connected", loc)
+	}
+
+	// Browser callback with invalid state: must redirect with auth=error.
+	req = httptest.NewRequest(http.MethodGet, "/callback?code=code&state=bad", nil)
+	req.Header.Set("Accept", "text/html")
+	rec = httptest.NewRecorder()
+	authHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("error callback status = %d, want 303", rec.Code)
+	}
+	loc = rec.Header().Get("Location")
+	if loc != "/settings?auth=error" {
+		t.Fatalf("error location = %q, want /settings?auth=error", loc)
+	}
+}
+
 func TestHandlerCallbackInvalidState(t *testing.T) {
 	key := newTestKey(t)
 	store := newTestStore(t, key)
