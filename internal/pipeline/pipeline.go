@@ -486,10 +486,12 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 	}
 
 	// Transition into acted before executing. If resuming at action execution,
-	// the video may already be in acted or evaluated state; try evaluated first.
+	// the video may already be in acted, evaluated, or deferred state; use the
+	// current state as the from-state so retries work for deferred videos.
 	fromState := state.VideoStateEvaluated
-	if v.ProcessingState == state.VideoStateActed {
-		fromState = state.VideoStateActed
+	switch v.ProcessingState {
+	case state.VideoStateActed, state.VideoStateDeferred:
+		fromState = v.ProcessingState
 	}
 	if _, err := p.machine.TransitionVideoState(ctx, v.ID, fromState, state.VideoStateActed); err != nil {
 		return state.FinalOutcomeFailed, fmt.Errorf("transition video %d to acted: %w", v.ID, err)

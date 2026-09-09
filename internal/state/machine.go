@@ -40,6 +40,7 @@ var allowedTransitions = map[transition]struct{}{
 	{VideoStateActed, VideoStateCompleted}:            {},
 	{VideoStateActed, VideoStateFailed}:               {},
 	{VideoStateActed, VideoStateDeferred}:             {},
+	{VideoStateDeferred, VideoStateActed}:             {},
 }
 
 // ErrInvalidTransition is returned when a requested state change is not allowed.
