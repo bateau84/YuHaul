@@ -379,6 +379,113 @@ Useful discovery is.
 
 ---
 
+## Deployment
+
+YuHaul ships as a single container. The container serves the admin SPA and the
+REST API on one port and stores all durable state in a SQLite database file
+that lives on a persistent volume.
+
+Kubernetes is the supported deployment target. A plain `docker run` equivalent
+still works, but the repository now ships Kubernetes manifests instead of a
+Docker Compose file.
+
+### Quick start with Kubernetes
+
+1. Build the container image and make it available to your cluster:
+
+   ```bash
+   docker build -t yuhaul:latest .
+   # Push the image to a registry your cluster can reach, or load it into
+   # your local cluster (e.g. `kind load docker-image yuhaul:latest`).
+   ```
+
+2. Create the OAuth secret from `k8s/secret.example.yaml`:
+
+   ```bash
+   cp k8s/secret.example.yaml k8s/secret.yaml
+   # Edit k8s/secret.yaml and replace every CHANGEME value.
+   kubectl apply -f k8s/secret.yaml
+   ```
+
+   The redirect URL must be registered in Google Cloud Console exactly as:
+
+   ```text
+   https://yuhaul.bateau.cloud/api/auth/callback
+   ```
+
+3. Apply the remaining manifests:
+
+   ```bash
+   kubectl apply -f k8s/pvc.yaml
+   kubectl apply -f k8s/deployment.yaml
+   kubectl apply -f k8s/service.yaml
+   kubectl apply -f k8s/ingress.yaml
+   ```
+
+4. Point `yuhaul.bateau.cloud` at your ingress controller and ensure the
+   controller terminates TLS for that hostname.
+
+The SQLite database is stored on the `yuhaul-data` PVC and persists across
+pod restarts, rescheduling, and image updates.
+
+### Kubernetes manifests
+
+| File | Purpose |
+|---|---|
+| `k8s/pvc.yaml` | PersistentVolumeClaim for the SQLite database file |
+| `k8s/deployment.yaml` | Single-replica Deployment with the YuHaul container |
+| `k8s/service.yaml` | ClusterIP service exposing port 80 to the ingress |
+| `k8s/ingress.yaml` | Ingress rule for `yuhaul.bateau.cloud` |
+| `k8s/secret.example.yaml` | Template for the OAuth credentials Secret |
+
+### Environment variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `YUHAUL_DB_PATH` | no | `/data/yuhaul.db` | Path to the SQLite database file |
+| `YUHAUL_HTTP_ADDR` | no | `:8080` | HTTP listen address |
+| `YUHAUL_WEB_ROOT` | no | `/app/web` | Directory containing the built SPA |
+| `YUHAUL_DAILY_QUOTA` | no | `10000` | YouTube Data API daily quota limit |
+| `YUHAUL_OAUTH_CLIENT_ID` | yes | — | Google OAuth2 client ID |
+| `YUHAUL_OAUTH_CLIENT_SECRET` | yes | — | Google OAuth2 client secret |
+| `YUHAUL_OAUTH_REDIRECT_URL` | yes | — | Absolute OAuth callback URL |
+| `YUHAUL_ENCRYPTION_KEY` | yes | — | 32-byte AES-256-GCM key (raw or base64) |
+
+### OAuth callback hostname and client-secret provisioning
+
+The YouTube OAuth2 flow requires a registered redirect URI. The value of
+`YUHAUL_OAUTH_REDIRECT_URL` must match one of the **Authorized redirect URIs**
+configured in the Google Cloud Console exactly, including scheme, hostname, and
+path. The application exposes the callback handler at `/api/auth/callback`.
+
+For the Kubernetes ingress hostname `yuhaul.bateau.cloud`, set:
+
+```text
+https://yuhaul.bateau.cloud/api/auth/callback
+```
+
+Provision the client secret by editing `k8s/secret.example.yaml` (copied to
+`k8s/secret.yaml`) and applying it with `kubectl apply`. The secret is mounted
+into the container as environment variables, never logged, and used only to
+exchange the authorization code for an access token during the OAuth flow.
+
+### Docker run (without Kubernetes)
+
+```bash
+docker run -d \
+  --name yuhaul \
+  -p 8080:8080 \
+  -v yuhaul-data:/data \
+  -v "$PWD/web/dist:/app/web:ro" \
+  -e YUHAUL_OAUTH_CLIENT_ID \
+  -e YUHAUL_OAUTH_CLIENT_SECRET \
+  -e YUHAUL_OAUTH_REDIRECT_URL=https://yuhaul.bateau.cloud/api/auth/callback \
+  -e YUHAUL_ENCRYPTION_KEY \
+  yuhaul:latest
+```
+
+---
+
 ## Status
 
 YuHaul is currently being rebuilt from an earlier working application.

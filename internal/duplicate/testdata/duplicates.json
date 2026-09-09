@@ -1,0 +1,40 @@
+{
+  "pairs": [
+    {
+      "name": "identical titles",
+      "a": "Jazz Live Session",
+      "b": "jazz live session",
+      "expected": 1.0
+    },
+    {
+      "name": "word reorder",
+      "a": "Live Jazz Session",
+      "b": "Jazz Live Session",
+      "expected": 1.0
+    },
+    {
+      "name": "parenthetical annotation stripped",
+      "a": "Jazz Live Session (Official Video)",
+      "b": "Jazz Live Session",
+      "expected": 1.0
+    },
+    {
+      "name": "one dropped non-stop word",
+      "a": "Jazz Live Session",
+      "b": "Jazz Session",
+      "expected": 0.6666666666666666
+    },
+    {
+      "name": "artist abbreviation",
+      "a": "Pharrell Williams - Happy",
+      "b": "Pharrell - Happy",
+      "expected": 0.6666666666666666
+    },
+    {
+      "name": "low overlap",
+      "a": "Jazz Live Session",
+      "b": "Rock Concert",
+      "expected": 0.0
+    }
+  ]
+}
