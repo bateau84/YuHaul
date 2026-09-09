@@ -1,0 +1,130 @@
+import { useEffect, useState } from 'react'
+import * as api from '../api/client'
+import { useToast } from '../components/ToastProvider'
+import type { ErrorEntry, DeferredItem } from '../types'
+
+export function ErrorsView() {
+  const [tab, setTab] = useState<'errors' | 'deferred'>('errors')
+  const [errors, setErrors] = useState<ErrorEntry[]>([])
+  const [deferred, setDeferred] = useState<DeferredItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const { addToast } = useToast()
+
+  useEffect(() => {
+    Promise.all([api.listErrors(), api.listDeferred()]).then(([e, d]) => {
+      setErrors(e)
+      setDeferred(d)
+      setLoading(false)
+    })
+  }, [])
+
+  async function retryError(id: number) {
+    await api.retryError(id)
+    setErrors((prev) => prev.filter((e) => e.id !== id))
+    addToast('Error queued for retry', 'success')
+  }
+
+  async function dismissError(id: number) {
+    await api.dismissError(id)
+    setErrors((prev) => prev.filter((e) => e.id !== id))
+    addToast('Error dismissed', 'success')
+  }
+
+  async function retryDeferred(id: number) {
+    await api.retryDeferred(id)
+    setDeferred((prev) => prev.filter((d) => d.id !== id))
+    addToast('Deferred item queued for retry', 'success')
+  }
+
+  async function discardDeferred(id: number) {
+    await api.discardDeferred(id)
+    setDeferred((prev) => prev.filter((d) => d.id !== id))
+    addToast('Deferred item discarded', 'success')
+  }
+
+  if (loading) return <div className="empty-state">Loading queue...</div>
+
+  return (
+    <>
+      <div className="page-header">
+        <h1 className="page-title">Errors & Deferred</h1>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }} role="tablist">
+        <button className={`button ${tab === 'errors' ? 'button--primary' : ''}`} onClick={() => setTab('errors')} role="tab" aria-selected={tab === 'errors'}>
+          Errors ({errors.length})
+        </button>
+        <button className={`button ${tab === 'deferred' ? 'button--primary' : ''}`} onClick={() => setTab('deferred')} role="tab" aria-selected={tab === 'deferred'}>
+          Deferred ({deferred.length})
+        </button>
+      </div>
+
+      {tab === 'errors' && (
+        <div className="card">
+          {errors.length === 0 ? (
+            <div className="empty-state">No errors. All processing is running smoothly.</div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">Video</th>
+                  <th scope="col">Category</th>
+                  <th scope="col">Reason</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {errors.map((e) => (
+                  <tr key={e.id}>
+                    <td data-label="Video">{e.video_title ?? e.video_id}</td>
+                    <td data-label="Category">{e.error_category}</td>
+                    <td data-label="Reason">{e.error_message}</td>
+                    <td data-label="Actions">
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="button" onClick={() => retryError(e.id)}>Retry</button>
+                        <button className="button" onClick={() => dismissError(e.id)}>Remove</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {tab === 'deferred' && (
+        <div className="card">
+          {deferred.length === 0 ? (
+            <div className="empty-state">No deferred work. All pending items have been processed.</div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">Video</th>
+                  <th scope="col">Reason</th>
+                  <th scope="col">Retry after</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {deferred.map((d) => (
+                  <tr key={d.id}>
+                    <td data-label="Video">{d.video_title ?? d.video_id}</td>
+                    <td data-label="Reason">{d.deferral_reason}</td>
+                    <td data-label="Retry after">{d.retry_after ? new Date(d.retry_after).toLocaleString() : 'Next run'}</td>
+                    <td data-label="Actions">
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="button" onClick={() => retryDeferred(d.id)}>Retry now</button>
+                        <button className="button" onClick={() => discardDeferred(d.id)}>Discard</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
