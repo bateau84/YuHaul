@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api/client'
-import { useToast } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import type { ErrorEntry, DeferredItem } from '../types'
 
 export function ErrorsView() {
@@ -8,41 +8,85 @@ export function ErrorsView() {
   const [errors, setErrors] = useState<ErrorEntry[]>([])
   const [deferred, setDeferred] = useState<DeferredItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [retryKey, setRetryKey] = useState(0)
   const { addToast } = useToast()
 
   useEffect(() => {
-    Promise.all([api.listErrors(), api.listDeferred()]).then(([e, d]) => {
-      setErrors(e)
-      setDeferred(d)
-      setLoading(false)
-    })
-  }, [])
+    let cancelled = false
+    Promise.all([api.listErrors(), api.listDeferred()])
+      .then(([e, d]) => {
+        if (cancelled) return
+        setErrors(e)
+        setDeferred(d)
+        setLoading(false)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setError(err instanceof Error ? err.message : 'Failed to load queue')
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [retryKey])
+
+  function retry() {
+    setLoading(true)
+    setError(null)
+    setRetryKey((k) => k + 1)
+  }
 
   async function retryError(id: number) {
-    await api.retryError(id)
-    setErrors((prev) => prev.filter((e) => e.id !== id))
-    addToast('Error queued for retry', 'success')
+    try {
+      await api.retryError(id)
+      setErrors((prev) => prev.filter((e) => e.id !== id))
+      addToast('Error queued for retry', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to retry error', 'error')
+    }
   }
 
   async function dismissError(id: number) {
-    await api.dismissError(id)
-    setErrors((prev) => prev.filter((e) => e.id !== id))
-    addToast('Error dismissed', 'success')
+    try {
+      await api.dismissError(id)
+      setErrors((prev) => prev.filter((e) => e.id !== id))
+      addToast('Error dismissed', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to dismiss error', 'error')
+    }
   }
 
   async function retryDeferred(id: number) {
-    await api.retryDeferred(id)
-    setDeferred((prev) => prev.filter((d) => d.id !== id))
-    addToast('Deferred item queued for retry', 'success')
+    try {
+      await api.retryDeferred(id)
+      setDeferred((prev) => prev.filter((d) => d.id !== id))
+      addToast('Deferred item queued for retry', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to retry deferred item', 'error')
+    }
   }
 
   async function discardDeferred(id: number) {
-    await api.discardDeferred(id)
-    setDeferred((prev) => prev.filter((d) => d.id !== id))
-    addToast('Deferred item discarded', 'success')
+    try {
+      await api.discardDeferred(id)
+      setDeferred((prev) => prev.filter((d) => d.id !== id))
+      addToast('Deferred item discarded', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to discard deferred item', 'error')
+    }
   }
 
   if (loading) return <div className="empty-state">Loading queue...</div>
+  if (error) {
+    return (
+      <div className="card" role="alert">
+        <h2 className="section-title">Error loading queue</h2>
+        <p>{error}</p>
+        <button className="button button--primary" onClick={retry}>Retry</button>
+      </div>
+    )
+  }
 
   return (
     <>

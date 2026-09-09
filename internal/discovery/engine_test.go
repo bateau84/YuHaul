@@ -18,7 +18,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
-	_ "modernc.org/sqlite"
 )
 
 func openTestDB(t *testing.T) *sql.DB {
@@ -38,7 +37,6 @@ func newTestEngine(t *testing.T, baseURL string, limit int) (*Engine, *state.Sto
 	require.NoError(t, err)
 
 	ledger := quota.New(db)
-	require.NoError(t, ledger.EnsureSchema(context.Background()))
 	if limit >= 0 {
 		require.NoError(t, ledger.SetDailyLimit(context.Background(), limit))
 	}

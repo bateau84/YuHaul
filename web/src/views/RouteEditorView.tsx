@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import * as api from '../api/client'
 import { RouteEditor } from '../components/RouteEditor'
-import { useToast } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import type { Route } from '../types'
 
 export function RouteEditorView() {
@@ -45,7 +45,7 @@ export function RouteEditorView() {
       <div className="page-header">
         <h1 className="page-title">{id === 'new' ? 'New Route' : `Edit Route: ${route?.name ?? ''}`}</h1>
       </div>
-      <RouteEditor route={route} onSave={handleSave} onCancel={() => navigate('/routes')} onDelete={id === 'new' ? undefined : handleDelete} />
+      <RouteEditor key={id === 'new' ? 'new' : route?.id ?? id} route={route} onSave={handleSave} onCancel={() => navigate('/routes')} onDelete={id === 'new' ? undefined : handleDelete} />
     </>
   )
 }

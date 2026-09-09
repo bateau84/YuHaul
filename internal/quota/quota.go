@@ -101,8 +101,8 @@ func WithDefaultLimit(limit int) Option {
 	}
 }
 
-// New returns a Ledger backed by db. The caller is responsible for ensuring the
-// schema exists (see EnsureSchema).
+// New returns a Ledger backed by db. The quota tables are owned by the central
+// migration system and must already exist.
 func New(db *sql.DB, opts ...Option) *Ledger {
 	l := &Ledger{
 		db:           db,
@@ -113,49 +113,6 @@ func New(db *sql.DB, opts ...Option) *Ledger {
 		opt(l)
 	}
 	return l
-}
-
-const (
-	createSettingsTable = `CREATE TABLE IF NOT EXISTS quota_settings (
-		key TEXT PRIMARY KEY,
-		value TEXT NOT NULL
-	)`
-
-	createLedgerTable = `CREATE TABLE IF NOT EXISTS quota_ledger (
-		id INTEGER PRIMARY KEY,
-		date TEXT NOT NULL,
-		operation_type TEXT NOT NULL,
-		units_consumed INTEGER NOT NULL,
-		call_count INTEGER NOT NULL,
-		run_id INTEGER,
-		recorded_at TIMESTAMP NOT NULL
-	)`
-
-	createLedgerDateIndex = `CREATE INDEX IF NOT EXISTS idx_quota_ledger_date ON quota_ledger(date)`
-)
-
-// EnsureSchema creates the quota tables and indexes if they do not exist.
-func (l *Ledger) EnsureSchema(ctx context.Context) error {
-	tx, err := l.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("quota: begin schema transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx, createSettingsTable); err != nil {
-		return fmt.Errorf("quota: create settings table: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, createLedgerTable); err != nil {
-		return fmt.Errorf("quota: create ledger table: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, createLedgerDateIndex); err != nil {
-		return fmt.Errorf("quota: create ledger date index: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("quota: commit schema transaction: %w", err)
-	}
-	return nil
 }
 
 // Record records a single API call in the ledger.

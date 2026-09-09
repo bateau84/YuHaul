@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Check, AlertTriangle, TrendingDown, Copy, ExternalLink, Star, Pin, Sparkles, Repeat } from 'lucide-react'
 import * as api from '../api/client'
-import { useToast } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import type { ChannelStats, ChannelDetail, Advisory, VideoProvenance } from '../types'
 
 const advisoryLabels: Record<Advisory['advisory_type'], string> = {

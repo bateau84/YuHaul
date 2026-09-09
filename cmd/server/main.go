@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -26,8 +27,8 @@ import (
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/pipeline"
-	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/queue"
+	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/scheduler"
 	"github.com/bateau84/YuHaul/internal/server"
@@ -40,11 +41,11 @@ import (
 // appConfig holds runtime configuration sourced from flags and environment
 // variables. Flags take precedence over environment variables.
 type appConfig struct {
-	DBPath      string
-	HTTPAddr    string
-	WebRoot     string
-	LogLevel    string
-	DailyQuota  int
+	DBPath     string
+	HTTPAddr   string
+	WebRoot    string
+	LogLevel   string
+	DailyQuota int
 
 	OAuthClientID     string
 	OAuthClientSecret string
@@ -65,27 +66,33 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
-	encKey, err := decodeKey(cfg.EncryptionKey)
-	if err != nil {
-		logger.ErrorContext(ctx, "invalid encryption key", "error", err)
-		os.Exit(1)
-	}
+	var authSvc *auth.Service
+	if cfg.OAuthClientID != "" {
+		encKey, err := decodeKey(cfg.EncryptionKey)
+		if err != nil {
+			logger.ErrorContext(ctx, "invalid encryption key", "error", err)
+			os.Exit(1)
+		}
 
-	tokenStore, err := auth.NewSQLiteTokenStore(db, encKey)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to open token store", "error", err)
-		os.Exit(1)
-	}
+		tokenStore, err := auth.NewSQLiteTokenStore(db, encKey)
+		if err != nil {
+			logger.ErrorContext(ctx, "failed to open token store", "error", err)
+			os.Exit(1)
+		}
 
-	authSvc, err := auth.NewService(&auth.ServiceConfig{
-		ClientID:      cfg.OAuthClientID,
-		ClientSecret:  cfg.OAuthClientSecret,
-		RedirectURL:   cfg.OAuthRedirectURL,
-		EncryptionKey: cfg.EncryptionKey,
-	}, tokenStore, auth.NewInMemoryStateStore())
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to configure auth", "error", err)
-		os.Exit(1)
+		authSvc, err = auth.NewService(&auth.ServiceConfig{
+			ClientID:      cfg.OAuthClientID,
+			ClientSecret:  cfg.OAuthClientSecret,
+			RedirectURL:   cfg.OAuthRedirectURL,
+			EncryptionKey: cfg.EncryptionKey,
+		}, tokenStore, auth.NewInMemoryStateStore())
+		if err != nil {
+			logger.ErrorContext(ctx, "failed to configure auth", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.WarnContext(ctx, "youtube oauth is not configured; auth endpoints will report not configured")
+		authSvc = auth.NewDisabledService()
 	}
 
 	stateStore, err := state.NewStore(db)
@@ -96,10 +103,6 @@ func main() {
 	machine := state.NewMachine(stateStore)
 
 	ledger := quota.New(db, quota.WithLogger(logger), quota.WithDefaultLimit(cfg.DailyQuota))
-	if err := ledger.EnsureSchema(ctx); err != nil {
-		logger.ErrorContext(ctx, "failed to ensure quota schema", "error", err)
-		os.Exit(1)
-	}
 
 	routerStore := router.NewStore(db)
 	configStore := config.NewStore(db)
@@ -150,7 +153,16 @@ func main() {
 		pipeline.WithAdvisoryGenerator(advisorySvc),
 	)
 
-	configHandler := config.NewHandler(configSvc, logger)
+	schedulerStore, err := scheduler.NewStore(db)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to open scheduler store", "error", err)
+		os.Exit(1)
+	}
+
+	configHandler := config.NewHandler(configSvc, logger).
+		WithScheduleProvider(schedulerStore).
+		WithQuotaProvider(ledger).
+		WithAuthStatusProvider(authSvc)
 	statsHandler := stats.NewHandler(statsSvc, logger)
 	advisoryHandler := advisory.NewHandler(advisorySvc, logger)
 	overview := &overviewProvider{stateStore: stateStore, ledger: ledger, queueSvc: queueSvc}
@@ -167,11 +179,6 @@ func main() {
 		server.WithOverviewProvider(overview),
 	)
 
-	schedulerStore, err := scheduler.NewStore(db)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to open scheduler store", "error", err)
-		os.Exit(1)
-	}
 	sch := scheduler.NewScheduler(schedulerStore, pl, stateStore, scheduler.WithLogger(logger))
 	if err := sch.Start(ctx); err != nil {
 		logger.ErrorContext(ctx, "failed to start scheduler", "error", err)
@@ -181,8 +188,9 @@ func main() {
 
 	root := http.NewServeMux()
 	root.Handle("/api/", apiServer.Handler())
-	root.Handle("/api/auth/", http.StripPrefix("/api/auth", authSvc.Handler()))
-	root.Handle("/api/account/", http.StripPrefix("/api/account", authSvc.AccountHandler()))
+	root.Handle("/api/auth/", stripPrefix("/api/auth", authSvc.Handler()))
+	root.Handle("/api/account", stripPrefix("/api/account", authSvc.AccountHandler()))
+	root.Handle("/api/account/", stripPrefix("/api/account", authSvc.AccountHandler()))
 	root.Handle("/", spaHandler(cfg.WebRoot))
 
 	httpServer := &http.Server{
@@ -208,6 +216,29 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.ErrorContext(ctx, "graceful shutdown failed", "error", err)
 	}
+}
+
+// stripPrefix is like http.StripPrefix but guarantees a leading slash on the
+// forwarded path so that a request for the prefix itself (e.g. /api/account)
+// is routed to the sub-handler's root instead of becoming an empty path that
+// triggers a redirect.
+func stripPrefix(prefix string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, prefix)
+		if p == r.URL.Path {
+			http.NotFound(w, r)
+			return
+		}
+		if p == "" || p[0] != '/' {
+			p = "/" + p
+		}
+		r2 := new(http.Request)
+		*r2 = *r
+		r2.URL = new(url.URL)
+		*r2.URL = *r.URL
+		r2.URL.Path = p
+		h.ServeHTTP(w, r2)
+	})
 }
 
 // loadConfig reads configuration from flags and environment variables.
@@ -301,12 +332,24 @@ func (s spaFS) Open(name string) (http.File, error) {
 	name = path.Clean("/" + name)
 	f, err := s.root.Open(name)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) && isNavigationRoute(name) {
 			return s.root.Open("/index.html")
 		}
 		return nil, err
 	}
 	return f, nil
+}
+
+// isNavigationRoute reports whether a missing path should fall back to
+// index.html for client-side routing. Asset-like paths (anything under
+// /assets/ or with a file extension) should return a real 404 so a stale
+// hashed bundle does not get served as HTML.
+func isNavigationRoute(name string) bool {
+	base := path.Base(name)
+	if strings.HasPrefix(name, "/assets/") {
+		return false
+	}
+	return !strings.Contains(base, ".")
 }
 
 // overviewProvider implements server.OverviewProvider from the underlying
@@ -342,9 +385,9 @@ func (o *overviewProvider) Overview(ctx context.Context) (*server.Overview, erro
 		return nil, fmt.Errorf("overview: quota budget: %w", err)
 	}
 	quotaResp := map[string]any{
-		"daily_limit":   budget.DailyLimit,
+		"daily_limit":    budget.DailyLimit,
 		"consumed_today": budget.Consumed,
-		"remaining":     budget.Remaining,
+		"remaining":      budget.Remaining,
 	}
 	if !budget.NextReset.IsZero() {
 		quotaResp["reset_at"] = budget.NextReset.UTC().Format(time.RFC3339)

@@ -30,8 +30,8 @@ import (
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/pipeline"
-	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/queue"
+	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
@@ -247,12 +247,12 @@ func (f *fakeMetadataFetcher) FetchMetadata(ctx context.Context, videoIDs []stri
 // ---------- harness ----------
 
 type testEnv struct {
-	db         *sql.DB
-	stateStore *state.Store
-	machine    *state.Machine
-	pipeline   *pipeline.Pipeline
-	ledger     *quota.Ledger
-	server     *mockYouTubeServer
+	db          *sql.DB
+	stateStore  *state.Store
+	machine     *state.Machine
+	pipeline    *pipeline.Pipeline
+	ledger      *quota.Ledger
+	server      *mockYouTubeServer
 	routerStore *router.Store
 	configStore *config.Store
 	configSvc   *config.Service
@@ -279,7 +279,6 @@ func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv
 	machine := state.NewMachine(stateStore)
 
 	ledger := quota.New(db, quota.WithDefaultLimit(1_000_000))
-	require.NoError(t, ledger.EnsureSchema(ctx))
 
 	mock := newMockYouTubeServer(channels, videos)
 	t.Cleanup(mock.Close)
@@ -807,13 +806,13 @@ func TestINV9_APIMetadataCompliance(t *testing.T) {
 	// Insert an active metadata record that expired 1 day ago.
 	title := "Stale Title"
 	meta := metadata.TransientMetadata{
-		VideoID:         "OLD1",
-		Title:           &title,
-		ChannelName:     &title,
-		Description:     &title,
-		FetchedAt:       now.Add(-31 * 24 * time.Hour),
-		ExpiresAt:       now.Add(-1 * 24 * time.Hour),
-		IsActive:        true,
+		VideoID:     "OLD1",
+		Title:       &title,
+		ChannelName: &title,
+		Description: &title,
+		FetchedAt:   now.Add(-31 * 24 * time.Hour),
+		ExpiresAt:   now.Add(-1 * 24 * time.Hour),
+		IsActive:    true,
 	}
 	require.NoError(t, env.metaStore.Upsert(ctx, meta))
 

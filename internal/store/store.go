@@ -40,7 +40,7 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("store: ping database: %w", err)
 	}
 
-	if err := applyMigrations(path); err != nil {
+	if err := ApplyMigrations(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: apply migrations: %w", err)
 	}
@@ -58,16 +58,21 @@ func sqliteDSN(path string) string {
 	return b.String()
 }
 
-func applyMigrations(path string) error {
+// ApplyMigrations runs all embedded migrations against an existing *sql.DB.
+// It is exported so tests can create an in-memory database and apply the same
+// schema used in production.
+func ApplyMigrations(db *sql.DB) error {
 	src, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {
 		return fmt.Errorf("load migration source: %w", err)
 	}
 
-	// golang-migrate expects a URL-style DSN. Use an absolute-path form with the
-	// foreign-key pragma enabled.
-	dbURL := "sqlite://" + path + "?_fk=1"
-	m, err := migrate.NewWithSourceInstance("iofs", src, dbURL)
+	driver, err := sqlite.WithInstance(db, &sqlite.Config{})
+	if err != nil {
+		return fmt.Errorf("create migration driver: %w", err)
+	}
+
+	m, err := migrate.NewWithInstance("iofs", src, "sqlite", driver)
 	if err != nil {
 		return fmt.Errorf("create migrator: %w", err)
 	}

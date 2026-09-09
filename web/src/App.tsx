@@ -15,6 +15,7 @@ import { BacktestView } from './views/BacktestView'
 import { HistoryView } from './views/HistoryView'
 import { SettingsView } from './views/SettingsView'
 import { NotFound } from './views/NotFound'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation()
@@ -80,7 +81,9 @@ function AppRoutes() {
 export default function App() {
   return (
     <Layout>
-      <AppRoutes />
+      <ErrorBoundary>
+        <AppRoutes />
+      </ErrorBoundary>
     </Layout>
   )
 }

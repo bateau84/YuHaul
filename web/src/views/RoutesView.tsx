@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Plus, Trash2, Edit2 } from 'lucide-react'
 import * as api from '../api/client'
-import { useToast } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import { RouteReorderHandle } from '../components/RouteEditor'
 import type { Route } from '../types'
 

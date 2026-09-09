@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/bateau84/YuHaul/internal/store"
 )
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dir := t.TempDir()
 	dsn := filepath.Join(dir, "quota.db")
-	db, err := sql.Open("sqlite", dsn)
+	db, err := store.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -27,9 +27,6 @@ func newTestLedger(t *testing.T) (*Ledger, *sql.DB) {
 	t.Helper()
 	db := openTestDB(t)
 	l := New(db)
-	if err := l.EnsureSchema(context.Background()); err != nil {
-		t.Fatalf("ensure schema: %v", err)
-	}
 	return l, db
 }
 
@@ -59,11 +56,10 @@ func TestRecordAndConsumed(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newTestLedger(t)
 
-	runID := sql.NullInt64{Int64: 7, Valid: true}
-	if err := l.Record(ctx, runID, OpVideosList); err != nil {
+	if err := l.Record(ctx, sql.NullInt64{}, OpVideosList); err != nil {
 		t.Fatalf("record videos.list: %v", err)
 	}
-	if err := l.Record(ctx, runID, OpPlaylistItemsInsert); err != nil {
+	if err := l.Record(ctx, sql.NullInt64{}, OpPlaylistItemsInsert); err != nil {
 		t.Fatalf("record playlist insert: %v", err)
 	}
 	if err := l.Record(ctx, sql.NullInt64{}, OpSubscriptionsList); err != nil {
@@ -85,7 +81,7 @@ func TestRecordCalls(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newTestLedger(t)
 
-	if err := l.RecordCalls(ctx, sql.NullInt64{Int64: 1, Valid: true}, OpVideosList, 5); err != nil {
+	if err := l.RecordCalls(ctx, sql.NullInt64{}, OpVideosList, 5); err != nil {
 		t.Fatalf("record calls: %v", err)
 	}
 
@@ -105,7 +101,7 @@ func TestBudgetAndCanAfford(t *testing.T) {
 	if err := l.SetDailyLimit(ctx, 100); err != nil {
 		t.Fatalf("set daily limit: %v", err)
 	}
-	if err := l.Record(ctx, sql.NullInt64{Int64: 1, Valid: true}, OpPlaylistItemsInsert); err != nil {
+	if err := l.Record(ctx, sql.NullInt64{}, OpPlaylistItemsInsert); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -257,25 +253,22 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 
 	// First process opens the ledger, records consumption, and closes.
 	func() {
-		db, err := sql.Open("sqlite", dsn)
+		db, err := store.Open(ctx, dsn)
 		if err != nil {
 			t.Fatalf("open db: %v", err)
 		}
 		defer db.Close()
 		l := New(db)
-		if err := l.EnsureSchema(ctx); err != nil {
-			t.Fatalf("ensure schema: %v", err)
-		}
 		if err := l.SetDailyLimit(ctx, 200); err != nil {
 			t.Fatalf("set limit: %v", err)
 		}
-		if err := l.Record(ctx, sql.NullInt64{Int64: 1, Valid: true}, OpPlaylistItemsInsert); err != nil {
+		if err := l.Record(ctx, sql.NullInt64{}, OpPlaylistItemsInsert); err != nil {
 			t.Fatalf("record: %v", err)
 		}
 	}()
 
 	// Reopen the same file in a new process-like context.
-	db, err := sql.Open("sqlite", dsn)
+	db, err := store.Open(ctx, dsn)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}

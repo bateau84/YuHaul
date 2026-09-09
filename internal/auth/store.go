@@ -14,15 +14,16 @@ import (
 // SQLiteTokenStore persists encrypted OAuth2 tokens in a SQLite database. The
 // single-user design stores at most one active token row (id = 1).
 //
-// The store is driver-agnostic: the caller opens the *sql.DB using the SQLite
-// driver chosen for the project (e.g. mattn/go-sqlite3 or modernc.org/sqlite).
+// The caller is responsible for opening db with the project's chosen SQLite
+// driver and applying the canonical schema (see internal/store).
 type SQLiteTokenStore struct {
 	db  *sql.DB
 	key []byte
 }
 
-// NewSQLiteTokenStore opens a SQLite-backed token store and creates the
-// auth_tokens table if it does not exist. The encryption key must be 32 bytes.
+// NewSQLiteTokenStore opens a SQLite-backed token store. The encryption key
+// must be 32 bytes. The auth_tokens table is owned by the central migration
+// system and must already exist.
 func NewSQLiteTokenStore(db *sql.DB, key []byte) (*SQLiteTokenStore, error) {
 	if db == nil {
 		return nil, errors.New("auth: db is required")
@@ -30,31 +31,7 @@ func NewSQLiteTokenStore(db *sql.DB, key []byte) (*SQLiteTokenStore, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("auth: encryption key must be 32 bytes, got %d", len(key))
 	}
-	s := &SQLiteTokenStore{db: db, key: key}
-	if err := s.migrate(context.Background()); err != nil {
-		return nil, fmt.Errorf("auth: token store migration failed: %w", err)
-	}
-	return s, nil
-}
-
-func (s *SQLiteTokenStore) migrate(ctx context.Context) error {
-	const schema = `
-CREATE TABLE IF NOT EXISTS auth_tokens (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    provider TEXT NOT NULL,
-    encrypted_access_token BLOB NOT NULL,
-    encrypted_refresh_token BLOB,
-    token_type TEXT NOT NULL,
-    expiry TIMESTAMP,
-    scopes TEXT NOT NULL,
-    connected_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL
-);
-`
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return err
-	}
-	return nil
+	return &SQLiteTokenStore{db: db, key: key}, nil
 }
 
 // encryptedRecord is the serialized and encrypted form stored on disk.

@@ -7,37 +7,37 @@ import "time"
 // RunStats is a computed view of a single run's outcomes, rejection breakdown,
 // and quota consumption.
 type RunStats struct {
-	RunID                 int64             `json:"run_id"`
-	RunType               string            `json:"run_type"`
-	Status                string            `json:"status"`
-	StartedAt             time.Time         `json:"started_at"`
-	CompletedAt           *time.Time        `json:"completed_at,omitempty"`
-	ConfigVersionID       *int64            `json:"config_version_id,omitempty"`
-	VideosDiscovered      int               `json:"videos_discovered"`
-	VideosAccepted        int               `json:"videos_accepted"`
-	VideosRejected        int               `json:"videos_rejected"`
-	VideosDeferred        int               `json:"videos_deferred"`
-	VideosFailed          int               `json:"videos_failed"`
-	VideosNotYetEvaluated int               `json:"videos_not_yet_evaluated"`
-	RejectionByReason     map[string]int    `json:"rejection_by_reason"`
-	QuotaByOperation      map[string]int    `json:"quota_by_operation"`
-	DurationSeconds       *float64          `json:"duration_seconds,omitempty"`
+	RunID                 int64          `json:"run_id"`
+	RunType               string         `json:"run_type"`
+	Status                string         `json:"status"`
+	StartedAt             time.Time      `json:"started_at"`
+	CompletedAt           *time.Time     `json:"completed_at,omitempty"`
+	ConfigVersionID       *int64         `json:"config_version_id,omitempty"`
+	VideosDiscovered      int            `json:"videos_discovered"`
+	VideosAccepted        int            `json:"videos_accepted"`
+	VideosRejected        int            `json:"videos_rejected"`
+	VideosDeferred        int            `json:"videos_deferred"`
+	VideosFailed          int            `json:"videos_failed"`
+	VideosNotYetEvaluated int            `json:"videos_not_yet_evaluated"`
+	RejectionByReason     map[string]int `json:"rejection_by_reason"`
+	QuotaByOperation      map[string]int `json:"quota_by_operation"`
+	DurationSeconds       *float64       `json:"duration_seconds,omitempty"`
 }
 
 // RouteStats is a computed view of a route's performance within a run.
 type RouteStats struct {
-	RouteID          int64          `json:"route_id"`
-	RouteName        string         `json:"route_name"`
-	EvaluationOrder  int            `json:"evaluation_order"`
-	VideosEvaluated  int            `json:"videos_evaluated"`
-	VideosMatched    int            `json:"videos_matched"`
-	VideosNotMatched int            `json:"videos_not_matched"`
-	VideosSkipped    int            `json:"videos_skipped"`
+	RouteID           int64          `json:"route_id"`
+	RouteName         string         `json:"route_name"`
+	EvaluationOrder   int            `json:"evaluation_order"`
+	VideosEvaluated   int            `json:"videos_evaluated"`
+	VideosMatched     int            `json:"videos_matched"`
+	VideosNotMatched  int            `json:"videos_not_matched"`
+	VideosSkipped     int            `json:"videos_skipped"`
 	RejectionByReason map[string]int `json:"rejection_by_reason"`
-	SkipBreakdown    map[string]int `json:"skip_breakdown"`
-	ActionsExecuted  int            `json:"actions_executed"`
-	ActionsSucceeded int            `json:"actions_succeeded"`
-	ActionsFailed    int            `json:"actions_failed"`
+	SkipBreakdown     map[string]int `json:"skip_breakdown"`
+	ActionsExecuted   int            `json:"actions_executed"`
+	ActionsSucceeded  int            `json:"actions_succeeded"`
+	ActionsFailed     int            `json:"actions_failed"`
 }
 
 // ChannelStats are materialized counters for a channel.
@@ -78,13 +78,13 @@ type DuplicateProvenance struct {
 
 // RetentionPlaylist is a user-designated playlist used for usefulness signals.
 type RetentionPlaylist struct {
-	ID           int64      `json:"id"`
-	PlaylistID   string     `json:"playlist_id"`
-	PlaylistName string     `json:"playlist_name"`
-	DesignatedAt time.Time  `json:"designated_at"`
+	ID             int64      `json:"id"`
+	PlaylistID     string     `json:"playlist_id"`
+	PlaylistName   string     `json:"playlist_name"`
+	DesignatedAt   time.Time  `json:"designated_at"`
 	UnDesignatedAt *time.Time `json:"un_designated_at,omitempty"`
-	IsActive     bool       `json:"is_active"`
-	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
+	IsActive       bool       `json:"is_active"`
+	LastCheckedAt  *time.Time `json:"last_checked_at,omitempty"`
 }
 
 // RetentionSignal records whether a video's playlist membership counts as a
@@ -100,8 +100,8 @@ type RetentionSignal struct {
 
 // QuotaBreakdown returns the ledger entries for a run or date range.
 type QuotaBreakdown struct {
-	Date       string `json:"date"`
-	Operation  string `json:"operation"`
-	Units      int    `json:"units"`
-	CallCount  int    `json:"call_count"`
+	Date      string `json:"date"`
+	Operation string `json:"operation"`
+	Units     int    `json:"units"`
+	CallCount int    `json:"call_count"`
 }

@@ -14,62 +14,13 @@ type Store struct {
 }
 
 // NewStore creates a queue store backed by db. The caller retains ownership of
-// db. Required tables and indexes are created idempotently.
+// db. The error_entry and deferred_item tables are owned by the central
+// migration system and must already exist.
 func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("queue: db is required")
 	}
-	s := &Store{db: db}
-	if err := s.migrate(context.Background()); err != nil {
-		return nil, fmt.Errorf("queue: migrating store: %w", err)
-	}
-	return s, nil
-}
-
-// migrate creates the tables required by the queue. It is idempotent and
-// matches the canonical schema in internal/store/migrations/001_initial_schema.up.sql.
-func (s *Store) migrate(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, "PRAGMA foreign_keys = ON;"); err != nil {
-		return fmt.Errorf("enabling foreign keys: %w", err)
-	}
-
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS error_entry (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			video_id INTEGER NOT NULL REFERENCES video(id) ON DELETE CASCADE,
-			run_id INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-			error_category TEXT NOT NULL CHECK(error_category IN ('api_error', 'authorization', 'runtime')),
-			error_message TEXT NOT NULL,
-			error_detail TEXT,
-			status TEXT NOT NULL CHECK(status IN ('active', 'retrying', 'dismissed', 'resolved')),
-			created_at TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-			resolved_at TIMESTAMP,
-			retry_count INTEGER NOT NULL DEFAULT 0
-		);`,
-		`CREATE TABLE IF NOT EXISTS deferred_item (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			video_id INTEGER NOT NULL REFERENCES video(id) ON DELETE CASCADE,
-			run_id INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-			deferral_reason TEXT NOT NULL CHECK(deferral_reason IN ('quota_exhausted', 'api_rate_limited')),
-			retry_after TIMESTAMP,
-			retry_count INTEGER NOT NULL DEFAULT 0,
-			status TEXT NOT NULL CHECK(status IN ('pending', 'retrying', 'completed', 'discarded')),
-			created_at TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_error_entry_status ON error_entry(status);`,
-		`CREATE INDEX IF NOT EXISTS idx_error_entry_video_id ON error_entry(video_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_error_entry_run_id ON error_entry(run_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_deferred_item_status ON deferred_item(status);`,
-		`CREATE INDEX IF NOT EXISTS idx_deferred_item_video_id ON deferred_item(video_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_deferred_item_run_id ON deferred_item(run_id);`,
-	}
-
-	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("executing schema: %w", err)
-		}
-	}
-	return nil
+	return &Store{db: db}, nil
 }
 
 // CreateErrorEntry persists a new error queue entry and returns its ID.

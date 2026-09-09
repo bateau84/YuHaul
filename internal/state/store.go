@@ -26,101 +26,14 @@ func NewStore(db *sql.DB) (*Store, error) {
 	return s, nil
 }
 
-// migrate creates the tables required by the state machine. It is idempotent.
+// migrate is retained as a lightweight validation hook. All schema creation is
+// owned by the central migration system in internal/store/migrations.
 func (s *Store) migrate(ctx context.Context) error {
-	// PRAGMA foreign_keys must be enabled per connection for SQLite. We enable
-	// it here; for connection pools it should be set via _fk=true on the DSN.
+	// PRAGMA foreign_keys must be enabled per connection for SQLite. The DSN
+	// used to open the database sets _fk=1; this explicit pragma defends against
+	// callers that pass a connection opened without foreign-key enforcement.
 	if _, err := s.db.ExecContext(ctx, "PRAGMA foreign_keys = ON;"); err != nil {
 		return fmt.Errorf("enabling foreign keys: %w", err)
-	}
-
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS config_version (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			created_at TIMESTAMP NOT NULL,
-			snapshot TEXT NOT NULL,
-			change_description TEXT
-		);`,
-		`CREATE TABLE IF NOT EXISTS settings (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		);`,
-		`INSERT OR IGNORE INTO settings (key, value) VALUES ('duplicate_threshold', '0.5');`,
-		`INSERT OR IGNORE INTO settings (key, value) VALUES ('duplicate_behavior', 'skip');`,
-		`CREATE TABLE IF NOT EXISTS route (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			description TEXT,
-			evaluation_order INTEGER NOT NULL UNIQUE,
-			is_final BOOLEAN DEFAULT false,
-			is_enabled BOOLEAN DEFAULT true,
-			condition_composition TEXT NOT NULL,
-			created_at TIMESTAMP NOT NULL,
-			updated_at TIMESTAMP NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS run (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			started_at TIMESTAMP NOT NULL,
-			completed_at TIMESTAMP,
-			run_type TEXT NOT NULL,
-			status TEXT NOT NULL,
-			config_version_id INTEGER REFERENCES config_version(id),
-			videos_discovered INTEGER DEFAULT 0,
-			videos_accepted INTEGER DEFAULT 0,
-			videos_rejected INTEGER DEFAULT 0,
-			videos_deferred INTEGER DEFAULT 0,
-			videos_failed INTEGER DEFAULT 0,
-			videos_not_yet_evaluated INTEGER DEFAULT 0,
-			quota_cost INTEGER DEFAULT 0,
-			duration_seconds REAL,
-			interrupt_reason TEXT,
-			current_phase TEXT
-		);`,
-		`CREATE TABLE IF NOT EXISTS video (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			video_id TEXT NOT NULL UNIQUE,
-			channel_id TEXT NOT NULL,
-			discovered_at TIMESTAMP NOT NULL,
-			discovered_in_run_id INTEGER NOT NULL REFERENCES run(id),
-			processing_state TEXT NOT NULL,
-			final_outcome TEXT NOT NULL,
-			deferred_reason TEXT,
-			error_message TEXT,
-			completed_at TIMESTAMP
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_video_run ON video(discovered_in_run_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_video_state ON video(processing_state);`,
-		`CREATE TABLE IF NOT EXISTS route_decision (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			video_id INTEGER NOT NULL REFERENCES video(id),
-			run_id INTEGER NOT NULL REFERENCES run(id),
-			route_id INTEGER NOT NULL REFERENCES route(id),
-			evaluation_order INTEGER NOT NULL,
-			decision TEXT NOT NULL,
-			skip_reason TEXT,
-			rejection_reason TEXT
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_route_decision_video ON route_decision(video_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_route_decision_run ON route_decision(run_id);`,
-		`CREATE TABLE IF NOT EXISTS executed_action (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			route_decision_id INTEGER NOT NULL REFERENCES route_decision(id),
-			run_id INTEGER NOT NULL REFERENCES run(id),
-			video_id INTEGER NOT NULL REFERENCES video(id),
-			action_type TEXT NOT NULL,
-			target_playlist_id TEXT NOT NULL,
-			outcome TEXT NOT NULL,
-			error_message TEXT,
-			executed_at TIMESTAMP,
-			UNIQUE(run_id, video_id, target_playlist_id, action_type)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_executed_action_video ON executed_action(video_id);`,
-	}
-
-	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("executing schema: %w", err)
-		}
 	}
 	return nil
 }

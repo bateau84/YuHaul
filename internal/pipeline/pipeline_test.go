@@ -174,8 +174,8 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 
 	inserter := &recordingInserter{}
 	ledger := quota.New(db)
-	require.NoError(t, ledger.EnsureSchema(ctx))
 	exec := newTestExecutor(t, db, ledger, inserter)
+
 	queueStore, err := queue.NewStore(db)
 	require.NoError(t, err)
 
@@ -244,11 +244,11 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 	queueStore, err := queue.NewStore(db)
 	require.NoError(t, err)
 	_, err = queueStore.CreateDeferredItem(ctx, &queue.DeferredItem{
-		VideoID:     video.ID,
-		RunID:       run1ID,
-		Reason:      queue.DeferredReasonQuotaExhausted,
-		Status:      queue.DeferredStatusPending,
-		CreatedAt:   time.Now().UTC(),
+		VideoID:   video.ID,
+		RunID:     run1ID,
+		Reason:    queue.DeferredReasonQuotaExhausted,
+		Status:    queue.DeferredStatusPending,
+		CreatedAt: time.Now().UTC(),
 	})
 	require.NoError(t, err)
 
@@ -259,7 +259,6 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 
 	inserter := &recordingInserter{}
 	ledger := quota.New(db)
-	require.NoError(t, ledger.EnsureSchema(ctx))
 	exec := newTestExecutor(t, db, ledger, inserter)
 
 	p := NewPipeline(db, machine, stateStore, nil, nil, nil, exec, ledger, nil, nil, broadcast,

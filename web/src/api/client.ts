@@ -50,7 +50,7 @@ export {
 } from './analytics'
 
 // Account operations are wired to the real backend.
-export { getAccountStatus, disconnectAccount } from './account'
+export { getAccountStatus, disconnectAccount, initiateOAuth } from './account'
 
 // Duplicate-threshold settings are wired to the real backend.
 export { getDuplicateThreshold, setDuplicateThreshold } from './settings'

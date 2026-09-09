@@ -95,5 +95,3 @@ func TestHandler_Trends(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "buckets")
 }
-
-

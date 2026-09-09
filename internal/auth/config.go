@@ -15,6 +15,11 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
+// ErrNotConfigured is returned when the auth service has not been configured
+// with OAuth client credentials and a caller attempts an operation that
+// requires them.
+var ErrNotConfigured = errors.New("auth: not configured")
+
 // Required OAuth2 scopes for YuHaul. The read-only scope is used to list
 // subscriptions and retrieve video metadata; the full YouTube scope is
 // required to insert videos into playlists.
@@ -69,12 +74,16 @@ func (c *ServiceConfig) Validate() error {
 }
 
 // Service coordinates OAuth2 flow, token encryption, and credential storage.
+// When constructed without a ClientID the service is "disabled": it exposes
+// handlers that report auth as not configured and refuses any operation that
+// would require OAuth credentials.
 type Service struct {
 	config      *ServiceConfig
 	oauthConfig *oauth2.Config
 	encKey      []byte
 	store       TokenStore
 	states      StateStore
+	configured  bool
 }
 
 // NewService constructs an auth Service. It validates config, derives the
@@ -117,7 +126,24 @@ func NewService(cfg *ServiceConfig, store TokenStore, states StateStore) (*Servi
 		encKey:      encKey,
 		store:       store,
 		states:      states,
+		configured:  true,
 	}, nil
+}
+
+// NewDisabledService returns a Service that reports auth as not configured.
+// It is used when the server starts without OAuth client credentials so that
+// the remaining endpoints can still be served.
+func NewDisabledService() *Service {
+	return &Service{configured: false}
+}
+
+// Configured reports whether the service has been configured with OAuth client
+// credentials.
+func (s *Service) Configured() bool {
+	if s == nil {
+		return false
+	}
+	return s.configured
 }
 
 // decodeEncryptionKey accepts a raw 32-byte key or a base64-encoded key.
@@ -193,10 +219,11 @@ type TokenRecord struct {
 
 // ConnectionStatus describes whether the service has usable credentials.
 type ConnectionStatus struct {
-	Connected   bool      `json:"connected"`
-	Provider    string    `json:"provider,omitempty"`
-	Scopes      []string  `json:"scopes,omitempty"`
-	ConnectedAt time.Time `json:"connected_at,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	Connected     bool      `json:"connected"`
+	Authenticated bool      `json:"authenticated"`
+	Configured    bool      `json:"configured"`
+	Provider      string    `json:"provider,omitempty"`
+	Scopes        []string  `json:"scopes,omitempty"`
+	ConnectedAt   time.Time `json:"connected_at,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at,omitempty"`
 }
-

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,8 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/store/storetest"
+
 	"golang.org/x/oauth2"
-	_ "modernc.org/sqlite"
 )
 
 // newTestKey returns a deterministic 32-byte key for tests.
@@ -31,11 +31,7 @@ func newTestKey(t *testing.T) []byte {
 // newTestStore returns an in-memory SQLite token store for tests.
 func newTestStore(t *testing.T, key []byte) *SQLiteTokenStore {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("failed to open in-memory db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := storetest.Open(t)
 	store, err := NewSQLiteTokenStore(db, key)
 	if err != nil {
 		t.Fatalf("failed to create token store: %v", err)
@@ -398,6 +394,80 @@ func TestHandlerInitiateAndCallback(t *testing.T) {
 	}
 }
 
+func TestHandlerCallbackRedirectsBrowser(t *testing.T) {
+	key := newTestKey(t)
+	store := newTestStore(t, key)
+	states := NewInMemoryStateStore()
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "mock-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	cfg := &ServiceConfig{
+		ClientID:      "id",
+		ClientSecret:  "secret",
+		RedirectURL:   "http://localhost/callback",
+		EncryptionKey: string(key),
+		Scopes:        DefaultScopes(),
+		HTTPClient:    tokenServer.Client(),
+	}
+	svc, err := NewService(cfg, store, states)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	svc.oauthConfig.Endpoint = oauth2.Endpoint{
+		AuthURL:  "https://accounts.google.com/o/oauth2/v2/auth",
+		TokenURL: tokenServer.URL,
+	}
+
+	authHandler := svc.Handler()
+
+	// Initiate to obtain a valid state.
+	req := httptest.NewRequest(http.MethodPost, "/initiate", nil)
+	rec := httptest.NewRecorder()
+	authHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initiate status = %d, want 200", rec.Code)
+	}
+	var initiateResp OAuthInitiateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &initiateResp); err != nil {
+		t.Fatalf("unmarshal initiate response: %v", err)
+	}
+
+	// Browser callback: must redirect with 303 and auth=connected.
+	callbackURL := fmt.Sprintf("/callback?code=code&state=%s", url.QueryEscape(initiateResp.State))
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.Header.Set("Accept", "text/html")
+	rec = httptest.NewRecorder()
+	authHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want 303", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/settings?auth=connected" {
+		t.Fatalf("location = %q, want /settings?auth=connected", loc)
+	}
+
+	// Browser callback with invalid state: must redirect with auth=error.
+	req = httptest.NewRequest(http.MethodGet, "/callback?code=code&state=bad", nil)
+	req.Header.Set("Accept", "text/html")
+	rec = httptest.NewRecorder()
+	authHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("error callback status = %d, want 303", rec.Code)
+	}
+	loc = rec.Header().Get("Location")
+	if loc != "/settings?auth=error" {
+		t.Fatalf("error location = %q, want /settings?auth=error", loc)
+	}
+}
+
 func TestHandlerCallbackInvalidState(t *testing.T) {
 	key := newTestKey(t)
 	store := newTestStore(t, key)
@@ -418,6 +488,98 @@ func TestHandlerCallbackInvalidState(t *testing.T) {
 	svc.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDisabledServiceStatus(t *testing.T) {
+	svc := NewDisabledService()
+	if svc.Configured() {
+		t.Fatal("expected disabled service to report not configured")
+	}
+
+	status, err := svc.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.Connected {
+		t.Errorf("Connected = true, want false")
+	}
+	if status.Authenticated {
+		t.Errorf("Authenticated = true, want false")
+	}
+	if status.Configured {
+		t.Errorf("Configured = true, want false")
+	}
+}
+
+func TestDisabledServiceHandlers(t *testing.T) {
+	svc := NewDisabledService()
+
+	// Status endpoint returns the not-configured payload.
+	accountHandler := svc.AccountHandler()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	accountHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status status = %d, want 200", rec.Code)
+	}
+	var status ConnectionStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if status.Configured {
+		t.Errorf("Configured = true, want false")
+	}
+	if status.Authenticated {
+		t.Errorf("Authenticated = true, want false")
+	}
+
+	// Initiate endpoint returns service unavailable.
+	authHandler := svc.Handler()
+	req = httptest.NewRequest(http.MethodPost, "/initiate", nil)
+	rec = httptest.NewRecorder()
+	authHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("initiate status = %d, want 503", rec.Code)
+	}
+
+	// Disconnect endpoint succeeds as a no-op.
+	req = httptest.NewRequest(http.MethodDelete, "/", nil)
+	rec = httptest.NewRecorder()
+	accountHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disconnect status = %d, want 200", rec.Code)
+	}
+}
+
+func TestStatusIncludesConfiguredAndAuthenticated(t *testing.T) {
+	key := newTestKey(t)
+	store := newTestStore(t, key)
+	ctx := context.Background()
+
+	cfg := &ServiceConfig{
+		ClientID:      "id",
+		ClientSecret:  "secret",
+		RedirectURL:   "http://localhost/callback",
+		EncryptionKey: string(key),
+	}
+	svc, err := NewService(cfg, store, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	status, err := svc.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if !status.Configured {
+		t.Error("Configured = false, want true")
+	}
+	if status.Authenticated {
+		t.Error("Authenticated = true for empty store, want false")
+	}
+	if status.Connected {
+		t.Error("Connected = true for empty store, want false")
 	}
 }
 

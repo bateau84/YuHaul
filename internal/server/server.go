@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -260,25 +261,69 @@ func (s *Server) Handler() http.Handler {
 	// Route CRUD endpoints.
 	mux.HandleFunc("GET /api/routes", s.handleListRoutes)
 	mux.HandleFunc("POST /api/routes", s.handleCreateRoute)
+	mux.HandleFunc("GET /api/routes/{$}", s.handleListRoutes)
+	mux.HandleFunc("POST /api/routes/{$}", s.handleCreateRoute)
 	mux.HandleFunc("GET /api/routes/{id}", s.handleGetRoute)
 	mux.HandleFunc("PUT /api/routes/{id}", s.handleUpdateRoute)
 	mux.HandleFunc("DELETE /api/routes/{id}", s.handleDeleteRoute)
 	mux.HandleFunc("PUT /api/routes/reorder", s.handleReorderRoutes)
 
+	// Analytics-owned endpoints that would otherwise be shadowed by the
+	// broader /api/settings/ and /api/analytics/ prefix mounts. These must
+	// be registered before the prefix handlers so they take precedence.
+	mux.Handle("/api/settings/retention-playlists", s.analyticsHandler.Handler())
+	mux.Handle("/api/settings/retention-playlists/{id}", s.analyticsHandler.Handler())
+	mux.Handle("/api/runs/{id}/stats", s.analyticsHandler.Handler())
+	mux.Handle("/api/runs/{id}/route-stats", s.analyticsHandler.Handler())
+
 	// Configuration-version endpoints are served by a dedicated handler.
 	mux.Handle("/api/config/", s.configHandler.Handler())
+	mux.Handle("/api/settings", s.configHandler.Handler())
+	mux.Handle("/api/settings/{$}", s.configHandler.Handler())
 	mux.Handle("/api/settings/", s.configHandler.Handler())
 
-	// Queue handlers are served from dedicated sub-paths.
-	mux.Handle("/api/errors/", http.StripPrefix("/api/errors", s.queueHandler.ErrorHandler()))
-	mux.Handle("/api/deferred/", http.StripPrefix("/api/deferred", s.queueHandler.DeferredHandler()))
+	// Queue handlers are served from legacy /api/errors and /api/deferred
+	// paths, plus the newer /api/queue/* namespace.
+	mux.Handle("/api/errors", stripPrefix("/api/errors", s.queueHandler.ErrorHandler()))
+	mux.Handle("/api/errors/", stripPrefix("/api/errors", s.queueHandler.ErrorHandler()))
+	mux.Handle("/api/deferred", stripPrefix("/api/deferred", s.queueHandler.DeferredHandler()))
+	mux.Handle("/api/deferred/", stripPrefix("/api/deferred", s.queueHandler.DeferredHandler()))
+	mux.Handle("/api/queue/errors", stripPrefix("/api/queue/errors", s.queueHandler.ErrorHandler()))
+	mux.Handle("/api/queue/errors/", stripPrefix("/api/queue/errors", s.queueHandler.ErrorHandler()))
+	mux.Handle("/api/queue/deferred", stripPrefix("/api/queue/deferred", s.queueHandler.DeferredHandler()))
+	mux.Handle("/api/queue/deferred/", stripPrefix("/api/queue/deferred", s.queueHandler.DeferredHandler()))
 
 	// Advisory routes are more specific than the analytics prefix; register
 	// them first so they take precedence over the broader analytics handler.
 	mux.Handle("/api/analytics/advisories", s.advisoryHandler.Handler())
 	mux.Handle("/api/analytics/channels/{id}/advisories", s.advisoryHandler.Handler())
+	mux.Handle("/api/analytics", s.analyticsHandler.Handler())
+	mux.Handle("/api/analytics/{$}", s.analyticsHandler.Handler())
 	mux.Handle("/api/analytics/", s.analyticsHandler.Handler())
 	return mux
+}
+
+// stripPrefix is like http.StripPrefix but guarantees a leading slash on the
+// forwarded path so that a request for the prefix itself (e.g. /api/errors)
+// is routed to the sub-handler's root (/) instead of becoming an empty path
+// that triggers a redirect.
+func stripPrefix(prefix string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, prefix)
+		if p == r.URL.Path {
+			http.NotFound(w, r)
+			return
+		}
+		if p == "" || p[0] != '/' {
+			p = "/" + p
+		}
+		r2 := new(http.Request)
+		*r2 = *r
+		r2.URL = new(url.URL)
+		*r2.URL = *r.URL
+		r2.URL.Path = p
+		h.ServeHTTP(w, r2)
+	})
 }
 
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {

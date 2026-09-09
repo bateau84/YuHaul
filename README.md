@@ -476,13 +476,15 @@ docker run -d \
   --name yuhaul \
   -p 8080:8080 \
   -v yuhaul-data:/data \
-  -v "$PWD/web/dist:/app/web:ro" \
   -e YUHAUL_OAUTH_CLIENT_ID \
   -e YUHAUL_OAUTH_CLIENT_SECRET \
   -e YUHAUL_OAUTH_REDIRECT_URL=https://yuhaul.bateau.cloud/api/auth/callback \
   -e YUHAUL_ENCRYPTION_KEY \
   yuhaul:latest
 ```
+
+The SPA is built into the container image during `docker build`; no external
+volume for static assets is required.
 
 ---
 

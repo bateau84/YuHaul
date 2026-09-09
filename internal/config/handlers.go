@@ -1,19 +1,42 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
 
+	"github.com/bateau84/YuHaul/internal/auth"
+	"github.com/bateau84/YuHaul/internal/scheduler"
 	"github.com/bateau84/YuHaul/internal/state"
 )
 
+// ScheduleProvider reads and writes the user-configured run schedule.
+type ScheduleProvider interface {
+	GetSchedule(ctx context.Context) (*scheduler.Schedule, error)
+	SetSchedule(ctx context.Context, sch *scheduler.Schedule) error
+}
+
+// QuotaProvider reads and writes the configured daily API quota limit.
+type QuotaProvider interface {
+	DailyLimit(ctx context.Context) (int, error)
+	SetDailyLimit(ctx context.Context, limit int) error
+}
+
+// AuthStatusProvider returns the connected-account status.
+type AuthStatusProvider interface {
+	Status(ctx context.Context) (*auth.ConnectionStatus, error)
+}
+
 // Handler exposes the configuration-version REST endpoints.
 type Handler struct {
-	service *Service
-	logger  *slog.Logger
+	service          *Service
+	logger           *slog.Logger
+	scheduleProvider ScheduleProvider
+	quotaProvider    QuotaProvider
+	authProvider     AuthStatusProvider
 }
 
 // NewHandler returns a config-version HTTP handler.
@@ -24,6 +47,24 @@ func NewHandler(service *Service, logger *slog.Logger) *Handler {
 	return &Handler{service: service, logger: logger}
 }
 
+// WithScheduleProvider wires the schedule source used by GET /api/settings.
+func (h *Handler) WithScheduleProvider(p ScheduleProvider) *Handler {
+	h.scheduleProvider = p
+	return h
+}
+
+// WithQuotaProvider wires the quota source used by GET /api/settings.
+func (h *Handler) WithQuotaProvider(p QuotaProvider) *Handler {
+	h.quotaProvider = p
+	return h
+}
+
+// WithAuthStatusProvider wires the account status source used by GET /api/settings.
+func (h *Handler) WithAuthStatusProvider(p AuthStatusProvider) *Handler {
+	h.authProvider = p
+	return h
+}
+
 // Handler returns the HTTP handler for config-version routes.
 func (h *Handler) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -31,6 +72,10 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /api/config/versions/{id}", h.handleGetVersion)
 	mux.HandleFunc("GET /api/config/versions/{id}/diff", h.handleDiffVersion)
 	mux.HandleFunc("POST /api/config/versions/{id}/restore", h.handleRestoreVersion)
+	mux.HandleFunc("GET /api/settings", h.handleSettings)
+	mux.HandleFunc("GET /api/settings/{$}", h.handleSettings)
+	mux.HandleFunc("PUT /api/settings", h.handleUpdateSettings)
+	mux.HandleFunc("PUT /api/settings/{$}", h.handleUpdateSettings)
 	mux.HandleFunc("GET /api/settings/duplicate-threshold", h.handleGetThreshold)
 	mux.HandleFunc("PUT /api/settings/duplicate-threshold", h.handleSetThreshold)
 	return mux
@@ -147,10 +192,10 @@ func (h *Handler) handleGetThreshold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"threshold":         threshold,
+		"threshold":          threshold,
 		"duplicate_behavior": behavior,
-		"default_threshold": 0.5,
-		"range":             map[string]float64{"min": 0.0, "max": 1.0},
+		"default_threshold":  0.5,
+		"range":              map[string]float64{"min": 0.0, "max": 1.0},
 	})
 }
 
@@ -169,6 +214,133 @@ func (h *Handler) handleSetThreshold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.settingsResponse(r.Context())
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "load settings failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var body struct {
+		Schedule           *string  `json:"schedule"`
+		QuotaLimit         *int     `json:"quota_limit"`
+		DuplicateThreshold *float64 `json:"duplicate_threshold"`
+		DuplicateBehavior  *string  `json:"duplicate_behavior"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if body.Schedule != nil && h.scheduleProvider != nil {
+		expr := *body.Schedule
+		if expr != "" {
+			if _, err := scheduler.ParseSchedule(expr); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid schedule expression")
+				return
+			}
+		}
+		if err := h.scheduleProvider.SetSchedule(ctx, &scheduler.Schedule{Expression: expr, Enabled: expr != ""}); err != nil {
+			h.logger.ErrorContext(ctx, "set schedule failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to update schedule")
+			return
+		}
+	}
+
+	if body.QuotaLimit != nil && h.quotaProvider != nil {
+		if *body.QuotaLimit < 0 {
+			writeError(w, http.StatusBadRequest, "quota_limit must be non-negative")
+			return
+		}
+		if err := h.quotaProvider.SetDailyLimit(ctx, *body.QuotaLimit); err != nil {
+			h.logger.ErrorContext(ctx, "set quota limit failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to update quota limit")
+			return
+		}
+	}
+
+	if body.DuplicateThreshold != nil {
+		if err := h.service.SetDuplicateThreshold(ctx, *body.DuplicateThreshold); err != nil {
+			h.logger.ErrorContext(ctx, "set duplicate threshold failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to update duplicate threshold")
+			return
+		}
+	}
+
+	if body.DuplicateBehavior != nil {
+		if err := h.service.SetDuplicateBehavior(ctx, *body.DuplicateBehavior); err != nil {
+			h.logger.ErrorContext(ctx, "set duplicate behavior failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to update duplicate behavior")
+			return
+		}
+	}
+
+	resp, err := h.settingsResponse(ctx)
+	if err != nil {
+		h.logger.ErrorContext(ctx, "load settings after update failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) settingsResponse(ctx context.Context) (map[string]any, error) {
+	threshold, err := h.service.DuplicateThreshold(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	behavior, err := h.service.DuplicateBehavior(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	schedule := ""
+	if h.scheduleProvider != nil {
+		sch, err := h.scheduleProvider.GetSchedule(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if sch != nil {
+			schedule = sch.Expression
+		}
+	}
+
+	quotaLimit := 0
+	if h.quotaProvider != nil {
+		limit, err := h.quotaProvider.DailyLimit(ctx)
+		if err != nil {
+			return nil, err
+		}
+		quotaLimit = limit
+	}
+
+	accountConnected := false
+	if h.authProvider != nil {
+		status, err := h.authProvider.Status(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if status != nil {
+			accountConnected = status.Connected
+		}
+	}
+
+	return map[string]any{
+		"schedule":            schedule,
+		"quota_limit":         quotaLimit,
+		"duplicate_threshold": threshold,
+		"duplicate_behavior":  behavior,
+		"account_connected":   accountConnected,
+	}, nil
 }
 
 func parseID(s string) (int64, error) {

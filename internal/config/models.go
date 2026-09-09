@@ -25,16 +25,16 @@ type Snapshot struct {
 
 // SnapshotRoute is the serializable form of a route and its children.
 type SnapshotRoute struct {
-	ID                   int64                `json:"id"`
-	Name                 string               `json:"name"`
-	Description          string               `json:"description,omitempty"`
-	EvaluationOrder      int                  `json:"evaluation_order"`
-	IsFinal              bool                 `json:"is_final"`
-	IsEnabled            bool                 `json:"is_enabled"`
-	ConditionComposition string               `json:"condition_composition"`
-	Conditions           []SnapshotCondition  `json:"conditions"`
-	Actions              []SnapshotAction     `json:"actions"`
-	Exclusions           []SnapshotExclusion  `json:"exclusions"`
+	ID                   int64               `json:"id"`
+	Name                 string              `json:"name"`
+	Description          string              `json:"description,omitempty"`
+	EvaluationOrder      int                 `json:"evaluation_order"`
+	IsFinal              bool                `json:"is_final"`
+	IsEnabled            bool                `json:"is_enabled"`
+	ConditionComposition string              `json:"condition_composition"`
+	Conditions           []SnapshotCondition `json:"conditions"`
+	Actions              []SnapshotAction    `json:"actions"`
+	Exclusions           []SnapshotExclusion `json:"exclusions"`
 }
 
 // SnapshotCondition is the serializable form of a route condition.
@@ -60,12 +60,12 @@ type SnapshotExclusion struct {
 
 // DiffResult describes the differences between two configuration snapshots.
 type DiffResult struct {
-	FromID          int64          `json:"from_id"`
-	ToID            int64          `json:"to_id"`
+	FromID          int64             `json:"from_id"`
+	ToID            int64             `json:"to_id"`
 	SettingsChanged map[string]Change `json:"settings_changed"`
-	RoutesAdded     []SnapshotRoute    `json:"routes_added"`
-	RoutesRemoved   []SnapshotRoute    `json:"routes_removed"`
-	RoutesChanged   []RouteChange      `json:"routes_changed"`
+	RoutesAdded     []SnapshotRoute   `json:"routes_added"`
+	RoutesRemoved   []SnapshotRoute   `json:"routes_removed"`
+	RoutesChanged   []RouteChange     `json:"routes_changed"`
 }
 
 // Change is a single-field change.

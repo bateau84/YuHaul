@@ -15,11 +15,11 @@ type ChannelReader interface {
 
 // ChannelStats is the subset of channel statistics used by the advisory service.
 type ChannelStats struct {
-	ChannelID       string
-	ChannelName     string
-	TotalDiscovered int
-	TotalRouted     int
-	TotalRetained   int
+	ChannelID        string
+	ChannelName      string
+	TotalDiscovered  int
+	TotalRouted      int
+	TotalRetained    int
 	LastDiscoveredAt *time.Time
 }
 
@@ -75,12 +75,12 @@ func (s *Service) GenerateAdvisories(ctx context.Context) error {
 		usefulnessRate := safeRate(ch.TotalRetained, ch.TotalDiscovered)
 		if usefulnessRate < lowUsefulnessThreshold {
 			if err := s.maybeCreate(ctx, ch, AdvisoryTypeLowUsefulness, map[string]any{
-				"window_days":      90,
-				"discovered":       ch.TotalDiscovered,
-				"routed":           ch.TotalRouted,
-				"retained":         ch.TotalRetained,
-				"usefulness_rate":  usefulnessRate,
-				"threshold":        lowUsefulnessThreshold,
+				"window_days":     90,
+				"discovered":      ch.TotalDiscovered,
+				"routed":          ch.TotalRouted,
+				"retained":        ch.TotalRetained,
+				"usefulness_rate": usefulnessRate,
+				"threshold":       lowUsefulnessThreshold,
 			}); err != nil {
 				return err
 			}
@@ -111,11 +111,11 @@ func (s *Service) GenerateAdvisories(ctx context.Context) error {
 		decliningThreshold := s.threshold(ctx, "advisory_declining_yield_threshold", 0.10)
 		if yieldRate < decliningThreshold {
 			if err := s.maybeCreate(ctx, ch, AdvisoryTypeDecliningYield, map[string]any{
-				"window_days":       90,
-				"discovered":        ch.TotalDiscovered,
-				"routed":            ch.TotalRouted,
-				"yield_rate":        yieldRate,
-				"threshold":         decliningThreshold,
+				"window_days": 90,
+				"discovered":  ch.TotalDiscovered,
+				"routed":      ch.TotalRouted,
+				"yield_rate":  yieldRate,
+				"threshold":   decliningThreshold,
 			}); err != nil {
 				return err
 			}

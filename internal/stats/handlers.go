@@ -28,6 +28,8 @@ func NewHandler(service *Service, logger *slog.Logger) *Handler {
 // Handler returns the HTTP handler for analytics routes.
 func (h *Handler) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/analytics", h.handleSummary)
+	mux.HandleFunc("GET /api/analytics/{$}", h.handleSummary)
 	mux.HandleFunc("GET /api/analytics/trends", h.handleTrends)
 	mux.HandleFunc("GET /api/analytics/channels", h.handleListChannels)
 	mux.HandleFunc("GET /api/analytics/channels/{id}", h.handleGetChannel)
@@ -182,6 +184,32 @@ func (h *Handler) handleQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"budget":    budget,
 		"breakdown": breakdown,
+	})
+}
+
+func (h *Handler) handleSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	channels, err := h.service.ChannelStats(ctx)
+	if err != nil {
+		h.logger.ErrorContext(ctx, "analytics summary: channel stats failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load analytics summary")
+		return
+	}
+
+	budget, breakdown, err := h.service.QuotaStatus(ctx)
+	if err != nil {
+		h.logger.ErrorContext(ctx, "analytics summary: quota status failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load analytics summary")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channels": channels,
+		"quota": map[string]any{
+			"budget":    budget,
+			"breakdown": breakdown,
+		},
 	})
 }
 
