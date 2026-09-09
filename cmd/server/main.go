@@ -160,6 +160,7 @@ func main() {
 		server.WithConfigHandler(configHandler),
 		server.WithAnalyticsHandler(statsHandler),
 		server.WithAdvisoryHandler(advisoryHandler),
+		server.WithRouteStore(routerStore),
 	)
 
 	schedulerStore, err := scheduler.NewStore(db)

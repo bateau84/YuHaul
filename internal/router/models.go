@@ -60,45 +60,45 @@ const (
 
 // Route is a single ordered routing rule.
 type Route struct {
-	ID                   int64
-	Name                 string
-	Description          string
-	EvaluationOrder      int
-	IsFinal              bool
-	IsEnabled            bool
-	ConditionComposition string // "AND" or "OR"
-	Conditions           []RouteCondition
-	Actions              []RouteAction
-	Exclusions           []RouteExclusion
-	CreatedAt            string
-	UpdatedAt            string
+	ID                   int64              `json:"id"`
+	Name                 string             `json:"name"`
+	Description          string             `json:"description"`
+	EvaluationOrder      int                `json:"evaluation_order"`
+	IsFinal              bool               `json:"is_final"`
+	IsEnabled            bool               `json:"is_enabled"`
+	ConditionComposition string             `json:"condition_composition"` // "AND" or "OR"
+	Conditions           []RouteCondition   `json:"conditions"`
+	Actions              []RouteAction      `json:"actions"`
+	Exclusions           []RouteExclusion   `json:"exclusions"`
+	CreatedAt            string             `json:"created_at"`
+	UpdatedAt            string             `json:"updated_at"`
 }
 
 // RouteCondition is one predicate within a route.
 type RouteCondition struct {
-	ID             int64
-	RouteID        int64
-	ConditionIndex int
-	Field          ConditionField
-	Operator       ConditionOperator
-	Value          string
+	ID             int64           `json:"id"`
+	RouteID        int64           `json:"route_id"`
+	ConditionIndex int             `json:"condition_index"`
+	Field          ConditionField  `json:"field"`
+	Operator       ConditionOperator `json:"operator"`
+	Value          string          `json:"value"`
 }
 
 // RouteAction describes what to do when a route matches.
 type RouteAction struct {
-	ID               int64
-	RouteID          int64
-	ActionType       string
-	TargetPlaylistID string
-	ActionIndex      int
+	ID               int64  `json:"id"`
+	RouteID          int64  `json:"route_id"`
+	ActionType       string `json:"action_type"`
+	TargetPlaylistID string `json:"target_playlist_id"`
+	ActionIndex      int    `json:"action_index"`
 }
 
 // RouteExclusion is a route-scoped exclusion rule.
 type RouteExclusion struct {
-	ID             int64
-	RouteID        int64
-	ExclusionType  ExclusionType
-	ExclusionValue string
+	ID             int64         `json:"id"`
+	RouteID        int64         `json:"route_id"`
+	ExclusionType  ExclusionType `json:"exclusion_type"`
+	ExclusionValue string        `json:"exclusion_value"`
 }
 
 // VideoContext is the data available when evaluating a video.
