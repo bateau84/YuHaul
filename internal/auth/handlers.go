@@ -13,15 +13,18 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /initiate", s.handleInitiate)
 	mux.HandleFunc("GET /callback", s.handleCallback)
+	mux.HandleFunc("GET /status", s.handleStatus)
 	return mux
 }
 
 // AccountHandler returns an http.Handler for account-level endpoints:
 //
+//	GET /        -> connection status
 //	GET /status  -> connection status
 //	DELETE /     -> disconnect account
 func (s *Service) AccountHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", s.handleStatus)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("DELETE /", s.handleDisconnect)
 	return mux

@@ -18,10 +18,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/pipeline"
 	"github.com/bateau84/YuHaul/internal/queue"
+	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
+	"github.com/bateau84/YuHaul/internal/scheduler"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/stats"
 	"github.com/bateau84/YuHaul/internal/store"
@@ -909,4 +912,172 @@ func TestHandleSetDuplicateThreshold(t *testing.T) {
 	v, err := versioner.DuplicateThreshold(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0.75, v)
+}
+
+func TestHandleSettingsRoot(t *testing.T) {
+	ctx := context.Background()
+	db, _, _, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	schedulerStore, err := scheduler.NewStore(db)
+	require.NoError(t, err)
+	require.NoError(t, schedulerStore.SetSchedule(ctx, &scheduler.Schedule{Expression: "0 6 * * *", Enabled: true}))
+
+	ledger := quota.New(db, quota.WithDefaultLimit(1234))
+
+	handler.
+		WithScheduleProvider(schedulerStore).
+		WithQuotaProvider(ledger).
+		WithAuthStatusProvider(auth.NewDisabledService())
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+
+	for _, path := range []string{"/api/settings", "/api/settings/"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			body := rec.Body.String()
+			assert.Contains(t, body, `"schedule":"0 6 * * *"`)
+			assert.Contains(t, body, `"quota_limit":1234`)
+			assert.Contains(t, body, `"duplicate_threshold":0.5`)
+			assert.Contains(t, body, `"duplicate_behavior":"skip"`)
+			assert.Contains(t, body, `"account_connected":false`)
+		})
+	}
+}
+
+func TestHandleAnalyticsRoot(t *testing.T) {
+	db, _, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	statsStore := stats.NewStore(db)
+	cfgStore := config.NewStore(db)
+	ledger := quota.New(db)
+	statsSvc := stats.NewService(statsStore, cfgStore, ledger)
+	analyticsHandler := stats.NewHandler(statsSvc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithAnalyticsHandler(analyticsHandler))
+
+	for _, path := range []string{"/api/analytics", "/api/analytics/"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			body := rec.Body.String()
+			assert.Contains(t, body, `"channels":`)
+			assert.Contains(t, body, `"quota":`)
+		})
+	}
+}
+
+func TestHandleUpdateSettingsRoot(t *testing.T) {
+	ctx := context.Background()
+	db, _, versioner, handler, cleanup := setupConfigHandlerTest(t)
+	defer cleanup()
+
+	schedulerStore, err := scheduler.NewStore(db)
+	require.NoError(t, err)
+	ledger := quota.New(db, quota.WithDefaultLimit(1234))
+
+	handler.
+		WithScheduleProvider(schedulerStore).
+		WithQuotaProvider(ledger).
+		WithAuthStatusProvider(auth.NewDisabledService())
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithConfigHandler(handler))
+
+	body := `{"schedule":"0 7 * * *","quota_limit":2000,"duplicate_threshold":0.75,"duplicate_behavior":"flag"}`
+	for _, path := range []string{"/api/settings", "/api/settings/"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			resp := rec.Body.String()
+			assert.Contains(t, resp, `"schedule":"0 7 * * *"`)
+			assert.Contains(t, resp, `"quota_limit":2000`)
+			assert.Contains(t, resp, `"duplicate_threshold":0.75`)
+			assert.Contains(t, resp, `"duplicate_behavior":"flag"`)
+		})
+	}
+
+	limit, err := ledger.DailyLimit(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2000, limit)
+
+	threshold, err := versioner.DuplicateThreshold(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0.75, threshold)
+}
+
+func TestHandleRoutesTrailingSlash(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	_, err := routerStore.CreateRoute(ctx, &router.Route{
+		Name: "Jazz", EvaluationOrder: 1, IsEnabled: true,
+		ConditionComposition: "AND",
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+		Exclusions:           []router.RouteExclusion{},
+	})
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes/", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"name":"Jazz"`)
+}
+
+func TestHandleQueueErrorsNewPath(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	queueStore, err := queue.NewStore(db)
+	require.NoError(t, err)
+	queueSvc := queue.NewService(queueStore, nil)
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	video := &state.Video{VideoID: "v1", ChannelID: "c1", DiscoveredAt: time.Now().UTC(), DiscoveredInRunID: runID, ProcessingState: state.VideoStateCompleted, FinalOutcome: state.FinalOutcomeAccepted}
+	videoID, err := stateStore.CreateVideo(ctx, video)
+	require.NoError(t, err)
+
+	_, err = queueStore.CreateErrorEntry(ctx, &queue.ErrorEntry{
+		VideoID:   videoID,
+		RunID:     runID,
+		Category:  queue.ErrorCategoryRuntime,
+		Message:   "test error",
+		Status:    queue.ErrorStatusActive,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithQueueHandler(queueSvc))
+
+	for _, path := range []string{"/api/queue/errors", "/api/queue/errors/"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path+"?include=active", nil)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Contains(t, rec.Body.String(), `"errors":`)
+			assert.Contains(t, rec.Body.String(), `"test error"`)
+		})
+	}
 }

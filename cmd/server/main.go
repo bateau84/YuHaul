@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -152,7 +153,16 @@ func main() {
 		pipeline.WithAdvisoryGenerator(advisorySvc),
 	)
 
-	configHandler := config.NewHandler(configSvc, logger)
+	schedulerStore, err := scheduler.NewStore(db)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to open scheduler store", "error", err)
+		os.Exit(1)
+	}
+
+	configHandler := config.NewHandler(configSvc, logger).
+		WithScheduleProvider(schedulerStore).
+		WithQuotaProvider(ledger).
+		WithAuthStatusProvider(authSvc)
 	statsHandler := stats.NewHandler(statsSvc, logger)
 	advisoryHandler := advisory.NewHandler(advisorySvc, logger)
 	overview := &overviewProvider{stateStore: stateStore, ledger: ledger, queueSvc: queueSvc}
@@ -169,11 +179,6 @@ func main() {
 		server.WithOverviewProvider(overview),
 	)
 
-	schedulerStore, err := scheduler.NewStore(db)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to open scheduler store", "error", err)
-		os.Exit(1)
-	}
 	sch := scheduler.NewScheduler(schedulerStore, pl, stateStore, scheduler.WithLogger(logger))
 	if err := sch.Start(ctx); err != nil {
 		logger.ErrorContext(ctx, "failed to start scheduler", "error", err)
@@ -183,8 +188,9 @@ func main() {
 
 	root := http.NewServeMux()
 	root.Handle("/api/", apiServer.Handler())
-	root.Handle("/api/auth/", http.StripPrefix("/api/auth", authSvc.Handler()))
-	root.Handle("/api/account/", http.StripPrefix("/api/account", authSvc.AccountHandler()))
+	root.Handle("/api/auth/", stripPrefix("/api/auth", authSvc.Handler()))
+	root.Handle("/api/account", stripPrefix("/api/account", authSvc.AccountHandler()))
+	root.Handle("/api/account/", stripPrefix("/api/account", authSvc.AccountHandler()))
 	root.Handle("/", spaHandler(cfg.WebRoot))
 
 	httpServer := &http.Server{
@@ -210,6 +216,29 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.ErrorContext(ctx, "graceful shutdown failed", "error", err)
 	}
+}
+
+// stripPrefix is like http.StripPrefix but guarantees a leading slash on the
+// forwarded path so that a request for the prefix itself (e.g. /api/account)
+// is routed to the sub-handler's root instead of becoming an empty path that
+// triggers a redirect.
+func stripPrefix(prefix string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, prefix)
+		if p == r.URL.Path {
+			http.NotFound(w, r)
+			return
+		}
+		if p == "" || p[0] != '/' {
+			p = "/" + p
+		}
+		r2 := new(http.Request)
+		*r2 = *r
+		r2.URL = new(url.URL)
+		*r2.URL = *r.URL
+		r2.URL.Path = p
+		h.ServeHTTP(w, r2)
+	})
 }
 
 // loadConfig reads configuration from flags and environment variables.
