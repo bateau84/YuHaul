@@ -4,22 +4,41 @@ import { Play, FlaskConical, AlertCircle } from 'lucide-react'
 import * as api from '../api/client'
 import { useToast } from '../hooks/useToast'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import type { Run } from '../types'
+import type { Overview as OverviewData } from '../api/overview'
 
 export function Overview() {
-  const [overview, setOverview] = useState<Awaited<ReturnType<typeof api.getOverview>> | null>(null)
+  const [overview, setOverview] = useState<OverviewData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [retryKey, setRetryKey] = useState(0)
   const [confirmRun, setConfirmRun] = useState(false)
   const [confirmDry, setConfirmDry] = useState(false)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const { addToast } = useToast()
 
   useEffect(() => {
-    api.getOverview().then((o) => {
-      setOverview(o)
-      setLoading(false)
-    })
-  }, [])
+    let cancelled = false
+    api.getOverview()
+      .then((o) => {
+        if (cancelled) return
+        setOverview(o)
+        setLoading(false)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setError(err instanceof Error ? err.message : 'Failed to load overview')
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [retryKey])
+
+  function retry() {
+    setLoading(true)
+    setError(null)
+    setRetryKey((k) => k + 1)
+  }
 
   useEffect(() => {
     headingRef.current?.focus()
@@ -27,19 +46,37 @@ export function Overview() {
 
   async function startRun() {
     setConfirmRun(false)
-    const res = await api.startRun()
-    addToast(`Run ${res.run_id} started`, 'success')
+    try {
+      const res = await api.startRun()
+      addToast(`Run ${res.run_id} started`, 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to start run', 'error')
+    }
   }
 
   async function startDryRun() {
     setConfirmDry(false)
-    const res = await api.startDryRun()
-    addToast(`Dry run ${res.run_id} started`, 'success')
+    try {
+      const res = await api.startDryRun()
+      addToast(`Dry run ${res.run_id} started`, 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to start dry run', 'error')
+    }
   }
 
-  if (loading || !overview) return <div className="empty-state">Loading overview...</div>
+  if (loading) return <div className="empty-state">Loading overview...</div>
+  if (error) {
+    return (
+      <div className="card" role="alert">
+        <h2 className="section-title">Error loading overview</h2>
+        <p>{error}</p>
+        <button className="button button--primary" onClick={retry}>Retry</button>
+      </div>
+    )
+  }
+  if (!overview) return null
 
-  const run = overview.last_run as Run
+  const run = overview.last_run
   return (
     <>
       <div className="page-header">
@@ -58,15 +95,15 @@ export function Overview() {
 
       <div className="card-grid">
         <div className="card">
-          <div className="metric-value">{run.videos_discovered}</div>
+          <div className="metric-value">{run?.videos_discovered ?? 0}</div>
           <div className="metric-label">Discovered</div>
         </div>
         <div className="card">
-          <div className="metric-value">{run.videos_accepted}</div>
+          <div className="metric-value">{run?.videos_accepted ?? 0}</div>
           <div className="metric-label">Accepted</div>
         </div>
         <div className="card">
-          <div className="metric-value">{run.videos_deferred}</div>
+          <div className="metric-value">{run?.videos_deferred ?? 0}</div>
           <div className="metric-label">Deferred</div>
         </div>
         <div className="card">
@@ -98,7 +135,7 @@ export function Overview() {
 
       <div className="card">
         <h2 className="section-title">Recent runs</h2>
-        {overview.runs_today === 0 ? (
+        {!run || overview.runs_today === 0 ? (
           <div className="empty-state">No runs yet.</div>
         ) : (
           <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>

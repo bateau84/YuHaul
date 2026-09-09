@@ -52,6 +52,8 @@ export function AnalyticsView() {
   const [data, setData] = useState<TrendBucket[]>([])
   const [routeRates, setRouteRates] = useState<RouteMatchRate[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [retryKey, setRetryKey] = useState(0)
   const [showTable, setShowTable] = useState(false)
 
   const trendsId = useId()
@@ -60,16 +62,28 @@ export function AnalyticsView() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([api.getTrends(), api.getRouteMatchRates()]).then(([trends, rates]) => {
-      if (cancelled) return
-      setData(trends.buckets)
-      setRouteRates(rates.routes)
-      setLoading(false)
-    })
+    Promise.all([api.getTrends(), api.getRouteMatchRates()])
+      .then(([trends, rates]) => {
+        if (cancelled) return
+        setData(trends.buckets)
+        setRouteRates(rates.routes)
+        setLoading(false)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setError(err instanceof Error ? err.message : 'Failed to load analytics')
+        setLoading(false)
+      })
     return () => {
       cancelled = true
     }
-  }, [range])
+  }, [range, retryKey])
+
+  function retry() {
+    setLoading(true)
+    setError(null)
+    setRetryKey((k) => k + 1)
+  }
 
   const combined = useMemo<CombinedBucket[]>(() => {
     return data.map((b) => ({
@@ -92,6 +106,15 @@ export function AnalyticsView() {
   }, [routeRates])
 
   if (loading) return <div className="empty-state">Loading analytics...</div>
+  if (error) {
+    return (
+      <div className="card" role="alert">
+        <h2 className="section-title">Error loading analytics</h2>
+        <p>{error}</p>
+        <button className="button button--primary" onClick={retry}>Retry</button>
+      </div>
+    )
+  }
 
   return (
     <>

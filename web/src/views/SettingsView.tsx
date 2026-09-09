@@ -8,45 +8,122 @@ export function SettingsView() {
   const [playlists, setPlaylists] = useState<RetentionPlaylist[]>([])
   const [newPlaylist, setNewPlaylist] = useState({ playlist_id: '', playlist_name: '' })
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [retryKey, setRetryKey] = useState(0)
   const { addToast } = useToast()
 
   useEffect(() => {
-    Promise.all([api.getSettings(), api.listRetentionPlaylists()]).then(([s, p]) => {
-      setSettings(s)
-      setPlaylists(p)
-      setLoading(false)
+    let cancelled = false
+    Promise.all([api.getSettings(), api.listRetentionPlaylists()])
+      .then(([s, p]) => {
+        if (cancelled) return
+        setSettings(s)
+        setPlaylists(p)
+        setLoading(false)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setError(err instanceof Error ? err.message : 'Failed to load settings')
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [retryKey])
+
+  function retry() {
+    setLoading(true)
+    setError(null)
+    setRetryKey((k) => k + 1)
+  }
+
+  // Handle OAuth callback result in the URL query string.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const auth = params.get('auth')
+    if (!auth) return
+
+    if (auth === 'connected') {
+      addToast('YouTube account connected', 'success')
+    } else if (auth === 'error') {
+      addToast('Account connection failed. Please try again.', 'error')
+    }
+
+    // Refresh account status and strip the query parameter.
+    api.getAccountStatus().then((status) => {
+      setSettings((s) => (s ? { ...s, account_connected: status.connected, account_email: status.email } : s))
     })
-  }, [])
+
+    params.delete('auth')
+    const qs = params.toString()
+    const url = qs ? `${window.location.pathname}?${qs}` : window.location.pathname
+    window.history.replaceState({}, '', url)
+  }, [addToast])
 
   async function saveSettings(patch: Partial<Settings>) {
     if (!settings) return
-    const updated = await api.updateSettings({ ...settings, ...patch })
-    setSettings(updated)
-    addToast('Settings saved', 'success')
+    try {
+      const updated = await api.updateSettings({ ...settings, ...patch })
+      setSettings(updated)
+      addToast('Settings saved', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to save settings', 'error')
+    }
   }
 
   async function addPlaylist(e: React.FormEvent) {
     e.preventDefault()
     if (!newPlaylist.playlist_id) return
-    const created = await api.createRetentionPlaylist(newPlaylist)
-    setPlaylists((prev) => [...prev, created])
-    setNewPlaylist({ playlist_id: '', playlist_name: '' })
-    addToast('Retention playlist added', 'success')
+    try {
+      const created = await api.createRetentionPlaylist(newPlaylist)
+      setPlaylists((prev) => [...prev, created])
+      setNewPlaylist({ playlist_id: '', playlist_name: '' })
+      addToast('Retention playlist added', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to add playlist', 'error')
+    }
   }
 
   async function removePlaylist(id: number) {
-    await api.deleteRetentionPlaylist(id)
-    setPlaylists((prev) => prev.filter((p) => p.id !== id))
-    addToast('Retention playlist removed', 'success')
+    try {
+      await api.deleteRetentionPlaylist(id)
+      setPlaylists((prev) => prev.filter((p) => p.id !== id))
+      addToast('Retention playlist removed', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to remove playlist', 'error')
+    }
+  }
+
+  async function connectAccount() {
+    try {
+      const res = await api.initiateOAuth()
+      window.location.assign(res.auth_url)
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to start OAuth flow', 'error')
+    }
   }
 
   async function disconnect() {
-    await api.disconnectAccount()
-    setSettings((s) => (s ? { ...s, account_connected: false, account_email: undefined } : s))
-    addToast('Account disconnected', 'success')
+    try {
+      await api.disconnectAccount()
+      setSettings((s) => (s ? { ...s, account_connected: false, account_email: undefined } : s))
+      addToast('Account disconnected', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to disconnect account', 'error')
+    }
   }
 
-  if (loading || !settings) return <div className="empty-state">Loading settings...</div>
+  if (loading) return <div className="empty-state">Loading settings...</div>
+  if (error) {
+    return (
+      <div className="card" role="alert">
+        <h2 className="section-title">Error loading settings</h2>
+        <p>{error}</p>
+        <button className="button button--primary" onClick={retry}>Retry</button>
+      </div>
+    )
+  }
+  if (!settings) return null
 
   return (
     <>
@@ -109,7 +186,10 @@ export function SettingsView() {
             <button className="button button--danger" onClick={disconnect}>Disconnect account</button>
           </>
         ) : (
-          <p>Account not connected.</p>
+          <>
+            <p>Account not connected.</p>
+            <button className="button button--primary" onClick={connectAccount}>Connect YouTube account</button>
+          </>
         )}
       </div>
 

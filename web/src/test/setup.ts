@@ -176,9 +176,14 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
   if (path === '/api/account/status' && method === 'GET') {
     return jsonResponse(await mock.getAccountStatus())
   }
-  if (path === '/api/account/disconnect' && method === 'POST') {
+  if (path === '/api/account/' && method === 'DELETE') {
     await mock.disconnectAccount()
     return jsonResponse({ ok: true })
+  }
+
+  // Auth
+  if (path === '/api/auth/initiate' && method === 'POST') {
+    return jsonResponse({ auth_url: 'https://accounts.google.com/oauth/mock', state: 'mock-state' })
   }
 
   // Config versions (mock-backed in client.ts but wired endpoints may be added)
