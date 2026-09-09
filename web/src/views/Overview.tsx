@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { Play, FlaskConical, AlertCircle } from 'lucide-react'
 import * as api from '../api/client'
-import { useToast } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { Run } from '../types'
 

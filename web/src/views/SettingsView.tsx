@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api/client'
-import { useToast } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import type { Settings, RetentionPlaylist } from '../types'
 
 export function SettingsView() {

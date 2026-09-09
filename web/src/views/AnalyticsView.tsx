@@ -59,12 +59,16 @@ export function AnalyticsView() {
   const volumesId = useId()
 
   useEffect(() => {
-    setLoading(true)
+    let cancelled = false
     Promise.all([api.getTrends(), api.getRouteMatchRates()]).then(([trends, rates]) => {
+      if (cancelled) return
       setData(trends.buckets)
       setRouteRates(rates.routes)
       setLoading(false)
     })
+    return () => {
+      cancelled = true
+    }
   }, [range])
 
   const combined = useMemo<CombinedBucket[]>(() => {

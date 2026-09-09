@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api/client'
 import { RouteEditor } from '../components/RouteEditor'
-import { useToast } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import type { Route } from '../types'
 
 export function BacktestView() {

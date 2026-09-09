@@ -1,4 +1,14 @@
-# Build stage
+# SPA build stage
+FROM node:22-alpine AS spa-builder
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+# Go build stage
 FROM golang:1.26-alpine AS builder
 
 WORKDIR /src
@@ -22,6 +32,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
     mkdir -p /data /app/web
 
 COPY --from=builder /bin/yuhaul /app/yuhaul
+COPY --from=spa-builder /web/dist /app/web
 
 USER yuhaul
 

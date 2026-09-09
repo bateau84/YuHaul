@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import * as api from '../api/client'
 import { Badge } from '../components/Badge'
-import { useToast } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import type { Run, VideoOutcome } from '../types'
 
 export function RunDetailView() {

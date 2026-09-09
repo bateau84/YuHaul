@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown, Check, X } from 'lucide-react'
 import type { Route, RouteCondition, RouteAction, Composition, ConditionField, ConditionOperator, ExclusionType } from '../types'
 
@@ -45,13 +45,8 @@ interface RouteEditorProps {
 }
 
 export function RouteEditor({ route, onSave, onCancel, onDelete }: RouteEditorProps) {
-  const [form, setForm] = useState<Route>(blankRoute())
+  const [form, setForm] = useState<Route>(() => (route ? { ...route } : blankRoute()))
   const [errors, setErrors] = useState<Record<string, string>>({})
-
-  useEffect(() => {
-    setForm(route ? { ...route } : blankRoute())
-    setErrors({})
-  }, [route])
 
   function validate(): boolean {
     const next: Record<string, string> = {}

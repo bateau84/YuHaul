@@ -4,7 +4,8 @@ import { BrowserRouter } from 'react-router-dom'
 import { Sidebar } from '../components/Sidebar'
 import { RouteEditor } from '../components/RouteEditor'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { ToastProvider, useToast } from '../components/ToastProvider'
+import { ToastProvider } from '../components/ToastProvider'
+import { useToast } from '../hooks/useToast'
 import type { Route } from '../types'
 
 const testRoute: Route = {
