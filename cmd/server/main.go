@@ -153,6 +153,7 @@ func main() {
 	configHandler := config.NewHandler(configSvc, logger)
 	statsHandler := stats.NewHandler(statsSvc, logger)
 	advisoryHandler := advisory.NewHandler(advisorySvc, logger)
+	overview := &overviewProvider{stateStore: stateStore, ledger: ledger, queueSvc: queueSvc}
 	apiServer := server.NewServer(
 		pl,
 		broadcast,
@@ -160,7 +161,10 @@ func main() {
 		server.WithConfigHandler(configHandler),
 		server.WithAnalyticsHandler(statsHandler),
 		server.WithAdvisoryHandler(advisoryHandler),
+		server.WithQueueHandler(queueSvc),
 		server.WithRouteStore(routerStore),
+		server.WithRunStore(stateStore),
+		server.WithOverviewProvider(overview),
 	)
 
 	schedulerStore, err := scheduler.NewStore(db)
@@ -179,8 +183,6 @@ func main() {
 	root.Handle("/api/", apiServer.Handler())
 	root.Handle("/api/auth/", http.StripPrefix("/api/auth", authSvc.Handler()))
 	root.Handle("/api/account/", http.StripPrefix("/api/account", authSvc.AccountHandler()))
-	root.Handle("/api/errors/", http.StripPrefix("/api/errors", queueSvc.ErrorHandler()))
-	root.Handle("/api/deferred/", http.StripPrefix("/api/deferred", queueSvc.DeferredHandler()))
 	root.Handle("/", spaHandler(cfg.WebRoot))
 
 	httpServer := &http.Server{
@@ -305,6 +307,65 @@ func (s spaFS) Open(name string) (http.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// overviewProvider implements server.OverviewProvider from the underlying
+// state, quota, and queue services.
+type overviewProvider struct {
+	stateStore *state.Store
+	ledger     *quota.Ledger
+	queueSvc   *queue.Service
+}
+
+func (o *overviewProvider) Overview(ctx context.Context) (*server.Overview, error) {
+	runs, err := o.stateStore.ListRuns(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("overview: list runs: %w", err)
+	}
+
+	var lastRun *state.Run
+	var runsToday int
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	for i, r := range runs {
+		if i == 0 {
+			run := r
+			lastRun = &run
+		}
+		if r.StartedAt.After(today) || r.StartedAt.Equal(today) {
+			runsToday++
+		}
+	}
+
+	budget, err := o.ledger.Budget(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("overview: quota budget: %w", err)
+	}
+	quotaResp := map[string]any{
+		"daily_limit":   budget.DailyLimit,
+		"consumed_today": budget.Consumed,
+		"remaining":     budget.Remaining,
+	}
+	if !budget.NextReset.IsZero() {
+		quotaResp["reset_at"] = budget.NextReset.UTC().Format(time.RFC3339)
+	}
+
+	activeErrors, err := o.queueSvc.ListActiveErrors(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("overview: list active errors: %w", err)
+	}
+	pendingDeferred, err := o.queueSvc.ListPendingDeferred(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("overview: list pending deferred: %w", err)
+	}
+
+	return &server.Overview{
+		LastRun:       lastRun,
+		RunsToday:     runsToday,
+		Quota:         quotaResp,
+		ErrorCount:    len(activeErrors),
+		DeferredCount: len(pendingDeferred),
+	}, nil
 }
 
 // advisoryChannelAdapter adapts the stats store to the advisory service's

@@ -41,6 +41,12 @@ type AnalyticsHandler interface {
 	Handler() http.Handler
 }
 
+// QueueHandler serves error and deferred queue endpoints.
+type QueueHandler interface {
+	ErrorHandler() http.Handler
+	DeferredHandler() http.Handler
+}
+
 // RouteStore is the subset of router.Store used by the HTTP server.
 type RouteStore interface {
 	CreateRoute(ctx context.Context, r *router.Route) (int64, error)
@@ -51,6 +57,26 @@ type RouteStore interface {
 	ReorderRoutes(ctx context.Context, routeIDs []int64) error
 }
 
+// RunStore is the subset of state.Store used by the HTTP server for run queries.
+type RunStore interface {
+	ListRuns(ctx context.Context) ([]state.Run, error)
+	GetRun(ctx context.Context, id int64) (*state.Run, error)
+}
+
+// Overview is the dashboard summary returned by GET /api/overview.
+type Overview struct {
+	LastRun       *state.Run `json:"last_run"`
+	RunsToday     int        `json:"runs_today"`
+	Quota         any        `json:"quota"`
+	ErrorCount    int        `json:"error_count"`
+	DeferredCount int        `json:"deferred_count"`
+}
+
+// OverviewProvider returns the dashboard summary data.
+type OverviewProvider interface {
+	Overview(ctx context.Context) (*Overview, error)
+}
+
 // Server serves the YuHaul REST API and SSE endpoints.
 type Server struct {
 	pipeline         Pipeline
@@ -58,7 +84,10 @@ type Server struct {
 	configHandler    ConfigHandler
 	analyticsHandler AnalyticsHandler
 	advisoryHandler  AnalyticsHandler
+	queueHandler     QueueHandler
 	routeStore       RouteStore
+	runStore         RunStore
+	overviewProvider OverviewProvider
 	logger           *slog.Logger
 }
 
@@ -101,11 +130,38 @@ func WithAdvisoryHandler(h AnalyticsHandler) Option {
 	}
 }
 
+// WithQueueHandler registers the error and deferred queue HTTP handlers.
+func WithQueueHandler(h QueueHandler) Option {
+	return func(s *Server) {
+		if h != nil {
+			s.queueHandler = h
+		}
+	}
+}
+
 // WithRouteStore registers the route configuration store.
 func WithRouteStore(store RouteStore) Option {
 	return func(s *Server) {
 		if store != nil {
 			s.routeStore = store
+		}
+	}
+}
+
+// WithRunStore registers the run query store.
+func WithRunStore(store RunStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.runStore = store
+		}
+	}
+}
+
+// WithOverviewProvider registers the dashboard overview provider.
+func WithOverviewProvider(provider OverviewProvider) Option {
+	return func(s *Server) {
+		if provider != nil {
+			s.overviewProvider = provider
 		}
 	}
 }
@@ -118,7 +174,10 @@ func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Optio
 		configHandler:    &noopHandler{},
 		analyticsHandler: &noopHandler{},
 		advisoryHandler:  &noopHandler{},
+		queueHandler:     noopQueueHandler{},
 		routeStore:       noopRouteStore{},
+		runStore:         noopRunStore{},
+		overviewProvider: noopOverviewProvider{},
 		logger:           slog.Default(),
 	}
 	for _, opt := range opts {
@@ -154,6 +213,38 @@ func (noopRouteStore) ReorderRoutes(context.Context, []int64) error {
 	return errors.New("route store not configured")
 }
 
+type noopRunStore struct{}
+
+func (noopRunStore) ListRuns(context.Context) ([]state.Run, error) {
+	return nil, errors.New("run store not configured")
+}
+func (noopRunStore) GetRun(context.Context, int64) (*state.Run, error) {
+	return nil, errors.New("run store not configured")
+}
+
+type noopOverviewProvider struct{}
+
+func (noopOverviewProvider) Overview(context.Context) (*Overview, error) {
+	return nil, errors.New("overview provider not configured")
+}
+
+type noopQueueHandler struct{}
+
+func (noopQueueHandler) ErrorHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "queue handler not configured")
+	})
+	return mux
+}
+func (noopQueueHandler) DeferredHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "queue handler not configured")
+	})
+	return mux
+}
+
 // Handler returns the HTTP handler for the API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -161,7 +252,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/dry-run", s.handleDryRun)
 	mux.HandleFunc("POST /api/runs/replay", s.handleReplay)
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
+	mux.HandleFunc("GET /api/runs", s.handleListRuns)
+	mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
+	mux.HandleFunc("GET /api/overview", s.handleOverview)
 
 	// Route CRUD endpoints.
 	mux.HandleFunc("GET /api/routes", s.handleListRoutes)
@@ -174,6 +268,10 @@ func (s *Server) Handler() http.Handler {
 	// Configuration-version endpoints are served by a dedicated handler.
 	mux.Handle("/api/config/", s.configHandler.Handler())
 	mux.Handle("/api/settings/", s.configHandler.Handler())
+
+	// Queue handlers are served from dedicated sub-paths.
+	mux.Handle("/api/errors/", http.StripPrefix("/api/errors", s.queueHandler.ErrorHandler()))
+	mux.Handle("/api/deferred/", http.StripPrefix("/api/deferred", s.queueHandler.DeferredHandler()))
 
 	// Advisory routes are more specific than the analytics prefix; register
 	// them first so they take precedence over the broader analytics handler.
@@ -321,6 +419,46 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 		"run_type": string(run.RunType),
 		"status":   string(run.Status),
 	})
+}
+
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.runStore.ListRuns(r.Context())
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "list runs failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list runs")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
+func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid run id")
+		return
+	}
+
+	run, err := s.runStore.GetRun(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, state.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "get run failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to load run")
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	overview, err := s.overviewProvider.Overview(r.Context())
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "overview failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load overview")
+		return
+	}
+	writeJSON(w, http.StatusOK, overview)
 }
 
 func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {

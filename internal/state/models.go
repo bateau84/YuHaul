@@ -84,22 +84,22 @@ const (
 
 // Run is a single execution of the processing pipeline.
 type Run struct {
-	ID                    int64
-	StartedAt             time.Time
-	CompletedAt           *time.Time
-	RunType               RunType
-	Status                RunStatus
-	ConfigVersionID       *int64
-	VideosDiscovered      int
-	VideosAccepted        int
-	VideosRejected        int
-	VideosDeferred        int
-	VideosFailed          int
-	VideosNotYetEvaluated int
-	QuotaCost             int
-	DurationSeconds       *float64
-	InterruptReason       *string
-	CurrentPhase          *string
+	ID                    int64      `json:"id"`
+	StartedAt             time.Time  `json:"started_at"`
+	CompletedAt           *time.Time `json:"completed_at"`
+	RunType               RunType    `json:"run_type"`
+	Status                RunStatus  `json:"status"`
+	ConfigVersionID       *int64     `json:"config_version_id"`
+	VideosDiscovered      int        `json:"videos_discovered"`
+	VideosAccepted        int        `json:"videos_accepted"`
+	VideosRejected        int        `json:"videos_rejected"`
+	VideosDeferred        int        `json:"videos_deferred"`
+	VideosFailed          int        `json:"videos_failed"`
+	VideosNotYetEvaluated int        `json:"videos_not_yet_evaluated"`
+	QuotaCost             int        `json:"quota_cost"`
+	DurationSeconds       *float64   `json:"duration_seconds"`
+	InterruptReason       *string    `json:"interrupt_reason"`
+	CurrentPhase          *string    `json:"current_phase"`
 }
 
 // Video represents a discovered video and its processing state.

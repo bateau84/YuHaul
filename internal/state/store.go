@@ -141,6 +141,33 @@ func (s *Store) CreateRun(ctx context.Context, run *Run) (int64, error) {
 	return id, nil
 }
 
+// ListRuns returns all runs ordered by started_at descending (newest first).
+func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
+		        videos_discovered, videos_accepted, videos_rejected, videos_deferred,
+		        videos_failed, videos_not_yet_evaluated, quota_cost, duration_seconds,
+		        interrupt_reason, current_phase
+		 FROM run ORDER BY started_at DESC;`)
+	if err != nil {
+		return nil, fmt.Errorf("listing runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning run: %w", err)
+		}
+		out = append(out, *r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating runs: %w", err)
+	}
+	return out, nil
+}
+
 // ListInterruptedRuns returns all runs with status interrupted, oldest first.
 func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,

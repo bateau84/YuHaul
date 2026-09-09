@@ -20,6 +20,7 @@ import (
 
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/pipeline"
+	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
@@ -109,6 +110,127 @@ func (f *fakePipeline) Backtest(ctx context.Context, proposed config.Snapshot) (
 func (f *fakePipeline) ExecuteBacktest(ctx context.Context, runID int64) {
 	f.execute = runID
 	close(f.done)
+}
+
+type fakeOverviewProvider struct {
+	overview *Overview
+	err      error
+}
+
+func (f *fakeOverviewProvider) Overview(context.Context) (*Overview, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.overview, nil
+}
+
+func TestHandleListRuns(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
+	_, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithRunStore(stateStore))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"runs":`)
+}
+
+func TestHandleGetRun(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithRunStore(stateStore))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(runID, 10), nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"id":`)
+}
+
+func TestHandleGetRun_NotFound(t *testing.T) {
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithRunStore(stateStore))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/999", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandleOverview(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	overview := &Overview{RunsToday: 3, ErrorCount: 1, DeferredCount: 2}
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithOverviewProvider(&fakeOverviewProvider{overview: overview}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"runs_today":3`)
+	assert.Contains(t, body, `"error_count":1`)
+	assert.Contains(t, body, `"deferred_count":2`)
+}
+
+func TestHandleQueueEndpointsMounted(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	queueStore, err := queue.NewStore(db)
+	require.NoError(t, err)
+	queueSvc := queue.NewService(queueStore, nil)
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	video := &state.Video{VideoID: "v1", ChannelID: "c1", DiscoveredAt: time.Now().UTC(), DiscoveredInRunID: runID, ProcessingState: state.VideoStateCompleted, FinalOutcome: state.FinalOutcomeAccepted}
+	videoID, err := stateStore.CreateVideo(ctx, video)
+	require.NoError(t, err)
+
+	_, err = queueStore.CreateErrorEntry(ctx, &queue.ErrorEntry{
+		VideoID:   videoID,
+		RunID:     runID,
+		Category:  queue.ErrorCategoryRuntime,
+		Message:   "test error",
+		Status:    queue.ErrorStatusActive,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithQueueHandler(queueSvc))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/errors/?include=active", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"errors":`)
+	assert.Contains(t, rec.Body.String(), `"test error"`)
 }
 
 func TestHandleStartRun(t *testing.T) {
