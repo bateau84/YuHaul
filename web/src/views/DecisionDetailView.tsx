@@ -6,6 +6,26 @@ import { Badge } from '../components/Badge'
 import { deriveRouteDecision, deriveActionOutcome, formatDuration } from '../lib/outcome'
 import type { DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome } from '../types'
 
+const actionIcons = {
+  accepted: Check,
+  rejected: X,
+  deferred: Clock,
+  failed: AlertTriangle,
+  'not-evaluated': Minus,
+  'in-progress': PlayCircle,
+}
+
+function ActionOutcomeBadge({ outcome }: { outcome: string }) {
+  const { variant, label } = deriveActionOutcome(outcome)
+  const Icon = actionIcons[variant]
+  return (
+    <span className={`badge badge--${variant}`}>
+      <Icon size={14} aria-hidden="true" />
+      {label}
+    </span>
+  )
+}
+
 function DecisionBadge({ decision, skipReason }: { decision: RouteDecision['decision']; skipReason?: RouteDecision['skip_reason'] }) {
   const { variant, label, reason } = deriveRouteDecision(decision, skipReason)
   const icons = {
@@ -213,9 +233,7 @@ export function DecisionDetailView() {
               <li key={a.id} style={{ marginBottom: 8 }}>
                 <strong>{d.route_name}</strong>:
                 <span style={{ marginLeft: 8 }}>
-                  <span className={`badge badge--${deriveActionOutcome(a.outcome).variant}`}>
-                    {deriveActionOutcome(a.outcome).label}
-                  </span>
+                  <ActionOutcomeBadge outcome={a.outcome} />
                 </span>
                 <span style={{ marginLeft: 8 }}>
                   {a.action_type} → {a.target_playlist_id}

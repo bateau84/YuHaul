@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown } from 'lucide-react'
+import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown, Check, X } from 'lucide-react'
 import type { Route, RouteCondition, RouteAction, Composition, ConditionField, ConditionOperator, ExclusionType } from '../types'
 
 const fields: { value: ConditionField; label: string }[] = [
@@ -247,11 +247,10 @@ export function RouteEditor({ route, onSave, onCancel, onDelete }: RouteEditorPr
                       <button
                         type="button"
                         className="icon-button"
-                        style={{ width: 20, height: 20, border: 'none' }}
                         onClick={() => removeExclusion(globalIdx)}
                         aria-label={`Remove ${e.exclusion_value}`}
                       >
-                        <Trash2 size={12} />
+                        <Trash2 size={14} />
                       </button>
                     </li>
                   )
@@ -374,12 +373,23 @@ export function RouteEditor({ route, onSave, onCancel, onDelete }: RouteEditorPr
             Final route (stop evaluation after match)
           </label>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={form.is_enabled}
-              onChange={(e) => setForm((f) => ({ ...f, is_enabled: e.target.checked }))}
-            />
-            Enabled
+            <span className="switch">
+              <span className="switch-track" aria-hidden="true" />
+              <input
+                type="checkbox"
+                role="switch"
+                aria-checked={form.is_enabled}
+                aria-label={form.is_enabled ? `Disable route ${form.name || 'this route'}` : `Enable route ${form.name || 'this route'}`}
+                checked={form.is_enabled}
+                onChange={(e) => setForm((f) => ({ ...f, is_enabled: e.target.checked }))}
+              />
+              <span className="switch-thumb" aria-hidden="true">
+                {form.is_enabled ? <Check size={12} /> : <X size={12} />}
+              </span>
+            </span>
+            <span style={{ color: form.is_enabled ? 'var(--color-status-accepted)' : 'var(--color-status-rejected)', fontWeight: 500 }}>
+              {form.is_enabled ? 'Enabled' : 'Disabled'}
+            </span>
           </label>
         </div>
       </div>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Check, AlertTriangle, TrendingDown, Copy, ExternalLink } from 'lucide-react'
+import { Check, AlertTriangle, TrendingDown, Copy, ExternalLink, Star, Pin, Sparkles, Repeat } from 'lucide-react'
 import * as api from '../api/client'
 import { useToast } from '../components/ToastProvider'
 import type { ChannelStats, ChannelDetail, Advisory, VideoProvenance } from '../types'
@@ -101,7 +101,19 @@ function ProvenanceBadge({ type, label }: { type: 'discovery' | 'relevance' | 'u
     user_driven: 'badge--accepted',
     yuhaul_routed: 'badge--not-evaluated',
   }
-  return <span className={`badge ${variants[type]}`}>{label}</span>
+  const icons = {
+    discovery: Sparkles,
+    relevance: Repeat,
+    user_driven: Star,
+    yuhaul_routed: Pin,
+  }
+  const Icon = icons[type]
+  return (
+    <span className={`badge ${variants[type]}`}>
+      <Icon size={14} aria-hidden="true" />
+      {label}
+    </span>
+  )
 }
 
 function VideoProvenanceRow({ video, provenance }: { video: { video_id: string; title?: string }; provenance?: VideoProvenance }) {

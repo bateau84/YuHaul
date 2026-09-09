@@ -23,20 +23,18 @@ const items = [
 
 export function Sidebar() {
   return (
-    <aside className="sidebar">
+    <nav className="sidebar" aria-label="Main navigation">
       <div style={{ padding: '16px', fontWeight: 700, fontSize: '1.25rem' }}>YuHaul</div>
-      <nav aria-label="Main navigation">
-        <ul className="nav-list">
-          {items.map((item) => (
-            <li key={item.path}>
-              <NavLink to={item.path} className="nav-link" end={item.path === '/'}>
-                <item.icon size={20} aria-hidden="true" />
-                {item.label}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
-      </nav>
-    </aside>
+      <ul className="nav-list">
+        {items.map((item) => (
+          <li key={item.path}>
+            <NavLink to={item.path} className="nav-link" end={item.path === '/'}>
+              <item.icon size={20} aria-hidden="true" />
+              {item.label}
+            </NavLink>
+          </li>
+        ))}
+      </ul>
+    </nav>
   )
 }

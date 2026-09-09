@@ -27,18 +27,26 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         ))}
       </div>
       <div className="toast-region" aria-live="polite" aria-atomic="true">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast toast--${t.type}`} role="status">
-            {t.message}
-            <button
-              aria-label="Dismiss notification"
-              onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
-              className="icon-button"
+        {toasts.map((t) => {
+          const isError = t.type === 'error'
+          return (
+            <div
+              key={t.id}
+              className={`toast toast--${t.type}`}
+              role={isError ? 'alert' : 'status'}
+              aria-live={isError ? 'assertive' : 'polite'}
             >
-              <span aria-hidden="true">×</span>
-            </button>
-          </div>
-        ))}
+              {t.message}
+              <button
+                aria-label="Dismiss notification"
+                onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
+                className="icon-button"
+              >
+                <span aria-hidden="true">×</span>
+              </button>
+            </div>
+          )
+        })}
       </div>
     </ToastContext.Provider>
   )
