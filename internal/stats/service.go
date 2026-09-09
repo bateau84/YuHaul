@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/advisory"
 	"github.com/bateau84/YuHaul/internal/quota"
 )
 
@@ -106,6 +107,42 @@ func (s *Service) RecordRetentionSignal(ctx context.Context, videoID, playlistID
 // RefreshChannelRetained recomputes total_retained for a channel.
 func (s *Service) RefreshChannelRetained(ctx context.Context, channelIDText string) error {
 	return s.store.UpdateChannelRetained(ctx, channelIDText)
+}
+
+// ListChannelStats implements the advisory.ChannelReader interface so the
+// advisory generator can consume channel statistics without a separate adapter.
+func (s *Service) ListChannelStats(ctx context.Context) ([]advisory.ChannelStats, error) {
+	cs, err := s.store.ListChannelStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]advisory.ChannelStats, len(cs))
+	for i, c := range cs {
+		out[i] = advisory.ChannelStats{
+			ChannelID:        c.ChannelID,
+			ChannelName:      c.ChannelName,
+			TotalDiscovered:  c.TotalDiscovered,
+			TotalRouted:      c.TotalRouted,
+			TotalRetained:    c.TotalRetained,
+			LastDiscoveredAt: c.LastDiscoveredAt,
+		}
+	}
+	return out, nil
+}
+
+// ListDuplicateProvenance implements the advisory.ChannelReader interface.
+func (s *Service) ListDuplicateProvenance(ctx context.Context, channelIDText string) ([]advisory.DuplicateProvenance, error) {
+	dp, err := s.store.ListDuplicateProvenance(ctx, channelIDText)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]advisory.DuplicateProvenance, len(dp))
+	for i, d := range dp {
+		out[i] = advisory.DuplicateProvenance{
+			VideoID: d.VideoID,
+		}
+	}
+	return out, nil
 }
 
 // QuotaStatus returns the current quota budget plus a per-operation breakdown.
