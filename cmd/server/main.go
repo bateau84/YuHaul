@@ -65,27 +65,33 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
-	encKey, err := decodeKey(cfg.EncryptionKey)
-	if err != nil {
-		logger.ErrorContext(ctx, "invalid encryption key", "error", err)
-		os.Exit(1)
-	}
+	var authSvc *auth.Service
+	if cfg.OAuthClientID != "" {
+		encKey, err := decodeKey(cfg.EncryptionKey)
+		if err != nil {
+			logger.ErrorContext(ctx, "invalid encryption key", "error", err)
+			os.Exit(1)
+		}
 
-	tokenStore, err := auth.NewSQLiteTokenStore(db, encKey)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to open token store", "error", err)
-		os.Exit(1)
-	}
+		tokenStore, err := auth.NewSQLiteTokenStore(db, encKey)
+		if err != nil {
+			logger.ErrorContext(ctx, "failed to open token store", "error", err)
+			os.Exit(1)
+		}
 
-	authSvc, err := auth.NewService(&auth.ServiceConfig{
-		ClientID:      cfg.OAuthClientID,
-		ClientSecret:  cfg.OAuthClientSecret,
-		RedirectURL:   cfg.OAuthRedirectURL,
-		EncryptionKey: cfg.EncryptionKey,
-	}, tokenStore, auth.NewInMemoryStateStore())
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to configure auth", "error", err)
-		os.Exit(1)
+		authSvc, err = auth.NewService(&auth.ServiceConfig{
+			ClientID:      cfg.OAuthClientID,
+			ClientSecret:  cfg.OAuthClientSecret,
+			RedirectURL:   cfg.OAuthRedirectURL,
+			EncryptionKey: cfg.EncryptionKey,
+		}, tokenStore, auth.NewInMemoryStateStore())
+		if err != nil {
+			logger.ErrorContext(ctx, "failed to configure auth", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.WarnContext(ctx, "youtube oauth is not configured; auth endpoints will report not configured")
+		authSvc = auth.NewDisabledService()
 	}
 
 	stateStore, err := state.NewStore(db)

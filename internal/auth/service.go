@@ -29,6 +29,9 @@ type OAuthCallbackResult struct {
 // InitiateOAuth begins the YouTube OAuth2 flow and returns the authorization
 // URL the caller should redirect the user to.
 func (s *Service) InitiateOAuth(ctx context.Context) (*OAuthInitiateResponse, error) {
+	if !s.configured {
+		return nil, ErrNotConfigured
+	}
 	state, err := generateState()
 	if err != nil {
 		return nil, err
@@ -48,6 +51,9 @@ func (s *Service) InitiateOAuth(ctx context.Context) (*OAuthInitiateResponse, er
 // It validates the state parameter, exchanges the code for tokens, and stores
 // the encrypted credentials.
 func (s *Service) HandleOAuthCallback(ctx context.Context, code, state string) (*OAuthCallbackResult, error) {
+	if !s.configured {
+		return nil, ErrNotConfigured
+	}
 	if strings.TrimSpace(code) == "" {
 		return nil, errors.New("auth: authorization code is required")
 	}
@@ -83,20 +89,34 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, code, state string) (
 
 // Status returns the current connection state without exposing tokens.
 func (s *Service) Status(ctx context.Context) (*ConnectionStatus, error) {
+	if !s.configured {
+		return &ConnectionStatus{
+			Connected:     false,
+			Authenticated: false,
+			Configured:    false,
+		}, nil
+	}
 	record, err := s.store.Load(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("auth: failed to load connection status: %w", err)
 	}
 	if record == nil {
-		return &ConnectionStatus{Connected: false}, nil
+		return &ConnectionStatus{
+			Connected:     false,
+			Authenticated: false,
+			Configured:    true,
+		}, nil
 	}
 
+	connected := !isExpired(record.Expiry)
 	return &ConnectionStatus{
-		Connected:   !isExpired(record.Expiry),
-		Provider:    record.Provider,
-		Scopes:      record.Scopes,
-		ConnectedAt: record.ConnectedAt,
-		ExpiresAt:   record.Expiry,
+		Connected:     connected,
+		Authenticated: connected,
+		Configured:    true,
+		Provider:      record.Provider,
+		Scopes:        record.Scopes,
+		ConnectedAt:   record.ConnectedAt,
+		ExpiresAt:     record.Expiry,
 	}, nil
 }
 
@@ -104,6 +124,9 @@ func (s *Service) Status(ctx context.Context) (*ConnectionStatus, error) {
 // removes all stored credentials. Routing data, statistics, and configuration
 // are not touched by this method.
 func (s *Service) Disconnect(ctx context.Context) error {
+	if !s.configured {
+		return nil
+	}
 	record, err := s.store.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("auth: failed to load credentials for disconnect: %w", err)
@@ -155,6 +178,9 @@ func (s *Service) revokeToken(ctx context.Context, token string) error {
 // the token is not expired. Callers should refresh using the refresh token if
 // expired. This is intended for downstream YouTube API clients.
 func (s *Service) ActiveToken(ctx context.Context) (*oauth2.Token, error) {
+	if !s.configured {
+		return nil, ErrNotConfigured
+	}
 	record, err := s.store.Load(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("auth: failed to load token: %w", err)

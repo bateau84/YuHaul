@@ -491,6 +491,98 @@ func TestHandlerCallbackInvalidState(t *testing.T) {
 	}
 }
 
+func TestDisabledServiceStatus(t *testing.T) {
+	svc := NewDisabledService()
+	if svc.Configured() {
+		t.Fatal("expected disabled service to report not configured")
+	}
+
+	status, err := svc.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.Connected {
+		t.Errorf("Connected = true, want false")
+	}
+	if status.Authenticated {
+		t.Errorf("Authenticated = true, want false")
+	}
+	if status.Configured {
+		t.Errorf("Configured = true, want false")
+	}
+}
+
+func TestDisabledServiceHandlers(t *testing.T) {
+	svc := NewDisabledService()
+
+	// Status endpoint returns the not-configured payload.
+	accountHandler := svc.AccountHandler()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	accountHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status status = %d, want 200", rec.Code)
+	}
+	var status ConnectionStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if status.Configured {
+		t.Errorf("Configured = true, want false")
+	}
+	if status.Authenticated {
+		t.Errorf("Authenticated = true, want false")
+	}
+
+	// Initiate endpoint returns service unavailable.
+	authHandler := svc.Handler()
+	req = httptest.NewRequest(http.MethodPost, "/initiate", nil)
+	rec = httptest.NewRecorder()
+	authHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("initiate status = %d, want 503", rec.Code)
+	}
+
+	// Disconnect endpoint succeeds as a no-op.
+	req = httptest.NewRequest(http.MethodDelete, "/", nil)
+	rec = httptest.NewRecorder()
+	accountHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disconnect status = %d, want 200", rec.Code)
+	}
+}
+
+func TestStatusIncludesConfiguredAndAuthenticated(t *testing.T) {
+	key := newTestKey(t)
+	store := newTestStore(t, key)
+	ctx := context.Background()
+
+	cfg := &ServiceConfig{
+		ClientID:      "id",
+		ClientSecret:  "secret",
+		RedirectURL:   "http://localhost/callback",
+		EncryptionKey: string(key),
+	}
+	svc, err := NewService(cfg, store, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	status, err := svc.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if !status.Configured {
+		t.Error("Configured = false, want true")
+	}
+	if status.Authenticated {
+		t.Error("Authenticated = true for empty store, want false")
+	}
+	if status.Connected {
+		t.Error("Connected = true for empty store, want false")
+	}
+}
+
 func TestSecureCompare(t *testing.T) {
 	if !secureCompare("abc", "abc") {
 		t.Error("expected equal strings to compare true")

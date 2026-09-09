@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -29,6 +30,10 @@ func (s *Service) AccountHandler() http.Handler {
 func (s *Service) handleInitiate(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.InitiateOAuth(r.Context())
 	if err != nil {
+		if errors.Is(err, ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "youtube oauth is not configured")
+			return
+		}
 		slog.ErrorContext(r.Context(), "oauth initiate failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to initiate authorization")
 		return
@@ -42,6 +47,14 @@ func (s *Service) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.HandleOAuthCallback(r.Context(), code, state)
 	if err != nil {
+		if errors.Is(err, ErrNotConfigured) {
+			if wantsHTML(r) {
+				http.Redirect(w, r, "/settings?auth=error", http.StatusSeeOther)
+				return
+			}
+			writeError(w, http.StatusServiceUnavailable, "youtube oauth is not configured")
+			return
+		}
 		slog.WarnContext(r.Context(), "oauth callback failed", "error", err)
 		if wantsHTML(r) {
 			http.Redirect(w, r, "/settings?auth=error", http.StatusSeeOther)
@@ -82,6 +95,10 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	if err := s.Disconnect(r.Context()); err != nil {
+		if errors.Is(err, ErrNotConfigured) {
+			writeJSON(w, http.StatusOK, map[string]bool{"disconnected": true})
+			return
+		}
 		slog.ErrorContext(r.Context(), "account disconnect failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to disconnect account")
 		return
