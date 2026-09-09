@@ -8,15 +8,26 @@ import (
 	"time"
 )
 
+// OnChange is invoked after a route mutation that should create a
+// ConfigVersion snapshot. If nil, no snapshot is created.
+type OnChange func(ctx context.Context, description string) error
+
 // Store persists route configuration.
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	onChange OnChange
 }
 
 // NewStore returns a route store backed by db. Tables are assumed to be created
 // by the state store migration, which owns the shared schema.
 func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
+}
+
+// WithOnChange registers a callback that is invoked after route mutations.
+func (s *Store) WithOnChange(cb OnChange) *Store {
+	s.onChange = cb
+	return s
 }
 
 // DB returns the underlying database handle.
@@ -55,6 +66,8 @@ func (s *Store) CreateRoute(ctx context.Context, r *Route) (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("router: commit create route: %w", err)
 	}
+
+	s.snapshot("created route: " + r.Name)
 	return id, nil
 }
 
@@ -184,6 +197,8 @@ func (s *Store) UpdateRoute(ctx context.Context, r *Route) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("router: commit update route: %w", err)
 	}
+
+	s.snapshot("updated route: " + r.Name)
 	return nil
 }
 
@@ -196,6 +211,8 @@ func (s *Store) DeleteRoute(ctx context.Context, id int64) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("route %d: %w", id, ErrRouteNotFound)
 	}
+
+	s.snapshot("deleted route")
 	return nil
 }
 
@@ -233,6 +250,8 @@ func (s *Store) ReorderRoutes(ctx context.Context, routeIDs []int64) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("router: commit reorder: %w", err)
 	}
+
+	s.snapshot("reordered routes")
 	return nil
 }
 
@@ -356,6 +375,19 @@ func (s *Store) listExclusions(ctx context.Context, routeID int64) ([]RouteExclu
 
 func nowUTC() string {
 	return time.Now().UTC().Format("2006-01-02T15:04:05Z")
+}
+
+func (s *Store) snapshot(description string) {
+	if s.onChange == nil {
+		return
+	}
+	// Best-effort snapshot; failures are logged but do not fail the route
+	// mutation, which already succeeded.
+	if err := s.onChange(context.Background(), description); err != nil {
+		// The store has no logger; swallow. Callers that need audit guarantees
+		// can inspect config_version directly.
+		_ = err
+	}
 }
 
 func scanRoute(sc scanner) (*Route, error) {

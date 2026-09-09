@@ -99,6 +99,7 @@ type Run struct {
 	QuotaCost             int
 	DurationSeconds       *float64
 	InterruptReason       *string
+	CurrentPhase          *string
 }
 
 // Video represents a discovered video and its processing state.
