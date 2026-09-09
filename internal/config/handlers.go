@@ -147,10 +147,10 @@ func (h *Handler) handleGetThreshold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"threshold":         threshold,
+		"threshold":          threshold,
 		"duplicate_behavior": behavior,
-		"default_threshold": 0.5,
-		"range":             map[string]float64{"min": 0.0, "max": 1.0},
+		"default_threshold":  0.5,
+		"range":              map[string]float64{"min": 0.0, "max": 1.0},
 	})
 }
 

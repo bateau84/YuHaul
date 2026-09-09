@@ -12,17 +12,17 @@ import "time"
 type ErrorCategory string
 
 const (
-	ErrorCategoryAPIError       ErrorCategory = "api_error"
-	ErrorCategoryAuthorization  ErrorCategory = "authorization"
-	ErrorCategoryRuntime        ErrorCategory = "runtime"
+	ErrorCategoryAPIError      ErrorCategory = "api_error"
+	ErrorCategoryAuthorization ErrorCategory = "authorization"
+	ErrorCategoryRuntime       ErrorCategory = "runtime"
 )
 
 // ErrorStatus records the lifecycle of an error queue entry.
 type ErrorStatus string
 
 const (
-	ErrorStatusActive   ErrorStatus = "active"
-	ErrorStatusRetrying ErrorStatus = "retrying"
+	ErrorStatusActive    ErrorStatus = "active"
+	ErrorStatusRetrying  ErrorStatus = "retrying"
 	ErrorStatusDismissed ErrorStatus = "dismissed"
 	ErrorStatusResolved  ErrorStatus = "resolved"
 )
@@ -47,30 +47,30 @@ const (
 
 // ErrorEntry is a single inspectable failure record in the error queue.
 type ErrorEntry struct {
-	ID            int64
-	VideoID       int64
+	ID              int64
+	VideoID         int64
 	ExternalVideoID string
-	RunID         int64
-	Category      ErrorCategory
-	Message       string
-	Detail        string
-	Status        ErrorStatus
-	CreatedAt     time.Time
-	ResolvedAt    *time.Time
-	RetryCount    int
+	RunID           int64
+	Category        ErrorCategory
+	Message         string
+	Detail          string
+	Status          ErrorStatus
+	CreatedAt       time.Time
+	ResolvedAt      *time.Time
+	RetryCount      int
 }
 
 // DeferredItem is a single unit of work held for later processing.
 type DeferredItem struct {
-	ID                int64
-	VideoID           int64
-	ExternalVideoID   string
-	RunID             int64
-	Reason            DeferredReason
-	RetryAfter        *time.Time
-	RetryCount        int
-	Status            DeferredStatus
-	CreatedAt         time.Time
+	ID              int64
+	VideoID         int64
+	ExternalVideoID string
+	RunID           int64
+	Reason          DeferredReason
+	RetryAfter      *time.Time
+	RetryCount      int
+	Status          DeferredStatus
+	CreatedAt       time.Time
 }
 
 // Valid reports whether c is a known error category.

@@ -22,7 +22,9 @@ func openTestDB(t *testing.T) *metadata.Store {
 	return metadata.NewStore(db)
 }
 
-func setupLedger(t *testing.T, db interface{ ExecContext(context.Context, string, ...any) (any, error) }) *quota.Ledger {
+func setupLedger(t *testing.T, db interface {
+	ExecContext(context.Context, string, ...any) (any, error)
+}) *quota.Ledger {
 	t.Helper()
 	// The ledger expects its own tables, but it also works on the shared db.
 	// We use a raw type assertion because quota.Ledger requires *sql.DB.
@@ -32,7 +34,6 @@ func setupLedger(t *testing.T, db interface{ ExecContext(context.Context, string
 func newManager(t *testing.T, store *metadata.Store, fetcher metadata.Fetcher, now time.Time) (*metadata.Manager, *quota.Ledger) {
 	t.Helper()
 	ledger := quota.New(store.DB(), quota.WithDefaultLimit(10000))
-	require.NoError(t, ledger.EnsureSchema(context.Background()))
 	mgr := metadata.NewManager(store, fetcher, ledger, metadata.WithNow(func() time.Time { return now }))
 	return mgr, ledger
 }
@@ -250,7 +251,6 @@ func TestManager_RefreshRespectsQuota(t *testing.T) {
 
 	fetcher := &fakeFetcher{}
 	ledger := quota.New(s.DB(), quota.WithDefaultLimit(0)) // zero budget
-	require.NoError(t, ledger.EnsureSchema(ctx))
 	mgr := metadata.NewManager(s, fetcher, ledger, metadata.WithNow(func() time.Time { return now }))
 
 	refreshed, err := mgr.RefreshActiveNearExpiry(ctx)

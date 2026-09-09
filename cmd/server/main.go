@@ -26,8 +26,8 @@ import (
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/pipeline"
-	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/queue"
+	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/scheduler"
 	"github.com/bateau84/YuHaul/internal/server"
@@ -40,11 +40,11 @@ import (
 // appConfig holds runtime configuration sourced from flags and environment
 // variables. Flags take precedence over environment variables.
 type appConfig struct {
-	DBPath      string
-	HTTPAddr    string
-	WebRoot     string
-	LogLevel    string
-	DailyQuota  int
+	DBPath     string
+	HTTPAddr   string
+	WebRoot    string
+	LogLevel   string
+	DailyQuota int
 
 	OAuthClientID     string
 	OAuthClientSecret string
@@ -96,10 +96,6 @@ func main() {
 	machine := state.NewMachine(stateStore)
 
 	ledger := quota.New(db, quota.WithLogger(logger), quota.WithDefaultLimit(cfg.DailyQuota))
-	if err := ledger.EnsureSchema(ctx); err != nil {
-		logger.ErrorContext(ctx, "failed to ensure quota schema", "error", err)
-		os.Exit(1)
-	}
 
 	routerStore := router.NewStore(db)
 	configStore := config.NewStore(db)
@@ -342,9 +338,9 @@ func (o *overviewProvider) Overview(ctx context.Context) (*server.Overview, erro
 		return nil, fmt.Errorf("overview: quota budget: %w", err)
 	}
 	quotaResp := map[string]any{
-		"daily_limit":   budget.DailyLimit,
+		"daily_limit":    budget.DailyLimit,
 		"consumed_today": budget.Consumed,
-		"remaining":     budget.Remaining,
+		"remaining":      budget.Remaining,
 	}
 	if !budget.NextReset.IsZero() {
 		quotaResp["reset_at"] = budget.NextReset.UTC().Format(time.RFC3339)

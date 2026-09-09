@@ -30,10 +30,10 @@ type StateStore interface {
 // Scheduler triggers production runs according to a user-configurable schedule
 // and resumes interrupted runs.
 type Scheduler struct {
-	store      *Store
-	pipeline   Pipeline
-	stateStore StateStore
-	logger     *slog.Logger
+	store        *Store
+	pipeline     Pipeline
+	stateStore   StateStore
+	logger       *slog.Logger
 	tickInterval time.Duration
 
 	mu         sync.Mutex

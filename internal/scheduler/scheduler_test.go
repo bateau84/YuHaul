@@ -13,16 +13,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	_ "modernc.org/sqlite"
 
 	"github.com/bateau84/YuHaul/internal/state"
+	"github.com/bateau84/YuHaul/internal/store"
 )
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dir := t.TempDir()
-	dsn := filepath.Join(dir, "scheduler.db") + "?_fk=true"
-	db, err := sql.Open("sqlite", dsn)
+	dsn := filepath.Join(dir, "scheduler.db")
+	db, err := store.Open(context.Background(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -112,9 +112,9 @@ func (s *fakeStateStore) GetRun(ctx context.Context, id int64) (*state.Run, erro
 		return nil, state.ErrNotFound
 	}
 	return &state.Run{
-		ID:       r.id,
-		RunType:  r.runType,
-		Status:   r.status,
+		ID:        r.id,
+		RunType:   r.runType,
+		Status:    r.status,
 		StartedAt: r.startedAt,
 	}, nil
 }

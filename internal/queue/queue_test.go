@@ -11,40 +11,12 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/bateau84/YuHaul/internal/store/storetest"
 )
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:?_fk=true")
-	if err != nil {
-		t.Fatalf("opening test db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	// Minimal run/video tables required by error_entry and deferred_item FKs.
-	schema := []string{
-		`CREATE TABLE IF NOT EXISTS run (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			started_at TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-			status TEXT NOT NULL DEFAULT 'running'
-		);`,
-		`CREATE TABLE IF NOT EXISTS video (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			video_id TEXT NOT NULL UNIQUE,
-			channel_id TEXT NOT NULL,
-			discovered_at TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-			discovered_in_run_id INTEGER REFERENCES run(id),
-			processing_state TEXT NOT NULL DEFAULT 'not_yet_evaluated',
-			final_outcome TEXT DEFAULT 'not_yet_evaluated'
-		);`,
-	}
-	for _, stmt := range schema {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("creating test schema: %v", err)
-		}
-	}
-	return db
+	return storetest.Open(t)
 }
 
 func newTestStore(t *testing.T) *Store {
@@ -58,7 +30,9 @@ func newTestStore(t *testing.T) *Store {
 
 func seedRun(t *testing.T, db *sql.DB) int64 {
 	t.Helper()
-	res, err := db.ExecContext(context.Background(), `INSERT INTO run DEFAULT VALUES;`)
+	res, err := db.ExecContext(context.Background(),
+		`INSERT INTO run (started_at, run_type, status) VALUES (?, ?, ?);`,
+		time.Now().UTC(), "manual", "running")
 	if err != nil {
 		t.Fatalf("creating run: %v", err)
 	}
@@ -287,8 +261,8 @@ func TestDiscardDeferredPreservesHistory(t *testing.T) {
 }
 
 type mockRetryHandler struct {
-	errors   map[int64]error
-	called   []string
+	errors map[int64]error
+	called []string
 }
 
 func (m *mockRetryHandler) HandleErrorRetry(ctx context.Context, videoID int64, externalVideoID string) error {
@@ -518,4 +492,3 @@ func TestHandlerInvalidID(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 }
-

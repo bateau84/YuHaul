@@ -13,28 +13,14 @@ type Store struct {
 	db *sql.DB
 }
 
-// NewStore creates a scheduler settings store backed by db.
+// NewStore creates a scheduler settings store backed by db. The
+// scheduler_settings table is owned by the central migration system and must
+// already exist.
 func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("scheduler: db is required")
 	}
-	s := &Store{db: db}
-	if err := s.migrate(context.Background()); err != nil {
-		return nil, fmt.Errorf("scheduler: migrating store: %w", err)
-	}
-	return s, nil
-}
-
-func (s *Store) migrate(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, "PRAGMA foreign_keys = ON;"); err != nil {
-		return fmt.Errorf("enabling foreign keys: %w", err)
-	}
-	_, err := s.db.ExecContext(ctx,
-		`CREATE TABLE IF NOT EXISTS scheduler_settings (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		);`)
-	return err
+	return &Store{db: db}, nil
 }
 
 const (

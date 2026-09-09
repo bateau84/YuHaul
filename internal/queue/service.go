@@ -21,9 +21,9 @@ type RetryHandler interface {
 
 // Service orchestrates error and deferred queue operations.
 type Service struct {
-	store  *Store
+	store   *Store
 	handler RetryHandler
-	logger *slog.Logger
+	logger  *slog.Logger
 }
 
 // NewService returns a queue service backed by store. handler may be nil if

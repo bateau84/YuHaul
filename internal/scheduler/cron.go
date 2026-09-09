@@ -45,11 +45,11 @@ func (s *intervalSchedule) Next(after time.Time) (time.Time, error) {
 }
 
 type cronSchedule struct {
-	minute  fieldSet
-	hour    fieldSet
-	dom     fieldSet
-	month   fieldSet
-	dow     fieldSet
+	minute fieldSet
+	hour   fieldSet
+	dom    fieldSet
+	month  fieldSet
+	dow    fieldSet
 }
 
 func parseCron(expr string) (*cronSchedule, error) {

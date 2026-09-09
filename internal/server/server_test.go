@@ -680,9 +680,9 @@ func TestHandleListRoutes(t *testing.T) {
 	_, err := routerStore.CreateRoute(ctx, &router.Route{
 		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
 		ConditionComposition: "AND",
-		Conditions: []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
-		Actions:    []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
-		Exclusions: []router.RouteExclusion{},
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+		Exclusions:           []router.RouteExclusion{},
 	})
 	require.NoError(t, err)
 
@@ -703,9 +703,9 @@ func TestHandleGetRoute(t *testing.T) {
 	id, err := routerStore.CreateRoute(ctx, &router.Route{
 		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
 		ConditionComposition: "AND",
-		Conditions: []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
-		Actions:    []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
-		Exclusions: []router.RouteExclusion{},
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+		Exclusions:           []router.RouteExclusion{},
 	})
 	require.NoError(t, err)
 
@@ -765,9 +765,9 @@ func TestHandleUpdateRoute(t *testing.T) {
 	id, err := routerStore.CreateRoute(ctx, &router.Route{
 		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
 		ConditionComposition: "AND",
-		Conditions: []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
-		Actions:    []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
-		Exclusions: []router.RouteExclusion{},
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+		Exclusions:           []router.RouteExclusion{},
 	})
 	require.NoError(t, err)
 

@@ -11,27 +11,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	_ "modernc.org/sqlite"
+	"github.com/bateau84/YuHaul/internal/store"
 )
 
-// openTestDB creates an isolated SQLite database and applies the initial schema
-// directly. It bypasses store.Open because sibling Wave 2 tasks currently have
-// colliding migration versions in internal/store/migrations, which makes the
-// golang-migrate source fail before any test can run. Once that conflict is
-// resolved, this helper can switch back to store.Open.
+// openTestDB creates an isolated SQLite database with the canonical schema.
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	dsn := filepath.Join(dir, "test.db") + "?_fk=1&_journal_mode=WAL&_busy_timeout=5000"
-	db, err := sql.Open("sqlite", dsn)
-	require.NoError(t, err)
-
-	schemaPath := filepath.Join("..", "store", "migrations", "001_initial_schema.up.sql")
-	schema, err := os.ReadFile(schemaPath)
-	require.NoError(t, err)
-
-	_, err = db.ExecContext(ctx, string(schema))
+	dsn := filepath.Join(dir, "test.db")
+	db, err := store.Open(ctx, dsn)
 	require.NoError(t, err)
 
 	t.Cleanup(func() { _ = db.Close() })

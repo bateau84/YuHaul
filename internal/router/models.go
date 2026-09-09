@@ -60,28 +60,28 @@ const (
 
 // Route is a single ordered routing rule.
 type Route struct {
-	ID                   int64              `json:"id"`
-	Name                 string             `json:"name"`
-	Description          string             `json:"description"`
-	EvaluationOrder      int                `json:"evaluation_order"`
-	IsFinal              bool               `json:"is_final"`
-	IsEnabled            bool               `json:"is_enabled"`
-	ConditionComposition string             `json:"condition_composition"` // "AND" or "OR"
-	Conditions           []RouteCondition   `json:"conditions"`
-	Actions              []RouteAction      `json:"actions"`
-	Exclusions           []RouteExclusion   `json:"exclusions"`
-	CreatedAt            string             `json:"created_at"`
-	UpdatedAt            string             `json:"updated_at"`
+	ID                   int64            `json:"id"`
+	Name                 string           `json:"name"`
+	Description          string           `json:"description"`
+	EvaluationOrder      int              `json:"evaluation_order"`
+	IsFinal              bool             `json:"is_final"`
+	IsEnabled            bool             `json:"is_enabled"`
+	ConditionComposition string           `json:"condition_composition"` // "AND" or "OR"
+	Conditions           []RouteCondition `json:"conditions"`
+	Actions              []RouteAction    `json:"actions"`
+	Exclusions           []RouteExclusion `json:"exclusions"`
+	CreatedAt            string           `json:"created_at"`
+	UpdatedAt            string           `json:"updated_at"`
 }
 
 // RouteCondition is one predicate within a route.
 type RouteCondition struct {
-	ID             int64           `json:"id"`
-	RouteID        int64           `json:"route_id"`
-	ConditionIndex int             `json:"condition_index"`
-	Field          ConditionField  `json:"field"`
+	ID             int64             `json:"id"`
+	RouteID        int64             `json:"route_id"`
+	ConditionIndex int               `json:"condition_index"`
+	Field          ConditionField    `json:"field"`
 	Operator       ConditionOperator `json:"operator"`
-	Value          string          `json:"value"`
+	Value          string            `json:"value"`
 }
 
 // RouteAction describes what to do when a route matches.

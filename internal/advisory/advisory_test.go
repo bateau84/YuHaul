@@ -41,7 +41,7 @@ func (f *fakeSettings) GetSetting(ctx context.Context, key string) (string, erro
 }
 
 type fakeChannelReader struct {
-	channels []ChannelStats
+	channels   []ChannelStats
 	provenance map[string][]DuplicateProvenance
 }
 

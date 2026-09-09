@@ -15,8 +15,9 @@ func (s *Service) Handler() http.Handler {
 }
 
 // AccountHandler returns an http.Handler for account-level endpoints:
-//   GET /status  -> connection status
-//   DELETE /     -> disconnect account
+//
+//	GET /status  -> connection status
+//	DELETE /     -> disconnect account
 func (s *Service) AccountHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", s.handleStatus)

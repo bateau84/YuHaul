@@ -199,4 +199,3 @@ type ConnectionStatus struct {
 	ConnectedAt time.Time `json:"connected_at,omitempty"`
 	ExpiresAt   time.Time `json:"expires_at,omitempty"`
 }
-

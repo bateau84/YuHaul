@@ -34,7 +34,6 @@ func setupExecutorTest(t *testing.T) (*sql.DB, *state.Store, *quota.Ledger, func
 	require.NoError(t, err)
 
 	ledger := quota.New(db, quota.WithDefaultLimit(10_000))
-	require.NoError(t, ledger.EnsureSchema(ctx))
 
 	cleanup := func() {
 		_ = db.Close()

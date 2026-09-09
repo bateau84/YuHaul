@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,8 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/store/storetest"
+
 	"golang.org/x/oauth2"
-	_ "modernc.org/sqlite"
 )
 
 // newTestKey returns a deterministic 32-byte key for tests.
@@ -31,11 +31,7 @@ func newTestKey(t *testing.T) []byte {
 // newTestStore returns an in-memory SQLite token store for tests.
 func newTestStore(t *testing.T, key []byte) *SQLiteTokenStore {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("failed to open in-memory db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := storetest.Open(t)
 	store, err := NewSQLiteTokenStore(db, key)
 	if err != nil {
 		t.Fatalf("failed to create token store: %v", err)

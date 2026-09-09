@@ -9,18 +9,14 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/store/storetest"
 )
 
 // openTestDB returns a new in-memory SQLite database configured for tests.
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:?_fk=true")
-	if err != nil {
-		t.Fatalf("opening test db: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return storetest.Open(t)
 }
 
 // newTestMachine returns a Machine backed by a fresh in-memory store.
@@ -157,7 +153,8 @@ func TestStateSurvivesRestart(t *testing.T) {
 
 	// First process: open, write, close.
 	{
-		db, err := sql.Open("sqlite", dbPath+"?_fk=true")
+		ctx := context.Background()
+		db, err := store.Open(ctx, dbPath)
 		if err != nil {
 			t.Fatalf("opening db: %v", err)
 		}
@@ -166,7 +163,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 			t.Fatalf("creating store: %v", err)
 		}
 		mach := NewMachine(store)
-		runID, err := store.CreateRun(context.Background(), &Run{
+		runID, err := store.CreateRun(ctx, &Run{
 			StartedAt: parseTime(t, "2026-09-08T00:00:00Z"),
 			RunType:   RunTypeManual,
 			Status:    RunStatusRunning,
@@ -174,11 +171,11 @@ func TestStateSurvivesRestart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("creating run: %v", err)
 		}
-		v, err := mach.DiscoverVideo(context.Background(), runID, "yt-restart", "UCchannel")
+		v, err := mach.DiscoverVideo(ctx, runID, "yt-restart", "UCchannel")
 		if err != nil {
 			t.Fatalf("discovering video: %v", err)
 		}
-		if _, err := mach.TransitionVideoState(context.Background(), v.ID,
+		if _, err := mach.TransitionVideoState(ctx, v.ID,
 			VideoStateNotYetEvaluated, VideoStateEvaluating); err != nil {
 			t.Fatalf("transitioning: %v", err)
 		}
@@ -189,7 +186,8 @@ func TestStateSurvivesRestart(t *testing.T) {
 
 	// Second process: reopen and read back.
 	{
-		db, err := sql.Open("sqlite", dbPath+"?_fk=true")
+		ctx := context.Background()
+		db, err := store.Open(ctx, dbPath)
 		if err != nil {
 			t.Fatalf("reopening db: %v", err)
 		}

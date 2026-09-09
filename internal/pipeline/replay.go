@@ -225,4 +225,3 @@ func (p *Pipeline) failHistoricalRun(ctx context.Context, runID int64, message s
 	p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
 	p.completeHistoricalRun(ctx, runID)
 }
-

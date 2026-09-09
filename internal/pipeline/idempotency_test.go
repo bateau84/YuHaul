@@ -55,12 +55,12 @@ func (f *fakeMetadataFetcher) FetchMetadata(ctx context.Context, videoIDs []stri
 // mockYouTubeServer serves deterministic YouTube Data API v3 responses and
 // records playlist insertions so tests can assert on real pipeline output.
 type mockYouTubeServer struct {
-	server      *httptest.Server
-	mu          sync.Mutex
-	insertions  []playlistInsertion
+	server        *httptest.Server
+	mu            sync.Mutex
+	insertions    []playlistInsertion
 	subscriptions []string
-	channels    []mockChannel
-	videos      []mockVideo
+	channels      []mockChannel
+	videos        []mockVideo
 }
 
 type playlistInsertion struct {
@@ -266,7 +266,6 @@ func setupIdempotencyTest(t *testing.T, videos []mockVideo) *idempotencyTestEnv 
 	machine := state.NewMachine(stateStore)
 
 	ledger := quota.New(db, quota.WithDefaultLimit(1_000_000))
-	require.NoError(t, ledger.EnsureSchema(ctx))
 
 	mock := newMockYouTubeServer([]mockChannel{
 		{ID: "UC1", Title: "Test Channel", UploadsPlaylistID: "UUPL1"},
