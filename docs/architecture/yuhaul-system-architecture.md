@@ -13,6 +13,7 @@ supersedes: superseded/yuhaul-system-architecture-v1.md
 - 2026-09-08: Resolved all 5 open questions. OQ-1 (fingerprint algorithm): normalized-token-set Jaccard, threshold 0.5, user-configurable 0.0–1.0 — based on researcher benchmark (F1=0.990, zero false positives; prior combined 0.6×Lev+0.4×Jacc at 0.97 threshold missed 11% of true duplicates). OQ-2 (discovery API): playlistItems.list on cached uploads playlists — 1 unit vs 100 units per call. OQ-3 (metadata refresh): hybrid — routed videos refreshed at run time, older on-demand. OQ-4 (SPA stack): implementation choice for coder — anchor imposes no framework requirement. OQ-5 (deployment): single container with mounted volume — SQLite file-based, minimal infrastructure.
 - 2026-09-08: Architecture-design spec alignment check. Fixed 7 gaps: clarified RunStats/RouteStats as computed views (not missing entities), added quota remaining/reset info section, added replay config_version_id parameter, added config diff endpoint, added config restore endpoint, added account disconnect endpoint, added duplicate provenance endpoints. All 36 requirements now fully aligned with architecture and design spec.
 - 2026-09-08: Addressed critic review findings (4 MAJOR, 5 MINOR). Added replay mode, fixed ExecutedAction constraint, added Advisory entity, extended dry-run for draft configs. See changelog entries below.
+- 2026-09-09: Fixed implementation-doc drift (4 items): added `duration_min` to RouteExclusion enum, corrected RouteCondition field names (`duration` → `duration_seconds`, added `channel_name` and `description`), expanded RouteCondition operator enum (`not_equals`, `gte`, `lte`), added `current_phase` column to Run entity.
 
 ## Satisfies
 
@@ -426,6 +427,7 @@ The data model enforces compliance at the schema level. Store A and Store B are 
 │ quota_cost INTEGER DEFAULT 0         │
 │ duration_seconds REAL               │
 │ interrupt_reason TEXT               │
+│ current_phase TEXT                  │  ← active pipeline phase (for SSE progress)
 └──────────────────────────────────────┘
 
 ┌──────────────────────────────────────┐
@@ -447,8 +449,11 @@ The data model enforces compliance at the schema level. Store A and Store B are 
 │ id INTEGER PRIMARY KEY               │
 │ route_decision_id INTEGER NOT NULL  │  ← FK → RouteDecision
 │ condition_index INTEGER NOT NULL    │  ← position in condition list
-│ field TEXT NOT NULL                  │  ← 'title', 'duration', 'channel', etc.
-│ operator TEXT NOT NULL              │  ← 'contains', 'equals', 'gt', etc.
+│ field TEXT NOT NULL                  │  ← 'title', 'channel_id', 'channel_name',
+│                                      │     'description', 'duration_seconds'
+│ operator TEXT NOT NULL              │  ← 'contains', 'not_contains', 'equals',
+│                                      │     'not_equals', 'gt', 'gte', 'lt',
+│                                      │     'lte', 'in_list'
 │ expected_value TEXT NOT NULL        │  ← configured condition value
 │ actual_value TEXT                   │  ← video's actual field value
 │ matched BOOLEAN NOT NULL            │
@@ -501,9 +506,11 @@ The data model enforces compliance at the schema level. Store A and Store B are 
 │ id INTEGER PRIMARY KEY               │
 │ route_id INTEGER NOT NULL           │  ← FK → Route
 │ condition_index INTEGER NOT NULL    │  ← position within route
-│ field TEXT NOT NULL                  │  ← 'title', 'duration', 'channel_id', etc.
+│ field TEXT NOT NULL                  │  ← 'title', 'channel_id', 'channel_name',
+│                                      │     'description', 'duration_seconds'
 │ operator TEXT NOT NULL              │  ← 'contains', 'not_contains', 'equals',
-│                                      │     'gt', 'lt', 'in_list', etc.
+│                                      │     'not_equals', 'gt', 'gte', 'lt',
+│                                      │     'lte', 'in_list'
 │ value TEXT NOT NULL                  │  ← the comparison value
 └──────────────────────────────────────┘
 
@@ -522,7 +529,8 @@ The data model enforces compliance at the schema level. Store A and Store B are 
 │──────────────────────────────────────│
 │ id INTEGER PRIMARY KEY               │
 │ route_id INTEGER NOT NULL           │  ← FK → Route (route-scoped, not global)
-│ exclusion_type TEXT NOT NULL        │  ← 'channel', 'video', 'title', 'word', 'duration_max'
+│ exclusion_type TEXT NOT NULL        │  ← 'channel', 'video', 'title', 'word',
+│                                      │     'duration_min', 'duration_max'
 │ exclusion_value TEXT NOT NULL       │
 └──────────────────────────────────────┘
 
