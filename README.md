@@ -379,6 +379,83 @@ Useful discovery is.
 
 ---
 
+## Deployment
+
+YuHaul ships as a single Docker container. The container serves the admin SPA
+and the REST API on one port and stores all durable state in a SQLite database
+that lives on a mounted volume.
+
+### Quick start with Docker Compose
+
+1. Copy the example environment variables into a `.env` file and fill them in:
+
+   ```bash
+   cat > .env <<EOF
+   YUHAUL_OAUTH_CLIENT_ID=your-google-client-id
+   YUHAUL_OAUTH_CLIENT_SECRET=your-google-client-secret
+   YUHAUL_OAUTH_REDIRECT_URL=https://yuhaul.example.com/api/auth/callback
+   YUHAUL_ENCRYPTION_KEY=$(openssl rand -base64 32)
+   EOF
+   ```
+
+2. Build the SPA (if not already built) so that `./web/index.html` exists.
+
+3. Start the container:
+
+   ```bash
+   docker compose up -d
+   ```
+
+The database file is stored in the named volume `yuhaul-data` and persists
+across container restarts and image rebuilds.
+
+### Environment variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `YUHAUL_DB_PATH` | no | `/data/yuhaul.db` | Path to the SQLite database file |
+| `YUHAUL_HTTP_ADDR` | no | `:8080` | HTTP listen address |
+| `YUHAUL_WEB_ROOT` | no | `/app/web` | Directory containing the built SPA |
+| `YUHAUL_DAILY_QUOTA` | no | `10000` | YouTube Data API daily quota limit |
+| `YUHAUL_OAUTH_CLIENT_ID` | yes | — | Google OAuth2 client ID |
+| `YUHAUL_OAUTH_CLIENT_SECRET` | yes | — | Google OAuth2 client secret |
+| `YUHAUL_OAUTH_REDIRECT_URL` | yes | — | Absolute OAuth callback URL |
+| `YUHAUL_ENCRYPTION_KEY` | yes | — | 32-byte AES-256-GCM key (raw or base64) |
+
+### OAuth callback hostname and client-secret provisioning
+
+The YouTube OAuth2 flow requires a registered redirect URI. The value of
+`YUHAUL_OAUTH_REDIRECT_URL` must match one of the **Authorized redirect URIs**
+configured in the Google Cloud Console exactly, including scheme, hostname, and
+path. The application exposes the callback handler at `/api/auth/callback`, so
+a typical value is:
+
+```text
+https://yuhaul.example.com/api/auth/callback
+```
+
+Provision the client secret by storing it in the `.env` file or passing it to
+`docker run` with `-e`. It is never logged or returned by the API; it is used
+only to exchange the authorization code for an access token during the OAuth
+flow.
+
+### Docker run (without Compose)
+
+```bash
+docker run -d \
+  --name yuhaul \
+  -p 8080:8080 \
+  -v yuhaul-data:/data \
+  -v "$PWD/web:/app/web:ro" \
+  -e YUHAUL_OAUTH_CLIENT_ID \
+  -e YUHAUL_OAUTH_CLIENT_SECRET \
+  -e YUHAUL_OAUTH_REDIRECT_URL \
+  -e YUHAUL_ENCRYPTION_KEY \
+  yuhaul
+```
+
+---
+
 ## Status
 
 YuHaul is currently being rebuilt from an earlier working application.
