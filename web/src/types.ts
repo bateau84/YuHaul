@@ -196,21 +196,34 @@ export interface ChannelStats {
   total_retained: number
   usefulness_rate: number
   yield: number
+  duplicate_rate?: number
   last_useful_discovery?: string
   advisories?: Advisory[]
 }
 
+export interface VideoProvenance {
+  video_id: string
+  title?: string
+  duplicate_credit?: 'discovery' | 'relevance'
+  retention_source?: 'user_driven' | 'yuhaul_routed'
+}
+
+export interface DuplicateProvenanceBreakdown {
+  discovery_credit: number
+  relevance_credit: number
+}
+
+export interface RetentionProvenanceBreakdown {
+  user_driven: number
+  yuhaul_routed: number
+}
+
 export interface ChannelDetail extends ChannelStats {
   subscription_date?: string
-  duplicate_provenance: {
-    discovery_credit: number
-    relevance_credit: number
-  }
-  retention_signals: {
-    user_driven: number
-    yuhaul_routed: number
-  }
+  duplicate_provenance: DuplicateProvenanceBreakdown
+  retention_signals: RetentionProvenanceBreakdown
   recent_videos: VideoOutcome[]
+  recent_video_provenance?: VideoProvenance[]
   matched_routes: string[]
 }
 
@@ -219,15 +232,27 @@ export type AdvisoryType =
   | 'declining_yield'
   | 'high_duplicate_rate'
 
+export interface AdvisoryEvidence {
+  window_days?: number
+  discovered?: number
+  routed?: number
+  retained?: number
+  duplicate_matches?: number
+  threshold?: number
+  baseline_yield_rate?: number
+  current_yield_rate?: number
+}
+
 export interface Advisory {
   id: number
   channel_id: string
+  channel_name?: string
   advisory_type: AdvisoryType
   generated_at: string
   status: 'active' | 'dismissed' | 'ignored' | 'acted_upon'
   ignored_until?: string
   action_taken?: string
-  evidence_snapshot?: Record<string, unknown>
+  evidence_snapshot?: AdvisoryEvidence
 }
 
 export interface TrendBucket {
@@ -237,6 +262,15 @@ export interface TrendBucket {
   rejected: number
   deferred: number
   failed: number
+}
+
+export interface RouteMatchRate {
+  bucket: string
+  route_id: number
+  route_name: string
+  evaluated: number
+  matched: number
+  match_rate: number
 }
 
 export interface ConfigVersion {

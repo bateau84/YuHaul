@@ -1,43 +1,135 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { Check, X } from 'lucide-react'
+import { Check, X, AlertTriangle, Clock, Minus, PlayCircle } from 'lucide-react'
 import * as api from '../api/client'
 import { Badge } from '../components/Badge'
-import type { DecisionDetail, RouteDecision } from '../types'
+import { deriveRouteDecision, deriveActionOutcome, formatDuration } from '../lib/outcome'
+import type { DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome } from '../types'
 
-function DecisionRow({ decision }: { decision: RouteDecision }) {
+function DecisionBadge({ decision, skipReason }: { decision: RouteDecision['decision']; skipReason?: RouteDecision['skip_reason'] }) {
+  const { variant, label, reason } = deriveRouteDecision(decision, skipReason)
+  const icons = {
+    accepted: Check,
+    rejected: X,
+    deferred: Clock,
+    failed: AlertTriangle,
+    'not-evaluated': Minus,
+    'in-progress': PlayCircle,
+  }
+  const Icon = icons[variant]
+  return (
+    <div>
+      <span className={`badge badge--${variant}`}>
+        <Icon size={14} aria-hidden="true" />
+        {label}
+      </span>
+      {reason && <p style={{ margin: '4px 0 0', color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>{reason}</p>}
+    </div>
+  )
+}
+
+function ConditionAuditRow({ audit }: { audit: ConditionAudit }) {
+  return (
+    <li style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 0' }}>
+      {audit.matched ? (
+        <Check size={18} color="var(--color-status-accepted)" aria-hidden="true" />
+      ) : (
+        <X size={18} color="var(--color-status-rejected)" aria-hidden="true" />
+      )}
+      <span>
+        <strong>{audit.field}</strong> {audit.operator} <code>{audit.expected_value}</code>
+        {audit.actual_value !== undefined && (
+          <span style={{ color: 'var(--color-text-muted)' }}> — actual: {audit.actual_value}</span>
+        )}
+        <span className="sr-only">{audit.matched ? ' matched' : ' did not match'}</span>
+      </span>
+    </li>
+  )
+}
+
+function ActionRow({ action }: { action: ActionOutcome }) {
+  const { variant, label } = deriveActionOutcome(action.outcome)
+  const icons = {
+    accepted: Check,
+    rejected: X,
+    deferred: Clock,
+    failed: AlertTriangle,
+    'not-evaluated': Minus,
+    'in-progress': PlayCircle,
+  }
+  const Icon = icons[variant]
+  return (
+    <li style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+      <span className={`badge badge--${variant}`}>
+        <Icon size={14} aria-hidden="true" />
+        {label}
+      </span>
+      <span>
+        {action.action_type} → {action.target_playlist_id}
+      </span>
+      {action.error_message && (
+        <span style={{ color: 'var(--color-status-rejected)', fontSize: '0.875rem' }}>{action.error_message}</span>
+      )}
+    </li>
+  )
+}
+
+function DecisionRow({ decision, index }: { decision: RouteDecision; index: number }) {
   return (
     <div className="card" style={{ marginBottom: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <strong>{decision.route_name}</strong>
-        <span className="badge badge--not-evaluated">{decision.decision}</span>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: 12,
+          flexWrap: 'wrap',
+        }}
+      >
+        <div>
+          <span
+            style={{
+              display: 'inline-block',
+              width: 24,
+              height: 24,
+              borderRadius: '50%',
+              background: 'var(--color-surface-elevated)',
+              color: 'var(--color-text-secondary)',
+              textAlign: 'center',
+              lineHeight: '24px',
+              fontSize: '0.75rem',
+              fontWeight: 700,
+              marginRight: 8,
+            }}
+            aria-hidden="true"
+          >
+            {index + 1}
+          </span>
+          <strong>{decision.route_name}</strong>
+        </div>
+        <DecisionBadge decision={decision.decision} skipReason={decision.skip_reason} />
       </div>
-      {decision.skip_reason && <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Skip reason: {decision.skip_reason}</p>}
+      {decision.rejection_reason && (
+        <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem', marginTop: 8 }}>
+          Rejection reason: {decision.rejection_reason}
+        </p>
+      )}
       {decision.condition_audits.length > 0 && (
-        <ul style={{ listStyle: 'none', padding: 0, margin: '12px 0 0' }}>
-          {decision.condition_audits.map((c) => (
-            <li key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
-              {c.matched ? (
-                <Check size={16} color="var(--color-status-accepted)" aria-hidden="true" />
-              ) : (
-                <X size={16} color="var(--color-status-rejected)" aria-hidden="true" />
-              )}
-              <span>
-                {c.field} {c.operator} {c.expected_value}
-                {c.actual_value !== undefined && ` (actual: ${c.actual_value})`}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <div style={{ marginTop: 12 }}>
+          <strong style={{ fontSize: '0.875rem', color: 'var(--color-text-secondary)' }}>Conditions evaluated</strong>
+          <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0' }}>
+            {decision.condition_audits.map((c) => (
+              <ConditionAuditRow key={c.id} audit={c} />
+            ))}
+          </ul>
+        </div>
       )}
       {decision.actions.length > 0 && (
         <div style={{ marginTop: 12 }}>
-          <strong>Actions:</strong>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+          <strong style={{ fontSize: '0.875rem', color: 'var(--color-text-secondary)' }}>Actions executed</strong>
+          <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0' }}>
             {decision.actions.map((a) => (
-              <li key={a.id} style={{ fontSize: '0.875rem' }}>
-                {a.action_type} → {a.target_playlist_id}: {a.outcome}
-              </li>
+              <ActionRow key={a.id} action={a} />
             ))}
           </ul>
         </div>
@@ -56,6 +148,8 @@ export function DecisionDetailView() {
 
   if (!detail) return <div className="empty-state">Loading decision detail...</div>
 
+  const video = detail.video
+
   return (
     <>
       <div className="page-header">
@@ -66,17 +160,79 @@ export function DecisionDetailView() {
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
-        <h2 className="section-title">{detail.video.title ?? detail.video.video_id}</h2>
-        <p style={{ color: 'var(--color-text-muted)' }}>{detail.video.channel_name ?? detail.video.channel_id}</p>
-        <div style={{ marginTop: 12 }}>
-          <Badge state={detail.processing_state} finalOutcome={detail.final_outcome} />
-        </div>
+        <h2 className="section-title">{video.title ?? video.video_id}</h2>
+        <p style={{ color: 'var(--color-text-muted)' }}>{video.channel_name ?? video.channel_id}</p>
+        <dl className="metadata-list" style={{ marginTop: 12 }}>
+          <div>
+            <dt>Duration</dt>
+            <dd>{formatDuration(video.duration_seconds)}</dd>
+          </div>
+          {video.published_at && (
+            <div>
+              <dt>Published</dt>
+              <dd>{new Date(video.published_at).toLocaleDateString()}</dd>
+            </div>
+          )}
+          <div>
+            <dt>Video ID</dt>
+            <dd>{video.video_id}</dd>
+          </div>
+        </dl>
       </div>
 
-      <h2 className="section-title">Evidence trail</h2>
-      {detail.route_decisions.map((d) => (
-        <DecisionRow key={d.id} decision={d} />
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h2 className="section-title">Layer 1 — Processing outcome</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <Badge state={detail.processing_state} finalOutcome={detail.final_outcome} />
+          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+            Processing state: <code>{detail.processing_state}</code>
+          </span>
+        </div>
+        {video.deferred_reason && (
+          <p style={{ marginTop: 8, color: 'var(--color-text-muted)' }}>Deferred reason: {video.deferred_reason}</p>
+        )}
+        {video.error_message && (
+          <p style={{ marginTop: 8, color: 'var(--color-status-rejected)' }}>{video.error_message}</p>
+        )}
+      </div>
+
+      <h2 className="section-title">Layer 2 — Route decisions</h2>
+      <p style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
+        Routes evaluated in order. Numbers show evaluation sequence.
+      </p>
+      {detail.route_decisions.map((d, i) => (
+        <DecisionRow key={d.id} decision={d} index={i} />
       ))}
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2 className="section-title">Layer 3 — Action outcomes</h2>
+      {detail.route_decisions.some((d) => d.actions.length > 0) ? (
+        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+          {detail.route_decisions.flatMap((d) =>
+            d.actions.map((a) => (
+              <li key={a.id} style={{ marginBottom: 8 }}>
+                <strong>{d.route_name}</strong>:
+                <span style={{ marginLeft: 8 }}>
+                  <span className={`badge badge--${deriveActionOutcome(a.outcome).variant}`}>
+                    {deriveActionOutcome(a.outcome).label}
+                  </span>
+                </span>
+                <span style={{ marginLeft: 8 }}>
+                  {a.action_type} → {a.target_playlist_id}
+                </span>
+                {a.error_message && (
+                  <span style={{ color: 'var(--color-status-rejected)', fontSize: '0.875rem', marginLeft: 8 }}>
+                    {a.error_message}
+                  </span>
+                )}
+              </li>
+            ))
+          )}
+        </ul>
+      ) : (
+        <p style={{ color: 'var(--color-text-muted)' }}>No actions were executed for this video.</p>
+      )}
+      </div>
     </>
   )
 }

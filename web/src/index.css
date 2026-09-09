@@ -490,3 +490,21 @@ a {
     padding-top: 32px;
   }
 }
+
+.metadata-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.metadata-list dt {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.metadata-list dd {
+  margin: 0;
+  font-size: 0.875rem;
+}

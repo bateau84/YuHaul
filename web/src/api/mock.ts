@@ -10,6 +10,7 @@ import type {
   ChannelStats,
   ChannelDetail,
   TrendBucket,
+  RouteMatchRate,
   ConfigVersion,
   Settings,
   ErrorEntry,
@@ -144,6 +145,64 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
         ],
         actions: [{ id: 7001, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', outcome: 'succeeded' }],
       },
+      {
+        id: 5002,
+        route_id: 2,
+        route_name: 'Ambient',
+        evaluation_order: 2,
+        decision: 'skipped',
+        skip_reason: 'final_route_matched',
+        condition_audits: [],
+        actions: [],
+      },
+    ],
+  },
+  '1/1002': {
+    video: mockVideos[1][1],
+    processing_state: 'evaluated',
+    final_outcome: 'rejected',
+    route_decisions: [
+      {
+        id: 5011,
+        route_id: 1,
+        route_name: 'Music Discovery',
+        evaluation_order: 1,
+        decision: 'not_matched',
+        rejection_reason: 'title does not contain "music"',
+        condition_audits: [
+          { id: 6011, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Ambient Study Session', matched: false },
+          { id: 6012, condition_index: 1, field: 'duration_seconds', operator: 'gt', expected_value: '180', actual_value: '620', matched: true },
+        ],
+        actions: [],
+      },
+      {
+        id: 5012,
+        route_id: 2,
+        route_name: 'Ambient',
+        evaluation_order: 2,
+        decision: 'skipped',
+        skip_reason: 'disabled',
+        condition_audits: [],
+        actions: [],
+      },
+    ],
+  },
+  '1/1003': {
+    video: mockVideos[1][2],
+    processing_state: 'deferred',
+    final_outcome: 'deferred',
+    route_decisions: [
+      {
+        id: 5021,
+        route_id: 1,
+        route_name: 'Music Discovery',
+        evaluation_order: 1,
+        decision: 'matched',
+        condition_audits: [
+          { id: 6021, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Pop Hit 2026', matched: false },
+        ],
+        actions: [{ id: 7021, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', outcome: 'deferred' }],
+      },
     ],
   },
 }
@@ -157,12 +216,30 @@ const mockChannels: ChannelDetail[] = [
     total_retained: 8,
     usefulness_rate: 0.133,
     yield: 0.2,
+    duplicate_rate: 0.25,
     duplicate_provenance: { discovery_credit: 45, relevance_credit: 15 },
     retention_signals: { user_driven: 6, yuhaul_routed: 2 },
     recent_videos: [mockVideos[1][0]],
+    recent_video_provenance: [
+      { video_id: 'dQw4w9WgXcQ', title: 'Late Night Jazz Mix', duplicate_credit: 'discovery', retention_source: 'user_driven' },
+    ],
     matched_routes: ['Music Discovery'],
     advisories: [
-      { id: 1, channel_id: 'UCdemo1', advisory_type: 'low_usefulness', generated_at: '2026-09-08T00:00:00Z', status: 'active' },
+      {
+        id: 1,
+        channel_id: 'UCdemo1',
+        channel_name: 'Jazz Club',
+        advisory_type: 'low_usefulness',
+        generated_at: '2026-09-08T00:00:00Z',
+        status: 'active',
+        evidence_snapshot: {
+          window_days: 90,
+          discovered: 60,
+          routed: 12,
+          retained: 8,
+          threshold: 0.1,
+        },
+      },
     ],
   },
   {
@@ -173,10 +250,30 @@ const mockChannels: ChannelDetail[] = [
     total_retained: 1,
     usefulness_rate: 0.033,
     yield: 0.133,
+    duplicate_rate: 0.667,
     duplicate_provenance: { discovery_credit: 10, relevance_credit: 20 },
     retention_signals: { user_driven: 1, yuhaul_routed: 0 },
     recent_videos: [mockVideos[1][1]],
+    recent_video_provenance: [
+      { video_id: 'abc123', title: 'Ambient Study Session', duplicate_credit: 'relevance', retention_source: 'user_driven' },
+    ],
     matched_routes: ['Ambient'],
+    advisories: [
+      {
+        id: 2,
+        channel_id: 'UCdemo2',
+        channel_name: 'Focus Sounds',
+        advisory_type: 'high_duplicate_rate',
+        generated_at: '2026-09-07T00:00:00Z',
+        status: 'active',
+        evidence_snapshot: {
+          window_days: 90,
+          discovered: 30,
+          duplicate_matches: 20,
+          threshold: 0.5,
+        },
+      },
+    ],
   },
 ]
 
@@ -188,6 +285,25 @@ const mockTrends: TrendBucket[] = Array.from({ length: 14 }).map((_, i) => ({
   deferred: 2 + (i % 2),
   failed: i % 5 === 0 ? 1 : 0,
 }))
+
+const mockRouteMatchRates: RouteMatchRate[] = Array.from({ length: 14 }).flatMap((_, i) => [
+  {
+    bucket: `2026-08-${String(26 + i).padStart(2, '0')}T00:00:00Z`,
+    route_id: 1,
+    route_name: 'Music Discovery',
+    evaluated: 8 + i,
+    matched: 1 + (i % 3),
+    match_rate: (1 + (i % 3)) / (8 + i),
+  },
+  {
+    bucket: `2026-08-${String(26 + i).padStart(2, '0')}T00:00:00Z`,
+    route_id: 2,
+    route_name: 'Ambient',
+    evaluated: 4 + i,
+    matched: i % 4 === 0 ? 1 : 0,
+    match_rate: i % 4 === 0 ? 1 / (4 + i) : 0,
+  },
+])
 
 const mockConfigVersions: ConfigVersion[] = [
   {
@@ -400,6 +516,15 @@ export async function getTrends(
 ): Promise<{ from: string; to: string; granularity: string; buckets: TrendBucket[] }> {
   await delay()
   return { from: from ?? '', to: to ?? '', granularity, buckets: mockTrends }
+}
+
+export async function getRouteMatchRates(
+  from?: string,
+  to?: string,
+  granularity = 'day'
+): Promise<{ from: string; to: string; granularity: string; routes: RouteMatchRate[] }> {
+  await delay()
+  return { from: from ?? '', to: to ?? '', granularity, routes: mockRouteMatchRates }
 }
 
 export async function getQuota() {
