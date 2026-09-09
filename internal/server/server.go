@@ -265,6 +265,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/routes/{id}", s.handleDeleteRoute)
 	mux.HandleFunc("PUT /api/routes/reorder", s.handleReorderRoutes)
 
+	// Analytics-owned endpoints that would otherwise be shadowed by the
+	// broader /api/settings/ and /api/analytics/ prefix mounts. These must
+	// be registered before the prefix handlers so they take precedence.
+	mux.Handle("/api/settings/retention-playlists", s.analyticsHandler.Handler())
+	mux.Handle("/api/settings/retention-playlists/{id}", s.analyticsHandler.Handler())
+	mux.Handle("/api/runs/{id}/stats", s.analyticsHandler.Handler())
+	mux.Handle("/api/runs/{id}/route-stats", s.analyticsHandler.Handler())
+
 	// Configuration-version endpoints are served by a dedicated handler.
 	mux.Handle("/api/config/", s.configHandler.Handler())
 	mux.Handle("/api/settings/", s.configHandler.Handler())

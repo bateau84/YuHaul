@@ -23,6 +23,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
+	"github.com/bateau84/YuHaul/internal/stats"
 	"github.com/bateau84/YuHaul/internal/store"
 )
 
@@ -848,6 +849,49 @@ func TestHandleReorderRoutes(t *testing.T) {
 	require.Len(t, routes, 2)
 	assert.Equal(t, id2, routes[0].ID)
 	assert.Equal(t, id1, routes[1].ID)
+}
+
+func TestAnalyticsRoutesReachable(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	statsStore := stats.NewStore(db)
+	cfgStore := config.NewStore(db)
+	statsSvc := stats.NewService(statsStore, cfgStore, nil)
+	analyticsHandler := stats.NewHandler(statsSvc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithAnalyticsHandler(analyticsHandler))
+
+	cases := []struct {
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{"GET", "/api/settings/retention-playlists", "", http.StatusOK},
+		{"POST", "/api/settings/retention-playlists", `{"playlist_id":"PLx","playlist_name":"x"}`, http.StatusCreated},
+		{"GET", "/api/runs/" + strconv.FormatInt(runID, 10) + "/stats", "", http.StatusOK},
+		{"GET", "/api/runs/" + strconv.FormatInt(runID, 10) + "/route-stats", "", http.StatusOK},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, tc.path, body)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			assert.Equal(t, tc.want, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
 }
 
 func TestHandleSetDuplicateThreshold(t *testing.T) {

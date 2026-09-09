@@ -297,12 +297,24 @@ func (s spaFS) Open(name string) (http.File, error) {
 	name = path.Clean("/" + name)
 	f, err := s.root.Open(name)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) && isNavigationRoute(name) {
 			return s.root.Open("/index.html")
 		}
 		return nil, err
 	}
 	return f, nil
+}
+
+// isNavigationRoute reports whether a missing path should fall back to
+// index.html for client-side routing. Asset-like paths (anything under
+// /assets/ or with a file extension) should return a real 404 so a stale
+// hashed bundle does not get served as HTML.
+func isNavigationRoute(name string) bool {
+	base := path.Base(name)
+	if strings.HasPrefix(name, "/assets/") {
+		return false
+	}
+	return !strings.Contains(base, ".")
 }
 
 // overviewProvider implements server.OverviewProvider from the underlying
