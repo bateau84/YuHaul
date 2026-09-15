@@ -64,6 +64,7 @@ type completedPayload struct {
 	VideosDiscovered      int    `json:"videos_discovered"`
 	VideosAccepted        int    `json:"videos_accepted"`
 	VideosRejected        int    `json:"videos_rejected"`
+	VideosExcluded        int    `json:"videos_excluded"`
 	VideosDeferred        int    `json:"videos_deferred"`
 	VideosFailed          int    `json:"videos_failed"`
 	VideosNotYetEvaluated int    `json:"videos_not_yet_evaluated"`

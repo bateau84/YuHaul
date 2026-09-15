@@ -191,6 +191,8 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 	outcome := state.FinalOutcomeRejected
 	if matched {
 		outcome = state.FinalOutcomeAccepted
+	} else if hasExclusionDecision(decisions) {
+		outcome = state.FinalOutcomeExcluded
 	}
 	p.broadcastVideo(runID, v, outcome, matched)
 	return nil
@@ -213,6 +215,7 @@ func (p *Pipeline) completeHistoricalRun(ctx context.Context, runID int64) {
 		VideosDiscovered:      run.VideosDiscovered,
 		VideosAccepted:        run.VideosAccepted,
 		VideosRejected:        run.VideosRejected,
+		VideosExcluded:        run.VideosExcluded,
 		VideosDeferred:        run.VideosDeferred,
 		VideosFailed:          run.VideosFailed,
 		VideosNotYetEvaluated: run.VideosNotYetEvaluated,

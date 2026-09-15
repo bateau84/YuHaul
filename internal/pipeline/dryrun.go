@@ -152,6 +152,8 @@ func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video,
 	outcome := state.FinalOutcomeRejected
 	if matched {
 		outcome = state.FinalOutcomeAccepted
+	} else if hasExclusionDecision(decisions) {
+		outcome = state.FinalOutcomeExcluded
 	}
 	p.broadcastVideo(runID, v, outcome, matched)
 	return nil

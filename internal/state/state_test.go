@@ -392,6 +392,67 @@ func TestCompleteRunRecomputesCounters(t *testing.T) {
 	}
 }
 
+func TestCompleteRunRecomputesExcludedCounter(t *testing.T) {
+	m := newTestMachine(t)
+	runID := seedRun(t, m)
+
+	accepted, err := m.DiscoverVideo(context.Background(), runID, "yt-accepted", "UCchannel")
+	if err != nil {
+		t.Fatalf("discovering video: %v", err)
+	}
+	excluded, err := m.DiscoverVideo(context.Background(), runID, "yt-excluded", "UCchannel")
+	if err != nil {
+		t.Fatalf("discovering video: %v", err)
+	}
+
+	for _, tr := range []struct {
+		from VideoProcessingState
+		to   VideoProcessingState
+	}{
+		{VideoStateNotYetEvaluated, VideoStateEvaluating},
+		{VideoStateEvaluating, VideoStateEvaluated},
+		{VideoStateEvaluated, VideoStateActed},
+		{VideoStateActed, VideoStateCompleted},
+	} {
+		if _, err := m.TransitionVideoState(context.Background(), accepted.ID, tr.from, tr.to); err != nil {
+			t.Fatalf("transitioning accepted %q -> %q: %v", tr.from, tr.to, err)
+		}
+	}
+
+	if _, err := m.TransitionVideoState(context.Background(), excluded.ID,
+		VideoStateNotYetEvaluated, VideoStateEvaluating); err != nil {
+		t.Fatalf("transitioning excluded to evaluating: %v", err)
+	}
+	if _, err := m.TransitionVideoState(context.Background(), excluded.ID,
+		VideoStateEvaluating, VideoStateEvaluated,
+		WithFinalOutcome(FinalOutcomeExcluded)); err != nil {
+		t.Fatalf("transitioning excluded to evaluated: %v", err)
+	}
+
+	run, err := m.CompleteRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("CompleteRun failed: %v", err)
+	}
+	if run.VideosAccepted != 1 {
+		t.Errorf("videos_accepted = %d, want 1", run.VideosAccepted)
+	}
+	if run.VideosExcluded != 1 {
+		t.Errorf("videos_excluded = %d, want 1", run.VideosExcluded)
+	}
+	if run.VideosNotYetEvaluated != 0 {
+		t.Errorf("videos_not_yet_evaluated = %d, want 0", run.VideosNotYetEvaluated)
+	}
+}
+
+func TestExcludedOutcomeIsValidAndDistinct(t *testing.T) {
+	if !FinalOutcomeExcluded.Valid() {
+		t.Error("FinalOutcomeExcluded should be valid")
+	}
+	if FinalOutcomeExcluded == FinalOutcomeRejected {
+		t.Error("FinalOutcomeExcluded must be distinct from FinalOutcomeRejected")
+	}
+}
+
 func parseTime(t *testing.T, s string) time.Time {
 	t.Helper()
 	ts, err := time.Parse(time.RFC3339, s)

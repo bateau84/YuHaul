@@ -309,6 +309,7 @@ func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
 		VideosDiscovered:      run.VideosDiscovered,
 		VideosAccepted:        run.VideosAccepted,
 		VideosRejected:        run.VideosRejected,
+		VideosExcluded:        run.VideosExcluded,
 		VideosDeferred:        run.VideosDeferred,
 		VideosFailed:          run.VideosFailed,
 		VideosNotYetEvaluated: run.VideosNotYetEvaluated,
@@ -433,14 +434,26 @@ func (p *Pipeline) phaseRouting(ctx context.Context, runID int64, videos []*stat
 			return nil, fmt.Errorf("route video %s: %w", v.VideoID, err)
 		}
 
+		decisions, err = p.stateStore.GetRouteDecisionsForVideoInRun(ctx, v.ID, runID)
+		if err != nil {
+			return nil, fmt.Errorf("load decisions for video %s: %w", v.VideoID, err)
+		}
+
 		if len(result.MatchedRoutes) > 0 {
 			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
 				state.VideoStateEvaluating, state.VideoStateEvaluated); err != nil {
 				return nil, fmt.Errorf("mark video %s evaluated: %w", v.VideoID, err)
 			}
 			routed = append(routed, v)
+		} else if hasExclusionDecision(decisions) {
+			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
+				state.VideoStateEvaluating, state.VideoStateEvaluated,
+				state.WithFinalOutcome(state.FinalOutcomeExcluded)); err != nil {
+				return nil, fmt.Errorf("mark video %s excluded: %w", v.VideoID, err)
+			}
+			p.broadcastVideo(runID, v, state.FinalOutcomeExcluded, false)
 		} else {
-			// No route matched: mark rejected.
+			// No route matched and not excluded: mark rejected.
 			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
 				state.VideoStateEvaluating, state.VideoStateEvaluated,
 				state.WithFinalOutcome(state.FinalOutcomeRejected)); err != nil {
@@ -450,6 +463,16 @@ func (p *Pipeline) phaseRouting(ctx context.Context, runID int64, videos []*stat
 		}
 	}
 	return routed, nil
+}
+
+func hasExclusionDecision(decisions []state.RouteDecision) bool {
+	for _, d := range decisions {
+		if d.Decision == state.RouteDecisionSkipped && d.SkipReason != nil &&
+			*d.SkipReason == state.SkipReasonExclusion {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Pipeline) phaseActionExecution(ctx context.Context, runID int64, videos []*state.Video) error {

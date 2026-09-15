@@ -61,9 +61,9 @@ func (s *Store) GetRunStats(ctx context.Context, runID int64) (*RunStats, error)
 func (s *Store) loadRun(ctx context.Context, runID int64) (*state.Run, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
-		        videos_discovered, videos_accepted, videos_rejected, videos_deferred,
-		        videos_failed, videos_not_yet_evaluated, quota_cost, duration_seconds,
-		        interrupt_reason, current_phase
+		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        duration_seconds, interrupt_reason, current_phase
 		 FROM run WHERE id = ?;`, runID)
 	r, err := scanRun(row)
 	if err != nil {
@@ -581,8 +581,8 @@ func scanRun(sc scanner) (*state.Run, error) {
 	var configVersionID sql.NullInt64
 	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
-		&r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.QuotaCost,
-		&durationSeconds, &interruptReason, &currentPhase)
+		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
+		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase)
 	if err != nil {
 		return nil, err
 	}

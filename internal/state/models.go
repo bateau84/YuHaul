@@ -28,6 +28,7 @@ type VideoFinalOutcome string
 const (
 	FinalOutcomeAccepted        VideoFinalOutcome = "accepted"
 	FinalOutcomeRejected        VideoFinalOutcome = "rejected"
+	FinalOutcomeExcluded        VideoFinalOutcome = "excluded"
 	FinalOutcomeDeferred        VideoFinalOutcome = "deferred"
 	FinalOutcomeFailed          VideoFinalOutcome = "failed"
 	FinalOutcomeNotYetEvaluated VideoFinalOutcome = "not_yet_evaluated"
@@ -93,6 +94,7 @@ type Run struct {
 	VideosDiscovered      int        `json:"videos_discovered"`
 	VideosAccepted        int        `json:"videos_accepted"`
 	VideosRejected        int        `json:"videos_rejected"`
+	VideosExcluded        int        `json:"videos_excluded"`
 	VideosDeferred        int        `json:"videos_deferred"`
 	VideosFailed          int        `json:"videos_failed"`
 	VideosNotYetEvaluated int        `json:"videos_not_yet_evaluated"`
@@ -167,8 +169,8 @@ func (s VideoProcessingState) Valid() bool {
 // Valid returns true if o is a known final outcome.
 func (o VideoFinalOutcome) Valid() bool {
 	switch o {
-	case FinalOutcomeAccepted, FinalOutcomeRejected, FinalOutcomeDeferred,
-		FinalOutcomeFailed, FinalOutcomeNotYetEvaluated:
+	case FinalOutcomeAccepted, FinalOutcomeRejected, FinalOutcomeExcluded,
+		FinalOutcomeDeferred, FinalOutcomeFailed, FinalOutcomeNotYetEvaluated:
 		return true
 	}
 	return false

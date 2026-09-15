@@ -58,9 +58,9 @@ func (s *Store) CreateRun(ctx context.Context, run *Run) (int64, error) {
 func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
-		        videos_discovered, videos_accepted, videos_rejected, videos_deferred,
-		        videos_failed, videos_not_yet_evaluated, quota_cost, duration_seconds,
-		        interrupt_reason, current_phase
+		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        duration_seconds, interrupt_reason, current_phase
 		 FROM run ORDER BY started_at DESC;`)
 	if err != nil {
 		return nil, fmt.Errorf("listing runs: %w", err)
@@ -85,9 +85,9 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
-		        videos_discovered, videos_accepted, videos_rejected, videos_deferred,
-		        videos_failed, videos_not_yet_evaluated, quota_cost, duration_seconds,
-		        interrupt_reason, current_phase
+		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        duration_seconds, interrupt_reason, current_phase
 		 FROM run WHERE status = ? ORDER BY started_at ASC;`, RunStatusInterrupted)
 	if err != nil {
 		return nil, fmt.Errorf("listing interrupted runs: %w", err)
@@ -112,9 +112,9 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
-		        videos_discovered, videos_accepted, videos_rejected, videos_deferred,
-		        videos_failed, videos_not_yet_evaluated, quota_cost, duration_seconds,
-		        interrupt_reason, current_phase
+		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        duration_seconds, interrupt_reason, current_phase
 		 FROM run WHERE id = ?;`, id)
 	r, err := scanRun(row)
 	if err != nil {
@@ -228,7 +228,7 @@ func (s *Store) UpdateVideoState(ctx context.Context, id int64, state VideoProce
 
 	var completedAt *time.Time
 	if outcome == FinalOutcomeAccepted || outcome == FinalOutcomeRejected ||
-		outcome == FinalOutcomeFailed {
+		outcome == FinalOutcomeExcluded || outcome == FinalOutcomeFailed {
 		now := time.Now().UTC()
 		completedAt = &now
 	}
@@ -466,12 +466,14 @@ func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 		  videos_discovered = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ?),
 		  videos_accepted = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
 		  videos_rejected = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
+		  videos_excluded = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
 		  videos_deferred = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
 		  videos_failed = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
 		  videos_not_yet_evaluated = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?)
 		 WHERE id = ?;`,
 		runID, runID, FinalOutcomeAccepted,
 		runID, FinalOutcomeRejected,
+		runID, FinalOutcomeExcluded,
 		runID, FinalOutcomeDeferred,
 		runID, FinalOutcomeFailed,
 		runID, FinalOutcomeNotYetEvaluated,
@@ -485,7 +487,8 @@ func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 // RecomputeRunCountersFromDecisions recomputes outcome counters for a
 // replay/backtest run from the route decisions recorded in the run. Videos are
 // counted as accepted when at least one route matched, rejected when no route
-// matched, and discovered when any route decision was recorded.
+// matched and not excluded, excluded when skipped due to an exclusion rule, and
+// discovered when any route decision was recorded.
 func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE run SET
@@ -503,12 +506,21 @@ func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int
 		            SELECT video_id FROM route_decision WHERE run_id = ? AND decision = ?
 		        )
 		  ),
+		  videos_excluded = (
+		      SELECT COUNT(DISTINCT video_id)
+		      FROM route_decision rd
+		      WHERE rd.run_id = ? AND rd.decision = ? AND rd.skip_reason = ?
+		        AND rd.video_id NOT IN (
+		            SELECT video_id FROM route_decision WHERE run_id = ? AND decision = ?
+		        )
+		  ),
 		  videos_deferred = 0,
 		  videos_failed = 0,
 		  videos_not_yet_evaluated = 0
 		 WHERE id = ?;`,
 		runID, runID, RouteDecisionMatched,
 		runID, RouteDecisionNotMatched, runID, RouteDecisionMatched,
+		runID, RouteDecisionSkipped, SkipReasonExclusion, runID, RouteDecisionMatched,
 		runID)
 	if err != nil {
 		return fmt.Errorf("recomputing run %d counters from decisions: %w", runID, err)
@@ -528,8 +540,8 @@ func scanRun(sc interface {
 	var configVersionID sql.NullInt64
 	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
-		&r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.QuotaCost,
-		&durationSeconds, &interruptReason, &currentPhase)
+		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
+		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase)
 	if err != nil {
 		return nil, err
 	}
