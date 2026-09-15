@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/store"
 	"github.com/bateau84/YuHaul/internal/store/storetest"
 )
@@ -441,6 +442,47 @@ func TestCompleteRunRecomputesExcludedCounter(t *testing.T) {
 	}
 	if run.VideosNotYetEvaluated != 0 {
 		t.Errorf("videos_not_yet_evaluated = %d, want 0", run.VideosNotYetEvaluated)
+	}
+}
+
+func TestCompleteRunRecordsQuotaCost(t *testing.T) {
+	db := openTestDB(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatalf("creating store: %v", err)
+	}
+	ledger := quota.New(db)
+	m := NewMachine(store, WithLedger(ledger))
+
+	runID := seedRun(t, m)
+
+	if err := ledger.Record(context.Background(), sql.NullInt64{Int64: runID, Valid: true}, quota.OpVideosList); err != nil {
+		t.Fatalf("recording quota: %v", err)
+	}
+	if err := ledger.Record(context.Background(), sql.NullInt64{Int64: runID, Valid: true}, quota.OpPlaylistItemsInsert); err != nil {
+		t.Fatalf("recording quota: %v", err)
+	}
+
+	run, err := m.CompleteRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("CompleteRun failed: %v", err)
+	}
+	want := 1 + 50
+	if run.QuotaCost != want {
+		t.Errorf("quota_cost = %d, want %d", run.QuotaCost, want)
+	}
+}
+
+func TestCompleteRunWithoutLedgerLeavesQuotaCostZero(t *testing.T) {
+	m := newTestMachine(t)
+	runID := seedRun(t, m)
+
+	run, err := m.CompleteRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("CompleteRun failed: %v", err)
+	}
+	if run.QuotaCost != 0 {
+		t.Errorf("quota_cost = %d, want 0 when no ledger is configured", run.QuotaCost)
 	}
 }
 

@@ -136,13 +136,13 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 	return r, nil
 }
 
-// CompleteRun marks a run as completed and records final counters.
-func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float64) error {
+// CompleteRun marks a run as completed and records final counters and quota cost.
+func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float64, quotaCost int) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE run
-		 SET status = ?, completed_at = ?, duration_seconds = ?
+		 SET status = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
 		 WHERE id = ?;`,
-		RunStatusCompleted, time.Now().UTC(), durationSeconds, id)
+		RunStatusCompleted, time.Now().UTC(), durationSeconds, quotaCost, id)
 	if err != nil {
 		return fmt.Errorf("completing run %d: %w", id, err)
 	}

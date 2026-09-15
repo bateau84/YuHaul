@@ -8,6 +8,10 @@ timestamp: 2026-09-08T00:00:00Z
 
 # Architecture Update Log
 
+## 2026-09-15
+
+**Update**: `yuhaul-system-architecture.md` — Reflected the five-phase processing pipeline (previously documented as "four phases"). Split the combined "Exclusion Gate + Routing" phase into two distinct phases: Phase 3 (Exclusion — global exclusion gate marking videos excluded by every enabled route) and Phase 4 (Routing — per-route condition evaluation). Renumbered action execution to Phase 5, relocated the configuration snapshot to run initiation (no longer a numbered phase), and updated the mode-variations table and channel-counter phase references to match. Grounded in `internal/pipeline` `Phase` constants: `discovery` → `duplicate_detection` → `exclusion` → `routing` → `action_execution`.
+
 ## 2026-09-08
 
 **Update**: `yuhaul-system-architecture.md` — Resolved all 5 open questions. OQ-1: fingerprint algorithm set to normalized-token-set Jaccard (threshold 0.5, user-configurable 0.0–1.0) based on researcher benchmark; added §Similarity Algorithm with benchmark table showing prior combined score missed 11% of true duplicates. OQ-2: discovery changed from search.list/activities.list to playlistItems.list on cached uploads playlists (1 unit/page). OQ-3: metadata refresh resolved as hybrid (routed videos at run time, older on-demand). OQ-4: SPA stack delegated to coder implementation choice. OQ-5: deployment resolved as single container with mounted volume. Updated quota model table, Phase 1 discovery steps, config version JSON example (threshold 0.95→0.5), and Pass 2 fuzzy match algorithm.

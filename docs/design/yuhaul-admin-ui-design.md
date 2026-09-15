@@ -3,247 +3,437 @@ type: design-spec
 title: YuHaul Admin Interface Design Specification
 description: "Human-centered design specification for the YuHaul web administration interface — a responsive, device-aware operational dashboard for managing YouTube subscription routing, inspecting processing decisions, and analyzing content discovery performance."
 tags: [design-spec, web-ui, admin-dashboard, youtube]
-status: draft
+status: accepted
 ---
 
 ## Design Spec: YuHaul Admin Interface
 
 ### Experience Context
 
-- **Experience requirement:** Enable a single user to understand at a glance whether their YouTube discovery system is operating correctly, configure routing rules with confidence, investigate why specific videos were accepted or rejected, and identify trends in channel quality — all without consulting documentation or switching tools.
+**Problem Statement:**
+A person who subscribes to many YouTube channels (primarily for music discovery) cannot efficiently discover which new videos are worth watching. Manually checking subscriptions is time-consuming; the same song appears across many channels under slightly different titles; and without historical tracking, there is no way to know whether a subscription or routing rule is actually producing valuable content. The user needs a system that automates the repetitive parts of content discovery — finding new videos, matching them to playlists, detecting duplicates — while keeping the user in full control of policy decisions and providing enough evidence to understand and trust every automated action.
 
-- **Scenario 1 — Morning check-in:** The user opens YuHaul on their phone while having coffee. They see the Overview: last run completed 6 hours ago, 42 videos processed, 3 accepted, 12 deferred (quota), 0 errors. They tap into Runs to see the latest run's details — the 3 accepted videos went to their "New Discoveries" playlist as expected. They glance at the error queue: empty. They close the app. Total time: 90 seconds.
+**Experience Requirement:**
+Enable the user to trust that their YouTube discovery system is operating correctly, configure routing rules with confidence, investigate why specific videos were accepted or rejected, and identify trends in channel quality — all without consulting documentation, switching tools, or second-guessing the system's behavior.
 
-- **Scenario 2 — Route tuning:** The user notices their "Ambient" route has accepted 0 videos in the last 2 weeks. On desktop, they navigate to Routes, edit the Ambient route's conditions, and lower the duration threshold from 10 minutes to 5 minutes. They run a dry-run to see what would happen with the current pending workload using the unsaved draft conditions. The dry-run shows 8 currently pending videos would now match under the adjusted conditions. They save the route. They later check Analytics to see if acceptance rates improve. Time: 5 minutes.
+**Scenario 1 — Morning check-in (90 seconds):**
+The user opens YuHaul on their phone while having coffee. They see the Overview: last run completed 6 hours ago, 42 videos processed, 3 accepted, 12 deferred (quota), 0 errors. They tap into Runs to see the latest run's details — the 3 accepted videos went to their "New Discoveries" playlist as expected. They glance at the error queue: empty. They close the app.
 
-- **Scenario 3 — Investigating a reject:** The user remembers a specific channel that should have matched but didn't. They navigate to Analytics > Channels, find the channel, and see its recent videos. They click a specific video that was rejected — the Decision Detail view shows the evidence: "Route 'Music Discovery' condition 'title contains [genre keyword]' — NOT MATCHED. Route 'Ambient' condition 'duration > 10min' — NOT MATCHED. Result: rejected (no route matched)." They realize their route conditions need adjustment. Time: 3 minutes.
+**Scenario 2 — Route tuning after noticing a gap (5 minutes):**
+The user notices their "Ambient" route has accepted 0 videos in the last 2 weeks. On desktop, they navigate to Routes, edit the Ambient route's conditions, and lower the duration threshold from 10 minutes to 5 minutes. Before saving, they run a dry-run with the unsaved draft conditions. The dry-run shows 8 currently pending videos would now match. They save the route. They later check Analytics to see if acceptance rates improve.
 
-- **Scenario 4 — Error triage and deferred work:** The user checks the Errors view. The error queue shows 1 item: authentication token expired (needs manual re-authentication). They also see the Deferred tab: 2 items deferred due to quota exhaustion. The deferred items will be eligible for the next scheduled or manual run once sufficient quota is available. The user re-authenticates, then removes the resolved auth error from the queue. Time: 2 minutes.
+**Scenario 3 — Investigating a specific rejection (3 minutes):**
+The user remembers a specific channel that should have matched but didn't. They navigate to Analytics > Channels, find the channel, and see its recent videos. They click a specific video that was rejected — the Decision Detail view shows the evidence trail: "Route 'Music Discovery' condition 'title contains [genre keyword]' — NOT MATCHED. Route 'Ambient' condition 'duration > 10min' — NOT MATCHED. Result: rejected (no route matched)." They realize their route conditions need adjustment.
 
-- **Scenario 5 — Backtest before change:** The user wants to add a new route for a niche genre. Before committing, they open Backtest, apply the proposed route configuration to 30 days of historical observations, and see: the new route would have caught 23 videos, 15 of which overlap with existing routes (already caught), 8 are new catches. They're satisfied and create the route. Time: 10 minutes.
+**Scenario 4 — Error triage and deferred work (2 minutes):**
+The user checks the Errors view. The error queue shows 1 item: authentication token expired (needs manual re-authentication). They also see the Deferred tab: 2 items deferred due to quota exhaustion. The deferred items will be eligible for the next scheduled or manual run once sufficient quota is available. The user re-authenticates, then removes the resolved auth error from the queue.
 
-- **Scenario 6 — Channel advisory review:** The user notices a "Low usefulness" advisory on the Analytics page for a channel they subscribed to months ago. The advisory notes: "This channel has produced 45 discoveries in the last 90 days, but only 2 were retained in designated rotation playlists. Consider whether this subscription still serves your interests." The user reviews the channel's recent videos, agrees, and unsubscribes directly from YouTube. Time: 3 minutes.
+**Scenario 5 — Backtest before committing a change (10 minutes):**
+The user wants to add a new route for a niche genre. Before committing, they open Backtest, apply the proposed route configuration to 30 days of historical observations, and see: the new route would have caught 23 videos, 15 of which overlap with existing routes (already caught), 8 are new catches. They're satisfied and create the route.
 
-### Information Architecture
+**Scenario 6 — Channel advisory review (3 minutes):**
+The user notices a "Low usefulness" advisory on the Analytics page for a channel they subscribed to months ago. The advisory notes: "This channel has produced 45 discoveries in the last 90 days, but only 2 were retained in designated rotation playlists. Consider whether this subscription still serves your interests." The user reviews the channel's recent videos, agrees, and unsubscribes directly from YouTube.
 
-**Primary grouping principle:** Task-based — navigation is organized around what the user wants to do, not what the system manages internally.
+### Workflow Map
 
-**Top-level sections:**
+Derived from the 32 acceptance criteria. Each workflow names the surfaces and endpoints that serve it, and identifies capability gaps.
 
-| Section | Purpose | What it contains |
-|---------|---------|-----------------|
-| **Overview** | Quick status check, entry to everything | Run schedule status, last run summary, quota state, error count, quick actions |
-| **Routes** | Define and manage routing rules | Route list with ordering, create/edit/delete, enable/disable, route conditions/exclusions/actions editor |
-| **Runs** | Inspect processing history | Run list (filterable), run detail with video outcomes, decision evidence, dry-run results |
-| **Analytics** | Understand trends and channel quality | Temporal charts, run/route statistics, channel analysis with advisories, source performance, duplicate provenance |
-| **Errors** | Triage failures and deferred work | Error queue with retry/remove, deferred work queue with next-eligibility status |
-| **History** | Configuration version history | Route/config change history with timestamps, diffs, linked runs |
-| **Settings** | System configuration | Schedule config, quota limits, account status, retention playlist designation, data import/export |
+| # | Workflow | Surfaces / Endpoints | ACs Served | Capability Gap |
+|---|----------|---------------------|------------|----------------|
+| 1 | **Account Connection** — OAuth flow to connect YouTube account | Settings > Account, `POST /api/settings/account/connect` | AC 1 | None |
+| 2 | **Discovery & Processing** — Scheduled or manual run discovers videos, evaluates routes, executes actions | Overview (trigger), Runs (trigger + inspect), `POST /api/runs`, `GET /api/runs/:id/progress` (SSE) | AC 2, 11, 12, 13, 14, 30, 32 | None |
+| 3 | **Route Management** — Create, edit, delete, reorder, enable/disable routes with conditions and actions | Routes (list + editor), `GET/POST/PUT/DELETE /api/routes`, `PUT /api/routes/reorder` | AC 3, 4, 5, 6 | None |
+| 4 | **Exclusion Management** — Per-route exclusion rules (channels, videos, titles, words, duration) | Route Editor > Exclusions region | AC 7 | None |
+| 5 | **Duplicate Detection** — Exact and fuzzy duplicate detection, corpus import | Settings > Data, Settings > Duplicate Threshold | AC 8, 9, 10 | None |
+| 6 | **Run Scheduling** — Configurable cron schedule + manual runs | Settings > Schedule, Overview (next run), `GET/PUT /api/settings` | AC 16, 17 | None |
+| 7 | **Quota Management** — Quota visibility, quota-aware processing, deferred work | Overview (quota bar), Analytics (quota ledger), Errors (deferred tab) | AC 18, 19, 30 | None |
+| 8 | **Run Inspection** — Decision evidence, run detail, video outcome detail | Runs (list + detail), `GET /api/runs/:id/videos/:videoId` | AC 15, 28 | None |
+| 9 | **Analytics & Statistics** — Run/route statistics, channel analysis, retention signals | Analytics (dashboard + channels tab) | AC 20, 21, 22 | None |
+| 10 | **Temporal Analytics** — Historical statistics, trend visualization, config-history attribution | Analytics (trends), History (config versions) | AC 23, 24, 25 | None |
+| 11 | **Dry-Run & Backtest** — Dry-run evaluation, historical backtesting, replay | Backtest (dual-mode), `POST /api/runs/dry-run`, `POST /api/backtest`, `POST /api/runs/replay` | AC 26, 27 | None |
+| 12 | **Configuration History** — Version snapshots, diffs, linked runs | History (list + detail), `GET /api/config-versions` | AC 25 | None |
+| 13 | **Error & Deferred Queue** — Inspectable error queue with retry/remove, deferred work queue | Errors (tabs + actions), `GET/POST/DELETE /api/errors` | AC 14, 30 | None |
+| 14 | **Responsive UI** — Desktop sidebar + mobile bottom nav, card layout for tables | All views | AC 29 | None |
+| 15 | **User Authority** — Evidence-backed advisories, no autonomous policy changes | Analytics > Channels (advisory cards), `GET /api/analytics/channels/:id` | AC 31 | None |
+| 16 | **Outcome Distinction** — Distinguish rejected, deferred, failed, not-yet-evaluated | Decision Detail (three-layer model), Run Detail (summary badges) | AC 32 | None |
 
-**Navigation model:** Sidebar navigation on desktop (persistent, collapsible on mobile). Top-level sections are always visible. Within Routes, Runs, and Analytics, secondary navigation uses tabs or sub-views.
+**Joint views (workflows that share a surface):**
+- **Run Detail** serves workflows 2 (processing), 8 (inspection), 7 (quota cost), and 16 (outcome distinction)
+- **Route Editor** serves workflows 3 (management) and 4 (exclusions)
+- **Analytics Dashboard** serves workflows 9 (statistics), 10 (temporal), and 15 (advisories)
+- **Settings** serves workflows 1 (account), 5 (duplicate threshold), 6 (schedule), and data import
 
-**URL structure (SPA with pushState):**
-- `/` — Overview
-- `/routes` — Route list
-- `/routes/:id` — Route detail/edit
-- `/routes/new` — Create route
-- `/runs` — Run history list
-- `/runs/:id` — Run detail with video outcomes
-- `/runs/:id/video/:videoId` — Decision detail for a specific video in a run
-- `/analytics` — Analytics dashboard (default: trends)
-- `/analytics/channels` — Channel analysis
-- `/analytics/channels/:channelId` — Single channel deep-dive
-- `/errors` — Error queue and deferred work
-- `/backtest` — Backtest interface
-- `/settings` — System settings
-- `/history` — Configuration history
-- `/history/:versionId` — Configuration version detail
+**No capability gaps identified.** All 32 ACs map to existing architecture endpoints and entity model.
 
-### User/Task Flows
+---
 
-**Flow 1: Create a new route**
+### User Stories
 
-```
-1. User navigates to Routes → sees route list
-2. User clicks "New Route" → Route Editor view opens
-3. User enters route name (required), description (optional)
-4. User configures conditions (flat list with AND/OR toggle):
-   a. Select field (title, duration, channel, etc.)
-   b. Select operator (contains, equals, greater than, etc.)
-   c. Enter value
-   d. Logical connective (AND/OR between conditions — top-level toggle)
-5. User configures exclusions (route-scoped, optional):
-   a. Channel exclusion: enter channel name → "Add" → entry appears in excluded channels list
-   b. Video identity exclusion: enter video ID or title → "Add" → entry appears in excluded videos list
-   c. Title exclusion: enter exact title string → "Add" → entry appears in excluded titles list (exact match after trim and Unicode NFC normalization)
-   d. Word/phrase exclusion: enter word or phrase → "Add" → entry appears in excluded words list (title-contains match)
-   e. Duration limits: optional min and/or max in seconds (empty = no limit)
-   → Excluded videos skip this route but remain eligible for other routes
-6. User configures actions (what happens on match):
-   a. Select action type (add to playlist — v1 only supports playlist insertion)
-   b. Configure action parameters (playlist selection)
-7. User sets route evaluation order (drag to reorder, or use position input)
-8. User optionally marks route as "final" (stops further evaluation after match)
-9. User optionally enables/disables route (default: enabled)
-10. User clicks "Save" → route is created, list updates
-    → Error path: validation fails → inline errors on invalid fields, focus moves to first error
-    → Success path: navigate to route list, new route visible, toast confirmation
-```
+#### Account & Onboarding
 
-**Flow 2: Inspect a run decision**
+**US-001: Connect YouTube Account**
+- **Actor:** YuHaul administrator (the single user)
+- **Context:** First-time setup or re-authentication after token expiry
+- **Trigger:** User navigates to Settings > Account and clicks "Connect YouTube Account"
+- **Desired outcome:** YouTube account is authenticated via OAuth2; YuHaul can discover subscriptions and manage playlists
+- **Observable success:** Account status shows "Connected" with channel name and avatar; next run will discover subscriptions
+- **Source:** AC 1
 
-```
-1. User navigates to Runs → sees run list sorted by date descending
-2. User clicks a run → Run Detail view opens
-3. Run Detail shows: run timestamp, duration, videos processed, outcomes summary (accepted/rejected/deferred/failed counts), quota cost summary
-4. User clicks a video outcome row → Decision Detail panel opens (or navigates to detail view)
-5. Decision Detail shows:
-   - Video title, channel, duration, publish date, thumbnail
-   - Three-layer outcome model (see Behavioral Specification for full model):
-     a. Video/run processing state: discovered, evaluating, evaluated, acted, completed, deferred, not-yet-evaluated
-     b. Per-route decision state: for each route evaluated, accepted/rejected/skipped
-     c. Per-action execution state: succeeded, failed, deferred
-   - Evidence trail: which routes were evaluated, in order
-     - For each route: which conditions matched (green check) or didn't match (red X)
-     - Which actions would have/were executed
-   - If accepted: which playlist it was added to (with link to YouTube playlist)
-   - If deferred: reason (quota limit, etc.)
-   - If failed: error type and message
-6. User can navigate to next/previous video in the same run (keyboard arrows or nav buttons)
-7. User presses Back or clicks Run list to return
-```
+**US-002: Import Historical Corpus**
+- **Actor:** YuHaul administrator migrating from the previous application
+- **Context:** Existing corpus of 10,000+ titles must be preserved for duplicate detection
+- **Trigger:** User navigates to Settings > Data and uploads a CSV or JSON file
+- **Desired outcome:** Historical titles are imported into the duplicate detection corpus; duplicates with existing entries are identified and skipped; corpus integrity is preserved
+- **Observable success:** Import summary shows count of new titles added, duplicates skipped, and total corpus size; duplicate detection works identically for imported and native titles
+- **Source:** AC 9
 
-**Flow 3: Run a dry-run**
+#### Route Configuration
 
-```
-1. User navigates to Routes (or anywhere with manual run trigger)
-2. User clicks "Run" button → dropdown appears: "Run Now" | "Dry Run"
-3. User selects "Dry Run" → confirmation dialog appears
-4. Confirmation shows: "This will process current pending videos against current routes
-   (including any unsaved draft conditions) without adding anything to playlists.
-   Production state (duplicate corpus, idempotency records, statistics) is not affected."
-5. User confirms → Run begins, frontend subscribes to SSE stream (`/api/runs/:id/stream`), progress indicator shown with real-time updates
-    → Error path: SSE connection failure → auto-reconnect (EventSource built-in), retry button if stream cannot establish
-6. Run completes → SSE stream closes, user navigates to Runs list, latest entry marked as "Dry Run"
-7. User clicks the dry-run → sees same outcome detail as a real run, but with "Would have"
-   language for actions
-```
+**US-003: Create a New Route**
+- **Actor:** YuHaul administrator defining content routing rules
+- **Context:** User wants to route videos matching specific criteria to a YouTube playlist
+- **Trigger:** User navigates to Routes and clicks "New Route"
+- **Desired outcome:** A new route is created with a name, conditions (field + operator + value), exclusions, and a playlist action; the route is added to the evaluation order
+- **Observable success:** New route appears in the route list at the correct position; conditions are saved; route is enabled by default
+- **Source:** AC 3, 4
 
-**Flow 4: View channel analytics**
+**US-004: Configure Route Exclusions**
+- **Actor:** YuHaul administrator refining route behavior
+- **Context:** User wants to exclude specific channels, videos, titles, words, or durations from a route without affecting other routes
+- **Trigger:** User opens a route editor and adds exclusion rules
+- **Desired outcome:** Exclusion rules are saved with the route; excluded videos are skipped by this route but remain eligible for other routes
+- **Observable success:** Exclusion list shows added entries; excluded videos do not match this route in subsequent runs; other routes still evaluate excluded videos
+- **Source:** AC 7
 
-```
-1. User navigates to Analytics → default view shows temporal trend charts
-2. User clicks "Channels" tab → channel list appears with usefulness metrics
-3. Channel list shows: channel name, discovered count, routed count, retained count (in designated rotation playlists), usefulness rate, time since last useful discovery
-4. User clicks a channel → channel detail view opens
-5. Channel detail shows:
-   - Channel name, subscription date (if known), total videos
-   - Usefulness metrics: discovered, routed, retained (in designated rotation playlists), usefulness rate, yield
-   - Retention signal provenance summary: user-driven count vs. YuHaul-routed count (with clear labeling that YuHaul-routed membership does not count as retention)
-   - Usefulness trend over time (chart)
-   - Recent videos with their outcomes and retention provenance badges (User-added / YuHaul-routed)
-   - Which routes matched this channel's content
-   - Advisory section (if applicable): system-generated suggestions about channel value
-6. User can filter by date range using date picker
-7. User clicks a video → Decision Detail (same as Flow 2, step 5)
-```
+**US-005: Set Route as Final**
+- **Actor:** YuHaul administrator controlling evaluation flow
+- **Context:** User wants a route to terminate further evaluation after a successful match (e.g., a "catch-all" route)
+- **Trigger:** User toggles the "Final" flag on a route in the editor
+- **Desired outcome:** After this route matches a video, subsequent routes in evaluation order are skipped for that video
+- **Observable success:** Route shows "Final" badge; in Decision Detail, videos matched by this route show subsequent routes as "skipped (final route matched)"
+- **Source:** AC 6
 
-**Flow 5: Manage errors and deferred work**
+**US-006: Reorder Routes**
+- **Actor:** YuHaul administrator adjusting evaluation priority
+- **Context:** Route evaluation is order-dependent; user needs to change the sequence
+- **Trigger:** User drags a route to a new position, or uses Move Up/Down buttons
+- **Desired outcome:** Route evaluation order updates; a ConfigVersion snapshot is created
+- **Observable success:** Route list reflects new order; configuration history shows the reorder event
+- **Source:** AC 3
 
-```
-1. User navigates to Errors → sees two tabs: "Errors" and "Deferred"
-2. Error tab shows: video title, channel, error type, failure reason, timestamp
-3. User clicks an error → detail panel shows full error context
-4. User clicks "Retry" → system re-attempts processing
-   → On success: item dismissed from active queue, toast confirmation
-   → On failure: error updated with new failure reason, stays in queue
-5. User clicks "Remove" → item dismissed from active queue (historical record preserved)
-6. Deferred tab shows: video title, channel, deferral reason, next-eligible indicator
-7. Deferred items remain queued and become eligible for the next scheduled or manual run when sufficient quota is available
-8. User can manually "Retry Now" on a deferred item (if quota allows)
-9. User can "Discard" a deferred item — dismissed from active queue, historical record preserved
-```
+#### Duplicate Detection
 
-**Flow 5b: Review configuration history**
+**US-007: Adjust Fuzzy Match Threshold**
+- **Actor:** YuHaul administrator tuning duplicate sensitivity
+- **Context:** Fuzzy matching threshold controls how similar titles must be to count as duplicates
+- **Trigger:** User adjusts the threshold slider in Settings > Duplicate Detection
+- **Desired outcome:** New threshold is persisted and applied to all subsequent duplicate detection
+- **Observable success:** Slider shows current value; toast confirms save; subsequent runs use the new threshold
+- **Source:** AC 8
 
-```
-1. User navigates to History (or accesses from a run's metadata link)
-2. Configuration History view shows: chronological list of all configuration changes
-3. Each entry shows: timestamp, change summary (e.g., "Added channel exclusion to Route 'Ambient'"), configuration version number, count of runs executed under this version
-4. User clicks an entry → change detail panel opens
-5. Change detail shows:
-   a. Full effective route configuration snapshot at that point in time
-   b. List of runs that executed under this configuration version (clickable → Run Detail)
-   c. Diff view: comparison to previous version (what was added/removed/modified)
-6. User can click a run link → navigates to Run Detail
-7. User can compare any two versions by selecting them and clicking "Compare"
-```
+**US-008: Inspect Duplicate Provenance**
+- **Actor:** YuHaul administrator understanding discovery credit
+- **Context:** When the same content appears from multiple channels, the user needs to know which channel was the original discoverer
+- **Trigger:** User navigates to Analytics > Channels > [channel] > [video]
+- **Desired outcome:** Video detail shows whether this channel holds discovery credit (first source) or relevance credit (also published by others)
+- **Observable success:** Per-video provenance badge shows "First discovered" or "Also published by [other channels]"; channel-level summary shows discovery credit vs relevance credit counts
+- **Source:** AC 10
 
-**Flow 6: Run a backtest or replay**
+#### Processing & Runs
 
-```
+**US-009: Start a Processing Run**
+- **Actor:** YuHaul administrator triggering content discovery
+- **Context:** User wants to process pending videos now rather than waiting for the next scheduled run
+- **Trigger:** User clicks "Run Now" in the header or Overview
+- **Desired outcome:** A processing run starts; the user sees real-time progress via SSE stream; run completes with outcomes
+- **Observable success:** Progress indicator shows current state (discovering, evaluating, acting); run appears in Runs list with outcome summary; accepted videos are in target playlists on YouTube
+- **Source:** AC 2, 17
+
+**US-010: Run a Dry-Run with Draft Configuration**
+- **Actor:** YuHaul administrator previewing changes before committing
+- **Context:** User has unsaved route edits and wants to see what would happen
+- **Trigger:** User clicks "Dry Run" and confirms the dialog
+- **Desired outcome:** System processes pending videos against draft (unsaved) route configuration without mutating playlists, duplicate corpus, or statistics
+- **Observable success:** Dry-run results show "Would have" language for actions; production state is unchanged; user can save the draft configuration if satisfied
+- **Source:** AC 26
+
+**US-011: Backtest Proposed Configuration**
+- **Actor:** YuHaul administrator evaluating routing changes against history
+- **Context:** User wants to know what a configuration change would have caught or lost over the past 30 days
+- **Trigger:** User navigates to Backtest, modifies proposed routes, selects date range, clicks "Run Backtest"
+- **Desired outcome:** System replays retained historical observations against proposed configuration; results show new catches, lost catches, and net change
+- **Observable success:** Comparison view shows actual vs proposed outcomes; user can inspect individual video differences; user can apply or discard the proposed configuration
+- **Source:** AC 27
+
+**US-012: Replay History with a Specific Configuration**
+- **Actor:** YuHaul administrator re-evaluating history
+- **Context:** User wants to see what a historical configuration would have produced on the same observations
+- **Trigger:** User selects a configuration version and date range in Backtest > Replay mode
+- **Desired outcome:** System reprocesses retained observations through the selected configuration; replay outcomes are labeled distinctly from production outcomes
+- **Observable success:** Replay results show each video's replay outcome alongside its original production outcome (if available); replay is clearly marked as non-production
+- **Source:** AC 27
+
+#### Inspection & Explainability
+
+**US-013: Inspect Why a Video Was Rejected**
+- **Actor:** YuHaul administrator debugging routing gaps
+- **Context:** User expected a video to match but it didn't
+- **Trigger:** User navigates to Runs > [run] > [video] or Analytics > Channels > [channel] > [video]
+- **Desired outcome:** Decision Detail shows the complete evidence trail: every route evaluated, every condition result (matched/not matched), and the final outcome
+- **Observable success:** Evidence trail is readable top-to-bottom in evaluation order; each condition shows its result with a visual indicator; outcome is explained in plain language
+- **Source:** AC 15, 28
+
+**US-014: Understand Processing Outcome States**
+- **Actor:** YuHaul administrator interpreting run results
+- **Context:** Videos can be in multiple outcome states; the user needs to distinguish them
+- **Trigger:** User views Run Detail or Decision Detail
+- **Desired outcome:** The three-layer outcome model is visible: processing state, per-route decisions, and per-action execution; summary badges use distinct visual treatment for each state
+- **Observable success:** Accepted, rejected, deferred, failed, and not-yet-evaluated are all visually distinct; not-yet-evaluated never appears as a negative routing decision; the user can tell at a glance what happened
+- **Source:** AC 32
+
+#### Analytics & Channel Quality
+
+**US-015: View Trend Analytics**
+- **Actor:** YuHaul administrator identifying patterns over time
+- **Context:** User wants to see how routing performance changes over weeks or months
+- **Trigger:** User navigates to Analytics > Trends
+- **Desired outcome:** Temporal charts show acceptance rate, videos processed, route match rates, and quota consumption over the selected time range
+- **Observable success:** Charts render with accurate data; time range selector works; charts have accessible text alternatives; data is interpretable without documentation
+- **Source:** AC 23, 24
+
+**US-016: Evaluate Channel Usefulness**
+- **Actor:** YuHaul administrator assessing subscription value
+- **Context:** User wants to know which channels produce content they actually keep
+- **Trigger:** User navigates to Analytics > Channels
+- **Desired outcome:** Channel list shows usefulness metrics (discovered, routed, retained, usefulness rate); channel detail shows retention signal provenance (user-driven vs YuHaul-routed)
+- **Observable success:** Channel usefulness is quantified; retention provenance distinguishes genuine user retention from system-routed membership; advisory badges appear for low-usefulness channels
+- **Source:** AC 21, 22, 31
+
+**US-017: Review Channel Advisory**
+- **Actor:** YuHaul administrator acting on system suggestions
+- **Context:** System has identified a channel with low usefulness
+- **Trigger:** User clicks a channel with an advisory badge
+- **Desired outcome:** Advisory shows evidence-backed suggestion with supporting metrics; user can take action, dismiss, or ignore
+- **Observable success:** Advisory text is specific and evidence-based; "Take action" opens the relevant external action (e.g., YouTube unsubscribe page); dismiss/ignore are distinct actions; no autonomous policy changes occur
+- **Source:** AC 31
+
+#### Quota & Error Management
+
+**US-018: Monitor Quota Consumption**
+- **Actor:** YuHaul administrator managing API budget
+- **Context:** YouTube quota is limited (10,000 units/day); user needs visibility
+- **Trigger:** User views Overview or Analytics
+- **Desired outcome:** Quota consumption is visible at a glance (current usage, remaining, reset time); quota ledger breaks down consumption by operation type
+- **Observable success:** Overview shows quota bar with percentage; Analytics shows detailed ledger; when quota is exhausted, deferred work is clearly indicated
+- **Source:** AC 18, 19
+
+**US-019: Triage Failed Processing**
+- **Actor:** YuHaul administrator resolving processing failures
+- **Context:** Videos failed during processing and need investigation
+- **Trigger:** User navigates to Errors
+- **Desired outcome:** Error queue shows failed items with error type, reason, and timestamp; user can retry or dismiss each item
+- **Observable success:** Retry re-attempts processing; dismiss removes from active queue while preserving history; error details are specific enough to diagnose
+- **Source:** AC 14
+
+**US-020: Review Deferred Work**
+- **Actor:** YuHaul administrator checking quota-deferred items
+- **Context:** Some videos were deferred due to quota exhaustion
+- **Trigger:** User navigates to Errors > Deferred tab
+- **Desired outcome:** Deferred items show video, channel, deferral reason, and next-eligibility indicator; user can retry when quota allows or discard
+- **Observable success:** Deferred items are clearly distinguished from errors; next-eligibility shows when the item will be retried; manual retry is available if quota permits
+- **Source:** AC 13, 30
+
+#### Configuration History
+
+**US-021: Review Configuration Changes**
+- **Actor:** YuHaul administrator interpreting historical statistics
+- **Context:** Route changes affect statistics; user needs to correlate changes with outcomes
+- **Trigger:** User navigates to History
+- **Desired outcome:** Chronological list of configuration changes with timestamps, summaries, and linked runs; user can diff any two versions
+- **Observable success:** Each version shows what changed, when, and which runs executed under it; diff view highlights additions/removals/modifications; historical statistics are interpretable in configuration context
+- **Source:** AC 25
+
+#### Responsive Access
+
+**US-022: Use on Mobile**
+- **Actor:** YuHaul administrator checking system status on the go
+- **Context:** User wants to check runs, errors, and analytics from their phone
+- **Trigger:** User opens YuHaul on a mobile device
+- **Desired outcome:** Interface adapts to mobile viewport; primary navigation is accessible via bottom bar; data tables convert to cards; forms are usable with touch
+- **Observable success:** All core functionality is reachable; touch targets are adequate (44×44px minimum); text is readable without zooming; no horizontal scrolling on primary content
+- **Source:** AC 29
+
+---
+
+### Scenarios
+
+#### SC-001: Morning Coffee Check-in (Mobile, 90 seconds)
+
+**Context:** The user is having coffee, phone in hand, before starting their day. YuHaul last ran 6 hours ago during the overnight scheduled window.
+
+**Goal:** Confirm the system is healthy and see if anything interesting was discovered overnight.
+
+**Task sequence:**
+1. User opens YuHaul in mobile browser — Overview loads
+2. User sees: last run 6h ago, 42 videos processed, 3 accepted, 12 deferred (quota), 0 errors. Quota bar: 8,400/10,000 used today (84%)
+3. User taps "Runs" in bottom nav — run list shows latest run at top with "3 accepted" badge
+4. User taps the latest run — Run Detail shows the 3 accepted videos: title, channel, target playlist
+5. User taps "Errors" in bottom nav — error queue is empty, deferred tab shows 12 items from quota exhaustion
+6. User closes the browser tab
+
+**Outcome:** User confirms system is operating normally. Total time: ~90 seconds. No action needed.
+
+**Edge condition:** If the error queue were not empty, the user would tap into the error detail to assess urgency. The design must make error detail accessible in ≤2 taps from the Errors list.
+
+---
+
+#### SC-002: Investigating a Specific Rejection (Desktop, 3 minutes)
+
+**Context:** The user remembers a video from a specific channel that should have matched their "New Discoveries" route but didn't appear in the playlist.
+
+**Goal:** Understand exactly why the video was rejected and decide whether to adjust routes.
+
+**Task sequence:**
+1. User navigates to Analytics > Channels
+2. User searches or scrolls to find the channel — sees it has 12 discoveries, 8 routed, 2 retained
+3. User clicks the channel — channel detail shows recent videos
+4. User finds the specific video — it shows "Rejected" badge
+5. User clicks the video — Decision Detail opens
+6. Evidence trail shows:
+   - Route 1 "Music Discovery": condition "title contains [genre keyword]" — NOT MATCHED (red X). The video's title uses a different keyword.
+   - Route 2 "Ambient": condition "duration > 10min" — NOT MATCHED (red X). Video is 4 minutes.
+   - Result: rejected (no route matched)
+7. User realizes the genre keyword in their route is too narrow
+8. User navigates to Routes > Music Discovery and adds an alternative keyword condition
+9. User saves the route
+
+**Outcome:** User understands the rejection reason and adjusts routing. The evidence trail made the cause unambiguous.
+
+**Edge condition:** If the video were deferred (not rejected), the user would see "Deferred: quota exhausted" instead of the condition trail. The design must distinguish "not evaluated" from "evaluated and rejected."
+
+---
+
+#### SC-003: Setting Up a New Genre Route (Desktop, 5 minutes)
+
+**Context:** The user has been manually listening to a new genre (lo-fi hip-hop) and wants to automate discovery of it.
+
+**Goal:** Create a route that catches lo-fi hip-hop videos and adds them to a dedicated playlist.
+
+**Task sequence:**
+1. User navigates to Routes — sees existing routes in evaluation order
+2. User clicks "New Route" — Route Editor opens
+3. User enters name: "Lo-Fi Discoveries"
+4. User adds condition: title contains "lo-fi" AND condition: duration_seconds >= 120
+5. User adds exclusion: channel name "Spam Channel" (known repetitive uploader)
+6. User configures action: add to playlist "Lo-Fi Beats" (selected from YouTube playlists)
+7. User sets evaluation order: drags route to position 3 (after "Music Discovery" and "Ambient")
+8. User toggles "Final" off (default — other routes should still evaluate)
+9. User clicks "Save" — route is created
+10. User clicks "Dry Run" — confirms the dialog
+11. Dry-run processes 42 pending videos against draft configuration (including new route)
+12. Results show: 5 videos would match the new route, 3 overlap with existing routes, 2 are new catches
+13. User is satisfied — the route is already saved
+
+**Outcome:** New route created, dry-run validated it catches expected content, no conflicts with existing routes.
+
+**Edge condition:** If the dry-run showed 0 new catches, the user would revisit conditions before saving. The dry-run must clearly show which videos matched which routes to make this assessment possible.
+
+---
+
+#### SC-004: Importing Historical Corpus (Desktop, 10 minutes)
+
+**Context:** The user is migrating from the old YuHaul application and has a CSV file with 12,000 historical video titles.
+
+**Goal:** Import the historical corpus so duplicate detection works from day one.
+
+**Task sequence:**
+1. User navigates to Settings > Data
+2. User sees "Historical Corpus Import" section
+3. User clicks "Import" — file picker appears
+4. User selects the CSV file
+5. System validates format and shows preview: "12,000 titles found. Date range: 2020-01-15 to 2026-09-01. First 10 titles shown for confirmation. 847 titles already exist in corpus (duplicates to skip)."
+6. User selects "Append" mode (default)
+7. User confirms import — progress indicator shows: "Importing: 3,200 of 12,000 titles (27%) — ~180 titles/sec — estimated 49 seconds remaining"
+8. Import completes: toast "Imported 11,153 new historical titles (847 duplicates skipped). Total corpus: 11,153 titles."
+9. User clicks "Export" to verify the corpus can be backed up
+
+**Outcome:** Historical corpus imported, duplicates identified and skipped, corpus integrity preserved.
+
+**Edge condition:** If the file format is invalid, the system must show a clear error ("Expected CSV with title column, or JSON array of objects with 'title' field") without losing the user's context. If the user cancels mid-import in Append mode, already-imported titles are preserved.
+
+---
+
+#### SC-005: Backtest Before Adding a Route (Desktop, 10 minutes)
+
+**Context:** The user wants to add a route for "Jazz Covers" but isn't sure if it would catch meaningful content given their current subscriptions.
+
+**Goal:** Evaluate the proposed route against 30 days of historical observations before committing.
+
+**Task sequence:**
 1. User navigates to Backtest
-2. Backtest interface shows mode selector: "Hypothetical Backtest" | "Replay/Reprocess"
-3. If Hypothetical Backtest:
-   a. Current route configuration shown as read-only preview
-   b. User can modify routes in a "proposed configuration" editor (changes are draft, not saved)
-   c. User selects date range for historical observations
-    d. User clicks "Run Backtest" → frontend subscribes to SSE stream, progress indicator shown with real-time updates
-   e. Backtest completes → results view shows:
-      - Comparison: actual historical outcomes vs. proposed configuration outcomes
-      - New catches (videos that would have matched under proposed config but didn't)
-      - Lost catches (videos that matched historically but wouldn't under proposed config)
-      - Net change summary
-   f. User can inspect individual video outcomes in the comparison
-   g. User can "Apply" the proposed configuration (creates/updates routes) or "Discard"
-4. If Replay/Reprocess:
-   a. User selects configuration version (current or historical from Configuration History)
-   b. User selects date range for historical observations
-    c. User clicks "Run Replay" → frontend subscribes to SSE stream, progress indicator shown with real-time updates
-   d. Replay completes → results view shows:
-      - Each video's replay outcome (accepted/rejected/deferred/failed) under the selected configuration
-      - Comparison to original production outcome (if available): "Originally accepted, now rejected" etc.
-      - Outcomes are labeled as "Replay" — distinct from production outcomes
-   e. User can inspect individual video outcomes in the replay results
-   f. User can "Apply Configuration" to make this historical config current, or "Discard"
-```
+2. User selects "Hypothetical Backtest" mode
+3. User adds a proposed route in the draft editor: condition "title contains 'jazz' OR title contains 'cover'"
+4. User selects date range: last 30 days
+5. User clicks "Run Backtest" — SSE stream shows progress
+6. Backtest completes — results view shows:
+   - New catches: 23 videos (would have matched under proposed config but didn't historically)
+   - Lost catches: 0 (no existing route would be disrupted)
+   - Net change: +23
+7. User inspects individual new catches — sees titles, channels, and which routes they would match
+8. User clicks "Apply" — the proposed route configuration is saved as a new route
+9. User navigates to Routes — new "Jazz Covers" route appears in the list
 
-**Flow 7: Import historical corpus**
+**Outcome:** User validated the route against history before committing, gaining confidence in the configuration change.
 
-```
-1. User navigates to Settings → Data section
-2. User sees "Historical Corpus Import" option
-3. User clicks "Import" → file picker appears (accepts CSV or JSON)
-4. User selects file → system validates format and shows preview:
-   - File format detected (CSV or JSON)
-   - N titles found
-   - Date range of entries (earliest to latest publish date, if available)
-   - Sample of first 10 titles for format confirmation
-   - Duplicate check: M titles already exist in corpus
-5. User sees mode selection:
-   - "Append" (default): add new titles to existing corpus
-   - "Replace": overwrite existing corpus entirely (with confirmation)
-6. User confirms import → system stages and validates all titles before committing
-7. Progress indicator shown with:
-   - Percentage complete (X of N titles processed)
-   - Processing rate (titles/second)
-   - Estimated time remaining
-   - Cancel button (Append mode: stops import, preserves already-imported titles; Replace mode: cancels before commit, leaves previous corpus intact)
-8. On completion: summary toast "Imported N new historical titles (M duplicates skipped). Total corpus: T titles."
-9. User can also "Export" current corpus for backup
-```
+**Edge condition:** If the backtest showed lost catches, the user would need to evaluate whether the trade-off is acceptable. The comparison view must make lost catches as visible as new catches.
 
-**Flow 8: Review channel advisories**
+---
 
-```
-1. User navigates to Analytics → Channels
-2. Advisory badges appear next to channels with system-generated suggestions
-3. User clicks a channel with advisory → channel detail shows advisory section
-4. Advisory shows: suggestion text, supporting evidence (metrics), suggested action
-5. User can "Take action" (system opens the specific action described, e.g., YouTube unsubscribe page), "Dismiss" (acknowledge but don't act),
-   or "Ignore" (hide advisory for this channel for 30 days)
-6. Advisory decisions are logged for reference
-```
+#### SC-006: Quota Exhaustion During a Run (Desktop, observed passively)
+
+**Context:** A scheduled run starts with 2,100 quota units remaining. The run discovers 85 new videos.
+
+**Goal:** Process as many videos as possible without losing eligible work.
+
+**Task sequence:**
+1. Run starts — Overview shows "Run in progress" with SSE-driven progress
+2. At video 34, quota is exhausted
+3. Run transitions remaining 51 videos to "deferred" state
+4. Run completes with summary: 34 processed (22 accepted, 10 rejected, 2 failed), 51 deferred
+5. Overview shows: quota bar at 10,000/10,000 (exhausted), deferred count: 51
+6. Errors > Deferred tab shows 51 items with "Quota exhausted" reason and next-eligibility: "Eligible when quota resets (estimated 6 hours)"
+7. User sees no errors — this is operational state, not failure
+8. Next scheduled run picks up deferred items when quota is available
+
+**Outcome:** No eligible work was lost. Deferred items are preserved and will be retried automatically.
+
+**Edge condition:** If a video failed (not deferred), it would appear in the Error tab with a specific error type (e.g., "YouTube API error: video not found"). The design must clearly distinguish "deferred because quota" from "failed because error."
+
+---
+
+#### SC-007: Re-authentication After Token Expiry (Desktop, 2 minutes)
+
+**Context:** The user's YouTube OAuth token has expired (tokens typically last hours to days).
+
+**Goal:** Re-authenticate without losing any processing state.
+
+**Task sequence:**
+1. User opens YuHaul — Overview shows "Account: Disconnected" warning
+2. Next scheduled run would fail — user sees an auth error in the Error queue
+3. User navigates to Settings > Account
+4. Account status shows "Disconnected — token expired"
+5. User clicks "Reconnect" — OAuth flow opens in new tab
+6. User authorizes on YouTube — redirected back to YuHaul
+7. Account status updates to "Connected — [channel name]"
+8. User navigates to Errors — the auth error is still in the queue
+9. User clicks "Retry" on the auth error — system re-processes the video with fresh token
+10. On success: error is dismissed from active queue
+
+**Outcome:** Account reconnected, failed items retried, processing can resume.
+
+**Edge condition:** If the retry fails again (e.g., video was removed from YouTube), the error updates with the new reason and stays in the queue. The user can dismiss it manually.
+
+---
 
 ### Behavioral Specification
 
@@ -255,13 +445,14 @@ status: draft
   - Summary cards region: key metrics at a glance (videos processed, accepted, deferred, errors)
   - Quick actions region: "Run Now", "Dry Run", "View Errors" buttons
   - Activity feed region: recent run history (last 5 runs as compact rows)
-- **Components:** Status card, metric card, quick action button, activity row
+  - Quota region: quota bar with units used/remaining, estimated reset time
+- **Components:** Status card, metric card, quick action button, activity row, quota bar
 
 **View: Route List** — Manage all routing rules; user job: see all routes, their order, and status.
 - **Regions:**
   - Toolbar region: "New Route" button
   - Route list region: sortable list of routes with drag-to-reorder
-- **Components:** Route row (name, description snippet, enabled/disabled toggle, final badge, match count, drag handle), empty state
+- **Components:** Route row (name, description snippet, enabled/disabled toggle, final badge, match count, drag handle, move up/down buttons), empty state
 
 **View: Route Editor** — Create or edit a single route; user job: define conditions, exclusions, and actions for a routing rule.
 - **Regions:**
@@ -273,11 +464,11 @@ status: draft
   - Footer region: Save, Cancel, Delete (if editing existing)
 - **Components:** Condition row (field selector, operator selector, value input, remove button), condition list (add condition, AND/OR toggle), exclusion section (channel exclusion list, video identity exclusion list, title exclusion list, word/phrase exclusion list, duration min/max inputs, add/remove for each list), action row (type selector: "Add to playlist" — v1 only, parameter fields), save/cancel buttons
 - **Exclusion semantics:** Exclusions are route-scoped — a video excluded from this route is not evaluated by this route but remains eligible for other routes. Exclusion lists support add/remove of individual entries. Duration limits are optional min/max fields (empty = no limit on that side). All exclusion state is persisted with the route.
-- **Layout:** Single-column layout at all viewport widths. Conditions, exclusions, and actions are vertically stacked. This avoids the complexity of responsive column reflow and ensures the editor works identically on mobile and desktop.
+- **Layout:** Single-column layout at all viewport widths. Conditions, exclusions, and actions are vertically stacked.
 
 **View: Run List** — Browse processing history; user job: find a specific run or scan recent activity.
 - **Regions:**
-  - Filter region: date range, run type (manual/scheduled/dry-run), status filter
+  - Filter region: date range, run type (manual/scheduled/dry-run/replay/backtest), status filter
   - Run list region: chronological list of runs
 - **Components:** Run row (timestamp, type badge, duration, video count, outcome summary, quota cost, status), empty state, filter controls
 
@@ -301,7 +492,7 @@ status: draft
 - **Regions:**
   - Time range selector region: preset ranges (7d, 30d, 90d, all) + custom date picker
   - Trend charts region: acceptance rate, videos processed, route match rates over time
-  - Quota ledger region: API consumption breakdown (see Quota Ledger below)
+  - Quota ledger region: API consumption breakdown
   - Summary statistics region: lifetime and period aggregates
 - **Components:** Date range picker, line chart, bar chart, statistic card, sparkline, quota ledger table
 
@@ -312,25 +503,15 @@ status: draft
   - Duplicate provenance region (within channel detail): discovery credit vs. relevance credit breakdown
   - Retention signal provenance region (within channel detail): user-driven vs. YuHaul-routed membership breakdown
   - Advisory region (within channel detail): system-generated suggestions with evidence
-- **Components:** Channel row (name, discovered count, routed count, retained count in designated rotation playlists, usefulness rate, time since last useful discovery, advisory badge), channel detail (video list, usefulness chart, route match breakdown, duplicate provenance breakdown, retention signal provenance breakdown, advisory card with take-action/dismiss/ignore actions)
-- **Duplicate provenance display:** Within the channel detail view, a section titled "Discovery & Relevance Credit" shows:
-  - **Discovery credit:** videos where this channel was the first source to publish the content (discovery = this channel "won" the race). Count and percentage of channel's discoveries.
-  - **Relevance credit:** videos where this channel published content that was already discovered from another channel (relevance = this channel confirmed relevance of existing content). Count and percentage.
-  - Per-video provenance note: for each video in the channel's video list, a small badge or note indicates whether this channel holds discovery credit ("First discovered") or relevance credit ("Also published by [other channels]"). This surfaces which channels are primary discoverers vs. redundant publishers.
-
-- **Retention signal provenance display:** Within the channel detail view, a section titled "Retention Signal Provenance" shows:
-  - **User-driven retention:** videos where this channel's content was added to a designated retention/rotation playlist by the user or an external process (not by YuHaul routing). These are genuine retention signals — the user chose to keep this content. Count and percentage of channel's retained videos.
-  - **YuHaul-routed membership:** videos where this channel's content was added to a designated retention/rotation playlist by YuHaul's own routing action. These do NOT count as retention signals — the system placed them, not the user. Count and percentage, labeled clearly as "not counted as retention."
-  - **Provenance summary line:** displayed prominently in the channel detail header area, e.g., "Retained: 12 (8 user-driven, 4 YuHaul-routed — not counted as retention)." This mirrors the existing duplicate provenance pattern and ensures the user can distinguish genuine keep signals from self-referential routing artifacts at a glance.
-  - Per-video provenance note: for each video in the channel's video list that appears in a designated retention playlist, a small badge indicates provenance — "User-added" (genuine retention signal) or "YuHaul-routed" (not a retention signal). This mirrors the existing duplicate provenance pattern (discovery credit vs. relevance credit).
+- **Components:** Channel row (name, discovered count, routed count, retained count, usefulness rate, time since last useful discovery, advisory badge), channel detail (video list, usefulness chart, route match breakdown, duplicate provenance breakdown, retention signal provenance breakdown, advisory card with take-action/dismiss/ignore actions)
 
 **View: Configuration History** — Route and configuration version history; user job: understand what changed, when, and which configuration governed each historical run.
 - **Regions:**
   - History list region: chronological list of configuration changes
   - Change detail region (on selection): full effective route configuration at that point in time, linked runs
-- **Components:** History entry (timestamp, change summary, configuration version number, linked run count), change detail panel (full route configuration snapshot, list of runs that executed under this configuration, "diff view" comparing to previous version)
+- **Components:** History entry (timestamp, change summary, configuration version number, linked run count), change detail panel (full route configuration snapshot, list of runs that executed under this configuration, diff view comparing to previous version)
 - **Diff view:** Side-by-side or inline comparison showing what changed between two configuration versions (added/removed/modified routes, conditions, exclusions, actions). Highlight additions in green, removals in red, modifications in amber.
-- **Linked runs:** Each configuration version shows which runs executed under it. Clicking a run navigates to Run Detail. This fulfills AC 25 (route/configuration history sufficient to interpret historical statistics) and the configuration-history requirement ACs 2–4.
+- **Linked runs:** Each configuration version shows which runs executed under it. Clicking a run navigates to Run Detail.
 
 **View: Error Queue and Deferred Work** — Triage processing failures and review deferred items; user job: resolve failures and understand deferred work.
 - **Regions:**
@@ -339,9 +520,9 @@ status: draft
   - Error detail region (on selection): full error context
   - Deferred list region: quota-deferred items with next-eligibility indicator
   - Deferred detail region (on selection): deferral context and manual retry option
-- **Components:** Tab selector, error row (video title, channel, error type, timestamp, retry button, remove button), error detail panel, deferred row (video title, channel, deferral reason, next-eligible indicator, manual retry button, discard button), deferred detail panel
+- **Components:** Tab selector, error row (video title, channel, error type, timestamp, retry button, remove button), error detail panel, deferred row (video title, channel, deferral reason, next-eligibility indicator, manual retry button, discard button), deferred detail panel
 
-**View: Backtest** — Compare proposed routing against historical observations, or replay/reprocess historical videos through current or proposed configuration; user job: evaluate a configuration change before committing, or re-evaluate history with different settings.
+**View: Backtest** — Compare proposed routing against historical observations, or replay/reprocess historical videos; user job: evaluate a configuration change before committing, or re-evaluate history with different settings.
 - **Regions:**
   - Mode selector region: "Hypothetical Backtest" tab, "Replay/Reprocess" tab
   - Configuration editor region (hypothetical): proposed route changes (draft, not saved)
@@ -349,22 +530,17 @@ status: draft
   - Date range selector region: which historical period to test or replay
   - Results region: comparison view
 - **Components:** Mode tab selector, route editor (same as Route Editor but in draft mode for hypothetical mode), configuration version selector (for replay mode), date picker, comparison cards (new catches, lost catches, net change), replay results list (reprocessed outcomes), video comparison list
-- **Hypothetical backtest:** User proposes route changes, runs backtest against historical observations, sees what would have changed. Production state is not altered. Results show comparison: actual historical outcomes vs. proposed configuration outcomes.
-- **Replay/reprocess:** User selects a configuration version (current or historical) and date range. System re-processes retained historical observations through that configuration, producing replay outcomes recorded distinctly from production outcomes. The user can see whether a video's outcome was produced by a production run, a replay, or a backtest. This fulfills the historical-reevaluation requirement (AC 2–5).
-- **Protection:** Backtest and replay must not alter production duplicate corpus, idempotency records, statistics, or playlist state. Backtest operates on a read-only copy of historical observations. Replay produces replay-labeled results, not production results.
 
 **View: Settings** — System configuration; user job: configure scheduling, quota limits, account, data management, and retention playlists.
 - **Regions:**
   - Schedule region: cron-like schedule configuration
   - Quota region: API quota limits, current usage, and quota ledger
   - Account region: YouTube account connection status, re-authenticate option
-  - Retention playlists region: designate which playlists represent the user's actual keep signal (rotation, favorites, curated)
+  - Retention playlists region: designate which playlists represent the user's actual keep signal
   - Duplicate detection region: fuzzy matching threshold configuration
   - Data region: historical corpus import/export, data management
   - Danger zone region: disconnect account
-- **Components:** Schedule form, quota display with ledger breakdown, account status card, retention playlist selector (multi-select from user's YouTube playlists with "Add" to designate), threshold slider with numeric display and explanation, import/export controls, danger action buttons
-- **Retention playlist semantics:** Only playlists explicitly designated by the user count as retention signals. Membership caused by YuHaul routing actions does not itself indicate retention — the user must designate a playlist as a retention/rotation target. The advisory system and channel usefulness metrics reference these designated playlists when calculating retention rates.
-- **Duplicate detection threshold:** A numeric input or slider (range 50%–100%, default 80%) controlling the fuzzy matching threshold for title similarity. Below the slider, helper text explains: "Titles with similarity above this threshold are considered fuzzy duplicates. Higher values require closer matches. Exact identifier matches are always detected regardless of this setting." The threshold is global — it applies to all duplicate detection across the system. Current value is displayed and persisted on change. No separate "Apply" needed — value saves on change with a brief toast confirmation.
+- **Components:** Schedule form, quota display with ledger breakdown, account status card, retention playlist selector (multi-select from user's YouTube playlists), threshold slider with numeric display and explanation, import/export controls, danger action buttons
 
 #### Three-Layer Video Outcome Model
 
@@ -399,7 +575,7 @@ A video in YuHaul has three independent outcome layers. The summary badge on vid
 
 #### Quota Ledger
 
-The quota ledger provides visibility into API consumption, fulfilling AC 18 ("External API consumption accounted for and visible").
+The quota ledger provides visibility into API consumption, fulfilling AC 18.
 
 **Displayed in Analytics Dashboard and Run Detail:**
 
@@ -446,6 +622,11 @@ Advisories are system-generated suggestions based on channel and route performan
 - On drop: updates evaluation order, saves automatically
 - On Escape: cancels drag, returns to original position
 
+**Route row interaction — Move Up/Down buttons:**
+- System: moves route one position up or down in evaluation order, saves automatically
+- Keyboard: accessible via Tab, activated with Enter/Space
+- Required alternative to drag per WCAG 2.2 SC 2.5.7
+
 **Run row states:**
 - default: timestamp, type badge, duration, outcome summary, quota cost
 - hover: background shift, clickable
@@ -458,7 +639,7 @@ Advisories are system-generated suggestions based on channel and route performan
 - evaluated (rejected): red badge with X icon
 - deferred: yellow badge with clock icon
 - acted (failed): red badge with alert icon
-- not-yet-evaluated: gray badge with dash icon (only for videos where execution did not reach routing — never for videos skipped by a final route match or exclusion)
+- not-yet-evaluated: gray badge with dash icon (only for videos where execution did not reach routing)
 - discovered/evaluating: blue badge with spinner icon (transient states)
 
 **Video outcome row interaction — click:**
@@ -535,7 +716,7 @@ Advisories are system-generated suggestions based on channel and route performan
 - System: "Run" button in header always visible
 - On click: dropdown with "Run Now" and "Dry Run" options
 - "Run Now" on click: confirmation dialog "Start a processing run now?", on confirm: starts run, frontend subscribes to SSE stream (`/api/runs/:id/stream`), navigates to Run Detail for the new run with live progress
-- "Dry Run" on click: confirmation dialog (see Flow 3), on confirm: starts dry-run, subscribes to SSE stream, shows live progress, navigates to dry-run results
+- "Dry Run" on click: confirmation dialog (see SC-003), on confirm: starts dry-run, subscribes to SSE stream, shows live progress, navigates to dry-run results
 
 **Empty states:**
 - Route list empty: "No routes yet. Create your first route to start routing videos." + "New Route" button
@@ -588,7 +769,7 @@ Advisories are system-generated suggestions based on channel and route performan
 
 **Route editor:** Conditions and actions are vertically stacked in a single-column layout at all viewport widths. This eliminates the contradiction between vertical stacking (narrow viewports) and two-column (desktop) — a single layout works everywhere.
 
-**Video outcome list in Run Detail:** On mobile, each video row converts to a card layout with stacked fields (title, channel, outcome badge, route match summary). On desktop, full table columns are visible. Cards preserve scanability while adapting to narrow viewports.
+**Video outcome list in Run Detail:** On mobile, each video row converts to a card layout with stacked fields (title, channel, outcome badge, route match summary). On desktop, full table columns are visible.
 
 **Decision evidence trail:** Must be vertically sequential (top to bottom = evaluation order). Never side-by-side — this is a sequential evaluation process.
 
@@ -756,15 +937,15 @@ Advisories are system-generated suggestions based on channel and route performan
 
 **DD-3: Theme follows system preference, no manual toggle in v1**
 - Decision: The interface uses `prefers-color-scheme` CSS media query to follow the user's operating system theme. No manual dark/light toggle in v1.
-- Rationale: A single-user personal tool inherits the user's system preference automatically. Adding a toggle requires persisting the choice (localStorage or backend), generating two complete token sets, and testing both themes — non-trivial implementation cost for a feature the OS already provides. The system preference approach is zero-configuration and always correct.
-- Alternatives considered: Manual toggle with localStorage persistence — possible as a future enhancement but adds implementation complexity without proportional user benefit for a single-user tool. Dark-mode-only — rejected because some users prefer light mode and the OS preference approach supports both.
+- Rationale: A single-user personal tool inherits the user's system preference automatically. Adding a toggle requires persisting the choice (localStorage or backend), generating two complete token sets, and testing both themes — non-trivial implementation cost for a feature the OS already provides.
+- Alternatives considered: Manual toggle with localStorage persistence — possible as a future enhancement but adds implementation complexity without proportional user benefit for a single-user tool.
 - Trade-off accepted: User cannot override OS preference within the app. Acceptable because OS-level theme switching is immediate and system-wide.
 
 **DD-4: SPA with URL reflecting all meaningful state**
 - Decision: Single-page application where every navigable state has a URL. Back button works. New tab opens same view. Links are shareable.
 - Rationale: Users bookmark frequently accessed views (specific route editor, channel analysis page). Users share links to specific runs or channels. SPA provides smoother transitions between related views.
-- Alternatives considered: MPA (multi-page app) — rejected because the interface has many cross-cutting views (search results, decision detail from multiple entry points) where SPA's client-side routing provides smoother transitions. Hash-based routing — rejected because URLs are less readable and less shareable.
-- Trade-off accepted: SPA requires explicit focus management on route changes (handled in Focus Behavior section) and careful state management to avoid stale data.
+- Alternatives considered: MPA (multi-page app) — rejected because the interface has many cross-cutting views where SPA's client-side routing provides smoother transitions. Hash-based routing — rejected because URLs are less readable and less shareable.
+- Trade-off accepted: SPA requires explicit focus management on route changes and careful state management to avoid stale data.
 
 **DD-5: Evidence trail as vertical sequence, not tree**
 - Decision: Decision evidence is presented as a top-to-bottom evaluation sequence (Route 1 → Route 2 → Route 3), not as a tree or branching visualization.
@@ -780,51 +961,51 @@ Advisories are system-generated suggestions based on channel and route performan
 
 **DD-7: Flat condition list for v1 route editor**
 - Decision: Route conditions use a flat list of conditions with a single AND/OR toggle at the top. No nested condition groups in v1.
-- Rationale: The anchor specifies "configurable conditions" without requiring nesting. For v1, conditions are typically 2–4 simple rules (title contains X, duration > Y, channel equals Z). Flat list with AND/OR covers the common case with minimal UI complexity. Nested groups add significant UI complexity (indentation, group management, mixed operators) for a use case that may not arise in practice.
+- Rationale: The anchor specifies "configurable conditions" without requiring nesting. For v1, conditions are typically 2–4 simple rules (title contains X, duration > Y, channel equals Z). Flat list with AND/OR covers the common case with minimal UI complexity.
 - Alternatives considered: Nested condition groups with AND/OR at group level — deferred to v2 if user needs arise. Visual query builder — rejected as over-engineered for v1.
-- Trade-off accepted: Users cannot express complex boolean logic like "(A AND B) OR (C AND D)" in v1. If this need arises, it becomes a v2 enhancement informed by real usage.
+- Trade-off accepted: Users cannot express complex boolean logic like "(A AND B) OR (C AND D)" in v1.
 
 **DD-7b: Route-scoped exclusions as a separate region in Route Editor**
 - Decision: Exclusions are a dedicated region in the Route Editor, visually distinct from conditions. Each exclusion type (channel, video, title, word/phrase, duration) is a separate list with add/remove controls. Exclusions apply per-route — a video excluded from Route A remains eligible for Route B.
-- Rationale: Exclusions are a different semantic construct from conditions. Conditions define what a route accepts; exclusions define what a route explicitly rejects before condition evaluation. Separating them makes the route's behavior legible: "evaluate conditions, but skip these first." Per-route scoping matches the exclusion-behaviors requirement (AC 6: excluded video remains eligible for other routes).
-- Alternatives considered: Exclusions as a special condition type (e.g., "title NOT contains") — rejected because exclusions run before condition evaluation and have different semantics (exclusion prevents evaluation entirely; condition mismatch just means no match). Global exclusions — rejected because the requirement specifies per-route scoping.
+- Rationale: Exclusions are a different semantic construct from conditions. Conditions define what a route accepts; exclusions define what a route explicitly rejects before condition evaluation. Separating them makes the route's behavior legible.
+- Alternatives considered: Exclusions as a special condition type (e.g., "title NOT contains") — rejected because exclusions run before condition evaluation and have different semantics. Global exclusions — rejected because the requirement specifies per-route scoping.
 - Trade-off accepted: More UI elements in the Route Editor. Acceptable because the single-column layout accommodates it and the separation makes route behavior clearer.
 
 **DD-8: Mobile tables convert to cards**
 - Decision: On viewports < 768px, data tables convert to card layout where each row becomes a stacked card with essential fields visible.
-- Rationale: Cards preserve scanability on narrow viewports by presenting each item as a discrete unit with stacked fields. This is more mobile-native than column reduction and avoids the poor UX of horizontal scrolling on touch devices.
-- Alternatives considered: Reduced columns with expand — deferred as an enhancement; cards are the default because they work without interaction. Horizontal scroll — rejected because horizontal scrolling on mobile is poor UX.
-- Trade-off accepted: Cards show fewer items per viewport than a table. Acceptable because mobile use is typically scanning (checking status) rather than deep analysis.
+- Rationale: Cards preserve scanability on narrow viewports by presenting each item as a discrete unit with stacked fields. This is more mobile-native than column reduction and avoids horizontal scrolling on touch devices.
+- Alternatives considered: Reduced columns with expand — deferred; cards are the default. Horizontal scroll — rejected because horizontal scrolling on mobile is poor UX.
+- Trade-off accepted: Cards show fewer items per viewport than a table. Acceptable because mobile use is typically scanning rather than deep analysis.
 
 **DD-9: Three-layer video outcome model**
 - Decision: Video outcomes are modeled as three independent layers: processing state, per-route decisions, and per-action execution. Summary badges derive from the layers but are not the authoritative model.
 - Rationale: A single outcome badge cannot represent the full reality of routing. A video can be accepted by one route and fail on another, or be accepted by a route whose action fails. The three layers make this visible and debuggable.
-- Alternatives considered: Single outcome badge only — rejected because it hides actionable information (e.g., "accepted" when one action failed). Separate views per layer — rejected because it fragments information; layers are presented together in Decision Detail.
-- Trade-off accepted: More complex data model. Acceptable because the complexity reflects reality and the UI presents it progressively (summary badge → full detail on click).
+- Alternatives considered: Single outcome badge only — rejected because it hides actionable information. Separate views per layer — rejected because it fragments information.
+- Trade-off accepted: More complex data model. Acceptable because the complexity reflects reality and the UI presents it progressively.
 
 **DD-10: Dry-run, backtest, and replay as distinct operations**
-- Decision: Dry-run processes current pending workload with real routing semantics but no external mutations. Backtest replays retained historical observations against hypothetical configuration. Replay reprocesses retained historical observations through a selected (current or historical) configuration. All three protect production state.
-- Rationale: These serve different user needs. Dry-run answers "what would happen if I ran now?" Backtest answers "what would have happened if my routes were different?" Replay answers "what would this specific historical configuration have produced?" Conflating them creates confusion about what state is affected and what outcomes are production vs. hypothetical.
-- Alternatives considered: Unified "test mode" — rejected because the operations have different inputs (current pending vs. historical observations), different configuration sources (draft proposed vs. selected historical), different outputs (current outcomes vs. comparison vs. replay results), and different protection requirements.
-- Trade-off accepted: Three separate UIs/modes instead of one. Acceptable because the workflows are genuinely different and users need to understand which they're running and whether outcomes are production, replay, or backtest.
+- Decision: Dry-run processes current pending workload with real routing semantics but no external mutations. Backtest replays retained historical observations against hypothetical configuration. Replay reprocesses retained historical observations through a selected configuration. All three protect production state.
+- Rationale: These serve different user needs with different inputs, configuration sources, outputs, and protection requirements. Conflating them creates confusion.
+- Alternatives considered: Unified "test mode" — rejected because the operations have genuinely different semantics.
+- Trade-off accepted: Three separate UIs/modes instead of one. Acceptable because the workflows are genuinely different.
 
 **DD-11: Global duplicate threshold in Settings, not per-route**
 - Decision: The fuzzy matching threshold for duplicate detection is a single global setting in Settings, not a per-route configuration.
-- Rationale: Duplicate detection operates against the duplicate-reference corpus (videos routed to playlists), which is shared across all routes. A per-route threshold would create inconsistency — the same video pair could be a duplicate under Route A but not under Route B, depending on which route processed them. A global threshold ensures consistent duplicate detection regardless of which route matched. The requirement (AC 3) states "adjustable by the user" without implying per-route scope.
-- Alternatives considered: Per-route threshold — rejected because duplicate detection is a corpus-level operation, not a route-level operation. The corpus is shared; the threshold should be too.
-- Trade-off accepted: User cannot tune duplicate sensitivity per genre or content type. Acceptable because a single threshold covers the common case, and the user can adjust it globally when their content mix changes.
-
-**DD-13: SSE for real-time run progress transport**
-- Decision: Run progress is delivered via Server-Sent Events (SSE) through a REST endpoint (`/api/runs/:id/stream`). The frontend subscribes and receives real-time events for processing state transitions, per-video outcomes, and quota updates.
-- Rationale: Runs may take minutes. Users need immediate feedback on progress — polling adds latency and unnecessary load. SSE is unidirectional (server→client only), which matches the progress use case. It has native browser support (`EventSource`), auto-reconnects on connection loss, and works over standard HTTP with no special server requirements. WebSocket was considered but adds bidirectional complexity that isn't needed here.
-- Alternatives considered: Polling (adds 1–5s latency, wastes requests on fast runs), no real-time progress (poor UX for multi-minute runs), WebSocket (over-engineered for unidirectional progress).
-- Trade-off accepted: SSE requires server-side streaming support, but this is well-supported by Go's `http.Flusher` interface and standard SSE libraries. The architect has already designed the endpoint.
+- Rationale: Duplicate detection operates against a shared corpus. A per-route threshold would create inconsistency — the same video pair could be a duplicate under Route A but not under Route B. A global threshold ensures consistent detection.
+- Alternatives considered: Per-route threshold — rejected because duplicate detection is a corpus-level operation.
+- Trade-off accepted: User cannot tune duplicate sensitivity per genre. Acceptable because a single threshold covers the common case.
 
 **DD-12: Retention provenance as progressive disclosure, not a filter**
 - Decision: Retention signal provenance (user-driven vs. YuHaul-routed) is shown as a summary line and per-video badges in the channel detail view, not as a filter on the channel list.
-- Rationale: The channel list needs to remain scannable — the retained count is the primary signal for usefulness assessment. Provenance breakdown is investigative detail needed when the user is evaluating a specific channel's value. Showing it at list level would clutter the scan path. The summary line in channel detail ("12 retained: 8 user-driven, 4 YuHaul-routed") gives the user the answer immediately; per-video badges let them inspect individual cases.
-- Alternatives considered: Filter by provenance on channel list — rejected because it adds UI complexity to the primary scan view for a use case that arises during investigation, not scanning. Separate provenance tab — rejected because it fragments information that belongs in context with the channel's other metrics.
-- Trade-off accepted: User must click into a channel to see provenance breakdown. Acceptable because provenance inspection is an investigative action, not a daily scan action.
+- Rationale: The channel list needs to remain scannable — the retained count is the primary signal. Provenance breakdown is investigative detail needed during channel evaluation, not during scanning.
+- Alternatives considered: Filter by provenance on channel list — rejected because it adds UI complexity to the primary scan view.
+- Trade-off accepted: User must click into a channel to see provenance breakdown. Acceptable because provenance inspection is investigative, not daily scanning.
+
+**DD-13: SSE for real-time run progress transport**
+- Decision: Run progress is delivered via Server-Sent Events (SSE) through a REST endpoint (`/api/runs/:id/stream`). The frontend subscribes and receives real-time events for processing state transitions, per-video outcomes, and quota updates.
+- Rationale: Runs may take minutes. Users need immediate feedback. SSE is unidirectional (server→client), has native browser support (`EventSource`), auto-reconnects, and works over standard HTTP. WebSocket was considered but adds unnecessary bidirectional complexity.
+- Alternatives considered: Polling (adds latency, wastes requests), no real-time progress (poor UX), WebSocket (over-engineered).
+- Trade-off accepted: SSE requires server-side streaming support, but this is well-supported by Go's `http.Flusher` interface.
 
 ### Open Design Questions
 
@@ -832,17 +1013,11 @@ Advisories are system-generated suggestions based on channel and route performan
 - Option A: Lightweight charting library (e.g., Chart.js, uPlot) — smaller bundle, simpler API, sufficient for line/bar charts
 - Option B: Full-featured library (e.g., ECharts, Recharts) — more chart types, interactive features, larger bundle
 - Option C: Pure SVG/D3 approach — maximum flexibility, highest implementation cost
-- Deciding criterion: The anchor says "no particular charting framework requirement." Implementation complexity vs. feature needs. For v1, line charts (trends) and bar charts (comparisons) are sufficient. Recommend Option A for simplicity, but this is an architecture decision.
+- Deciding criterion: The anchor says "no particular charting framework requirement." For v1, line charts (trends) and bar charts (comparisons) are sufficient. Recommend Option A for simplicity, but this is an architecture decision.
 - Owner: Architect (after design spec is accepted)
 - Blocking: No — Coder can start with placeholder chart components and swap library later
 
-**OQ-2: Real-time run progress display** — RESOLVED
-- **Resolution:** SSE (Server-Sent Events) via REST + SSE with `/api/runs/:id/stream` endpoint.
-- Architect has designed this as the transport. The frontend subscribes to the SSE stream and receives real-time run progress events (processing state, per-video outcomes as they complete, quota consumption updates).
-- Rationale: SSE is simpler than WebSocket (unidirectional server→client is sufficient for progress), has native browser support with `EventSource`, auto-reconnects on connection loss, and works over standard HTTP. No polling overhead, no connection management complexity.
-- Impact on design: Progress indicator in run views (Run Detail, dry-run, backtest, replay) is driven by SSE events, not polling. The UX stays the same — user sees a progress indicator — but the transport is instant and efficient.
-
-**OQ-3: Quota bucket awareness**
+**OQ-2: Quota bucket awareness**
 - Option A: Display raw quota numbers (units used / units remaining) — precise but may be confusing if bucket details are unknown
 - Option B: Display relative status (green/amber/red bar) with raw numbers on hover/tap — simpler at a glance, detailed on demand
 - Option C: Display bucket-specific information (reset time, bucket size) alongside raw numbers — most informative but requires YouTube API quota endpoint availability

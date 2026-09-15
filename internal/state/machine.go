@@ -6,18 +6,38 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bateau84/YuHaul/internal/quota"
 )
 
 // Machine orchestrates valid state transitions for the three-tier outcome model.
 // It wraps a Store and enforces transition rules before persisting.
 type Machine struct {
-	store *Store
-	now   func() time.Time
+	store  *Store
+	ledger *quota.Ledger
+	now    func() time.Time
+}
+
+// MachineOption configures a Machine.
+type MachineOption func(*Machine)
+
+// WithLedger sets the quota ledger used to compute a run's quota_cost on
+// completion. When unset, runs complete with quota_cost = 0.
+func WithLedger(ledger *quota.Ledger) MachineOption {
+	return func(m *Machine) {
+		if ledger != nil {
+			m.ledger = ledger
+		}
+	}
 }
 
 // NewMachine constructs a state machine backed by store.
-func NewMachine(store *Store) *Machine {
-	return &Machine{store: store, now: time.Now}
+func NewMachine(store *Store, opts ...MachineOption) *Machine {
+	m := &Machine{store: store, now: time.Now}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // transition describes an allowed processing-state change.
@@ -287,7 +307,8 @@ func (m *Machine) RecordConditionAudit(ctx context.Context, a *ConditionAudit) (
 	return a, nil
 }
 
-// CompleteRun finalizes a run and recomputes its outcome counters.
+// CompleteRun finalizes a run, recomputes its outcome counters, and records
+// the quota cost from the ledger when one is configured.
 func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 	started := m.now().UTC()
 	run, err := m.store.GetRun(ctx, runID)
@@ -295,8 +316,13 @@ func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 		return nil, err
 	}
 
+	quotaCost, err := m.runQuotaCost(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
 	duration := started.Sub(run.StartedAt).Seconds()
-	if err := m.store.CompleteRun(ctx, runID, duration); err != nil {
+	if err := m.store.CompleteRun(ctx, runID, duration, quotaCost); err != nil {
 		return nil, err
 	}
 	if err := m.store.RecomputeRunCounters(ctx, runID); err != nil {
@@ -314,14 +340,33 @@ func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run,
 		return nil, err
 	}
 
+	quotaCost, err := m.runQuotaCost(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
 	duration := started.Sub(run.StartedAt).Seconds()
-	if err := m.store.CompleteRun(ctx, runID, duration); err != nil {
+	if err := m.store.CompleteRun(ctx, runID, duration, quotaCost); err != nil {
 		return nil, err
 	}
 	if err := m.store.RecomputeRunCountersFromDecisions(ctx, runID); err != nil {
 		return nil, err
 	}
 	return m.store.GetRun(ctx, runID)
+}
+
+// runQuotaCost returns the quota units consumed on behalf of runID. When no
+// ledger is configured it returns 0 so tests and offline tools are not forced
+// to provide one.
+func (m *Machine) runQuotaCost(ctx context.Context, runID int64) (int, error) {
+	if m.ledger == nil {
+		return 0, nil
+	}
+	cost, err := m.ledger.ConsumedByRun(ctx, runID)
+	if err != nil {
+		return 0, fmt.Errorf("computing quota cost for run %d: %w", runID, err)
+	}
+	return cost, nil
 }
 
 // txer is satisfied by *sql.DB and *sql.Tx so we can share scanning helpers.

@@ -69,6 +69,7 @@ type completedPayload struct {
 	VideosDeferred        int    `json:"videos_deferred"`
 	VideosFailed          int    `json:"videos_failed"`
 	VideosNotYetEvaluated int    `json:"videos_not_yet_evaluated"`
+	QuotaCost             int    `json:"quota_cost"`
 }
 
 type errorPayload struct {

@@ -1,157 +1,69 @@
 ---
 type: requirement-index
-title: YuHaul Behavioral Requirements
-description: Cohesive view of all behavioral requirements for the YuHaul YouTube Discovery & Routing system.
-tags: [requirement-index, yuhaul]
+title: YuHaul — Behavioral Requirements & Obligation Contracts
+description: Obligation layer for the YouTube subscription discovery and routing system, derived from the accepted Anchor
+tags: [requirement-index, youtube, discovery, routing, analytics]
 ---
 
-**Status:** accepted
-
-## Overview
-
-These requirements define the behavioral obligations for the YuHaul system — a personal, stateful discovery and routing system for content published by subscribed YouTube channels. Every requirement traces to one or more acceptance criteria in the [YuHaul anchor](../../anchors/youtube-discovery-routing.md). 32 acceptance criteria produce 36 behavioral requirement documents.
-
-## Requirements
-
-### Account & Authentication
-
-- **Account Connection** — file `account-connection.md` — MUST: User can establish a connection to a YouTube account (AC 1)
-- **Account Connection Security** — file `account-connection-security.md` — MUST: Credentials are protected and API access is restricted to authorized accounts (AC 1)
-
-### Discovery
-
-- **Subscription Discovery** — file `subscription-discovery.md` — MUST: System discovers newly published videos from subscribed channels without continuous monitoring (AC 2)
-
-### Routes, Conditions, and Actions
-
-- **Route Definition** — file `route-definition.md` — MUST: User can define multiple ordered routes (AC 3)
-- **Route Conditions and Actions** — file `route-conditions-actions.md` — MUST: Each route has configurable conditions and actions (AC 4)
-- **Condition Composition** — file `condition-composition.md` — MUST: Multiple conditions within a route compose with explicit AND/OR toggle semantics (AC 4)
-- **Multi-Route Matching** — file `multi-route-matching.md` — MUST: A video can match multiple routes until a matching final route terminates evaluation (AC 5)
-- **Final Route** — file `final-route.md` — MUST: A route can be marked final to terminate evaluation (AC 6)
-- **Exclusion Behaviors** — file `exclusion-behaviors.md` — MUST: Route-scoped exclusion rules for channels, videos, titles, words, and duration (AC 7)
-
-### Duplicate Detection
-
-- **Duplicate Detection** — file `duplicate-detection.md` — MUST: Exact and configurable fuzzy duplicate detection against the corpus of routed titles (AC 8)
-- **Historical Title Persistence** — file `historical-title-persistence.md` — MUST: Historical titles persisted; corpus importable (AC 9)
-- **Duplicate Provenance** — file `duplicate-provenance.md` — MUST: Duplicate provenance retained to distinguish discovery credit (AC 10)
-
-### Processing State and Idempotency
-
-- **Processing State Persistence** — file `processing-state-persistence.md` — MUST: Processing state survives across runs and restarts, including three-tiered outcome model (AC 11)
-- **Idempotent Execution** — file `idempotent-execution.md` — MUST: Repeated execution does not repeat completed actions (AC 12)
-
-### Quota Management
-
-- **Quota Deferral** — file `quota-deferral.md` — MUST: Quota-limited work deferred, not lost or falsely rejected (AC 13)
-- **Quota Accounting** — file `quota-accounting.md` — MUST: Resource consumption accounted for by operation type, per run, cumulatively, with remaining capacity (AC 18)
-- **Quota-Aware Processing** — file `quota-aware-processing.md` — MUST: Processing avoids unnecessary external expenditure (AC 19)
-
-### Decision Evidence and Explainability
-
-- **Decision Evidence** — file `decision-evidence.md` — MUST: Every route decision explainable from durable evidence (AC 15)
-
-### Runs and Scheduling
-
-- **Scheduled Runs** — file `scheduled-runs.md` — MUST: Runs configurable by user on a schedule (AC 16)
-- **Manual Runs** — file `manual-runs.md` — MUST: User can manually initiate runs (AC 17)
-
-### Error Handling and Recovery
-
-- **Error Queue** — file `error-queue.md` — MUST: Failed work in inspectable queue with retry/dismissal; dismissal preserves historical evidence (AC 14)
-- **Failure Retention** — file `failure-retention.md` — MUST: Temporary failures do not silently lose eligible work; quota exhaustion is not classified as failure (AC 30)
-
-### Statistics and Analytics
-
-- **Run-Level and Route-Level Statistics** — file `run-route-statistics.md` — MUST: Operational statistics at run and route level with rejection counts by reason (AC 20)
-- **Source/Channel Statistics** — file `source-channel-statistics.md` — MUST: Channel yield and usefulness statistics including playlist retention counts (AC 21)
-- **Retention/Value Signals** — file `retention-signals.md` — MUST: User-retention signals measured from designated retention playlists, excluding YuHaul-routed membership (AC 22)
-- **Retention-Signal Configuration** — file `retention-signal-configuration.md` — MUST: User designates retention playlists; system distinguishes YuHaul-routed from user-driven membership (AC 22)
-- **Temporal Statistics** — file `temporal-statistics.md` — MUST: Statistics viewable historically over time (AC 23)
-- **Trend Visualization** — file `trend-visualization.md` — MUST: Useful trends visualized graphically (AC 24)
-
-### Configuration History
-
-- **Configuration History** — file `configuration-history.md` — MUST: Full effective route configuration preserved for reconstruction at any point in time (AC 25)
-- **Historical Re-evaluation** — file `historical-reevaluation.md` — MUST: Configuration changes never silently reprocess historical videos; re-evaluation is explicit user-triggered operation (AC 25)
-
-### Dry-Run and Backtesting
-
-- **Dry-Run Evaluation** — file `dry-run.md` — MUST: Routing evaluation of current pending workload without mutating external state (AC 26)
-- **Historical Backtesting** — file `backtesting.md` — MUST: Backtesting replays historical observations against proposed configurations without altering any state (AC 27)
-- **Run Inspection** — file `run-inspection.md` — MUST: User can inspect historical runs and understand outcomes (AC 28)
-
-### User Authority and Administration
-
-- **Responsive Administration Interface** — file `responsive-administration.md` — MUST: Admin interface usable on desktop and mobile (AC 29)
-- **User Authority** — file `user-authority.md` — MUST: System advises but does not autonomously subscribe, unsubscribe, or change policy (AC 31)
-- **Outcome Distinction** — file `outcome-distinction.md` — MUST: Three-tiered outcome model distinguishing processing state, per-route decisions, and per-action outcomes (AC 32)
-
-## AC Coverage Matrix
-
-| AC | Title | Requirement(s) |
-|---|---|---|
-| 1 | Account connection | account-connection, account-connection-security |
-| 2 | Subscription discovery | subscription-discovery |
-| 3 | Ordered routes | route-definition |
-| 4 | Conditions/actions | route-conditions-actions, condition-composition |
-| 5 | Multi-route matching | multi-route-matching |
-| 6 | Final route | final-route |
-| 7 | Exclusion behaviors | exclusion-behaviors |
-| 8 | Duplicate detection | duplicate-detection |
-| 9 | Historical titles | historical-title-persistence |
-| 10 | Duplicate provenance | duplicate-provenance |
-| 11 | Processing state | processing-state-persistence |
-| 12 | Idempotent execution | idempotent-execution |
-| 13 | Quota deferral | quota-deferral |
-| 14 | Error queue | error-queue |
-| 15 | Decision evidence | decision-evidence |
-| 16 | Scheduled runs | scheduled-runs |
-| 17 | Manual runs | manual-runs |
-| 18 | Quota accounting | quota-accounting |
-| 19 | Quota-aware processing | quota-aware-processing |
-| 20 | Run/route statistics | run-route-statistics |
-| 21 | Source/channel statistics | source-channel-statistics |
-| 22 | Retention signals | retention-signals, retention-signal-configuration |
-| 23 | Temporal statistics | temporal-statistics |
-| 24 | Trend visualization | trend-visualization |
-| 25 | Configuration history | configuration-history, historical-reevaluation |
-| 26 | Dry-run | dry-run |
-| 27 | Backtesting | backtesting |
-| 28 | Run inspection | run-inspection |
-| 29 | Responsive admin | responsive-administration |
-| 30 | Failure retention | failure-retention |
-| 31 | User authority | user-authority |
-| 32 | Outcome distinction | outcome-distinction |
-
-## Cross-requirements
-
-Dependencies between requirements (predecessor → successor):
-
-- **account-connection** → subscription-discovery, route-conditions-actions, quota-aware-processing, retention-signals, retention-signal-configuration
-- **route-definition** → route-conditions-actions, condition-composition, multi-route-matching, final-route, exclusion-behaviors, run-route-statistics, source-channel-statistics, configuration-history, dry-run, historical-reevaluation, retention-signal-configuration
-- **route-conditions-actions** → condition-composition, multi-route-matching, final-route, idempotent-execution, decision-evidence, user-authority, historical-reevaluation
-- **condition-composition** → multi-route-matching, final-route
-- **processing-state-persistence** → idempotent-execution, quota-deferral, error-queue, decision-evidence, run-route-statistics, source-channel-statistics, manual-runs, configuration-history, outcome-distinction
-- **duplicate-detection** → historical-title-persistence, duplicate-provenance
-- **quota-accounting** → quota-aware-processing
-- **quota-deferral** → failure-retention, quota-aware-processing
-- **decision-evidence** → run-inspection, user-authority
-- **run-route-statistics** → temporal-statistics, trend-visualization, outcome-distinction, run-inspection
-- **source-channel-statistics** → temporal-statistics
-- **retention-signal-configuration** → retention-signals
-- **retention-signals** → source-channel-statistics
-- **temporal-statistics** → trend-visualization
-- **dry-run** → backtesting
-- **historical-title-persistence** → backtesting
-- **configuration-history** → backtesting, historical-reevaluation
-- **error-queue** → failure-retention
+**Status:** proposed
 
 ## Source
 
-All requirements in this domain derive from YuHaul — YouTube Subscription Discovery & Routing at `../../anchors/youtube-discovery-routing.md`.
+- Anchor: ../../anchors/youtube-discovery-routing.md
 
-## Open questions
+## Behavioral Requirements
 
-None at this time. The anchor's 32 acceptance criteria are fully covered by the 36 requirement documents above.
+| ID | Title | File | Priority | Summary |
+|----|-------|------|----------|---------|
+| BR-001 | Secure YouTube Account Connection | br-001-secure-youtube-account-connection.md | MUST | User can securely connect and manage YouTube account authorization |
+| BR-002 | Subscription-Based Discovery Without Live Monitoring | br-002-subscription-discovery-without-live-monitoring.md | MUST | System discovers new videos from subscriptions via polling, not continuous monitoring |
+| BR-003 | Multiple Ordered Route Definition | br-003-multiple-ordered-route-definition.md | MUST | User can define multiple routes evaluated in declared order |
+| BR-004 | Route Conditions and Playlist Actions | br-004-route-conditions-and-playlist-actions.md | MUST | Routes contain configurable conditions that trigger playlist actions |
+| BR-005 | Multi-Route Video Matching | br-005-multi-route-video-matching.md | MUST | A video may satisfy conditions of multiple routes |
+| BR-006 | Final Route Termination | br-006-final-route-termination.md | MUST | A route marked final terminates further evaluation after successful match |
+| BR-007 | Exclusion Behaviors | br-007-exclusion-behaviors.md | MUST | Exclusion filters for channels, videos, titles, words, and duration |
+| BR-008 | Exact and Fuzzy Duplicate Detection | br-008-exact-and-fuzzy-duplicate-detection.md | MUST | Historical duplicate detection via exact and configurable fuzzy matching |
+| BR-009 | Historical Title Persistence and Corpus Import | br-009-historical-title-persistence-and-corpus-import.md | MUST | Historical titles preserved; existing corpus importable |
+| BR-010 | Duplicate Provenance for Discovery Credit | br-010-duplicate-provenance-for-discovery-credit.md | MUST | Duplicate provenance distinguishes discovery credit from other source relevance |
+| BR-011 | Processing State Persistence | br-011-processing-state-persistence.md | MUST | Processing state survives across runs and restarts |
+| BR-012 | Idempotent Playlist Actions | br-012-idempotent-playlist-actions.md | MUST | Repeated execution does not repeat completed playlist mutations |
+| BR-013 | Quota-Limited Work Deferral | br-013-quota-limited-work-deferral.md | MUST | Quota-limited work deferred rather than lost or falsely rejected |
+| BR-014 | Failed Work Retention and Retry | br-014-failed-work-retention-and-retry.md | MUST | Failed work retained in inspectable queue with retry and removal |
+| BR-015 | Explainable Route Decisions | br-015-explainable-route-decisions.md | MUST | Every meaningful route decision explainable from durable evidence |
+| BR-016 | Configurable Scheduled Runs | br-016-configurable-scheduled-runs.md | MUST | User configures when processing runs execute |
+| BR-017 | Manual Run Initiation | br-017-manual-run-initiation.md | MUST | User can trigger a processing run on demand |
+| BR-018 | API Consumption Accounting and Visibility | br-018-api-consumption-accounting-and-visibility.md | MUST | External API consumption tracked and visible |
+| BR-019 | Quota-Aware Processing | br-019-quota-aware-processing.md | MUST | Processing avoids unnecessary external API expenditure |
+| BR-020 | Run-Level and Route-Level Statistics | br-020-run-level-and-route-level-statistics.md | MUST | Operational statistics available at run and route level |
+| BR-021 | Source and Channel Usefulness Statistics | br-021-source-and-channel-usefulness-statistics.md | MUST | Source and channel contribution to value measured |
+| BR-022 | User Retention and Value Signals | br-022-user-retention-and-value-signals.md | SHOULD | User retention signals measured where reliable provider evidence permits |
+| BR-023 | Historical Statistics Over Time | br-023-historical-statistics-over-time.md | MUST | Statistics viewable over time, not only lifetime counters |
+| BR-024 | Trend Visualization | br-024-trend-visualization.md | SHOULD | Useful trends rendered graphically |
+| BR-025 | Configuration History for Statistics Interpretation | br-025-configuration-history-for-statistics-interpretation.md | MUST | Route/configuration history sufficient to interpret historical statistics |
+| BR-026 | Dry-Run Evaluation | br-026-dry-run-evaluation.md | MUST | Dry-run evaluates routes without mutating external state |
+| BR-027 | Historical Backtesting | br-027-historical-backtesting.md | MUST | Backtesting compares routing changes against retained observations without external mutation |
+| BR-028 | Historical Run Inspection | br-028-historical-run-inspection.md | MUST | User inspects historical runs and understands accepted/rejected/deferred/failed decisions |
+| BR-029 | Responsive Administration Interface | br-029-responsive-administration-interface.md | MUST | Administration usable on desktop and mobile |
+| BR-030 | Temporary Failure Work Preservation | br-030-temporary-failure-work-preservation.md | MUST | Temporary failures do not silently lose eligible work |
+| BR-031 | User Authority Over Policy Decisions | br-031-user-authority-over-policy-decisions.md | MUST | System advises with evidence but does not autonomously change policy |
+| BR-032 | Processing Outcome Distinction | br-032-processing-outcome-distinction.md | MUST | Outcomes distinguish rejected, deferred, failed, and not-yet-evaluated |
+
+## Obligation Contracts
+
+| ID | Title | File | Seam | Summary |
+|----|-------|------|------|---------|
+| OC-001 | YouTube API Quota and Failure Semantics | oc-001-youtube-api-quota-and-failure-semantics.md | System ↔ YouTube Data API v3 | Quota exhaustion treated as operational state; failures deferred not lost; consumption accounted |
+| OC-002 | Route Evaluation Outcome Semantics | oc-002-route-evaluation-outcome-semantics.md | Evaluation Engine ↔ State/History/Statistics | Accepted vocabulary for routing outcomes shared across evaluation, persistence, and reporting |
+| OC-003 | Configuration Snapshot for Historical Interpretation | oc-003-configuration-snapshot-for-historical-interpretation.md | Configuration Manager ↔ Statistics/Backtesting | Stable configuration snapshots attached to runs for historical statistics interpretation |
+
+## Dependencies
+
+- BR-015 (Explainable Decisions) depends on BR-003–BR-006 (Route Configuration) for decision logic and BR-032 (Outcome Distinction) for classification vocabulary.
+- BR-023 (Historical Statistics) depends on BR-025 (Configuration History) for meaningful interpretation.
+- BR-027 (Backtesting) depends on BR-008–BR-010 (Duplicate Detection) and BR-015 (Explainable Decisions) for retained observations.
+- OC-002 provides shared vocabulary consumed by BR-015, BR-020, BR-028, and BR-032.
+- OC-003 is consumed by BR-023, BR-025, and BR-027.
+
+## Open Questions
+
+- None — all 32 ACs are fully covered by the obligation baseline above.

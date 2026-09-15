@@ -95,14 +95,14 @@ func main() {
 		authSvc = auth.NewDisabledService()
 	}
 
+	ledger := quota.New(db, quota.WithLogger(logger), quota.WithDefaultLimit(cfg.DailyQuota))
+
 	stateStore, err := state.NewStore(db)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to open state store", "error", err)
 		os.Exit(1)
 	}
-	machine := state.NewMachine(stateStore)
-
-	ledger := quota.New(db, quota.WithLogger(logger), quota.WithDefaultLimit(cfg.DailyQuota))
+	machine := state.NewMachine(stateStore, state.WithLedger(ledger))
 
 	routerStore := router.NewStore(db)
 	configStore := config.NewStore(db)
