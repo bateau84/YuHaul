@@ -12,6 +12,9 @@ import type {
   TrendBucket,
   RouteMatchRate,
   ConfigVersion,
+  ConfigDiffResult,
+  ConfigRouteChange,
+  BacktestComparison,
   Settings,
   ErrorEntry,
   DeferredItem,
@@ -66,7 +69,8 @@ let mockRuns: Run[] = [
     config_version_id: 1,
     videos_discovered: 42,
     videos_accepted: 3,
-    videos_rejected: 27,
+    videos_rejected: 23,
+    videos_excluded: 4,
     videos_deferred: 12,
     videos_failed: 0,
     videos_not_yet_evaluated: 0,
@@ -82,7 +86,8 @@ let mockRuns: Run[] = [
     config_version_id: 1,
     videos_discovered: 12,
     videos_accepted: 1,
-    videos_rejected: 8,
+    videos_rejected: 6,
+    videos_excluded: 2,
     videos_deferred: 3,
     videos_failed: 0,
     videos_not_yet_evaluated: 0,
@@ -459,6 +464,7 @@ export async function startRun(): Promise<{ run_id: number; status: string }> {
     videos_discovered: 0,
     videos_accepted: 0,
     videos_rejected: 0,
+    videos_excluded: 0,
     videos_deferred: 0,
     videos_failed: 0,
     videos_not_yet_evaluated: 0,
@@ -481,6 +487,7 @@ export async function startDryRun(_draft?: { routes: Route[]; duplicate_threshol
     videos_discovered: 0,
     videos_accepted: 0,
     videos_rejected: 0,
+    videos_excluded: 0,
     videos_deferred: 0,
     videos_failed: 0,
     videos_not_yet_evaluated: 0,
@@ -495,8 +502,43 @@ export async function startReplay(_configVersionId?: number): Promise<{ run_id: 
   return startDryRun()
 }
 
-export async function startBacktest(_proposed: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string }> {
-  return startDryRun()
+export async function startBacktest(proposed: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string; comparison: BacktestComparison }> {
+  await delay()
+  const id = uid()
+  // Simulate a completed backtest against the mock historical runs.
+  const baselineAccepted = mockRuns
+    .filter((r) => r.run_type === 'scheduled' || r.run_type === 'manual')
+    .reduce((sum, r) => sum + r.videos_accepted, 0)
+  const proposedAccepted = baselineAccepted + Math.floor(proposed.routes.length * 1.5)
+  const newCatches = Math.max(0, proposedAccepted - baselineAccepted)
+  const lostCatches = 0
+  const comparison: BacktestComparison = {
+    baseline_run_ids: mockRuns.map((r) => r.id),
+    baseline_accepted: baselineAccepted,
+    proposed_accepted: proposedAccepted,
+    new_catches: newCatches,
+    lost_catches: lostCatches,
+    net_change: newCatches - lostCatches,
+  }
+  const run: Run = {
+    id,
+    started_at: new Date().toISOString(),
+    completed_at: new Date().toISOString(),
+    run_type: 'backtest',
+    status: 'completed',
+    config_version_id: 1,
+    videos_discovered: 42,
+    videos_accepted: proposedAccepted,
+    videos_rejected: 23,
+    videos_excluded: 4,
+    videos_deferred: 0,
+    videos_failed: 0,
+    videos_not_yet_evaluated: 0,
+    quota_cost: 0,
+    duration_seconds: 120,
+  }
+  mockRuns.unshift(run)
+  return { run_id: id, status: 'completed', comparison }
 }
 
 export async function listChannels(): Promise<ChannelStats[]> {
@@ -590,6 +632,59 @@ export async function listConfigVersions(): Promise<ConfigVersion[]> {
 export async function getConfigVersion(id: number): Promise<ConfigVersion | undefined> {
   await delay()
   return mockConfigVersions.find((v) => v.id === id)
+}
+
+export async function diffConfigVersion(id: number, compareTo?: number): Promise<ConfigDiffResult> {
+  await delay()
+  const to = mockConfigVersions.find((v) => v.id === id)
+  if (!to) throw new Error('config version not found')
+  const fromId = compareTo ?? (id > 1 ? id - 1 : id)
+  const from = mockConfigVersions.find((v) => v.id === fromId) ?? to
+  const toRouteIds = new Set(to.snapshot.routes.map((r) => r.id))
+  const fromRouteIds = new Set(from.snapshot.routes.map((r) => r.id))
+  const routesAdded = to.snapshot.routes.filter((r) => !fromRouteIds.has(r.id))
+  const routesRemoved = from.snapshot.routes.filter((r) => !toRouteIds.has(r.id))
+  const routesChanged: ConfigRouteChange[] = []
+  for (const newRoute of to.snapshot.routes) {
+    const oldRoute = from.snapshot.routes.find((r) => r.id === newRoute.id)
+    if (!oldRoute || oldRoute.name === newRoute.name) continue
+    const changes: { field: string; old: string; new: string }[] = []
+    if (oldRoute.name !== newRoute.name) changes.push({ field: 'name', old: oldRoute.name, new: newRoute.name })
+    if (oldRoute.is_enabled !== newRoute.is_enabled) {
+      changes.push({ field: 'is_enabled', old: String(oldRoute.is_enabled), new: String(newRoute.is_enabled) })
+    }
+    routesChanged.push({ id: newRoute.id, old: oldRoute, new: newRoute, changes })
+  }
+  const settingsChanged: Record<string, { old: string; new: string }> = {}
+  if (from.snapshot.duplicate_threshold !== to.snapshot.duplicate_threshold) {
+    settingsChanged.duplicate_threshold = {
+      old: String(from.snapshot.duplicate_threshold),
+      new: String(to.snapshot.duplicate_threshold),
+    }
+  }
+  return {
+    from_id: from.id,
+    to_id: to.id,
+    settings_changed: settingsChanged,
+    routes_added: routesAdded,
+    routes_removed: routesRemoved,
+    routes_changed: routesChanged,
+  }
+}
+
+export async function restoreConfigVersion(id: number, description?: string): Promise<ConfigVersion> {
+  await delay()
+  const source = mockConfigVersions.find((v) => v.id === id)
+  if (!source) throw new Error('config version not found')
+  const restored: ConfigVersion = {
+    id: uid(),
+    created_at: new Date().toISOString(),
+    snapshot: JSON.parse(JSON.stringify(source.snapshot)),
+    change_description: description ?? `Restored from version ${id}`,
+  }
+  mockConfigVersions.push(restored)
+  mockRoutes = restored.snapshot.routes.map((r) => JSON.parse(JSON.stringify(r)))
+  return restored
 }
 
 export async function getSettings(): Promise<Settings> {

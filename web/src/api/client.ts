@@ -52,18 +52,23 @@ export {
 // Account operations are wired to the real backend.
 export { getAccountStatus, disconnectAccount, initiateOAuth } from './account'
 
-// Duplicate-threshold settings are wired to the real backend.
-export { getDuplicateThreshold, setDuplicateThreshold } from './settings'
+// Configuration-version operations are wired to the real backend.
+export {
+  listConfigVersions,
+  getConfigVersion,
+  diffConfigVersion,
+  restoreConfigVersion,
+  getSettings,
+  updateSettings,
+  getDuplicateThreshold,
+  setDuplicateThreshold,
+} from './settings'
 
 // The following operations do not yet have backend endpoints and remain
 // mock-backed.
 export {
   getRunVideos,
   getDecisionDetail,
-  listConfigVersions,
-  getConfigVersion,
-  getSettings,
-  updateSettings,
   listAdvisories,
   dismissAdvisory,
   ignoreAdvisory,

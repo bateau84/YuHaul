@@ -1,4 +1,4 @@
-import type { Route, Run } from '../types'
+import type { Route, Run, BacktestComparison } from '../types'
 import { api } from './core'
 
 export async function listRuns(): Promise<Run[]> {
@@ -35,8 +35,8 @@ export async function startReplay(configVersionId?: number): Promise<{ run_id: n
   })
 }
 
-export async function startBacktest(proposed: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string }> {
-  return api<{ run_id: number; status: string }>('/api/backtest', {
+export async function startBacktest(proposed: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string; comparison?: BacktestComparison }> {
+  return api<{ run_id: number; status: string; comparison?: BacktestComparison }>('/api/backtest', {
     method: 'POST',
     body: JSON.stringify({ proposed_configuration: proposed }),
   })

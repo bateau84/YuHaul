@@ -6,7 +6,8 @@ const originalFetch = globalThis.fetch
 
 function parsePath(url: string): { path: string; search: URLSearchParams } {
   const stripped = url.replace(/^https?:\/\/[^/]+/, '')
-  const [path, query] = stripped.split('?')
+  const [rawPath, query] = stripped.split('?')
+  const path = rawPath.length > 1 && rawPath.endsWith('/') ? rawPath.slice(0, -1) : rawPath
   return { path, search: new URLSearchParams(query ?? '') }
 }
 
@@ -132,7 +133,7 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return jsonResponse(item)
   }
   if (path === '/api/deferred' && method === 'GET') {
-    return jsonResponse({ items: await mock.listDeferred(search.get('include') ?? 'pending') })
+    return jsonResponse({ deferred: await mock.listDeferred(search.get('include') ?? 'pending') })
   }
   const deferredMatch = path.match(/^\/api\/deferred\/(\d+)\/(retry|discard)$/)
   if (deferredMatch && method === 'POST') {
@@ -186,7 +187,7 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return jsonResponse({ auth_url: 'https://accounts.google.com/oauth/mock', state: 'mock-state' })
   }
 
-  // Config versions (mock-backed in client.ts but wired endpoints may be added)
+  // Config versions
   if (path === '/api/config/versions' && method === 'GET') {
     return jsonResponse({ versions: await mock.listConfigVersions() })
   }
@@ -195,6 +196,18 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     const version = await mock.getConfigVersion(Number(versionMatch[1]))
     if (!version) return jsonResponse({ error: 'not found' }, 404)
     return jsonResponse(version)
+  }
+  const versionDiffMatch = path.match(/^\/api\/config\/versions\/(\d+)\/diff$/)
+  if (versionDiffMatch && method === 'GET') {
+    const id = Number(versionDiffMatch[1])
+    const compareTo = search.get('compare_to')
+    return jsonResponse(await mock.diffConfigVersion(id, compareTo ? Number(compareTo) : undefined))
+  }
+  const versionRestoreMatch = path.match(/^\/api\/config\/versions\/(\d+)\/restore$/)
+  if (versionRestoreMatch && method === 'POST') {
+    const id = Number(versionRestoreMatch[1])
+    const body = init?.body ? JSON.parse(String(init.body)) : {}
+    return jsonResponse(await mock.restoreConfigVersion(id, body.description), 201)
   }
 
   return jsonResponse({ error: 'not implemented in test mock' }, 501)

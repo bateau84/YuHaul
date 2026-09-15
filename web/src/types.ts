@@ -86,6 +86,7 @@ export interface Run {
   videos_discovered: number
   videos_accepted: number
   videos_rejected: number
+  videos_excluded: number
   videos_deferred: number
   videos_failed: number
   videos_not_yet_evaluated: number
@@ -108,6 +109,7 @@ export type VideoProcessingState =
 export type VideoFinalOutcome =
   | 'accepted'
   | 'rejected'
+  | 'excluded'
   | 'deferred'
   | 'failed'
   | 'not_yet_evaluated'
@@ -333,4 +335,35 @@ export interface Toast {
   id: string
   type: ToastType
   message: string
+}
+
+export interface ConfigDiffResult {
+  from_id: number
+  to_id: number
+  settings_changed: Record<string, { old: string; new: string }>
+  routes_added: Route[]
+  routes_removed: Route[]
+  routes_changed: ConfigRouteChange[]
+}
+
+export interface ConfigRouteChange {
+  id: number
+  old: Route
+  new: Route
+  changes: ConfigFieldChange[]
+}
+
+export interface ConfigFieldChange {
+  field: string
+  old: string
+  new: string
+}
+
+export interface BacktestComparison {
+  baseline_run_ids: number[]
+  baseline_accepted: number
+  proposed_accepted: number
+  new_catches: number
+  lost_catches: number
+  net_change: number
 }
