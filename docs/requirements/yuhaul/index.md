@@ -17,7 +17,7 @@ tags: [requirement-index, youtube, discovery, routing, analytics]
 |----|-------|------|----------|---------|
 | BR-001 | Secure YouTube Account Connection | br-001-secure-youtube-account-connection.md | MUST | User can securely connect and manage YouTube account authorization |
 | BR-002 | Subscription-Based Discovery Without Live Monitoring | br-002-subscription-discovery-without-live-monitoring.md | MUST | System discovers new videos from subscriptions via polling, not continuous monitoring |
-| BR-003 | Multiple Ordered Route Definition | br-003-multiple-ordered-route-definition.md | MUST | User can define multiple routes evaluated in declared order |
+| BR-003 | Multiple Ordered Route Definition | br-003-multiple-ordered-route-definition.md | MUST | User can create, read, update, delete, and reorder routes evaluated in declared order |
 | BR-004 | Route Conditions and Playlist Actions | br-004-route-conditions-and-playlist-actions.md | MUST | Routes contain configurable conditions that trigger playlist actions |
 | BR-005 | Multi-Route Video Matching | br-005-multi-route-video-matching.md | MUST | A video may satisfy conditions of multiple routes |
 | BR-006 | Final Route Termination | br-006-final-route-termination.md | MUST | A route marked final terminates further evaluation after successful match |

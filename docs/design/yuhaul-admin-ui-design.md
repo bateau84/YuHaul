@@ -452,7 +452,15 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 - **Regions:**
   - Toolbar region: "New Route" button
   - Route list region: sortable list of routes with drag-to-reorder
-- **Components:** Route row (name, description snippet, enabled/disabled toggle, final badge, match count, drag handle, move up/down buttons), empty state
+- **Components:** Route row (name, conditions summary, enabled/disabled toggle, final badge, match count, drag handle, move up/down buttons), empty state
+- **Route row details:**
+  - Name: route name, clickable to open editor
+  - Conditions summary: compact text summarizing conditions (e.g., "title contains 'lo-fi' | duration ≥ 2min"). Truncate with ellipsis if longer than 60 characters. If no conditions, show "No conditions" in muted text.
+  - Enabled toggle: see Toggle component below
+  - Final badge: small badge "Final" if route is marked final; hidden if not final
+  - Match count: number of videos matched by this route (lifetime or period, depending on context)
+  - Drag handle: grip icon for drag reordering
+  - Move Up/Down buttons: arrow icons for keyboard-accessible reordering
 
 **View: Route Editor** — Create or edit a single route; user job: define conditions, exclusions, and actions for a routing rule.
 - **Regions:**
@@ -465,6 +473,98 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 - **Components:** Condition row (field selector, operator selector, value input, remove button), condition list (add condition, AND/OR toggle), exclusion section (channel exclusion list, video identity exclusion list, title exclusion list, word/phrase exclusion list, duration min/max inputs, add/remove for each list), action row (type selector: "Add to playlist" — v1 only, parameter fields), save/cancel buttons
 - **Exclusion semantics:** Exclusions are route-scoped — a video excluded from this route is not evaluated by this route but remains eligible for other routes. Exclusion lists support add/remove of individual entries. Duration limits are optional min/max fields (empty = no limit on that side). All exclusion state is persisted with the route.
 - **Layout:** Single-column layout at all viewport widths. Conditions, exclusions, and actions are vertically stacked.
+
+**Route Editor — Create vs Edit mode:**
+- **Create mode:** URL pattern `/routes/new`. Page title: "New Route". All fields start empty/default. Footer shows "Save" and "Cancel" (no Delete). Evaluation order: new route appended to end of list.
+- **Edit mode:** URL pattern `/routes/:id`. Page title: "Edit Route [name]". All fields populated from saved route data. Footer shows "Save", "Cancel", and "Delete". Delete button is destructive-styled (red).
+- **Distinguishing the mode:** The URL determines mode. If the route ID does not exist, show a "Route not found" error and navigate back to Route list.
+
+**Route Editor — Default values on create:**
+- Name: empty string
+- Description: empty string
+- Conditions: empty list (no conditions — user must add at least one before saving)
+- Exclusions: empty lists (all exclusion lists empty)
+- Actions: empty list (no actions — user must add at least one before saving)
+- Final: false
+- Enabled: true
+- Evaluation order: last position (appended after all existing routes)
+
+**Route Editor — Loading state on edit:**
+- On navigating to `/routes/:id`: show skeleton loader (placeholder rows for name, conditions, actions) while fetching route data from `GET /api/routes/:id`
+- On fetch success: populate all fields, transition to ready state
+- On fetch error (404): show "Route not found" message with "Back to Routes" link
+- On fetch error (network): show "Failed to load route" error with "Retry" button
+
+**Route Editor — Condition composition UI:**
+- **Condition row layout:** Horizontal row with three controls: field selector (dropdown), operator selector (dropdown), value input (text or number), remove button (×).
+- **Field options (v1):**
+  - `title` — video title text
+  - `channel_name` — channel name text
+  - `duration_seconds` — video duration in seconds
+  - `description` — video description text
+- **Operator options per field:**
+  - `title`, `channel_name`, `description` (text fields): `contains`, `equals`, `starts_with`, `ends_with`, `matches_regex`
+  - `duration_seconds` (numeric field): `equals`, `greater_than`, `less_than`, `between`
+- **Value input behavior:**
+  - Text fields: text input with placeholder hint (e.g., "e.g., lo-fi")
+  - Numeric fields: number input with min=0
+  - `between` operator: shows two number inputs (min, max) with "to" separator
+  - `matches_regex`: monospace font input with regex syntax hint
+- **Add condition button:** Appears below the last condition row. Label: "+ Add condition". Click appends a new empty condition row.
+- **AND/OR toggle:** Single toggle at the top of the conditions region. Label: "Match [ALL / ANY] conditions". Default: ALL. When ALL: all conditions must be true for the route to match. When ANY: at least one condition must be true.
+- **Remove condition:** Click × button on a condition row. Removes the row immediately (undo via "Discard changes" on the editor). If last condition is removed, conditions list becomes empty.
+
+**Route Editor — Action configuration UI:**
+- **Action row layout:** Horizontal row with: action type selector (dropdown), action-specific parameters, remove button (×).
+- **Action type options (v1):**
+  - `add_to_playlist` — Add matching video to a YouTube playlist
+- **`add_to_playlist` parameters:**
+  - Playlist selector: dropdown populated from user's YouTube playlists (fetched via `GET /api/playlists`). Shows playlist title. If playlists fail to load, shows error state with "Retry" link.
+  - Playlist selector loading state: skeleton dropdown with "Loading playlists..." text.
+  - Playlist selector empty state: "No playlists found. Create a playlist on YouTube first." with link to YouTube.
+- **Add action button:** Appears below the last action row. Label: "+ Add action". Click appends a new action row with type defaulting to `add_to_playlist`.
+- **Remove action:** Click × button on an action row. Removes the row immediately (undo via "Discard changes"). If last action is removed, actions list becomes empty.
+
+**Route Editor — Validation rules:**
+- **Name:** Required. Must be non-empty after trimming whitespace. Maximum 100 characters. Must be unique across all routes (checked on save).
+- **Conditions:** At least one condition required before saving. Each condition requires: field selected, operator selected, value non-empty (except `between` which requires both min and max).
+- **Actions:** At least one action required before saving. Each action requires: type selected, all type-specific parameters filled (for `add_to_playlist`: playlist selected).
+- **Validation timing:** Validate on save attempt. Show inline error messages below each invalid field. Scroll to first error if multiple errors exist.
+- **Validation error messages:**
+  - Name empty: "Route name is required"
+  - Name too long: "Route name must be 100 characters or fewer"
+  - Name not unique: "A route with this name already exists"
+  - No conditions: "Add at least one condition"
+  - Condition missing field: "Select a field"
+  - Condition missing operator: "Select an operator"
+  - Condition missing value: "Enter a value"
+  - No actions: "Add at least one action"
+  - Action missing playlist: "Select a playlist"
+
+**Route Editor — Save behavior:**
+- **Create:** `POST /api/routes` with route payload. On success: toast "Route created", navigate to Route list (or stay on editor with new URL `/routes/:id`). On error (validation): show inline errors. On error (network): toast "Failed to save route. Check your connection." and re-enable Save button.
+- **Update:** `PUT /api/routes/:id` with route payload. On success: toast "Route saved", stay on editor. On error (validation): show inline errors. On error (network): toast "Failed to save route. Check your connection." and re-enable Save button.
+- **Cancel:** If no changes made, navigate back immediately. If changes made, show confirmation dialog: "Discard unsaved changes?" with "Discard" and "Keep editing" options.
+
+**Route Editor — Delete behavior:**
+- **Delete button:** Destructive-styled (red) button in footer, only visible in edit mode. Label: "Delete".
+- **Delete confirmation dialog:** On click, show modal dialog:
+  - Title: "Delete route?"
+  - Body: "Delete route '[name]'? This cannot be undone. Videos that would have matched this route will no longer be routed by it."
+  - Actions: "Cancel" (secondary) and "Delete" (destructive, red)
+  - Focus: moves to "Cancel" button on open (safe default)
+- **Delete execution:** On confirm, `DELETE /api/routes/:id`. On success: toast "Route deleted", navigate to Route list. On error: toast "Failed to delete route. Please try again.", dialog closes.
+- **Evaluation order after delete:** Remaining routes maintain their relative order. No re-indexing occurs — the gap in positions is transparent to the user.
+
+**Route Editor — is_final toggle:**
+- Toggle control in Settings region. Label: "Final route" with description: "When enabled, no further routes are evaluated after this route matches."
+- Visual indicator on Route list: "Final" badge (distinct color/icon) next to route name.
+- No restriction on multiple final routes — the user may set multiple routes as final. The first final route that matches terminates evaluation; later final routes are still evaluated if no earlier final matched.
+
+**Route Editor — Evaluation order display:**
+- In Settings region, show current position: "Evaluation order: #N of M".
+- Provide "Move up" and "Move down" buttons to adjust position (same as Route list drag, but within the editor).
+- Moving a route in the editor also updates the Route list order immediately (persisted on save).
 
 **View: Run List** — Browse processing history; user job: find a specific run or scan recent activity.
 - **Regions:**
@@ -718,6 +818,33 @@ Advisories are system-generated suggestions based on channel and route performan
 - "Run Now" on click: confirmation dialog "Start a processing run now?", on confirm: starts run, frontend subscribes to SSE stream (`/api/runs/:id/stream`), navigates to Run Detail for the new run with live progress
 - "Dry Run" on click: confirmation dialog (see SC-003), on confirm: starts dry-run, subscribes to SSE stream, shows live progress, navigates to dry-run results
 
+**Route delete button states:**
+- default: destructive style (red text/border), enabled
+- hover: darker red background
+- disabled: gray, cursor not-allowed (during delete API call)
+
+**Route delete confirmation dialog:**
+- Modal opens with focus on "Cancel" button
+- "Delete" button is destructive-styled (red)
+- Escape key closes dialog, returns focus to Delete button
+- Clicking outside dialog closes it (same as Cancel)
+
+**Route list after delete:**
+- Deleted route removed from list
+- Remaining routes maintain relative order
+- Focus moves to the route row that was below the deleted route (or the last row if deleted route was last)
+- Toast confirms deletion
+
+**Condition validation error states:**
+- Condition row: red border on invalid field
+- Error message below the row in caption style (red, 12px)
+- First error field receives focus on save attempt
+
+**Action validation error states:**
+- Action row: red border on invalid parameter
+- Error message below the row in caption style (red, 12px)
+- Playlist selector: red border if no playlist selected when save attempted
+
 **Empty states:**
 - Route list empty: "No routes yet. Create your first route to start routing videos." + "New Route" button
 - Run list empty: "No runs yet. Start a processing run to see results here." + "Run Now" button
@@ -834,6 +961,31 @@ Advisories are system-generated suggestions based on channel and route performan
 - Standard: WCAG 2.2 SC 1.1.1 Non-text Content (A)
 - Requirement: Every chart must have a text alternative that conveys the same data. Options: (1) an accessible data table adjacent to or behind the chart (toggle view), or (2) a `aria-describedby` element summarizing key trends. Chart data points must be accessible via keyboard (tab through data points with tooltip showing value).
 - Verification: Manual: activate screen reader, navigate to chart area, confirm data is readable.
+
+**Component/interaction: Route delete confirmation dialog**
+- Standard: WCAG 2.2 SC 2.4.3 Focus Order (A), ARIA APG Dialog (Modal) pattern
+- Requirement: On open, focus moves to "Cancel" button (safe default). Focus is trapped within dialog. Escape closes dialog and returns focus to Delete button. Dialog must have `role="alertdialog"` (confirmation) and `aria-modal="true"`. Destructive action ("Delete") must be clearly labeled and visually distinct from cancel.
+- Verification: Manual: open dialog with keyboard, tab through buttons, confirm focus trap, close with Escape, confirm focus returns to Delete button.
+
+**Component/interaction: Condition row field/operator selectors**
+- Standard: WCAG 2.2 SC 4.1.2 Name, Role, Value (A), SC 3.3.2 Labels or Instructions (A)
+- Requirement: Each selector must be a `<select>` or custom dropdown with `aria-label` (e.g., "Condition field", "Condition operator"). Value input must have an associated `<label>` or `aria-label`. Error messages must be linked via `aria-describedby`.
+- Verification: Automated: axe-core confirms label association. Manual: screen reader announces each selector and input by name.
+
+**Component/interaction: Playlist selector**
+- Standard: WCAG 2.2 SC 4.1.2 Name, Role, Value (A), SC 3.3.2 Labels or Instructions (A)
+- Requirement: Playlist selector must have `aria-label="Select target playlist"`. Loading state must use `aria-busy="true"` and announce "Loading playlists" via `aria-live="polite"`. Empty state must be announced via `aria-live="polite"`. Error state must use `role="alert"`.
+- Verification: Manual: trigger loading state, confirm screen reader announces loading. Trigger error, confirm error is announced.
+
+**Component/interaction: Route name input**
+- Standard: WCAG 2.2 SC 3.3.1 Error Identification (A), SC 3.3.2 Labels or Instructions (A)
+- Requirement: Name input must have visible label "Route name". Required state must be indicated (aria-required="true"). Validation errors must appear below input, linked via `aria-describedby`, and announced via `aria-live="polite"`. Character count must be visible: "X/100 characters".
+- Verification: Manual: leave name empty, trigger save, confirm error message is announced and linked to input.
+
+**Component/interaction: AND/OR toggle**
+- Standard: WCAG 2.2 SC 4.1.2 Name, Role, Value (A)
+- Requirement: Toggle must use `role="switch"` with `aria-checked` state. Accessible name: "Match all conditions" or "Match any conditions" depending on state. Toggle must be keyboard-accessible (Tab + Enter/Space).
+- Verification: Manual: screen reader announces toggle state. Keyboard-only toggle works.
 
 **Component/interaction: Modal dialogs (confirm, error detail, etc.)**
 - Standard: ARIA APG Dialog (Modal) pattern
