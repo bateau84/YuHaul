@@ -752,13 +752,34 @@ func TestHandleCreateRoute_Validation(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	body := `{"evaluation_order":1,"is_enabled":true,"condition_composition":"AND"}`
-	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
-	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing name",
+			body: `{"evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}]}`,
+		},
+		{
+			name: "empty conditions",
+			body: `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}]}`,
+		},
+		{
+			name: "empty actions",
+			body: `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[]}`,
+		},
+	}
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+			req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
 }
 
 func TestHandleUpdateRoute(t *testing.T) {
@@ -775,7 +796,7 @@ func TestHandleUpdateRoute(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	body := `{"name":"Updated","evaluation_order":2,"is_enabled":false,"condition_composition":"OR","conditions":[],"actions":[],"exclusions":[]}`
+	body := `{"name":"Updated","evaluation_order":2,"is_enabled":false,"condition_composition":"OR","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}],"exclusions":[]}`
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
 	req := httptest.NewRequest(http.MethodPut, "/api/routes/"+strconv.FormatInt(id, 10), strings.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -789,7 +810,7 @@ func TestHandleUpdateRoute_NotFound(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	body := `{"name":"Updated","evaluation_order":2,"is_enabled":false,"condition_composition":"OR","conditions":[],"actions":[],"exclusions":[]}`
+	body := `{"name":"Updated","evaluation_order":2,"is_enabled":false,"condition_composition":"OR","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}],"exclusions":[]}`
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
 	req := httptest.NewRequest(http.MethodPut, "/api/routes/999", strings.NewReader(body))
 	rec := httptest.NewRecorder()

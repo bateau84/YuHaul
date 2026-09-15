@@ -747,14 +747,24 @@ func decodeRouteRequest(r *http.Request) (*routeRequest, error) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return nil, fmt.Errorf("invalid request body")
 	}
-	if strings.TrimSpace(req.Name) == "" {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
 		return nil, fmt.Errorf("name is required")
+	}
+	if len(name) > 100 {
+		return nil, fmt.Errorf("name must be 100 characters or fewer")
 	}
 	comp := strings.ToUpper(req.ConditionComposition)
 	if comp != "AND" && comp != "OR" {
 		return nil, fmt.Errorf("condition_composition must be AND or OR")
 	}
 	req.ConditionComposition = comp
+	if len(req.Conditions) == 0 {
+		return nil, fmt.Errorf("at least one condition is required")
+	}
+	if len(req.Actions) == 0 {
+		return nil, fmt.Errorf("at least one action is required")
+	}
 	return &req, nil
 }
 
