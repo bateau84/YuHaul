@@ -287,4 +287,73 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 	assert.Equal(t, "PLdefer", inserter.calls[0].PlaylistID)
 }
 
+func TestPipeline_ActionExecutionUpdatesChannelCounters(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	// Set up a route with an action.
+	routerStore := router.NewStore(db)
+	routeID, err := routerStore.CreateRoute(ctx, &router.Route{
+		Name:                 "CounterRoute",
+		EvaluationOrder:      1,
+		IsEnabled:            true,
+		ConditionComposition: "AND",
+	})
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO route_action (route_id, action_type, target_playlist_id, action_index)
+		 VALUES (?, 'playlist_insert', 'PLcounters', 0);`, routeID)
+	require.NoError(t, err)
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	video, err := machine.DiscoverVideo(ctx, runID, "counter_vid", "counter_ch")
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO channel (channel_id, channel_name, first_discovered_at, last_discovered_at, total_discovered, total_routed, total_retained)
+		 VALUES (?, 'Counter Channel', ?, ?, 1, 0, 0);`,
+		"counter_ch", time.Now().UTC(), time.Now().UTC())
+	require.NoError(t, err)
+
+	_, err = machine.RecordRouteDecision(ctx, &state.RouteDecision{
+		VideoID:         video.ID,
+		RunID:           runID,
+		RouteID:         routeID,
+		EvaluationOrder: 1,
+		Decision:        state.RouteDecisionMatched,
+	})
+	require.NoError(t, err)
+
+	_, err = machine.TransitionVideoState(ctx, video.ID,
+		state.VideoStateNotYetEvaluated, state.VideoStateEvaluating)
+	require.NoError(t, err)
+	_, err = machine.TransitionVideoState(ctx, video.ID,
+		state.VideoStateEvaluating, state.VideoStateEvaluated)
+	require.NoError(t, err)
+
+	inserter := &recordingInserter{}
+	ledger := quota.New(db)
+	exec := newTestExecutor(t, db, ledger, inserter)
+
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, exec, ledger, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+
+	outcome, err := p.executeVideoActions(ctx, runID, video)
+	require.NoError(t, err)
+	assert.Equal(t, state.FinalOutcomeAccepted, outcome)
+	require.Len(t, inserter.calls, 1)
+
+	var totalRouted, totalRetained int
+	err = db.QueryRowContext(ctx,
+		`SELECT total_routed, total_retained FROM channel WHERE channel_id = ?;`, "counter_ch").Scan(&totalRouted, &totalRetained)
+	require.NoError(t, err)
+	assert.Equal(t, 1, totalRouted, "total_routed should increment for an accepted video")
+	assert.Equal(t, 1, totalRetained, "total_retained should increment for an accepted video in v1")
+}
+
 var _ = io.Discard

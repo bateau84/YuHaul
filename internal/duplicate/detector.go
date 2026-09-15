@@ -194,10 +194,17 @@ func (d *Detector) fuzzyMatch(ctx context.Context, videoID string, tokens []stri
 	return best, nil
 }
 
+// execer is the subset of *sql.DB / *sql.Tx operations needed for fingerprint
+// writes. Accepting a transaction lets callers keep fingerprint persistence
+// atomic with the surrounding unit of work.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // SaveFingerprint normalizes title and inserts a TitleFingerprint row. It is
 // used by both the migration path and discovery path so that all fingerprints
 // share the same normalization.
-func SaveFingerprint(ctx context.Context, db *sql.DB, videoID, channelID, source, title string, isReference bool, importBatchID *string) (int64, error) {
+func SaveFingerprint(ctx context.Context, db execer, videoID, channelID, source, title string, isReference bool, importBatchID *string) (int64, error) {
 	if source != "api_discovery" && source != "user_import" {
 		return 0, fmt.Errorf("invalid fingerprint source %q", source)
 	}
@@ -226,7 +233,7 @@ func SaveFingerprint(ctx context.Context, db *sql.DB, videoID, channelID, source
 
 // SetDuplicateReference marks the TitleFingerprint for videoID as a duplicate
 // reference. Callers should invoke this when a video is routed to a playlist.
-func SetDuplicateReference(ctx context.Context, db *sql.DB, videoID string, isReference bool) error {
+func SetDuplicateReference(ctx context.Context, db execer, videoID string, isReference bool) error {
 	var v int
 	if isReference {
 		v = 1

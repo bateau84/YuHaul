@@ -13,6 +13,16 @@ type Store struct {
 	db *sql.DB
 }
 
+// execer is satisfied by *sql.DB and *sql.Tx so we can share write helpers.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// queryer is satisfied by *sql.DB and *sql.Tx so we can share read helpers.
+type queryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // NewStore opens the state store on db, creating required tables if they do
 // not already exist. The caller retains ownership of db.
 func NewStore(db *sql.DB) (*Store, error) {
@@ -173,7 +183,16 @@ func (s *Store) SetRunPhase(ctx context.Context, id int64, phase string) error {
 
 // CreateVideo persists a video record.
 func (s *Store) CreateVideo(ctx context.Context, v *Video) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
+	return s.createVideo(ctx, s.db, v)
+}
+
+// CreateVideoTx is the transaction-scoped variant of CreateVideo.
+func (s *Store) CreateVideoTx(ctx context.Context, tx *sql.Tx, v *Video) (int64, error) {
+	return s.createVideo(ctx, tx, v)
+}
+
+func (s *Store) createVideo(ctx context.Context, exec execer, v *Video) (int64, error) {
+	res, err := exec.ExecContext(ctx,
 		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id,
 		                   processing_state, final_outcome, deferred_reason, error_message, completed_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
@@ -191,7 +210,16 @@ func (s *Store) CreateVideo(ctx context.Context, v *Video) (int64, error) {
 
 // GetVideo loads a video by internal ID.
 func (s *Store) GetVideo(ctx context.Context, id int64) (*Video, error) {
-	row := s.db.QueryRowContext(ctx,
+	return s.getVideo(ctx, s.db, id)
+}
+
+// GetVideoTx is the transaction-scoped variant of GetVideo.
+func (s *Store) GetVideoTx(ctx context.Context, tx *sql.Tx, id int64) (*Video, error) {
+	return s.getVideo(ctx, tx, id)
+}
+
+func (s *Store) getVideo(ctx context.Context, q queryer, id int64) (*Video, error) {
+	row := q.QueryRowContext(ctx,
 		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
 		        processing_state, final_outcome, deferred_reason, error_message, completed_at
 		 FROM video WHERE id = ?;`, id)
@@ -226,6 +254,19 @@ func (s *Store) GetVideoByExternalID(ctx context.Context, videoID string) (*Vide
 func (s *Store) UpdateVideoState(ctx context.Context, id int64, state VideoProcessingState,
 	outcome VideoFinalOutcome, deferredReason, errorMessage *string) error {
 
+	return s.updateVideoState(ctx, s.db, id, state, outcome, deferredReason, errorMessage)
+}
+
+// UpdateVideoStateTx is the transaction-scoped variant of UpdateVideoState.
+func (s *Store) UpdateVideoStateTx(ctx context.Context, tx *sql.Tx, id int64, state VideoProcessingState,
+	outcome VideoFinalOutcome, deferredReason, errorMessage *string) error {
+
+	return s.updateVideoState(ctx, tx, id, state, outcome, deferredReason, errorMessage)
+}
+
+func (s *Store) updateVideoState(ctx context.Context, exec execer, id int64, state VideoProcessingState,
+	outcome VideoFinalOutcome, deferredReason, errorMessage *string) error {
+
 	var completedAt *time.Time
 	if outcome == FinalOutcomeAccepted || outcome == FinalOutcomeRejected ||
 		outcome == FinalOutcomeExcluded || outcome == FinalOutcomeFailed {
@@ -233,7 +274,7 @@ func (s *Store) UpdateVideoState(ctx context.Context, id int64, state VideoProce
 		completedAt = &now
 	}
 
-	res, err := s.db.ExecContext(ctx,
+	res, err := exec.ExecContext(ctx,
 		`UPDATE video
 		 SET processing_state = ?, final_outcome = ?, deferred_reason = ?,
 		     error_message = ?, completed_at = ?
@@ -480,6 +521,28 @@ func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 		runID)
 	if err != nil {
 		return fmt.Errorf("recomputing run %d counters: %w", runID, err)
+	}
+	return nil
+}
+
+// IncrementChannelRoutedTx increments a channel's total_routed counter within
+// an existing transaction.
+func (s *Store) IncrementChannelRoutedTx(ctx context.Context, tx *sql.Tx, channelIDText string) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE channel SET total_routed = total_routed + 1 WHERE channel_id = ?;`, channelIDText)
+	if err != nil {
+		return fmt.Errorf("increment channel routed %s: %w", channelIDText, err)
+	}
+	return nil
+}
+
+// IncrementChannelRetainedTx increments a channel's total_retained counter
+// within an existing transaction.
+func (s *Store) IncrementChannelRetainedTx(ctx context.Context, tx *sql.Tx, channelIDText string) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE channel SET total_retained = total_retained + 1 WHERE channel_id = ?;`, channelIDText)
+	if err != nil {
+		return fmt.Errorf("increment channel retained %s: %w", channelIDText, err)
 	}
 	return nil
 }

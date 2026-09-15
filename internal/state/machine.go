@@ -50,6 +50,15 @@ var ErrInvalidTransition = errors.New("state: invalid processing-state transitio
 // It is intended to be called during the discovery phase before any downstream
 // processing begins.
 func (m *Machine) DiscoverVideo(ctx context.Context, runID int64, videoID, channelID string) (*Video, error) {
+	return m.discoverVideo(ctx, nil, runID, videoID, channelID)
+}
+
+// DiscoverVideoTx is the transaction-scoped variant of DiscoverVideo.
+func (m *Machine) DiscoverVideoTx(ctx context.Context, tx *sql.Tx, runID int64, videoID, channelID string) (*Video, error) {
+	return m.discoverVideo(ctx, tx, runID, videoID, channelID)
+}
+
+func (m *Machine) discoverVideo(ctx context.Context, tx *sql.Tx, runID int64, videoID, channelID string) (*Video, error) {
 	if videoID == "" {
 		return nil, errors.New("state: videoID is required")
 	}
@@ -65,7 +74,13 @@ func (m *Machine) DiscoverVideo(ctx context.Context, runID int64, videoID, chann
 		ProcessingState:   VideoStateNotYetEvaluated,
 		FinalOutcome:      FinalOutcomeNotYetEvaluated,
 	}
-	id, err := m.store.CreateVideo(ctx, v)
+	var id int64
+	var err error
+	if tx != nil {
+		id, err = m.store.CreateVideoTx(ctx, tx, v)
+	} else {
+		id, err = m.store.CreateVideo(ctx, v)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("discovering video: %w", err)
 	}
@@ -79,6 +94,19 @@ func (m *Machine) DiscoverVideo(ctx context.Context, runID int64, videoID, chann
 func (m *Machine) TransitionVideoState(ctx context.Context, videoID int64,
 	from, to VideoProcessingState, opts ...TransitionOption) (*Video, error) {
 
+	return m.transitionVideoState(ctx, nil, videoID, from, to, opts...)
+}
+
+// TransitionVideoStateTx is the transaction-scoped variant of TransitionVideoState.
+func (m *Machine) TransitionVideoStateTx(ctx context.Context, tx *sql.Tx, videoID int64,
+	from, to VideoProcessingState, opts ...TransitionOption) (*Video, error) {
+
+	return m.transitionVideoState(ctx, tx, videoID, from, to, opts...)
+}
+
+func (m *Machine) transitionVideoState(ctx context.Context, tx *sql.Tx, videoID int64,
+	from, to VideoProcessingState, opts ...TransitionOption) (*Video, error) {
+
 	if !from.Valid() {
 		return nil, fmt.Errorf("%w: from %q", ErrInvalidTransition, from)
 	}
@@ -89,7 +117,13 @@ func (m *Machine) TransitionVideoState(ctx context.Context, videoID int64,
 		return nil, fmt.Errorf("%w: %q -> %q", ErrInvalidTransition, from, to)
 	}
 
-	v, err := m.store.GetVideo(ctx, videoID)
+	var v *Video
+	var err error
+	if tx != nil {
+		v, err = m.store.GetVideoTx(ctx, tx, videoID)
+	} else {
+		v, err = m.store.GetVideo(ctx, videoID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -107,10 +141,18 @@ func (m *Machine) TransitionVideoState(ctx context.Context, videoID int64,
 		outcome = cfg.outcome
 	}
 
-	if err := m.store.UpdateVideoState(ctx, videoID, to, outcome, cfg.deferredReason, cfg.errorMessage); err != nil {
+	if tx != nil {
+		err = m.store.UpdateVideoStateTx(ctx, tx, videoID, to, outcome, cfg.deferredReason, cfg.errorMessage)
+	} else {
+		err = m.store.UpdateVideoState(ctx, videoID, to, outcome, cfg.deferredReason, cfg.errorMessage)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("transitioning video %d: %w", videoID, err)
 	}
 
+	if tx != nil {
+		return m.store.GetVideoTx(ctx, tx, videoID)
+	}
 	return m.store.GetVideo(ctx, videoID)
 }
 

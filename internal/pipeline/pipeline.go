@@ -541,13 +541,11 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 
 	switch outcome {
 	case state.FinalOutcomeAccepted:
-		if err := duplicate.SetDuplicateReference(ctx, p.db, v.VideoID, true); err != nil {
-			return outcome, fmt.Errorf("mark duplicate reference for %s: %w", v.VideoID, err)
-		}
-		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
-			state.VideoStateActed, state.VideoStateCompleted,
-			state.WithFinalOutcome(state.FinalOutcomeAccepted)); err != nil {
-			return outcome, fmt.Errorf("transition video %d to completed: %w", v.ID, err)
+		// Atomically mark the video completed and update channel counters. For
+		// v1, a routed (accepted) video is treated as retained because the
+		// retention-signal monitoring path is not yet wired into the pipeline.
+		if err := p.markVideoAccepted(ctx, runID, v); err != nil {
+			return outcome, err
 		}
 	case state.FinalOutcomeDeferred:
 		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
@@ -564,6 +562,37 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 
 	p.broadcastVideo(runID, v, outcome, len(matched) > 0)
 	return outcome, nil
+}
+
+func (p *Pipeline) markVideoAccepted(ctx context.Context, runID int64, v *state.Video) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin accepted transaction for video %d: %w", v.ID, err)
+	}
+
+	if err := duplicate.SetDuplicateReference(ctx, tx, v.VideoID, true); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("mark duplicate reference for %s: %w", v.VideoID, err)
+	}
+	if _, err := p.machine.TransitionVideoStateTx(ctx, tx, v.ID,
+		state.VideoStateActed, state.VideoStateCompleted,
+		state.WithFinalOutcome(state.FinalOutcomeAccepted)); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("transition video %d to completed: %w", v.ID, err)
+	}
+	if err := p.stateStore.IncrementChannelRoutedTx(ctx, tx, v.ChannelID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("increment routed for video %d: %w", v.ID, err)
+	}
+	if err := p.stateStore.IncrementChannelRetainedTx(ctx, tx, v.ChannelID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("increment retained for video %d: %w", v.ID, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit accepted transaction for video %d: %w", v.ID, err)
+	}
+	return nil
 }
 
 func (p *Pipeline) listRunVideos(ctx context.Context, runID int64) ([]*state.Video, error) {

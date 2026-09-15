@@ -171,11 +171,13 @@ func TestDiscoveryEndToEnd(t *testing.T) {
 	require.Equal(t, "Artist - Track (Official Video)", title)
 	require.Equal(t, 210, duration)
 
-	// Channel watermark updated.
+	// Channel watermark and discovered counter updated.
 	var lastDiscovered time.Time
-	err = db.QueryRowContext(ctx, `SELECT last_discovered_at FROM channel WHERE channel_id = ?`, "UCchannel1").Scan(&lastDiscovered)
+	var totalDiscovered int
+	err = db.QueryRowContext(ctx, `SELECT last_discovered_at, total_discovered FROM channel WHERE channel_id = ?`, "UCchannel1").Scan(&lastDiscovered, &totalDiscovered)
 	require.NoError(t, err)
 	require.False(t, lastDiscovered.IsZero())
+	require.Equal(t, 1, totalDiscovered, "channel total_discovered should reflect the new video")
 
 	// Quota ledger recorded every operation type.
 	consumed, err := ledger.ConsumedToday(ctx)
