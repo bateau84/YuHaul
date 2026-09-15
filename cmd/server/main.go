@@ -176,6 +176,7 @@ func main() {
 		server.WithQueueHandler(queueSvc),
 		server.WithRouteStore(routerStore),
 		server.WithRunStore(stateStore),
+		server.WithRunVideoStore(stateStore),
 		server.WithOverviewProvider(overview),
 	)
 

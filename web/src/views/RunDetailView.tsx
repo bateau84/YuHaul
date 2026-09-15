@@ -114,7 +114,7 @@ export function RunDetailView() {
               {videos.map((v) => (
                 <tr key={v.id}>
                   <td data-label="Title">
-                    <Link to={`/runs/${runId}/video/${v.id}`}>{v.title ?? v.video_id}</Link>
+                    <Link to={`/runs/${runId}/video/${v.video_id}`}>{v.title ?? v.video_id}</Link>
                   </td>
                   <td data-label="Channel">{v.channel_name ?? v.channel_id}</td>
                   <td data-label="Outcome">

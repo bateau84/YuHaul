@@ -10,10 +10,10 @@ import "time"
 
 // ConfigVersion is a persisted full snapshot of the effective configuration.
 type ConfigVersion struct {
-	ID                int64
-	CreatedAt         time.Time
-	Snapshot          Snapshot
-	ChangeDescription string
+	ID                int64     `json:"id"`
+	CreatedAt         time.Time `json:"created_at"`
+	Snapshot          Snapshot  `json:"snapshot"`
+	ChangeDescription string    `json:"change_description"`
 }
 
 // Snapshot is the JSON-serializable effective configuration.

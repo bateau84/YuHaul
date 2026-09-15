@@ -64,11 +64,12 @@ export {
   setDuplicateThreshold,
 } from './settings'
 
+// Run video and decision detail endpoints are wired to the real backend.
+export { getRunVideos, getDecisionDetail } from './run-videos'
+
 // The following operations do not yet have backend endpoints and remain
 // mock-backed.
 export {
-  getRunVideos,
-  getDecisionDetail,
   listAdvisories,
   dismissAdvisory,
   ignoreAdvisory,

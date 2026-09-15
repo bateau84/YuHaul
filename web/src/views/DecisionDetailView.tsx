@@ -163,7 +163,8 @@ export function DecisionDetailView() {
   const [detail, setDetail] = useState<DecisionDetail | null>(null)
 
   useEffect(() => {
-    api.getDecisionDetail(Number(id), Number(videoId)).then((d) => setDetail(d ?? null))
+    if (!id || !videoId) return
+    api.getDecisionDetail(Number(id), videoId).then((d) => setDetail(d ?? null))
   }, [id, videoId])
 
   if (!detail) return <div className="empty-state">Loading decision detail...</div>
