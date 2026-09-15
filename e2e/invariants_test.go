@@ -276,9 +276,8 @@ func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv
 
 	stateStore, err := state.NewStore(db)
 	require.NoError(t, err)
-	machine := state.NewMachine(stateStore)
-
 	ledger := quota.New(db, quota.WithDefaultLimit(1_000_000))
+	machine := state.NewMachine(stateStore, state.WithLedger(ledger))
 
 	mock := newMockYouTubeServer(channels, videos)
 	t.Cleanup(mock.Close)
@@ -390,6 +389,7 @@ func (env *testEnv) runProductionRun(t *testing.T) *state.Run {
 	loaded, err := env.stateStore.GetRun(ctx, run.ID)
 	require.NoError(t, err)
 	require.Equal(t, state.RunStatusCompleted, loaded.Status, "run %d did not complete: %v", run.ID, loaded.InterruptReason)
+	assert.Greater(t, loaded.QuotaCost, 0, "run %d should record a positive quota cost", run.ID)
 	return loaded
 }
 
