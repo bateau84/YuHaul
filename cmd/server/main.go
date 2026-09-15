@@ -51,6 +51,8 @@ type appConfig struct {
 	OAuthClientSecret string
 	OAuthRedirectURL  string
 	EncryptionKey     string
+
+	YouTubeBaseURL string
 }
 
 func main() {
@@ -112,14 +114,14 @@ func main() {
 	metadataStore := metadata.NewStore(db)
 	meta := metadata.NewManager(
 		metadataStore,
-		&metadataFetcher{auth: authSvc},
+		&metadataFetcher{auth: authSvc, baseURL: cfg.YouTubeBaseURL},
 		ledger,
 		metadata.WithLogger(logger),
 	)
 
 	detector := duplicate.NewDetector(db, duplicate.WithLogger(logger))
-	discoveryEngine := discovery.NewEngine(authSvc, machine, ledger, db, discovery.WithLogger(logger))
-	executor := pipeline.NewExecutor(db, ledger, authSvc, pipeline.WithExecutorLogger(logger))
+	discoveryEngine := discovery.NewEngine(authSvc, machine, ledger, db, discovery.WithLogger(logger), discovery.WithBaseURL(cfg.YouTubeBaseURL))
+	executor := pipeline.NewExecutor(db, ledger, authSvc, pipeline.WithExecutorLogger(logger), pipeline.WithYouTubeBaseURL(cfg.YouTubeBaseURL))
 	broadcast := pipeline.NewBroadcaster()
 
 	queueStore, err := queue.NewStore(db)
@@ -256,6 +258,7 @@ func loadConfig() appConfig {
 	cfg.OAuthClientSecret = envDefault("YUHAUL_OAUTH_CLIENT_SECRET", "")
 	cfg.OAuthRedirectURL = envDefault("YUHAUL_OAUTH_REDIRECT_URL", "")
 	cfg.EncryptionKey = envDefault("YUHAUL_ENCRYPTION_KEY", "")
+	cfg.YouTubeBaseURL = envDefault("YUHAUL_YOUTUBE_BASE_URL", "")
 
 	return cfg
 }
@@ -455,7 +458,8 @@ func (a *advisoryChannelAdapter) ListDuplicateProvenance(ctx context.Context, ch
 // metadataFetcher adapts the YouTube API client to the metadata.Fetcher
 // interface used by the metadata lifecycle manager.
 type metadataFetcher struct {
-	auth *auth.Service
+	auth    *auth.Service
+	baseURL string
 }
 
 func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) ([]metadata.TransientMetadata, error) {
@@ -466,7 +470,11 @@ func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) 
 	if err != nil {
 		return nil, fmt.Errorf("metadata fetcher: no active token: %w", err)
 	}
-	client := youtube.NewClient(ctx, token)
+	opts := []youtube.Option{}
+	if f.baseURL != "" {
+		opts = append(opts, youtube.WithBaseURL(f.baseURL))
+	}
+	client := youtube.NewClient(ctx, token, opts...)
 	details, err := client.GetVideos(ctx, videoIDs)
 	if err != nil {
 		return nil, fmt.Errorf("metadata fetcher: get videos: %w", err)

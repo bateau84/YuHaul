@@ -35,6 +35,7 @@ type Executor struct {
 	factory    YouTubeClientFactory
 	logger     *slog.Logger
 	insertCost int
+	baseURL    string
 }
 
 // ExecutorOption configures an Executor.
@@ -59,6 +60,14 @@ func WithYouTubeFactory(f YouTubeClientFactory) ExecutorOption {
 	}
 }
 
+// WithYouTubeBaseURL overrides the default production YouTube Data API base URL
+// for this executor. Empty value keeps the production default.
+func WithYouTubeBaseURL(u string) ExecutorOption {
+	return func(e *Executor) {
+		e.baseURL = u
+	}
+}
+
 // WithTokenSource overrides the default auth service token source. Useful in
 // tests to avoid constructing a real auth.Service.
 func WithTokenSource(src TokenSource) ExecutorOption {
@@ -75,18 +84,24 @@ func NewExecutor(db *sql.DB, ledger *quota.Ledger, auth TokenSource, opts ...Exe
 		db:         db,
 		ledger:     ledger,
 		auth:       auth,
-		factory:    defaultYouTubeFactory,
 		logger:     slog.Default(),
 		insertCost: quota.OpPlaylistItemsInsert.UnitCost(),
 	}
 	for _, opt := range opts {
 		opt(e)
 	}
+	if e.factory == nil {
+		e.factory = e.defaultYouTubeFactory
+	}
 	return e
 }
 
-func defaultYouTubeFactory(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) PlaylistInserter {
-	return youtube.NewClient(ctx, token, youtube.WithRecorder(recorder))
+func (e *Executor) defaultYouTubeFactory(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) PlaylistInserter {
+	opts := []youtube.Option{youtube.WithRecorder(recorder)}
+	if e.baseURL != "" {
+		opts = append(opts, youtube.WithBaseURL(e.baseURL))
+	}
+	return youtube.NewClient(ctx, token, opts...)
 }
 
 // Execute runs all actions for the matched routes. It returns the final outcome

@@ -51,8 +51,9 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-// WithBaseURL overrides the default production YouTube Data API base URL.
-// It is used by tests.
+// WithBaseURL overrides the default production YouTube Data API base URL. It is
+// used by tests and by the YUHAUL_YOUTUBE_BASE_URL runtime seam so Product
+// Acceptance can point the assembled binary at a fake YouTube endpoint.
 func WithBaseURL(u string) Option {
 	return func(c *Client) {
 		c.baseURL = strings.TrimRight(u, "/")

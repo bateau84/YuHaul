@@ -42,6 +42,7 @@ type Engine struct {
 	db        *sql.DB
 	logger    *slog.Logger
 	batchSize int
+	baseURL   string
 }
 
 // Option configures an Engine.
@@ -64,6 +65,14 @@ func WithClientFactory(f ClientFactory) Option {
 	}
 }
 
+// WithBaseURL overrides the default production YouTube Data API base URL for
+// this engine. Empty value keeps the production default.
+func WithBaseURL(u string) Option {
+	return func(e *Engine) {
+		e.baseURL = u
+	}
+}
+
 // WithBatchSize sets the maximum number of video IDs requested per videos.list
 // call. YouTube allows up to 50; the default is 50.
 func WithBatchSize(n int) Option {
@@ -78,7 +87,6 @@ func WithBatchSize(n int) Option {
 func NewEngine(auth TokenProvider, machine *state.Machine, ledger *quota.Ledger, db *sql.DB, opts ...Option) *Engine {
 	e := &Engine{
 		auth:      auth,
-		factory:   defaultClientFactory,
 		machine:   machine,
 		ledger:    ledger,
 		db:        db,
@@ -88,11 +96,18 @@ func NewEngine(auth TokenProvider, machine *state.Machine, ledger *quota.Ledger,
 	for _, opt := range opts {
 		opt(e)
 	}
+	if e.factory == nil {
+		e.factory = e.defaultClientFactory
+	}
 	return e
 }
 
-func defaultClientFactory(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
-	return youtube.NewClient(ctx, token, youtube.WithRecorder(recorder))
+func (e *Engine) defaultClientFactory(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
+	opts := []youtube.Option{youtube.WithRecorder(recorder)}
+	if e.baseURL != "" {
+		opts = append(opts, youtube.WithBaseURL(e.baseURL))
+	}
+	return youtube.NewClient(ctx, token, opts...)
 }
 
 // Result summarizes a discovery run.

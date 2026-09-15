@@ -446,6 +446,7 @@ pod restarts, rescheduling, and image updates.
 | `YUHAUL_HTTP_ADDR` | no | `:8080` | HTTP listen address |
 | `YUHAUL_WEB_ROOT` | no | `/app/web` | Directory containing the built SPA |
 | `YUHAUL_DAILY_QUOTA` | no | `10000` | YouTube Data API daily quota limit |
+| `YUHAUL_YOUTUBE_BASE_URL` | no | — | Override the YouTube Data API v3 base URL for Product Acceptance / sandboxing |
 | `YUHAUL_OAUTH_CLIENT_ID` | yes | — | Google OAuth2 client ID |
 | `YUHAUL_OAUTH_CLIENT_SECRET` | yes | — | Google OAuth2 client secret |
 | `YUHAUL_OAUTH_REDIRECT_URL` | yes | — | Absolute OAuth callback URL |

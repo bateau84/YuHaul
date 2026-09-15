@@ -265,6 +265,40 @@ func TestDiscoveryWithoutAuthFails(t *testing.T) {
 	require.Contains(t, err.Error(), "no active token")
 }
 
+func TestWithBaseURLUsesOverrideURL(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	var requestPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	db := openTestDB(t)
+	st, err := state.NewStore(db)
+	require.NoError(t, err)
+	ledger := quota.New(db)
+	mach := state.NewMachine(st)
+	auth := &stubTokenProvider{token: &oauth2.Token{AccessToken: "test-token"}}
+	eng := NewEngine(auth, mach, ledger, db, WithBaseURL(server.URL))
+
+	runID, err := st.CreateRun(context.Background(), &state.Run{
+		StartedAt: now,
+		RunType:   state.RunTypeManual,
+		Status:    state.RunStatusRunning,
+	})
+	require.NoError(t, err)
+
+	_, err = eng.Run(context.Background(), runID)
+	require.NoError(t, err)
+	require.Equal(t, "/subscriptions", requestPath)
+}
+
 func TestDiscoveryRespectsQuotaBudget(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("no API calls should be made when quota is exhausted")

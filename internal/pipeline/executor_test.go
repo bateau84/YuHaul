@@ -3,9 +3,12 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -141,6 +144,38 @@ func TestExecutor_DeferredWhenQuotaExhausted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, state.FinalOutcomeDeferred, outcome)
 	assert.Empty(t, inserter.calls)
+}
+
+func TestExecutor_WithYouTubeBaseURLUsesOverrideURL(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, ledger, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	runID, videoID, _ := createRunAndVideo(t, ctx, stateStore)
+	routeID := createRoute(t, ctx, db, "Jazz", 1)
+	createRouteAction(t, ctx, db, routeID, "PLjazz")
+	decisionID := createRouteDecision(t, ctx, stateStore, videoID, runID, routeID, 1, state.RouteDecisionMatched)
+
+	var requestPath string
+	targetURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "item-id",
+			"snippet": map[string]any{
+				"playlistId": "PLjazz",
+				"resourceId": map[string]any{"kind": "youtube#video", "videoId": "vid1"},
+			},
+		})
+	}))
+	defer targetURL.Close()
+
+	exec := NewExecutor(db, ledger, &fakeTokenSource{}, WithYouTubeBaseURL(targetURL.URL))
+
+	outcome, err := exec.Execute(ctx, runID, videoID, []RouteMatch{{RouteDecisionID: decisionID, RouteID: routeID}})
+	require.NoError(t, err)
+	assert.Equal(t, state.FinalOutcomeAccepted, outcome)
+	assert.Equal(t, "/playlistItems", requestPath)
 }
 
 func TestExecutor_FailedActionRecordsOutcome(t *testing.T) {
