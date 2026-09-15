@@ -49,7 +49,7 @@ type ConfigStore interface {
 	Get(ctx context.Context, id int64) (*config.ConfigVersion, error)
 }
 
-// Pipeline orchestrates the four-phase run lifecycle.
+// Pipeline orchestrates the five-phase run lifecycle.
 type Pipeline struct {
 	db                *sql.DB
 	machine           *state.Machine
@@ -190,7 +190,7 @@ func (p *Pipeline) StartRun(ctx context.Context, runType state.RunType) (*state.
 	return run, nil
 }
 
-// Execute runs all four phases for runID. It is safe to call in a goroutine.
+// Execute runs all five phases for runID. It is safe to call in a goroutine.
 // If runID refers to an interrupted run, execution resumes from the last
 // recorded phase. For new production runs, pending deferred work is processed
 // before new discoveries.
@@ -254,6 +254,15 @@ func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 	if startPhase == PhaseDuplicateDetect {
 		if err := p.phaseDuplicateDetection(ctx, runID, videos); err != nil {
 			p.failRun(ctx, runID, "duplicate detection phase failed", err)
+			return
+		}
+		startPhase = PhaseExclusion
+	}
+
+	if startPhase == PhaseExclusion {
+		videos, err = p.phaseExclusion(ctx, runID, videos)
+		if err != nil {
+			p.failRun(ctx, runID, "exclusion gate failed", err)
 			return
 		}
 		startPhase = PhaseRouting
@@ -428,7 +437,7 @@ func (p *Pipeline) phaseRouting(ctx context.Context, runID int64, videos []*stat
 			meta = &metadata.TransientMetadata{VideoID: v.VideoID}
 		}
 
-		vc := videoContextFromMetadata(v.VideoID, meta)
+		vc := videoContextFromMetadata(v.VideoID, v.ChannelID, meta)
 		result, err := p.router.Evaluate(ctx, runID, v.ID, vc, p.machine)
 		if err != nil {
 			return nil, fmt.Errorf("route video %s: %w", v.VideoID, err)
@@ -695,8 +704,8 @@ func (p *Pipeline) createErrorEntryFromDeferred(ctx context.Context, item queue.
 	return err
 }
 
-func videoContextFromMetadata(videoID string, m *metadata.TransientMetadata) router.VideoContext {
-	vc := router.VideoContext{VideoID: videoID}
+func videoContextFromMetadata(videoID, channelID string, m *metadata.TransientMetadata) router.VideoContext {
+	vc := router.VideoContext{VideoID: videoID, ChannelID: channelID}
 	if m.ChannelName != nil {
 		vc.ChannelName = *m.ChannelName
 	}

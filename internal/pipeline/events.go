@@ -1,5 +1,5 @@
-// Package pipeline orchestrates YuHaul's four-phase processing pipeline:
-// discovery -> duplicate detection -> routing -> action execution.
+// Package pipeline orchestrates YuHaul's five-phase processing pipeline:
+// discovery -> duplicate detection -> exclusion -> routing -> action execution.
 //
 // It manages the Run lifecycle, emits SSE events, enforces quota-aware action
 // execution, and guarantees INV-1 terminal-state accounting.
@@ -11,12 +11,13 @@ import (
 	"time"
 )
 
-// Phase names the four pipeline phases.
+// Phase names the five pipeline phases.
 type Phase string
 
 const (
 	PhaseDiscovery       Phase = "discovery"
 	PhaseDuplicateDetect Phase = "duplicate_detection"
+	PhaseExclusion       Phase = "exclusion"
 	PhaseRouting         Phase = "routing"
 	PhaseActionExecution Phase = "action_execution"
 )

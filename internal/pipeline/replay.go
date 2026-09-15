@@ -168,7 +168,18 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 		}
 	}
 
-	vc := videoContextFromMetadata(v.VideoID, meta)
+	vc := videoContextFromMetadata(v.VideoID, v.ChannelID, meta)
+
+	// Global exclusion gate: videos excluded by every enabled route are marked
+	// excluded without evaluating route conditions.
+	remaining, err := p.runExclusionGate(ctx, runID, []*state.Video{v}, routes, false)
+	if err != nil {
+		return fmt.Errorf("exclusion gate for video %s: %w", v.VideoID, err)
+	}
+	if len(remaining) == 0 {
+		return nil
+	}
+
 	if _, err := p.router.EvaluateWithRoutes(ctx, runID, v.ID, vc, p.machine, routes); err != nil {
 		return fmt.Errorf("evaluate video %s: %w", v.VideoID, err)
 	}

@@ -99,7 +99,7 @@ func (e *Engine) evaluateRoute(route Route, vc VideoContext) (state.RouteDecisio
 		}, nil, false
 	}
 
-	if reason := excluded(route, vc); reason != nil {
+	if reason := Excluded(route, vc); reason != nil {
 		return state.RouteDecision{
 			EvaluationOrder: order,
 			Decision:        state.RouteDecisionSkipped,
@@ -138,7 +138,9 @@ func (e *Engine) evaluateRoute(route Route, vc VideoContext) (state.RouteDecisio
 	}, audits, false
 }
 
-func excluded(route Route, vc VideoContext) *state.SkipReason {
+// Excluded returns the exclusion skip reason if the video matches any of the
+// route's exclusion rules, or nil if it does not.
+func Excluded(route Route, vc VideoContext) *state.SkipReason {
 	for _, ex := range route.Exclusions {
 		switch ex.ExclusionType {
 		case ExclusionTypeChannel:
