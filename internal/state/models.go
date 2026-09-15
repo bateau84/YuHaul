@@ -81,6 +81,7 @@ const (
 	RunStatusRunning     RunStatus = "running"
 	RunStatusCompleted   RunStatus = "completed"
 	RunStatusInterrupted RunStatus = "interrupted"
+	RunStatusFailed      RunStatus = "failed"
 )
 
 // Run is a single execution of the processing pipeline.

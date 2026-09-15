@@ -331,6 +331,31 @@ func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 	return m.store.GetRun(ctx, runID)
 }
 
+// FailRun marks a run as failed, recomputes its outcome counters, and records
+// the quota cost from the ledger when one is configured. The reason explains
+// why the run did not reach a normal terminal state.
+func (m *Machine) FailRun(ctx context.Context, runID int64, reason string) (*Run, error) {
+	started := m.now().UTC()
+	run, err := m.store.GetRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	quotaCost, err := m.runQuotaCost(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := started.Sub(run.StartedAt).Seconds()
+	if err := m.store.FailRun(ctx, runID, reason, duration, quotaCost); err != nil {
+		return nil, err
+	}
+	if err := m.store.RecomputeRunCounters(ctx, runID); err != nil {
+		return nil, err
+	}
+	return m.store.GetRun(ctx, runID)
+}
+
 // CompleteHistoricalRun finalizes a replay/backtest run and recomputes its
 // counters from route decisions rather than discovered_in_run_id.
 func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run, error) {

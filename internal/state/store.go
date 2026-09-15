@@ -152,6 +152,24 @@ func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float
 	return nil
 }
 
+// FailRun marks a run as failed with a reason and records final counters and
+// quota cost. It reuses the interrupt_reason column to explain why the run did
+// not reach a normal terminal state.
+func (s *Store) FailRun(ctx context.Context, id int64, reason string, durationSeconds float64, quotaCost int) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE run
+		 SET status = ?, interrupt_reason = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
+		 WHERE id = ?;`,
+		RunStatusFailed, reason, time.Now().UTC(), durationSeconds, quotaCost, id)
+	if err != nil {
+		return fmt.Errorf("failing run %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // InterruptRun marks a run as interrupted with a reason.
 func (s *Store) InterruptRun(ctx context.Context, id int64, reason string) error {
 	res, err := s.db.ExecContext(ctx,

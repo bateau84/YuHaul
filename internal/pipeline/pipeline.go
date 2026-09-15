@@ -201,9 +201,12 @@ func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.ErrorContext(ctx, "pipeline panic", "recover", r)
-			_ = p.stateStore.InterruptRun(ctx, runID, fmt.Sprintf("panic: %v", r))
-			p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: fmt.Sprintf("panic: %v", r)}))
-			p.completeRun(ctx, runID)
+			reason := fmt.Sprintf("panic: %v", r)
+			if _, ferr := p.machine.FailRun(ctx, runID, reason); ferr != nil {
+				logger.ErrorContext(ctx, "fail run failed after panic", "run_id", runID, "error", ferr)
+				_ = p.stateStore.InterruptRun(ctx, runID, reason)
+			}
+			p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: reason}))
 		}
 	}()
 
@@ -328,9 +331,11 @@ func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
 
 func (p *Pipeline) failRun(ctx context.Context, runID int64, message string, err error) {
 	p.logger.ErrorContext(ctx, message, "run_id", runID, "error", err)
-	_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
+	if _, ferr := p.machine.FailRun(ctx, runID, err.Error()); ferr != nil {
+		p.logger.ErrorContext(ctx, "fail run failed", "run_id", runID, "error", ferr)
+		_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
+	}
 	p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
-	p.completeRun(ctx, runID)
 }
 
 func (p *Pipeline) isProductionRun(runType state.RunType) bool {

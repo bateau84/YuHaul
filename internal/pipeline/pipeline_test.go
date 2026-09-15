@@ -3,8 +3,12 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,13 +16,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/youtube"
 )
 
 func setupPipelineTest(t *testing.T) (*sql.DB, *state.Store, *state.Machine, *Broadcaster, func()) {
@@ -261,7 +268,11 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 	ledger := quota.New(db)
 	exec := newTestExecutor(t, db, ledger, inserter)
 
-	p := NewPipeline(db, machine, stateStore, nil, nil, nil, exec, ledger, nil, nil, broadcast,
+	// Provide a discovery engine that returns empty results so the run can
+	// reach completion after deferred items are processed.
+	disc := newNoOpDiscoveryEngine(t, machine, ledger, db)
+
+	p := NewPipeline(db, machine, stateStore, disc, nil, nil, exec, ledger, nil, nil, broadcast,
 		WithQueueStore(queueStore),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
@@ -285,6 +296,92 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 
 	assert.Len(t, inserter.calls, 1)
 	assert.Equal(t, "PLdefer", inserter.calls[0].PlaylistID)
+}
+
+func TestPipeline_FailRunSetsFailedStatus(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+
+	p.failRun(ctx, runID, "discovery phase failed", fmt.Errorf("no active token"))
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.NotNil(t, loaded.InterruptReason)
+	assert.Equal(t, "no active token", *loaded.InterruptReason)
+}
+
+func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	// Leave discovery nil so phaseDiscovery panics with a nil pointer dereference.
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+
+	sub := broadcast.Subscribe(runID)
+	defer broadcast.Unsubscribe(runID, sub)
+
+	p.Execute(ctx, runID)
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.NotNil(t, loaded.InterruptReason)
+	assert.Contains(t, *loaded.InterruptReason, "panic:")
+
+	var errorEvent *Event
+	for {
+		select {
+		case ev := <-sub:
+			if ev.Type == EventRunError {
+				errorEvent = &ev
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for error event")
+		}
+		if errorEvent != nil {
+			break
+		}
+	}
+	require.NotNil(t, errorEvent)
+}
+
+func newNoOpDiscoveryEngine(t *testing.T, machine *state.Machine, ledger *quota.Ledger, db *sql.DB) *discovery.Engine {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+	}))
+	t.Cleanup(server.Close)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	factory := func(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
+		return youtube.NewClient(ctx, token,
+			youtube.WithBaseURL(server.URL),
+			youtube.WithRecorder(recorder),
+			youtube.WithLogger(logger),
+		)
+	}
+	return discovery.NewEngine(&fakeTokenSource{}, machine, ledger, db,
+		discovery.WithClientFactory(factory),
+		discovery.WithLogger(logger),
+	)
 }
 
 func TestPipeline_ActionExecutionUpdatesChannelCounters(t *testing.T) {
