@@ -74,6 +74,31 @@ func (s *Store) Get(ctx context.Context, videoID string) (*TransientMetadata, er
 // ErrNotFound is returned when a Store A record does not exist.
 var ErrNotFound = errors.New("metadata not found")
 
+// CleanupExpired deletes transient_metadata records whose fetched_at is before
+// cutoff. It performs only local database operations and consumes no API quota.
+// Returns the number of records deleted.
+func (s *Store) CleanupExpired(ctx context.Context, cutoff time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 10000
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM transient_metadata
+		WHERE video_id IN (
+			SELECT video_id FROM transient_metadata
+			WHERE fetched_at < ?
+			ORDER BY fetched_at ASC
+			LIMIT ?
+		);`, cutoff.UTC(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("metadata: cleanup expired: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("metadata: cleanup expired rows affected: %w", err)
+	}
+	return int(n), nil
+}
+
 // ListActivePastExpiry returns active records whose expires_at is before now.
 func (s *Store) ListActivePastExpiry(ctx context.Context, now time.Time, limit int) ([]string, error) {
 	if limit <= 0 {
@@ -254,6 +279,22 @@ func (s *Store) Refresh(ctx context.Context, items []TransientMetadata, ttl time
 		return fmt.Errorf("metadata: commit refresh transaction: %w", err)
 	}
 	return nil
+}
+
+// GetFingerprint returns the Store B fingerprint for videoID, or an empty
+// string if no fingerprint exists.
+func (s *Store) GetFingerprint(ctx context.Context, videoID string) (string, error) {
+	var fp string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT fingerprint FROM title_fingerprint
+		WHERE video_id = ?;`, videoID).Scan(&fp)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("metadata: get fingerprint %s: %w", videoID, err)
+	}
+	return fp, nil
 }
 
 func scanMetadata(row *sql.Row) (*TransientMetadata, error) {

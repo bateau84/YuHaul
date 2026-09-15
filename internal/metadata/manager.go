@@ -105,6 +105,14 @@ func (m *Manager) RunLifecycle(ctx context.Context) error {
 	return nil
 }
 
+// CleanupExpired deletes metadata records older than the configured TTL.
+// It performs only local DELETE operations and never consumes API quota.
+// Returns the number of records deleted.
+func (m *Manager) CleanupExpired(ctx context.Context) (int, error) {
+	cutoff := m.now().UTC().Add(-m.ttl)
+	return m.store.CleanupExpired(ctx, cutoff, 10000)
+}
+
 // ExpireStale marks active records past expires_at as expired, clearing raw
 // metadata fields. It returns the number of records expired.
 func (m *Manager) ExpireStale(ctx context.Context) (int, error) {
@@ -185,6 +193,29 @@ func (m *Manager) GetDisplayMetadata(ctx context.Context, videoID string) (*Tran
 		return nil, &MetadataExpiredError{VideoID: videoID}
 	}
 	return meta, nil
+}
+
+// GetDisplayTitle returns the best available human-readable title for a video.
+// Active metadata is preferred. If the metadata has expired or is missing, the
+// title degrades to the Store B fingerprint hash. If no fingerprint exists, a
+// fixed degraded label is returned.
+func (m *Manager) GetDisplayTitle(ctx context.Context, videoID string) (string, error) {
+	meta, err := m.store.Get(ctx, videoID)
+	if err == nil {
+		now := m.now().UTC()
+		if meta.IsActive && meta.ExpiredAt == nil && !meta.ExpiresAt.Before(now) && meta.Title != nil {
+			return *meta.Title, nil
+		}
+	}
+
+	fp, err := m.store.GetFingerprint(ctx, videoID)
+	if err != nil {
+		return "", err
+	}
+	if fp != "" {
+		return fp, nil
+	}
+	return "[metadata expired]", nil
 }
 
 // CountStaleActive returns the number of active records whose expires_at is
