@@ -364,7 +364,7 @@ Key design decisions:
 | **Backtest Engine** | Offline evaluation against retained observations; state isolation from production |
 | **Configuration Versioner** | Snapshots route configuration on change; links runs to active config version |
 | **Quota Ledger** | Tracks per-operation API costs; pre-flight budget checks; remaining capacity reporting |
-| **YouTube API Client** | Thin wrapper around YouTube Data API v3; handles auth, retries, rate limiting |
+| **YouTube API Client** | Thin wrapper around YouTube Data API v3; handles auth, retries, rate limiting. Exposes a base-URL seam (`YUHAUL_YOUTUBE_BASE_URL`) so the assembled artifact can run against a fake/sandbox endpoint for Product Acceptance without modifying the binary (see ADR-001) |
 | **Storage Layer** | SQLite with FTS5 for fingerprint search; two-store separation enforced at schema level |
 | **Web SPA** | Single-page application matching designer spec; responsive layout |
 
@@ -435,7 +435,8 @@ Lifecycle: Records created at discovery. `expires_at = fetched_at + 30 days`. Me
 │ completed_at TIMESTAMP              │
 │ run_type TEXT NOT NULL               │  ← 'scheduled' | 'manual' | 'dry_run' |
 │                                      │     'replay' | 'backtest'
-│ status TEXT NOT NULL                 │  ← 'running' | 'completed' | 'interrupted'
+│ status TEXT NOT NULL                 │  ← 'running' | 'completed' | 'interrupted' |
+│                                      │     'failed'
 │ config_version_id INTEGER           │
 │ videos_discovered INTEGER DEFAULT 0  │
 │ videos_accepted INTEGER DEFAULT 0    │
@@ -1018,13 +1019,22 @@ Events: `run.started`, `run.phase`, `run.video.processed`, `run.quota.warning`, 
 
 #### Run Recovery
 
-If a run is interrupted:
+Run `status` has four states: `running`, `completed`, `interrupted`, and `failed`. `interrupted` and `failed` are distinct terminal-adjacent states with different recovery semantics; both carry a reason in `interrupt_reason` (redefined as "the reason the run is not in a normal terminal state").
+
+**Interrupted (resumable):** a run whose process was cleanly stopped at a phase boundary (e.g. crash mid-run):
 
 1. Run status set to `interrupted` with `interrupt_reason`
 2. Videos in `evaluating` or `acted` state are re-processing candidates
 3. Next run checks for interrupted runs and resumes from last known state
 4. Idempotency guards prevent duplicate insertions on resume
 5. Videos in `completed` state are never reprocessed
+
+**Failed (terminal):** a run whose processing phase returned an unrecoverable error, or which panicked mid-flight:
+
+1. Run status set to `failed` with `interrupt_reason`
+2. Run records `completed_at`, `duration_seconds`, and `quota_cost` (terminal accounting), and its outcome counters are recomputed
+3. The run is NOT auto-resumed — it is excluded from the interrupted-run resume queue
+4. The operator initiates a fresh run after remedying the cause (e.g. re-connecting the account)
 
 #### Deferred Work Recovery
 
@@ -1104,8 +1114,9 @@ Prior installation has 10,000+ titles. API-originated titles retain API-Data pro
 1. Process crash mid-run: run status = interrupted, resumes on next run
 2. Quota exhaustion mid-run: remaining work deferred, processed in next run
 3. Auth token expiry mid-run: remaining work deferred, user prompted to re-authorize
-4. Metadata expiry: evidence degrades gracefully, one-click refresh restores
-5. Database corruption: SQLite backup (file copy) restores to last consistent state
+4. Processing phase failure or panic (e.g. no active token): run status = failed, terminal, not auto-resumed
+5. Metadata expiry: evidence degrades gracefully, one-click refresh restores
+6. Database corruption: SQLite backup (file copy) restores to last consistent state
 
 ## Consequences
 

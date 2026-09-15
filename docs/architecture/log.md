@@ -10,6 +10,12 @@ timestamp: 2026-09-08T00:00:00Z
 
 ## 2026-09-15
 
+**Update**: `yuhaul-system-architecture.md` — Reconciled the Run entity `status` enum to add `failed` as a fourth state (`running | completed | interrupted | failed`), redefined `interrupt_reason` as "the reason the run is not in a normal terminal state" (populated for both `interrupted` and `failed`), split §Run Recovery into resumable `interrupted` vs terminal `failed` recovery, added a failure/panic recovery scenario, and documented the YouTube base-URL seam in the YouTube API Client responsibility.
+
+**Creation**: `adr-001-youtube-provider-seam.md` — Resolves pre-merge MAJOR-1: thread the existing `youtube.WithBaseURL` through the three production client-construction sites behind `YUHAUL_YOUTUBE_BASE_URL` (empty = production default) so Product Acceptance can run the assembled artifact against a fake YouTube. Chose the narrow base-URL seam (Option A) over a full client-factory override to preserve the real OAuth token source and quota recorder on the proof path.
+
+**Creation**: `adr-002-run-status-failed-terminal-state.md` — Resolves pre-merge MAJOR-2: add `RunStatusFailed = "failed"` and route `Pipeline.failRun` and the `Execute` panic-recovery path through a new `Machine.FailRun` so a phase failure is reported `failed`, not `completed`. `failed` is terminal and excluded from interrupted-run resume.
+
 **Update**: `yuhaul-system-architecture.md` — Reflected the five-phase processing pipeline (previously documented as "four phases"). Split the combined "Exclusion Gate + Routing" phase into two distinct phases: Phase 3 (Exclusion — global exclusion gate marking videos excluded by every enabled route) and Phase 4 (Routing — per-route condition evaluation). Renumbered action execution to Phase 5, relocated the configuration snapshot to run initiation (no longer a numbered phase), and updated the mode-variations table and channel-counter phase references to match. Grounded in `internal/pipeline` `Phase` constants: `discovery` → `duplicate_detection` → `exclusion` → `routing` → `action_execution`.
 
 ## 2026-09-08
