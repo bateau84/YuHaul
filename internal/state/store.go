@@ -385,6 +385,58 @@ func (s *Store) ListRetainedVideos(ctx context.Context) ([]Video, error) {
 	return out, nil
 }
 
+// ListRunVideos returns paginated videos discovered in a specific run, ordered
+// by discovered_at descending (newest first). It also returns the total count
+// of videos in the run for pagination metadata.
+func (s *Store) ListRunVideos(ctx context.Context, runID int64, limit, offset int) ([]Video, int64, error) {
+	var total int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ?;`, runID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting run %d videos: %w", runID, err)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
+		        processing_state, final_outcome, deferred_reason, error_message, completed_at
+		 FROM video WHERE discovered_in_run_id = ? ORDER BY discovered_at DESC LIMIT ? OFFSET ?;`,
+		runID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing run %d videos: %w", runID, err)
+	}
+	defer rows.Close()
+
+	var out []Video
+	for rows.Next() {
+		v, err := scanVideo(rows)
+		if err != nil {
+			return nil, 0, fmt.Errorf("scanning run video: %w", err)
+		}
+		out = append(out, *v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterating run videos: %w", err)
+	}
+	return out, total, nil
+}
+
+// GetVideoByExternalIDInRun loads a video by its YouTube video ID only if it
+// was discovered in the specified run. This scopes the lookup so that a video
+// ID reused across runs is still bound to the run in the request path.
+func (s *Store) GetVideoByExternalIDInRun(ctx context.Context, runID int64, videoID string) (*Video, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
+		        processing_state, final_outcome, deferred_reason, error_message, completed_at
+		 FROM video WHERE video_id = ? AND discovered_in_run_id = ?;`, videoID, runID)
+	v, err := scanVideo(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("video %s in run %d: %w", videoID, runID, ErrNotFound)
+		}
+		return nil, fmt.Errorf("loading video %s in run %d: %w", videoID, runID, err)
+	}
+	return v, nil
+}
+
 // ListPendingVideos returns videos that are eligible for dry-run evaluation:
 // those in the not_yet_evaluated state and not already processed or rejected.
 func (s *Store) ListPendingVideos(ctx context.Context) ([]Video, error) {
@@ -436,6 +488,33 @@ func (s *Store) GetExecutedActionsForVideo(ctx context.Context, videoID int64) (
 		`SELECT id, route_decision_id, run_id, video_id, action_type,
 		        target_playlist_id, outcome, error_message, executed_at
 		 FROM executed_action WHERE video_id = ?;`, videoID)
+	if err != nil {
+		return nil, fmt.Errorf("querying executed actions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ExecutedAction
+	for rows.Next() {
+		a, err := scanExecutedAction(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning executed action: %w", err)
+		}
+		out = append(out, *a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating executed actions: %w", err)
+	}
+	return out, nil
+}
+
+// GetExecutedActionsForVideoInRun returns executed actions for a specific video
+// within a specific run. This scopes the lookup to the run surfaced in the
+// decision detail endpoint.
+func (s *Store) GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]ExecutedAction, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, route_decision_id, run_id, video_id, action_type,
+		        target_playlist_id, outcome, error_message, executed_at
+		 FROM executed_action WHERE video_id = ? AND run_id = ?;`, videoID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("querying executed actions: %w", err)
 	}

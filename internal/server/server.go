@@ -64,6 +64,17 @@ type RunStore interface {
 	GetRun(ctx context.Context, id int64) (*state.Run, error)
 }
 
+// RunVideoStore is the subset of state.Store used by the run video handlers.
+// It is defined in run_handlers.go and repeated here for the Server field.
+type RunVideoStore interface {
+	ListRunVideos(ctx context.Context, runID int64, limit, offset int) ([]state.Video, int64, error)
+	GetRun(ctx context.Context, id int64) (*state.Run, error)
+	GetVideoByExternalIDInRun(ctx context.Context, runID int64, videoID string) (*state.Video, error)
+	GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.RouteDecision, error)
+	GetConditionAuditsForDecision(ctx context.Context, decisionID int64) ([]state.ConditionAudit, error)
+	GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.ExecutedAction, error)
+}
+
 // Overview is the dashboard summary returned by GET /api/overview.
 type Overview struct {
 	LastRun       *state.Run `json:"last_run"`
@@ -88,6 +99,7 @@ type Server struct {
 	queueHandler     QueueHandler
 	routeStore       RouteStore
 	runStore         RunStore
+	runVideoStore    RunVideoStore
 	overviewProvider OverviewProvider
 	logger           *slog.Logger
 }
@@ -158,6 +170,16 @@ func WithRunStore(store RunStore) Option {
 	}
 }
 
+// WithRunVideoStore registers the store used by run video and decision detail
+// endpoints.
+func WithRunVideoStore(store RunVideoStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.runVideoStore = store
+		}
+	}
+}
+
 // WithOverviewProvider registers the dashboard overview provider.
 func WithOverviewProvider(provider OverviewProvider) Option {
 	return func(s *Server) {
@@ -178,6 +200,7 @@ func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Optio
 		queueHandler:     noopQueueHandler{},
 		routeStore:       noopRouteStore{},
 		runStore:         noopRunStore{},
+		runVideoStore:    noopRunVideoStore{},
 		overviewProvider: noopOverviewProvider{},
 		logger:           slog.Default(),
 	}
@@ -223,6 +246,27 @@ func (noopRunStore) GetRun(context.Context, int64) (*state.Run, error) {
 	return nil, errors.New("run store not configured")
 }
 
+type noopRunVideoStore struct{}
+
+func (noopRunVideoStore) ListRunVideos(context.Context, int64, int, int) ([]state.Video, int64, error) {
+	return nil, 0, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) GetRun(context.Context, int64) (*state.Run, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) GetVideoByExternalIDInRun(context.Context, int64, string) (*state.Video, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) GetRouteDecisionsForVideoInRun(context.Context, int64, int64) ([]state.RouteDecision, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) GetConditionAuditsForDecision(context.Context, int64) ([]state.ConditionAudit, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) GetExecutedActionsForVideoInRun(context.Context, int64, int64) ([]state.ExecutedAction, error) {
+	return nil, errors.New("run video store not configured")
+}
+
 type noopOverviewProvider struct{}
 
 func (noopOverviewProvider) Overview(context.Context) (*Overview, error) {
@@ -255,6 +299,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
 	mux.HandleFunc("GET /api/runs", s.handleListRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
+	mux.HandleFunc("GET /api/runs/{id}/videos", s.handleListRunVideos)
+	mux.HandleFunc("GET /api/runs/{id}/videos/{videoId}", s.handleGetRunVideo)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 
