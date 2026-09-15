@@ -21,13 +21,19 @@ export function RoutesView() {
 
   async function move(from: number, to: number) {
     if (to < 0 || to >= routes.length) return
+    const previous = routes
     const next = [...routes]
     const [moved] = next.splice(from, 1)
     next.splice(to, 0, moved)
     next.forEach((r, i) => (r.evaluation_order = i + 1))
     setRoutes(next)
-    await api.reorderRoutes(next.map((r) => r.id))
-    addToast('Route order updated', 'success')
+    try {
+      await api.reorderRoutes(next.map((r) => r.id))
+      addToast('Route order updated', 'success')
+    } catch (err) {
+      setRoutes(previous)
+      addToast(err instanceof Error ? err.message : 'Failed to update route order', 'error')
+    }
   }
 
   if (loading) return <div className="empty-state">Loading routes...</div>
@@ -81,9 +87,13 @@ export function RoutesView() {
                       <button
                         className="icon-button"
                         onClick={async () => {
-                          await api.deleteRoute(r.id)
-                          setRoutes((prev) => prev.filter((x) => x.id !== r.id))
-                          addToast('Route deleted', 'success')
+                          try {
+                            await api.deleteRoute(r.id)
+                            setRoutes((prev) => prev.filter((x) => x.id !== r.id))
+                            addToast('Route deleted', 'success')
+                          } catch (err) {
+                            addToast(err instanceof Error ? err.message : 'Failed to delete route', 'error')
+                          }
                         }}
                         aria-label={`Delete route ${r.name}`}
                       >

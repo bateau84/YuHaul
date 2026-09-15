@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { RouteEditorView } from './RouteEditorView'
 import { ToastProvider } from '../components/ToastProvider'
@@ -129,7 +129,31 @@ describe('RouteEditorView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Delete/i }))
 
+    await waitFor(() => expect(screen.getByRole('alertdialog')).toBeInTheDocument())
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: /^Delete$/i }))
+
     await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith(1))
     await waitFor(() => expect(screen.getByTestId('routes-list')).toBeInTheDocument())
+  })
+
+  it('shows route not found for an unknown id', async () => {
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([routeFixture()])
+    vi.spyOn(mock, 'getRoute').mockResolvedValueOnce(undefined)
+
+    renderAt('/routes/999')
+
+    await waitFor(() => expect(screen.queryByText('Loading route...')).not.toBeInTheDocument())
+    expect(screen.getByText('Route not found')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Back to Routes/i })).toBeInTheDocument()
+  })
+
+  it('shows a network error with retry', async () => {
+    vi.spyOn(mock, 'listRoutes').mockRejectedValueOnce(new Error('network error'))
+
+    renderAt('/routes/1')
+
+    await waitFor(() => expect(screen.queryByText('Loading route...')).not.toBeInTheDocument())
+    expect(screen.getByText('Failed to load route')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Retry/i })).toBeInTheDocument()
   })
 })

@@ -114,9 +114,9 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
       return new Response(null, { status: 204 })
     }
   }
-  if (path === '/api/routes/reorder' && method === 'POST') {
-    const body = JSON.parse(String(init?.body)) as { ids: number[] }
-    await mock.reorderRoutes(body.ids)
+  if (path === '/api/routes/reorder' && method === 'PUT') {
+    const body = JSON.parse(String(init?.body)) as { route_ids: number[] }
+    await mock.reorderRoutes(body.route_ids)
     return jsonResponse({ ok: true })
   }
 
