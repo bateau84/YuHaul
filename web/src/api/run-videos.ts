@@ -76,8 +76,8 @@ function toVideoOutcome(v: BackendVideoOutcome): VideoOutcome {
   }
 }
 
-function toConditionAudits(audits: BackendConditionAudit[]): ConditionAudit[] {
-  return audits.map((a, index) => ({
+function toConditionAudits(audits: BackendConditionAudit[] | null | undefined): ConditionAudit[] {
+  return (audits ?? []).map((a, index) => ({
     id: index,
     condition_index: a.condition_index,
     field: a.field,
@@ -88,8 +88,8 @@ function toConditionAudits(audits: BackendConditionAudit[]): ConditionAudit[] {
   }))
 }
 
-function toActionOutcomes(actions: BackendExecutedAction[]): ActionOutcome[] {
-  return actions.map((a, index) => ({
+function toActionOutcomes(actions: BackendExecutedAction[] | null | undefined): ActionOutcome[] {
+  return (actions ?? []).map((a, index) => ({
     id: index,
     action_type: a.action_type,
     target_playlist_id: a.target_playlist_id,
@@ -98,8 +98,8 @@ function toActionOutcomes(actions: BackendExecutedAction[]): ActionOutcome[] {
   }))
 }
 
-function toRouteDecisions(decisions: BackendRouteDecision[]): RouteDecision[] {
-  return decisions.map((d) => ({
+function toRouteDecisions(decisions: BackendRouteDecision[] | null | undefined): RouteDecision[] {
+  return (decisions ?? []).map((d) => ({
     id: d.route_id,
     route_id: d.route_id,
     route_name: d.route_name,

@@ -37,8 +37,9 @@ function formatConditionValue(c: RouteCondition): string {
 }
 
 function conditionSummary(route: Route): string {
-  if (route.conditions.length === 0) return 'No conditions'
-  const parts = route.conditions.map((c) => {
+  const conditions = route.conditions ?? []
+  if (conditions.length === 0) return 'No conditions'
+  const parts = conditions.map((c) => {
     const field = fieldLabels[c.field]
     const op = operatorLabels[c.operator]
     const value = formatConditionValue(c)
@@ -147,7 +148,7 @@ export function RoutesView() {
                     <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>{r.description}</p>
                   </td>
                   <td data-label="Conditions">
-                    <span style={{ color: r.conditions.length === 0 ? 'var(--color-text-muted)' : undefined }}>
+                    <span style={{ color: (r.conditions ?? []).length === 0 ? 'var(--color-text-muted)' : undefined }}>
                       {conditionSummary(r)}
                     </span>
                   </td>

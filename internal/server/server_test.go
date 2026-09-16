@@ -813,6 +813,31 @@ func TestHandleGetRoute_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestHandleGetRoute_EmptyChildren(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	id, err := routerStore.CreateRoute(ctx, &router.Route{
+		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
+		ConditionComposition: "AND",
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+		Exclusions:           []router.RouteExclusion{},
+	})
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes/"+strconv.FormatInt(id, 10), nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"exclusions":[]`)
+	assert.NotContains(t, body, `"exclusions":null`)
+}
+
 func TestHandleCreateRoute(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()

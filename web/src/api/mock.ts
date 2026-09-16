@@ -443,7 +443,7 @@ export async function reorderRoutes(ids: number[]): Promise<void> {
 export async function getRouteStats(id: number): Promise<{ match_count: number }> {
   await delay()
   const count = Object.values(mockDecisionDetails)
-    .flatMap((d) => d.route_decisions)
+    .flatMap((d) => d.route_decisions ?? [])
     .filter((rd) => rd.route_id === id && rd.decision === 'matched').length
   return { match_count: count }
 }

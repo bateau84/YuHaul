@@ -68,19 +68,19 @@ function ScenarioDiff({ current, proposed }: { current: Route[]; proposed: Route
                   Final: {String(row.oldRoute.is_final)} → {String(row.newRoute.is_final)}
                 </li>
               )}
-              {row.oldRoute.conditions.length !== row.newRoute.conditions.length && (
+              {(row.oldRoute.conditions ?? []).length !== (row.newRoute.conditions ?? []).length && (
                 <li>
-                  Conditions: {row.oldRoute.conditions.length} → {row.newRoute.conditions.length}
+                  Conditions: {(row.oldRoute.conditions ?? []).length} → {(row.newRoute.conditions ?? []).length}
                 </li>
               )}
-              {row.oldRoute.actions.length !== row.newRoute.actions.length && (
+              {(row.oldRoute.actions ?? []).length !== (row.newRoute.actions ?? []).length && (
                 <li>
-                  Actions: {row.oldRoute.actions.length} → {row.newRoute.actions.length}
+                  Actions: {(row.oldRoute.actions ?? []).length} → {(row.newRoute.actions ?? []).length}
                 </li>
               )}
-              {row.oldRoute.exclusions.length !== row.newRoute.exclusions.length && (
+              {(row.oldRoute.exclusions ?? []).length !== (row.newRoute.exclusions ?? []).length && (
                 <li>
-                  Exclusions: {row.oldRoute.exclusions.length} → {row.newRoute.exclusions.length}
+                  Exclusions: {(row.oldRoute.exclusions ?? []).length} → {(row.newRoute.exclusions ?? []).length}
                 </li>
               )}
             </ul>

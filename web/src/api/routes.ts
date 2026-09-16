@@ -1,14 +1,26 @@
 import type { Route } from '../types'
 import { api, ApiError } from './core'
 
+function normalizeRoute(route: Route): Route {
+  return {
+    ...route,
+    conditions: route.conditions ?? [],
+    actions: route.actions ?? [],
+    exclusions: route.exclusions ?? [],
+  }
+}
+
 export async function listRoutes(): Promise<Route[]> {
   const data = await api<{ routes: Route[] }>('/api/routes')
-  return (data.routes ?? []).sort((a, b) => a.evaluation_order - b.evaluation_order)
+  return (data.routes ?? [])
+    .map(normalizeRoute)
+    .sort((a, b) => a.evaluation_order - b.evaluation_order)
 }
 
 export async function getRoute(id: number): Promise<Route | undefined> {
   try {
-    return await api<Route>(`/api/routes/${id}`)
+    const route = await api<Route>(`/api/routes/${id}`)
+    return normalizeRoute(route)
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       return undefined

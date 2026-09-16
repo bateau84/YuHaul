@@ -67,7 +67,7 @@ func (s *Store) List(ctx context.Context) ([]ConfigVersion, error) {
 	}
 	defer rows.Close()
 
-	var out []ConfigVersion
+	out := make([]ConfigVersion, 0)
 	for rows.Next() {
 		cv, err := scanConfigVersion(rows)
 		if err != nil {
@@ -111,7 +111,7 @@ func (s *Store) GetRunsForVersion(ctx context.Context, versionID int64) ([]state
 	}
 	defer rows.Close()
 
-	var out []state.Run
+	out := make([]state.Run, 0)
 	for rows.Next() {
 		r, err := scanRun(rows)
 		if err != nil {

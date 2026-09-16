@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown, Check, X, Loader2, AlertCircle } from 'lucide-react'
 import { DeleteConfirmDialog } from './DeleteConfirmDialog'
 import { listPlaylists } from '../api/client'
-import { blankRoute } from '../lib/route'
+import { blankRoute, normalizeRoute } from '../lib/route'
 import type { Route, RouteCondition, RouteAction, Composition, ConditionField, ConditionOperator, ExclusionType, Playlist } from '../types'
 
 const fields: { value: ConditionField; label: string }[] = [
@@ -41,8 +41,8 @@ interface RouteEditorProps {
 }
 
 export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDelete }: RouteEditorProps) {
-  const [form, setForm] = useState<Route>(() => (route ? { ...route } : blankRoute()))
-  const [initialForm] = useState(() => JSON.parse(JSON.stringify(route ? { ...route } : blankRoute())))
+  const [form, setForm] = useState<Route>(() => (route ? normalizeRoute(route) : blankRoute()))
+  const [initialForm] = useState(() => JSON.parse(JSON.stringify(route ? normalizeRoute(route) : blankRoute())))
   const isDirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(initialForm), [form, initialForm])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)

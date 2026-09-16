@@ -310,7 +310,7 @@ func scanErrorEntry(sc interface{ Scan(dest ...any) error }) (*ErrorEntry, error
 }
 
 func scanErrorEntries(rows *sql.Rows) ([]ErrorEntry, error) {
-	var out []ErrorEntry
+	out := make([]ErrorEntry, 0)
 	for rows.Next() {
 		e, err := scanErrorEntry(rows)
 		if err != nil {
@@ -340,7 +340,7 @@ func scanDeferredItem(sc interface{ Scan(dest ...any) error }) (*DeferredItem, e
 }
 
 func scanDeferredItems(rows *sql.Rows) ([]DeferredItem, error) {
-	var out []DeferredItem
+	out := make([]DeferredItem, 0)
 	for rows.Next() {
 		d, err := scanDeferredItem(rows)
 		if err != nil {

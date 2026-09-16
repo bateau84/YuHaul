@@ -166,7 +166,7 @@ func (s *Service) QuotaStatus(ctx context.Context) (*quota.BudgetSnapshot, []Quo
 	}
 	defer rows.Close()
 
-	var breakdown []QuotaBreakdown
+	breakdown := make([]QuotaBreakdown, 0)
 	for rows.Next() {
 		var q QuotaBreakdown
 		if err := rows.Scan(&q.Date, &q.Operation, &q.Units, &q.CallCount); err != nil {

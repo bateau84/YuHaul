@@ -20,31 +20,31 @@ function RouteSnapshot({ route }: { route: Route }) {
       </div>
       <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem', margin: '4px 0' }}>{route.description}</p>
       <p style={{ fontSize: '0.875rem' }}>Order: {route.evaluation_order} · Composition: {route.condition_composition}</p>
-      {route.conditions.length > 0 && (
+      {(route.conditions ?? []).length > 0 && (
         <div style={{ marginTop: 8 }}>
           <p style={{ fontSize: '0.875rem', fontWeight: 600 }}>Conditions</p>
           <ul style={{ fontSize: '0.875rem', margin: '4px 0' }}>
-            {route.conditions.map((c) => (
+            {(route.conditions ?? []).map((c) => (
               <li key={c.id ?? c.condition_index}>{c.field} {c.operator} "{c.value}"</li>
             ))}
           </ul>
         </div>
       )}
-      {route.actions.length > 0 && (
+      {(route.actions ?? []).length > 0 && (
         <div style={{ marginTop: 8 }}>
           <p style={{ fontSize: '0.875rem', fontWeight: 600 }}>Actions</p>
           <ul style={{ fontSize: '0.875rem', margin: '4px 0' }}>
-            {route.actions.map((a) => (
+            {(route.actions ?? []).map((a) => (
               <li key={a.id ?? a.action_index}>{a.action_type} → {a.target_playlist_id}</li>
             ))}
           </ul>
         </div>
       )}
-      {route.exclusions.length > 0 && (
+      {(route.exclusions ?? []).length > 0 && (
         <div style={{ marginTop: 8 }}>
           <p style={{ fontSize: '0.875rem', fontWeight: 600 }}>Exclusions</p>
           <ul style={{ fontSize: '0.875rem', margin: '4px 0' }}>
-            {route.exclusions.map((e) => (
+            {(route.exclusions ?? []).map((e) => (
               <li key={e.id ?? `${e.exclusion_type}-${e.exclusion_value}`}>{e.exclusion_type}: {e.exclusion_value}</li>
             ))}
           </ul>

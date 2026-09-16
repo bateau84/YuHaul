@@ -500,7 +500,7 @@ type metadataFetcher struct {
 
 func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) ([]metadata.TransientMetadata, error) {
 	if len(videoIDs) == 0 {
-		return nil, nil
+		return []metadata.TransientMetadata{}, nil
 	}
 	token, err := f.auth.ActiveToken(ctx)
 	if err != nil {

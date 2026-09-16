@@ -155,7 +155,7 @@ func (s *Store) ListRoutes(ctx context.Context) ([]Route, error) {
 	}
 	defer rows.Close()
 
-	var routes []Route
+	routes := make([]Route, 0)
 	for rows.Next() {
 		r, err := scanRoute(rows)
 		if err != nil {
@@ -187,7 +187,7 @@ func (s *Store) LoadActiveRoutes(ctx context.Context) ([]Route, error) {
 	}
 	defer rows.Close()
 
-	var routes []Route
+	routes := make([]Route, 0)
 	for rows.Next() {
 		r, err := scanRoute(rows)
 		if err != nil {
@@ -424,7 +424,7 @@ func (s *Store) listConditions(ctx context.Context, routeID int64) ([]RouteCondi
 	}
 	defer rows.Close()
 
-	var out []RouteCondition
+	out := make([]RouteCondition, 0)
 	for rows.Next() {
 		c, err := scanCondition(rows)
 		if err != nil {
@@ -447,7 +447,7 @@ func (s *Store) listActions(ctx context.Context, routeID int64) ([]RouteAction, 
 	}
 	defer rows.Close()
 
-	var out []RouteAction
+	out := make([]RouteAction, 0)
 	for rows.Next() {
 		a, err := scanAction(rows)
 		if err != nil {
@@ -470,7 +470,7 @@ func (s *Store) listExclusions(ctx context.Context, routeID int64) ([]RouteExclu
 	}
 	defer rows.Close()
 
-	var out []RouteExclusion
+	out := make([]RouteExclusion, 0)
 	for rows.Next() {
 		e, err := scanExclusion(rows)
 		if err != nil {

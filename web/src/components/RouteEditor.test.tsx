@@ -48,6 +48,30 @@ describe('RouteEditor', () => {
     expect(onSave).not.toHaveBeenCalled()
   })
 
+  it('tolerates null nested arrays from the API and treats them as empty', async () => {
+    const onSave = vi.fn()
+    render(
+      <RouteEditor
+        route={routeFixture({
+          name: '',
+          conditions: null as unknown as RouteCondition[],
+          actions: null as unknown as RouteAction[],
+          exclusions: null as unknown as RouteExclusion[],
+        })}
+        existingRoutes={[]}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
+
+    await waitFor(() => expect(screen.getByText('Route name is required')).toBeInTheDocument())
+    expect(screen.getByText('Add at least one condition')).toBeInTheDocument()
+    expect(screen.getByText('Add at least one action')).toBeInTheDocument()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
   it('shows validation error when name exceeds 100 characters', async () => {
     const onSave = vi.fn()
     render(

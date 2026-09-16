@@ -3,7 +3,7 @@ import { api } from './core'
 
 export async function listConfigVersions(): Promise<ConfigVersion[]> {
   const data = await api<{ versions: ConfigVersion[] }>('/api/config/versions')
-  return data.versions
+  return data.versions ?? []
 }
 
 export async function getConfigVersion(id: number): Promise<ConfigVersion | undefined> {

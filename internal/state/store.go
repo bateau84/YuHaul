@@ -77,7 +77,7 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	}
 	defer rows.Close()
 
-	var out []Run
+	out := make([]Run, 0)
 	for rows.Next() {
 		r, err := scanRun(rows)
 		if err != nil {
@@ -104,7 +104,7 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 	}
 	defer rows.Close()
 
-	var out []Run
+	out := make([]Run, 0)
 	for rows.Next() {
 		r, err := scanRun(rows)
 		if err != nil {
@@ -336,7 +336,7 @@ func (s *Store) GetRouteDecisionsForVideo(ctx context.Context, videoID int64) ([
 	}
 	defer rows.Close()
 
-	var out []RouteDecision
+	out := make([]RouteDecision, 0)
 	for rows.Next() {
 		d, err := scanRouteDecision(rows)
 		if err != nil {
@@ -363,7 +363,7 @@ func (s *Store) GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, run
 	}
 	defer rows.Close()
 
-	var out []RouteDecision
+	out := make([]RouteDecision, 0)
 	for rows.Next() {
 		d, err := scanRouteDecision(rows)
 		if err != nil {
@@ -389,7 +389,7 @@ func (s *Store) ListRetainedVideos(ctx context.Context) ([]Video, error) {
 	}
 	defer rows.Close()
 
-	var out []Video
+	out := make([]Video, 0)
 	for rows.Next() {
 		v, err := scanVideo(rows)
 		if err != nil {
@@ -423,7 +423,7 @@ func (s *Store) ListRunVideos(ctx context.Context, runID int64, limit, offset in
 	}
 	defer rows.Close()
 
-	var out []Video
+	out := make([]Video, 0)
 	for rows.Next() {
 		v, err := scanVideo(rows)
 		if err != nil {
@@ -468,7 +468,7 @@ func (s *Store) ListPendingVideos(ctx context.Context) ([]Video, error) {
 	}
 	defer rows.Close()
 
-	var out []Video
+	out := make([]Video, 0)
 	for rows.Next() {
 		v, err := scanVideo(rows)
 		if err != nil {
@@ -511,7 +511,7 @@ func (s *Store) GetExecutedActionsForVideo(ctx context.Context, videoID int64) (
 	}
 	defer rows.Close()
 
-	var out []ExecutedAction
+	out := make([]ExecutedAction, 0)
 	for rows.Next() {
 		a, err := scanExecutedAction(rows)
 		if err != nil {
@@ -538,7 +538,7 @@ func (s *Store) GetExecutedActionsForVideoInRun(ctx context.Context, videoID, ru
 	}
 	defer rows.Close()
 
-	var out []ExecutedAction
+	out := make([]ExecutedAction, 0)
 	for rows.Next() {
 		a, err := scanExecutedAction(rows)
 		if err != nil {
@@ -565,7 +565,7 @@ func (s *Store) GetConditionAuditsForDecision(ctx context.Context, decisionID in
 	}
 	defer rows.Close()
 
-	var out []ConditionAudit
+	out := make([]ConditionAudit, 0)
 	for rows.Next() {
 		a, err := scanConditionAudit(rows)
 		if err != nil {

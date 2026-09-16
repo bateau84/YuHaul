@@ -3,7 +3,7 @@ import { api } from './core'
 
 export async function listErrors(include = 'active'): Promise<ErrorEntry[]> {
   const data = await api<{ errors: ErrorEntry[] }>(`/api/errors/?include=${encodeURIComponent(include)}`)
-  return data.errors
+  return data.errors ?? []
 }
 
 export async function retryError(id: number): Promise<ErrorEntry> {
@@ -16,7 +16,7 @@ export async function dismissError(id: number): Promise<ErrorEntry> {
 
 export async function listDeferred(include = 'pending'): Promise<DeferredItem[]> {
   const data = await api<{ deferred: DeferredItem[] }>(`/api/deferred/?include=${encodeURIComponent(include)}`)
-  return data.deferred
+  return data.deferred ?? []
 }
 
 export async function retryDeferred(id: number): Promise<DeferredItem> {

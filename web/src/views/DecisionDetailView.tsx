@@ -134,21 +134,21 @@ function DecisionRow({ decision, index }: { decision: RouteDecision; index: numb
           Rejection reason: {decision.rejection_reason}
         </p>
       )}
-      {decision.condition_audits.length > 0 && (
+      {(decision.condition_audits ?? []).length > 0 && (
         <div style={{ marginTop: 12 }}>
           <strong style={{ fontSize: '0.875rem', color: 'var(--color-text-secondary)' }}>Conditions evaluated</strong>
           <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0' }}>
-            {decision.condition_audits.map((c) => (
+            {(decision.condition_audits ?? []).map((c) => (
               <ConditionAuditRow key={c.id} audit={c} />
             ))}
           </ul>
         </div>
       )}
-      {decision.actions.length > 0 && (
+      {(decision.actions ?? []).length > 0 && (
         <div style={{ marginTop: 12 }}>
           <strong style={{ fontSize: '0.875rem', color: 'var(--color-text-secondary)' }}>Actions executed</strong>
           <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0' }}>
-            {decision.actions.map((a) => (
+            {(decision.actions ?? []).map((a) => (
               <ActionRow key={a.id} action={a} />
             ))}
           </ul>
@@ -221,16 +221,16 @@ export function DecisionDetailView() {
       <p style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
         Routes evaluated in order. Numbers show evaluation sequence.
       </p>
-      {detail.route_decisions.map((d, i) => (
+      {(detail.route_decisions ?? []).map((d, i) => (
         <DecisionRow key={d.id} decision={d} index={i} />
       ))}
 
       <div className="card" style={{ marginTop: 16 }}>
         <h2 className="section-title">Layer 3 — Action outcomes</h2>
-      {detail.route_decisions.some((d) => d.actions.length > 0) ? (
+      {(detail.route_decisions ?? []).some((d) => (d.actions ?? []).length > 0) ? (
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-          {detail.route_decisions.flatMap((d) =>
-            d.actions.map((a) => (
+          {(detail.route_decisions ?? []).flatMap((d) =>
+            (d.actions ?? []).map((a) => (
               <li key={a.id} style={{ marginBottom: 8 }}>
                 <strong>{d.route_name}</strong>:
                 <span style={{ marginLeft: 8 }}>

@@ -115,7 +115,7 @@ func (s *Store) ListActivePastExpiry(ctx context.Context, now time.Time, limit i
 	}
 	defer rows.Close()
 
-	var ids []string
+	ids := make([]string, 0)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -146,7 +146,7 @@ func (s *Store) ListActiveBefore(ctx context.Context, cutoff time.Time, limit in
 	}
 	defer rows.Close()
 
-	var out []RefreshCandidate
+	out := make([]RefreshCandidate, 0)
 	for rows.Next() {
 		var c RefreshCandidate
 		if err := rows.Scan(&c.VideoID, &c.FetchedAt, &c.ExpiresAt); err != nil {
@@ -183,7 +183,7 @@ func (s *Store) ListActiveRoutedBefore(ctx context.Context, cutoff time.Time, li
 	}
 	defer rows.Close()
 
-	var out []RefreshCandidate
+	out := make([]RefreshCandidate, 0)
 	for rows.Next() {
 		var c RefreshCandidate
 		if err := rows.Scan(&c.VideoID, &c.FetchedAt, &c.ExpiresAt); err != nil {

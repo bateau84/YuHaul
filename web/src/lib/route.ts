@@ -16,3 +16,12 @@ export function blankRoute(evaluationOrder = 1): Route {
     updated_at: '',
   }
 }
+
+export function normalizeRoute(route: Route): Route {
+  return {
+    ...route,
+    conditions: route.conditions ?? [],
+    actions: route.actions ?? [],
+    exclusions: route.exclusions ?? [],
+  }
+}

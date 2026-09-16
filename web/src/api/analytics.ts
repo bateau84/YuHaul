@@ -3,7 +3,7 @@ import { api } from './core'
 
 export async function listChannels(): Promise<ChannelStats[]> {
   const data = await api<{ channels: ChannelStats[] }>('/api/analytics/channels')
-  return data.channels
+  return data.channels ?? []
 }
 
 export async function getChannel(id: string): Promise<ChannelDetail | undefined> {
@@ -38,7 +38,10 @@ export async function getRouteMatchRates(
   if (from) params.set('from', from)
   if (to) params.set('to', to)
   if (granularity) params.set('granularity', granularity)
-  return api(`/api/analytics/route-match-rates?${params.toString()}`)
+  const data = await api<{ from: string; to: string; granularity: string; routes: RouteMatchRate[] }>(
+    `/api/analytics/route-match-rates?${params.toString()}`
+  )
+  return { ...data, routes: data.routes ?? [] }
 }
 
 export async function getQuota(): Promise<{
@@ -55,7 +58,7 @@ export async function getQuota(): Promise<{
 
 export async function listRetentionPlaylists(): Promise<RetentionPlaylist[]> {
   const data = await api<{ playlists: RetentionPlaylist[] }>('/api/settings/retention-playlists')
-  return data.playlists
+  return data.playlists ?? []
 }
 
 export async function createRetentionPlaylist(playlist: { playlist_id: string; playlist_name: string }): Promise<RetentionPlaylist> {
