@@ -182,6 +182,24 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return new Response(null, { status: 204 })
   }
 
+  // Advisories
+  if (path === '/api/analytics/advisories' && method === 'GET') {
+    return jsonResponse({ advisories: await mock.listAdvisories() })
+  }
+  const channelAdvisoryMatch = path.match(/^\/api\/analytics\/channels\/([^/]+)\/advisories$/)
+  if (channelAdvisoryMatch && method === 'GET') {
+    return jsonResponse({ advisories: await mock.listChannelAdvisories(decodeURIComponent(channelAdvisoryMatch[1])) })
+  }
+  const advisoryActionMatch = path.match(/^\/api\/analytics\/advisories\/(\d+)\/(dismiss|ignore|act)$/)
+  if (advisoryActionMatch && method === 'POST') {
+    const id = Number(advisoryActionMatch[1])
+    const action = advisoryActionMatch[2]
+    if (action === 'dismiss') await mock.dismissAdvisory(id)
+    else if (action === 'ignore') await mock.ignoreAdvisory(id)
+    else await mock.actOnAdvisory(id, 'Reviewed channel on YouTube')
+    return new Response(null, { status: 204 })
+  }
+
   // Account
   if (path === '/api/account/status' && method === 'GET') {
     return jsonResponse(await mock.getAccountStatus())

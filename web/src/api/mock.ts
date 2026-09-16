@@ -757,6 +757,11 @@ export async function listAdvisories(): Promise<Advisory[]> {
   return mockChannels.flatMap((c) => c.advisories ?? [])
 }
 
+export async function listChannelAdvisories(channelId: string): Promise<Advisory[]> {
+  await delay()
+  return mockChannels.find((c) => c.channel_id === channelId)?.advisories ?? []
+}
+
 export async function dismissAdvisory(id: number): Promise<void> {
   await delay()
   for (const c of mockChannels) {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { ChannelsView } from './ChannelsView'
 import { ToastProvider } from '../components/ToastProvider'
@@ -56,5 +56,14 @@ describe('ChannelsView', () => {
     await waitFor(() => expect(screen.getByText('Sparse Channel')).toBeInTheDocument())
     expect(screen.getByText('Discovery & Relevance Credit')).toBeInTheDocument()
     expect(screen.getByText('Retention Signal Provenance')).toBeInTheDocument()
+  })
+
+  it('dismisses an advisory from the detail view', async () => {
+    const dismissSpy = vi.spyOn(mock, 'dismissAdvisory')
+    renderView('/analytics/channels/UCdemo1')
+    await waitFor(() => expect(screen.getByText('Jazz Club')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /Dismiss/i }))
+    await waitFor(() => expect(dismissSpy).toHaveBeenCalledWith(1))
   })
 })
