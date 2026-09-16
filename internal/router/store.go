@@ -99,6 +99,22 @@ func (s *Store) GetRoute(ctx context.Context, id int64) (*Route, error) {
 	return r, nil
 }
 
+// CountRouteMatches returns the number of production-run `matched` decisions
+// for a route. Production runs are scheduled and manual runs; dry-run,
+// replay, and backtest decisions are excluded.
+func (s *Store) CountRouteMatches(ctx context.Context, routeID int64) (int64, error) {
+	var count int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM route_decision rd
+		 JOIN run ru ON ru.id = rd.run_id
+		 WHERE rd.route_id = ? AND rd.decision = 'matched'
+		   AND ru.run_type IN ('scheduled', 'manual');`,
+		routeID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("router: count route matches %d: %w", routeID, err)
+	}
+	return count, nil
+}
+
 // ListRoutes returns all routes ordered by evaluation_order, with children loaded.
 func (s *Store) ListRoutes(ctx context.Context) ([]Route, error) {
 	rows, err := s.db.QueryContext(ctx,

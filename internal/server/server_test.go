@@ -903,6 +903,82 @@ func TestHandleCreateRoute_InvalidBetween(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "between value must be")
 }
 
+func TestHandleCreateRoute_InvalidEvaluationOrder(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	body := `{"name":"Music","evaluation_order":0,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}]}`
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "evaluation_order must be at least 1")
+}
+
+func TestHandleCreateRoute_NonNumericNumericValue(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	body := `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"duration_seconds","operator":"greater_than","value":"abc"}],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}]}`
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "value must be a number")
+}
+
+func TestHandleGetRouteStats(t *testing.T) {
+	ctx := context.Background()
+	db, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	stateStore, err := state.NewStore(db)
+	require.NoError(t, err)
+	machine := state.NewMachine(stateStore)
+
+	id, err := routerStore.CreateRoute(ctx, &router.Route{
+		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
+		ConditionComposition: "AND",
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "music"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+	})
+	require.NoError(t, err)
+
+	run := &state.Run{RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	video, err := machine.DiscoverVideo(ctx, runID, "v1", "ch1")
+	require.NoError(t, err)
+
+	engine := router.NewEngine(routerStore)
+	_, err = engine.Evaluate(ctx, runID, video.ID, router.VideoContext{VideoID: "v1", ChannelID: "ch1", Title: "music video"}, machine)
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/routes/%d/stats", id), nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"match_count":1`)
+}
+
+func TestHandleGetRouteStats_NotFound(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes/999/stats", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 type fakePlaylistProvider struct {
 	playlists []Playlist
 	err       error

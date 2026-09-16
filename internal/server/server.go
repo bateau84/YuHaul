@@ -57,6 +57,7 @@ type RouteStore interface {
 	DeleteRoute(ctx context.Context, id int64) error
 	ReorderRoutes(ctx context.Context, routeIDs []int64) error
 	ListRouteNamesIncludingDeleted(ctx context.Context) (map[int64]string, error)
+	CountRouteMatches(ctx context.Context, routeID int64) (int64, error)
 }
 
 // RunStore is the subset of state.Store used by the HTTP server for run queries.
@@ -263,6 +264,10 @@ func (noopRouteStore) ListRouteNamesIncludingDeleted(context.Context) (map[int64
 	return nil, errors.New("route store not configured")
 }
 
+func (noopRouteStore) CountRouteMatches(context.Context, int64) (int64, error) {
+	return 0, errors.New("route store not configured")
+}
+
 type noopRunStore struct{}
 
 func (noopRunStore) ListRuns(context.Context) ([]state.Run, error) {
@@ -342,6 +347,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/routes", s.handleCreateRoute)
 	mux.HandleFunc("GET /api/routes/{$}", s.handleListRoutes)
 	mux.HandleFunc("POST /api/routes/{$}", s.handleCreateRoute)
+	mux.HandleFunc("GET /api/routes/{id}/stats", s.handleGetRouteStats)
 	mux.HandleFunc("GET /api/routes/{id}", s.handleGetRoute)
 	mux.HandleFunc("PUT /api/routes/{id}", s.handleUpdateRoute)
 	mux.HandleFunc("DELETE /api/routes/{id}", s.handleDeleteRoute)
@@ -679,6 +685,32 @@ func (s *Server) handleGetRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, route)
 }
 
+func (s *Server) handleGetRouteStats(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid route id")
+		return
+	}
+
+	if _, err := s.routeStore.GetRoute(r.Context(), id); err != nil {
+		if errors.Is(err, router.ErrRouteNotFound) {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "get route stats failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to load route stats")
+		return
+	}
+
+	count, err := s.routeStore.CountRouteMatches(r.Context(), id)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "count route matches failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to load route stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"match_count": count})
+}
+
 func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
 	req, err := decodeRouteRequest(r)
 	if err != nil {
@@ -806,6 +838,9 @@ func decodeRouteRequest(r *http.Request) (*routeRequest, error) {
 		return nil, fmt.Errorf("condition_composition must be AND or OR")
 	}
 	req.ConditionComposition = comp
+	if req.EvaluationOrder < 1 {
+		return nil, fmt.Errorf("evaluation_order must be at least 1")
+	}
 	if len(req.Conditions) == 0 {
 		return nil, fmt.Errorf("at least one condition is required")
 	}
@@ -849,16 +884,22 @@ func validateConditionOperator(field router.ConditionField, op router.ConditionO
 	if !allowed[op] {
 		return fmt.Errorf("operator %q is not valid for field %q", op, field)
 	}
-	if op == router.ConditionOperatorBetween {
-		parts := strings.Split(value, ",")
-		if len(parts) != 2 {
-			return fmt.Errorf("between value must be \"min,max\"")
-		}
-		if _, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err != nil {
-			return fmt.Errorf("between min value must be a number")
-		}
-		if _, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err != nil {
-			return fmt.Errorf("between max value must be a number")
+	if field == router.ConditionFieldDurationSeconds {
+		if op == router.ConditionOperatorBetween {
+			parts := strings.Split(value, ",")
+			if len(parts) != 2 {
+				return fmt.Errorf("between value must be \"min,max\"")
+			}
+			if _, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err != nil {
+				return fmt.Errorf("between min value must be a number")
+			}
+			if _, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err != nil {
+				return fmt.Errorf("between max value must be a number")
+			}
+		} else {
+			if _, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err != nil {
+				return fmt.Errorf("value must be a number for field %q", field)
+			}
 		}
 	}
 	return nil

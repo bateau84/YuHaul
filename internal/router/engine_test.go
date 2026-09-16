@@ -545,6 +545,69 @@ func TestStore_ReorderRoutes(t *testing.T) {
 	assert.Equal(t, 2, routes[1].EvaluationOrder)
 }
 
+func TestStore_DeleteHighestThenCreate(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	id1, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "First", EvaluationOrder: 1, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+	id2, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "Second", EvaluationOrder: 2, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+
+	// Deleting the highest-id route sets its evaluation_order sentinel to -id2.
+	require.NoError(t, routerStore.DeleteRoute(ctx, id2))
+
+	// Creating a new route must not collide with the deleted sentinel.
+	id3, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "Third", EvaluationOrder: 3, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+
+	routes, err := routerStore.ListRoutes(ctx)
+	require.NoError(t, err)
+	require.Len(t, routes, 2)
+	assert.Equal(t, id1, routes[0].ID)
+	assert.Equal(t, id3, routes[1].ID)
+}
+
+func TestStore_DeleteMiddleThenReorder(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	id1, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "First", EvaluationOrder: 1, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+	id2, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "Second", EvaluationOrder: 2, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+	id3, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "Third", EvaluationOrder: 3, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+
+	// Soft-delete the middle route; its sentinel is -id2.
+	require.NoError(t, routerStore.DeleteRoute(ctx, id2))
+
+	// Reordering the remaining active routes must not collide with -id2.
+	require.NoError(t, routerStore.ReorderRoutes(ctx, []int64{id3, id1}))
+
+	routes, err := routerStore.ListRoutes(ctx)
+	require.NoError(t, err)
+	require.Len(t, routes, 2)
+	assert.Equal(t, id3, routes[0].ID)
+	assert.Equal(t, 1, routes[0].EvaluationOrder)
+	assert.Equal(t, id1, routes[1].ID)
+	assert.Equal(t, 2, routes[1].EvaluationOrder)
+}
+
 func TestEngine_CanonicalOperators(t *testing.T) {
 	ctx := context.Background()
 	stateStore, routerStore, cleanup := setupTestDB(t)
