@@ -519,6 +519,7 @@ Lifecycle: Records created at discovery. `expires_at = fetched_at + 30 days`. Me
 │ condition_composition TEXT NOT NULL │  ← 'AND' | 'OR'
 │ created_at TIMESTAMP NOT NULL        │
 │ updated_at TIMESTAMP NOT NULL        │
+│ deleted_at TIMESTAMP                │  ← soft delete (ADR-003); null = active
 └──────────────────────────────────────┘
 
 ┌──────────────────────────────────────┐
@@ -787,6 +788,7 @@ Replay and backtest modes query retained observations for duplicate detection, n
 | List channel uploads | `playlistItems.list` | 1 per call |
 | Get video metadata | `videos.list` | 1 per call (up to 50 IDs) |
 | Get channel info | `channels.list` | 1 per call |
+| List user playlists | `playlists.list` | 1 per call |
 | Insert playlist item | `playlistItems.insert` | 50 per call |
 | List playlist items | `playlistItems.list` | 1 per call |
 
@@ -961,12 +963,13 @@ Diffs are computed as structural JSON comparison of the snapshot objects, highli
 | `GET` | `/api/runs/:id` | Run detail |
 | `GET` | `/api/runs/:id/videos` | Video outcomes for run |
 | `GET` | `/api/runs/:id/videos/:videoId` | Decision detail (three-tier evidence) |
-| `GET` | `/api/routes` | List routes (ordered) |
+| `GET` | `/api/routes` | List routes (ordered; excludes soft-deleted) |
 | `POST` | `/api/routes` | Create route |
-| `GET` | `/api/routes/:id` | Route detail |
+| `GET` | `/api/routes/:id` | Route detail (404 if soft-deleted) |
 | `PUT` | `/api/routes/:id` | Update route (creates ConfigVersion) |
-| `DELETE` | `/api/routes/:id` | Delete route |
-| `PUT` | `/api/routes/reorder` | Update evaluation order |
+| `DELETE` | `/api/routes/:id` | Soft-delete route (preserves history; ADR-003) |
+| `PUT` | `/api/routes/reorder` | Update evaluation order (active routes only) |
+| `GET` | `/api/playlists` | List user's YouTube playlists (ADR-005) |
 | `GET` | `/api/analytics/trends` | Temporal trend data |
 | `GET` | `/api/analytics/channels` | Channel statistics |
 | `GET` | `/api/analytics/channels/:id` | Channel detail with advisories |

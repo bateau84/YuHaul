@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { RouteEditor } from './RouteEditor'
+import * as mock from '../api/mock'
 import type { Route } from '../types'
 
 const routeFixture = (overrides: Partial<Route> = {}): Route => ({
@@ -22,6 +23,10 @@ const routeFixture = (overrides: Partial<Route> = {}): Route => ({
 describe('RouteEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([
+      { playlist_id: 'PLmusic', playlist_name: 'Music Discovery' },
+      { playlist_id: 'PLambient', playlist_name: 'Ambient' },
+    ])
   })
 
   it('shows validation errors for empty name, conditions, and actions', async () => {

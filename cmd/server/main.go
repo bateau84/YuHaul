@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -106,7 +107,7 @@ func main() {
 	}
 	machine := state.NewMachine(stateStore, state.WithLedger(ledger))
 
-	routerStore := router.NewStore(db)
+	routerStore := router.NewStore(db).WithLogger(logger)
 	configStore := config.NewStore(db)
 	configSvc := config.NewService(routerStore, configStore)
 	routerStore.WithOnChange(configSvc.Snapshot)
@@ -180,6 +181,7 @@ func main() {
 		server.WithRunStore(stateStore),
 		server.WithRunVideoStore(stateStore),
 		server.WithOverviewProvider(overview),
+		server.WithPlaylistProvider(&playlistProvider{auth: authSvc, baseURL: cfg.YouTubeBaseURL, ledger: ledger}),
 	)
 
 	sch := scheduler.NewScheduler(schedulerStore, pl, stateStore, scheduler.WithLogger(logger))
@@ -451,6 +453,40 @@ func (a *advisoryChannelAdapter) ListDuplicateProvenance(ctx context.Context, ch
 		out[i] = advisory.DuplicateProvenance{
 			VideoID: r.VideoID,
 		}
+	}
+	return out, nil
+}
+
+// playlistProvider adapts the YouTube API client to the server's
+// PlaylistProvider interface used by GET /api/playlists.
+type playlistProvider struct {
+	auth    *auth.Service
+	baseURL string
+	ledger  *quota.Ledger
+}
+
+func (p *playlistProvider) ListPlaylists(ctx context.Context) ([]server.Playlist, error) {
+	token, err := p.auth.ActiveToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("playlist provider: not authenticated: %w", err)
+	}
+	opts := []youtube.Option{}
+	if p.baseURL != "" {
+		opts = append(opts, youtube.WithBaseURL(p.baseURL))
+	}
+	client := youtube.NewClient(ctx, token, opts...)
+	playlists, _, err := client.ListPlaylists(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("playlist provider: list playlists: %w", err)
+	}
+	if p.ledger != nil {
+		if err := p.ledger.Record(ctx, sql.NullInt64{}, quota.OpPlaylistsList); err != nil {
+			return nil, fmt.Errorf("playlist provider: record quota: %w", err)
+		}
+	}
+	out := make([]server.Playlist, 0, len(playlists))
+	for _, pl := range playlists {
+		out = append(out, server.Playlist{PlaylistID: pl.ID, PlaylistName: pl.Title})
 	}
 	return out, nil
 }

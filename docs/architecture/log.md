@@ -8,6 +8,14 @@ timestamp: 2026-09-08T00:00:00Z
 
 # Architecture Update Log
 
+## 2026-09-16
+
+**Update**: `adr-003-route-soft-delete-preserve-history.md` — Amended Realization/Consequences per the architecture-gate critique (CRITICAL-1, MAJOR-1, MINOR-1): replaced the "reserved position" order-space strategy with a sentinel-negative scheme (`DeleteRoute` sets `evaluation_order = -id`), switched `ReorderRoutes` to a shift below the sentinel band, fixed the migration filename to `010_route_soft_delete`, and added an unfiltered `ListRouteNamesIncludingDeleted` for the `routeNameMap` historical-name path.
+
+**Update**: `adr-004-condition-operator-vocabulary.md` — Amended Realization/Consequences per the architecture-gate critique (MAJOR-2): added write-boundary operator validation in `decodeRouteRequest` (`400` on an operator outside the field kind's canonical set, and on a malformed `between`), an engine `default` case that logs a warning for stored drifted operators instead of silently returning `false`, and a lazy (no-migration) policy for existing drifted rows.
+
+**Update**: `adr-005-playlist-listing-endpoint.md` — Amended Realization/Consequences per the architecture-gate critique (MINOR-2): specified the `PlaylistProvider` no-op default returns an error → `502`, so an unwired server fails loud instead of faking the spec's empty state.
+
 ## 2026-09-15
 
 **Update**: `yuhaul-system-architecture.md` — Reconciled the Run entity `status` enum to add `failed` as a fourth state (`running | completed | interrupted | failed`), redefined `interrupt_reason` as "the reason the run is not in a normal terminal state" (populated for both `interrupted` and `failed`), split §Run Recovery into resumable `interrupted` vs terminal `failed` recovery, added a failure/panic recovery scenario, and documented the YouTube base-URL seam in the YouTube API Client responsibility.
@@ -17,6 +25,14 @@ timestamp: 2026-09-08T00:00:00Z
 **Creation**: `adr-002-run-status-failed-terminal-state.md` — Resolves pre-merge MAJOR-2: add `RunStatusFailed = "failed"` and route `Pipeline.failRun` and the `Execute` panic-recovery path through a new `Machine.FailRun` so a phase failure is reported `failed`, not `completed`. `failed` is terminal and excluded from interrupted-run resume.
 
 **Update**: `yuhaul-system-architecture.md` — Reflected the five-phase processing pipeline (previously documented as "four phases"). Split the combined "Exclusion Gate + Routing" phase into two distinct phases: Phase 3 (Exclusion — global exclusion gate marking videos excluded by every enabled route) and Phase 4 (Routing — per-route condition evaluation). Renumbered action execution to Phase 5, relocated the configuration snapshot to run initiation (no longer a numbered phase), and updated the mode-variations table and channel-counter phase references to match. Grounded in `internal/pipeline` `Phase` constants: `discovery` → `duplicate_detection` → `exclusion` → `routing` → `action_execution`.
+
+**Creation**: `adr-003-route-soft-delete-preserve-history.md` — Resolves CRITICAL-1: replace the hard `DELETE FROM route` with a soft delete (`route.deleted_at`) and filter soft-deleted routes from management/evaluation queries, so `route_decision`/`condition_audit`/`executed_action` and the historical run counters derived from them survive route deletion (BR-003 AC4; Anchor AC15/25/28). Retains the `route_decision.route_id NOT NULL` FK join to the soft-deleted route name.
+
+**Creation**: `adr-004-condition-operator-vocabulary.md` — Resolves MAJOR-5: adopt the accepted design spec's operator vocabulary as the engine's single canonical set (`contains, equals, starts_with, ends_with, matches_regex` for text; `equals, greater_than, less_than, between` for numerics), retiring the drifted `not_contains/not_equals/in_list/gt/gte/lt/lte`. `between` is encoded `"min,max"` in the single value field; `matches_regex` uses Go RE2 (case-sensitive, `(?i)` available).
+
+**Creation**: `adr-005-playlist-listing-endpoint.md` — Resolves MAJOR-4: add `GET /api/playlists` backed by YouTube `playlists.list` (`mine=true`, 1 unit) behind a `PlaylistProvider` seam, honoring the ADR-001 base-URL seam and quota ledger, so the Route Editor action config gets a real playlist dropdown instead of a free-text ID.
+
+**Update**: `yuhaul-system-architecture.md` — Added `route.deleted_at` (soft-delete) to the Route entity and noted the soft-delete semantics in the API surface (`DELETE /api/routes/:id` soft-deletes; `GET /api/routes`/`/api/routes/:id` exclude deleted; reorder scoped to active routes); added `playlists.list | 1 per call` to the quota model table; added `GET /api/playlists` to the REST endpoint table.
 
 ## 2026-09-08
 

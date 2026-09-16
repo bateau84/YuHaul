@@ -67,6 +67,9 @@ export {
 // Run video and decision detail endpoints are wired to the real backend.
 export { getRunVideos, getDecisionDetail } from './run-videos'
 
+// Playlist listing is wired to the real backend.
+export { listPlaylists } from './playlists'
+
 // The following operations do not yet have backend endpoints and remain
 // mock-backed.
 export {

@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
-import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown, Check, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown, Check, X, Loader2, AlertCircle } from 'lucide-react'
 import { DeleteConfirmDialog } from './DeleteConfirmDialog'
-import type { Route, RouteCondition, RouteAction, Composition, ConditionField, ConditionOperator, ExclusionType } from '../types'
+import { listPlaylists } from '../api/client'
+import { blankRoute } from '../lib/route'
+import type { Route, RouteCondition, RouteAction, Composition, ConditionField, ConditionOperator, ExclusionType, Playlist } from '../types'
 
 const fields: { value: ConditionField; label: string }[] = [
   { value: 'title', label: 'Title' },
@@ -11,32 +13,24 @@ const fields: { value: ConditionField; label: string }[] = [
   { value: 'duration_seconds', label: 'Duration (seconds)' },
 ]
 
-const operators: { value: ConditionOperator; label: string }[] = [
+const textOperators: { value: ConditionOperator; label: string }[] = [
   { value: 'contains', label: 'contains' },
-  { value: 'not_contains', label: 'does not contain' },
   { value: 'equals', label: 'equals' },
-  { value: 'not_equals', label: 'does not equal' },
-  { value: 'gt', label: 'greater than' },
-  { value: 'gte', label: 'greater than or equal' },
-  { value: 'lt', label: 'less than' },
-  { value: 'lte', label: 'less than or equal' },
-  { value: 'in_list', label: 'is in list' },
+  { value: 'starts_with', label: 'starts with' },
+  { value: 'ends_with', label: 'ends with' },
+  { value: 'matches_regex', label: 'matches regex' },
 ]
 
-const blankRoute = (): Route => ({
-  id: 0,
-  name: '',
-  description: '',
-  evaluation_order: 0,
-  is_final: false,
-  is_enabled: true,
-  condition_composition: 'AND',
-  conditions: [],
-  actions: [],
-  exclusions: [],
-  created_at: '',
-  updated_at: '',
-})
+const numericOperators: { value: ConditionOperator; label: string }[] = [
+  { value: 'equals', label: 'equals' },
+  { value: 'greater_than', label: 'greater than' },
+  { value: 'less_than', label: 'less than' },
+  { value: 'between', label: 'between' },
+]
+
+function operatorsForField(field: ConditionField) {
+  return field === 'duration_seconds' ? numericOperators : textOperators
+}
 
 interface RouteEditorProps {
   route?: Route
@@ -48,8 +42,48 @@ interface RouteEditorProps {
 
 export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDelete }: RouteEditorProps) {
   const [form, setForm] = useState<Route>(() => (route ? { ...route } : blankRoute()))
+  const [initialForm] = useState(() => JSON.parse(JSON.stringify(route ? { ...route } : blankRoute())))
+  const isDirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(initialForm), [form, initialForm])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [playlists, setPlaylists] = useState<Playlist[]>([])
+  const [playlistsLoading, setPlaylistsLoading] = useState(true)
+  const [playlistsError, setPlaylistsError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    listPlaylists()
+      .then((data) => {
+        if (!cancelled) setPlaylists(data)
+      })
+      .catch((err) => {
+        if (!cancelled) setPlaylistsError(err instanceof Error ? err.message : 'Failed to load playlists')
+      })
+      .finally(() => {
+        if (!cancelled) setPlaylistsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      if (!isDirty) return
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [isDirty])
+
+  function handleCancel() {
+    if (isDirty) {
+      const confirmed = window.confirm('You have unsaved changes. Are you sure you want to leave?')
+      if (!confirmed) return
+    }
+    onCancel()
+  }
 
   function validate(): boolean {
     const next: Record<string, string> = {}
@@ -72,7 +106,14 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
       form.conditions.forEach((c, i) => {
         if (!c.field) next[`condition-${i}-field`] = 'Select a field'
         if (!c.operator) next[`condition-${i}-operator`] = 'Select an operator'
-        if (!c.value.trim()) next[`condition-${i}-value`] = 'Enter a value'
+        if (!c.value.trim()) {
+          next[`condition-${i}-value`] = 'Enter a value'
+        } else if (c.operator === 'between') {
+          const parts = c.value.split(',')
+          if (parts.length !== 2 || parts.some((p) => p.trim() === '' || Number.isNaN(Number(p.trim())))) {
+            next[`condition-${i}-value`] = 'Enter two numbers separated by a comma'
+          }
+        }
       })
     }
 
@@ -118,10 +159,50 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
     onSave(form)
   }
 
+  function normalizeConditionValue(operator: ConditionOperator, currentValue: string): string {
+    if (operator === 'between') {
+      const parts = currentValue.split(',')
+      if (parts.length === 2) return currentValue
+      return currentValue.includes(',') ? currentValue : `${currentValue},`
+    }
+    return currentValue
+  }
+
+  function defaultOperatorForField(field: ConditionField): ConditionOperator {
+    return field === 'duration_seconds' ? 'greater_than' : 'contains'
+  }
+
   function updateCondition(index: number, patch: Partial<RouteCondition>) {
     setForm((f) => {
       const conditions = [...f.conditions]
-      conditions[index] = { ...conditions[index], ...patch }
+      const current = conditions[index]
+      const next = { ...current, ...patch }
+
+      if (patch.field && patch.field !== current.field) {
+        const valid = operatorsForField(patch.field).map((o) => o.value)
+        if (!valid.includes(next.operator)) {
+          next.operator = defaultOperatorForField(patch.field)
+          next.value = ''
+        }
+      }
+
+      if (patch.operator && patch.operator !== current.operator) {
+        next.value = normalizeConditionValue(patch.operator, current.value)
+      }
+
+      conditions[index] = next
+      return { ...f, conditions }
+    })
+  }
+
+  function updateBetweenValue(index: number, part: 'min' | 'max', value: string) {
+    setForm((f) => {
+      const conditions = [...f.conditions]
+      const current = conditions[index]
+      const parts = current.value.split(',')
+      const min = part === 'min' ? value : parts[0] ?? ''
+      const max = part === 'max' ? value : parts[1] ?? ''
+      conditions[index] = { ...current, value: `${min},${max}` }
       return { ...f, conditions }
     })
   }
@@ -264,22 +345,48 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
                 aria-invalid={!!errors[`condition-${i}-operator`]}
                 aria-describedby={errors[`condition-${i}-operator`] ? `condition-${i}-operator-error` : undefined}
               >
-                {operators.map((o) => (
+                {operatorsForField(c.field).map((o) => (
                   <option key={o.value} value={o.value}>
                     {o.label}
                   </option>
                 ))}
               </select>
-              <input
-                id={`condition-${i}-value`}
-                className="form-input"
-                value={c.value}
-                onChange={(e) => updateCondition(i, { value: e.target.value })}
-                placeholder="Value"
-                aria-label={`Condition ${i + 1} value`}
-                aria-invalid={!!errors[`condition-${i}-value`]}
-                aria-describedby={errors[`condition-${i}-value`] ? `condition-${i}-value-error` : undefined}
-              />
+              {c.operator === 'between' ? (
+                <div className="field-row" style={{ gap: 8, flex: 1 }}>
+                  <input
+                    id={`condition-${i}-value-min`}
+                    className="form-input"
+                    type="number"
+                    value={c.value.split(',')[0] ?? ''}
+                    onChange={(e) => updateBetweenValue(i, 'min', e.target.value)}
+                    placeholder="Min"
+                    aria-label={`Condition ${i + 1} minimum value`}
+                    aria-invalid={!!errors[`condition-${i}-value`]}
+                  />
+                  <input
+                    id={`condition-${i}-value-max`}
+                    className="form-input"
+                    type="number"
+                    value={c.value.split(',')[1] ?? ''}
+                    onChange={(e) => updateBetweenValue(i, 'max', e.target.value)}
+                    placeholder="Max"
+                    aria-label={`Condition ${i + 1} maximum value`}
+                    aria-invalid={!!errors[`condition-${i}-value`]}
+                  />
+                </div>
+              ) : (
+                <input
+                  id={`condition-${i}-value`}
+                  className="form-input"
+                  value={c.value}
+                  onChange={(e) => updateCondition(i, { value: e.target.value })}
+                  placeholder="Value"
+                  aria-label={`Condition ${i + 1} value`}
+                  aria-invalid={!!errors[`condition-${i}-value`]}
+                  aria-describedby={errors[`condition-${i}-value`] ? `condition-${i}-value-error` : undefined}
+                  style={c.operator === 'matches_regex' ? { fontFamily: 'monospace' } : undefined}
+                />
+              )}
               <button type="button" className="icon-button" onClick={() => removeCondition(i)} aria-label={`Remove condition ${i + 1}`}>
                 <Trash2 size={16} />
               </button>
@@ -422,20 +529,37 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
         {form.actions.map((a, i) => (
           <div key={i}>
             <div className="field-row" style={{ gridTemplateColumns: '1fr auto', alignItems: 'end' }}>
-              <input
+              <select
                 id={`action-${i}-playlist`}
-                className="form-input"
+                className="form-select"
                 value={a.target_playlist_id}
                 onChange={(e) => updateAction(i, { target_playlist_id: e.target.value })}
-                placeholder="Target playlist ID"
+                disabled={playlistsLoading}
                 aria-label={`Action ${i + 1} target playlist`}
                 aria-invalid={!!errors[`action-${i}-playlist`]}
                 aria-describedby={errors[`action-${i}-playlist`] ? `action-${i}-playlist-error` : undefined}
-              />
+              >
+                <option value="">{playlistsLoading ? 'Loading playlists...' : 'Select a playlist'}</option>
+                {playlists.map((p) => (
+                  <option key={p.playlist_id} value={p.playlist_id}>
+                    {p.playlist_name}
+                  </option>
+                ))}
+                {a.target_playlist_id && !playlists.some((p) => p.playlist_id === a.target_playlist_id) && (
+                  <option value={a.target_playlist_id}>{a.target_playlist_id} (unavailable)</option>
+                )}
+              </select>
+              {playlistsLoading && <Loader2 size={16} className="spinner" aria-hidden="true" />}
               <button type="button" className="icon-button" onClick={() => removeAction(i)} aria-label={`Remove action ${i + 1}`}>
                 <Trash2 size={16} />
               </button>
             </div>
+            {playlistsError && (
+              <div className="form-error" aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <AlertCircle size={14} aria-hidden="true" />
+                {playlistsError}
+              </div>
+            )}
             {errors[`action-${i}-playlist`] && (
               <div id={`action-${i}-playlist-error`} className="form-error" aria-live="polite">
                 {errors[`action-${i}-playlist`]}
@@ -503,7 +627,7 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
         <button type="submit" className="button button--primary">
           Save route
         </button>
-        <button type="button" className="button" onClick={onCancel}>
+        <button type="button" className="button" onClick={handleCancel}>
           Cancel
         </button>
         {onDelete && (

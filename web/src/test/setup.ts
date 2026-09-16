@@ -119,6 +119,9 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     await mock.reorderRoutes(body.route_ids)
     return jsonResponse({ ok: true })
   }
+  if (path === '/api/playlists' && method === 'GET') {
+    return jsonResponse({ playlists: await mock.listPlaylists() })
+  }
 
   // Queue
   if (path === '/api/errors' && method === 'GET') {

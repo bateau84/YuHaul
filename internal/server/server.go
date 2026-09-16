@@ -56,6 +56,7 @@ type RouteStore interface {
 	UpdateRoute(ctx context.Context, r *router.Route) error
 	DeleteRoute(ctx context.Context, id int64) error
 	ReorderRoutes(ctx context.Context, routeIDs []int64) error
+	ListRouteNamesIncludingDeleted(ctx context.Context) (map[int64]string, error)
 }
 
 // RunStore is the subset of state.Store used by the HTTP server for run queries.
@@ -89,6 +90,17 @@ type OverviewProvider interface {
 	Overview(ctx context.Context) (*Overview, error)
 }
 
+// PlaylistProvider returns the authenticated user's YouTube playlists.
+type PlaylistProvider interface {
+	ListPlaylists(ctx context.Context) ([]Playlist, error)
+}
+
+// Playlist is the shape returned by GET /api/playlists.
+type Playlist struct {
+	PlaylistID   string `json:"playlist_id"`
+	PlaylistName string `json:"playlist_name"`
+}
+
 // Server serves the YuHaul REST API and SSE endpoints.
 type Server struct {
 	pipeline         Pipeline
@@ -101,6 +113,7 @@ type Server struct {
 	runStore         RunStore
 	runVideoStore    RunVideoStore
 	overviewProvider OverviewProvider
+	playlistProvider PlaylistProvider
 	logger           *slog.Logger
 }
 
@@ -189,6 +202,15 @@ func WithOverviewProvider(provider OverviewProvider) Option {
 	}
 }
 
+// WithPlaylistProvider registers the provider used by GET /api/playlists.
+func WithPlaylistProvider(provider PlaylistProvider) Option {
+	return func(s *Server) {
+		if provider != nil {
+			s.playlistProvider = provider
+		}
+	}
+}
+
 // NewServer returns an API server.
 func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Option) *Server {
 	s := &Server{
@@ -202,6 +224,7 @@ func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Optio
 		runStore:         noopRunStore{},
 		runVideoStore:    noopRunVideoStore{},
 		overviewProvider: noopOverviewProvider{},
+		playlistProvider: noopPlaylistProvider{},
 		logger:           slog.Default(),
 	}
 	for _, opt := range opts {
@@ -235,6 +258,9 @@ func (noopRouteStore) DeleteRoute(context.Context, int64) error {
 }
 func (noopRouteStore) ReorderRoutes(context.Context, []int64) error {
 	return errors.New("route store not configured")
+}
+func (noopRouteStore) ListRouteNamesIncludingDeleted(context.Context) (map[int64]string, error) {
+	return nil, errors.New("route store not configured")
 }
 
 type noopRunStore struct{}
@@ -273,6 +299,12 @@ func (noopOverviewProvider) Overview(context.Context) (*Overview, error) {
 	return nil, errors.New("overview provider not configured")
 }
 
+type noopPlaylistProvider struct{}
+
+func (noopPlaylistProvider) ListPlaylists(context.Context) ([]Playlist, error) {
+	return nil, errors.New("playlist provider not configured")
+}
+
 type noopQueueHandler struct{}
 
 func (noopQueueHandler) ErrorHandler() http.Handler {
@@ -303,6 +335,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/videos/{videoId}", s.handleGetRunVideo)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
+	mux.HandleFunc("GET /api/playlists", s.handleListPlaylists)
 
 	// Route CRUD endpoints.
 	mux.HandleFunc("GET /api/routes", s.handleListRoutes)
@@ -552,6 +585,20 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, overview)
 }
 
+func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
+	playlists, err := s.playlistProvider.ListPlaylists(r.Context())
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "list playlists failed", "error", err)
+		msg := "failed to list playlists"
+		if err.Error() == "playlist provider not configured" || strings.Contains(err.Error(), "not authenticated") {
+			msg = "not authenticated"
+		}
+		writeError(w, http.StatusBadGateway, msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"playlists": playlists})
+}
+
 func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 	runID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -765,7 +812,56 @@ func decodeRouteRequest(r *http.Request) (*routeRequest, error) {
 	if len(req.Actions) == 0 {
 		return nil, fmt.Errorf("at least one action is required")
 	}
+	for i, c := range req.Conditions {
+		if err := validateConditionOperator(c.Field, c.Operator, c.Value); err != nil {
+			return nil, fmt.Errorf("condition %d: %w", i, err)
+		}
+	}
 	return &req, nil
+}
+
+// validateConditionOperator rejects operators outside the canonical set for a
+// field kind, and validates the single-value encoding of the between operator.
+func validateConditionOperator(field router.ConditionField, op router.ConditionOperator, value string) error {
+	textOperators := map[router.ConditionOperator]bool{
+		router.ConditionOperatorContains:     true,
+		router.ConditionOperatorEquals:       true,
+		router.ConditionOperatorStartsWith:   true,
+		router.ConditionOperatorEndsWith:     true,
+		router.ConditionOperatorMatchesRegex: true,
+	}
+	numericOperators := map[router.ConditionOperator]bool{
+		router.ConditionOperatorEquals:      true,
+		router.ConditionOperatorGreaterThan: true,
+		router.ConditionOperatorLessThan:    true,
+		router.ConditionOperatorBetween:     true,
+	}
+
+	var allowed map[router.ConditionOperator]bool
+	switch field {
+	case router.ConditionFieldDurationSeconds:
+		allowed = numericOperators
+	case router.ConditionFieldTitle, router.ConditionFieldChannelID, router.ConditionFieldChannelName, router.ConditionFieldDescription:
+		allowed = textOperators
+	default:
+		return fmt.Errorf("field %q is not valid", field)
+	}
+	if !allowed[op] {
+		return fmt.Errorf("operator %q is not valid for field %q", op, field)
+	}
+	if op == router.ConditionOperatorBetween {
+		parts := strings.Split(value, ",")
+		if len(parts) != 2 {
+			return fmt.Errorf("between value must be \"min,max\"")
+		}
+		if _, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err != nil {
+			return fmt.Errorf("between min value must be a number")
+		}
+		if _, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err != nil {
+			return fmt.Errorf("between max value must be a number")
+		}
+	}
+	return nil
 }
 
 func (req *routeRequest) toRoute() *router.Route {

@@ -5,7 +5,7 @@ description: User can create, read, update, delete, and reorder routes that are 
 tags: [requirement, routes, configuration, ordering, crud, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

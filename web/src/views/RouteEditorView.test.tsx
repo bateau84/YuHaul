@@ -46,14 +46,19 @@ describe('RouteEditorView', () => {
   beforeEach(() => {
     window.history.replaceState({}, '', '/')
     vi.clearAllMocks()
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([
+      { playlist_id: 'PLmusic', playlist_name: 'Music Discovery' },
+      { playlist_id: 'PLambient', playlist_name: 'Ambient' },
+    ])
   })
 
-  it('creates a new route with the next evaluation order', async () => {
+  it('creates a new route with the next evaluation order and opens it for editing', async () => {
     vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([
       routeFixture({ id: 1, name: 'A', evaluation_order: 1 }),
       routeFixture({ id: 2, name: 'B', evaluation_order: 2 }),
     ])
-    const createSpy = vi.spyOn(mock, 'createRoute').mockResolvedValueOnce(routeFixture({ id: 3, evaluation_order: 3 }))
+    const createSpy = vi.spyOn(mock, 'createRoute').mockResolvedValueOnce(routeFixture({ id: 3, name: 'New Test Route', evaluation_order: 3 }))
+    vi.spyOn(mock, 'getRoute').mockResolvedValueOnce(routeFixture({ id: 3, name: 'New Test Route', evaluation_order: 3 }))
 
     renderAt('/routes/new')
 
@@ -65,7 +70,7 @@ describe('RouteEditorView', () => {
     fireEvent.change(screen.getByLabelText(/Condition 1 value/i), { target: { value: 'test' } })
 
     fireEvent.click(screen.getByRole('button', { name: /Add playlist action/i }))
-    fireEvent.change(screen.getByLabelText(/Action 1 target playlist/i), { target: { value: 'PLnew' } })
+    fireEvent.change(screen.getByLabelText(/Action 1 target playlist/i), { target: { value: 'PLmusic' } })
 
     fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
 
@@ -77,7 +82,7 @@ describe('RouteEditorView', () => {
     expect(submitted.conditions).toHaveLength(1)
     expect(submitted.actions).toHaveLength(1)
 
-    await waitFor(() => expect(screen.getByTestId('routes-list')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Edit Route: New Test Route')).toBeInTheDocument())
   })
 
   it('shows an error toast when route creation fails', async () => {
@@ -92,14 +97,14 @@ describe('RouteEditorView', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add condition/i }))
     fireEvent.change(screen.getByLabelText(/Condition 1 value/i), { target: { value: 'x' } })
     fireEvent.click(screen.getByRole('button', { name: /Add playlist action/i }))
-    fireEvent.change(screen.getByLabelText(/Action 1 target playlist/i), { target: { value: 'PLx' } })
+    fireEvent.change(screen.getByLabelText(/Action 1 target playlist/i), { target: { value: 'PLmusic' } })
     fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
 
     await waitFor(() => expect(document.querySelector('.toast')).toHaveTextContent(/duplicate evaluation order/i))
     expect(screen.queryByTestId('routes-list')).not.toBeInTheDocument()
   })
 
-  it('edits an existing route and calls the update endpoint', async () => {
+  it('edits an existing route, calls update, and stays on the editor', async () => {
     vi.spyOn(mock, 'getRoute').mockResolvedValueOnce(routeFixture())
     const updateSpy = vi.spyOn(mock, 'updateRoute').mockResolvedValueOnce(routeFixture({ name: 'Updated Music' }))
 
@@ -116,7 +121,7 @@ describe('RouteEditorView', () => {
     expect(routeId).toBe(1)
     expect(submitted.name).toBe('Updated Music')
 
-    await waitFor(() => expect(screen.getByTestId('routes-list')).toBeInTheDocument())
+    expect(screen.queryByTestId('routes-list')).not.toBeInTheDocument()
   })
 
   it('deletes an existing route and calls the delete endpoint', async () => {

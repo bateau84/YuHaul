@@ -33,6 +33,7 @@ const (
 	OpPlaylistItemsList   Operation = "playlist_items_list"
 	OpVideosList          Operation = "videos_list"
 	OpPlaylistItemsInsert Operation = "playlist_items_insert"
+	OpPlaylistsList       Operation = "playlists_list"
 )
 
 // CostRecorder is invoked after each API call with the operation type and the
@@ -150,6 +151,54 @@ type subscriptionItem struct {
 			ChannelID string `json:"channelId"`
 		} `json:"resourceId"`
 	} `json:"snippet"`
+}
+
+// Playlist represents a YouTube playlist owned by the authenticated user.
+type Playlist struct {
+	ID    string
+	Title string
+}
+
+// ListPlaylists retrieves the authenticated user's playlists one page at a
+// time. Pass nextPageToken from the previous response to continue paging.
+func (c *Client) ListPlaylists(ctx context.Context, nextPageToken string) ([]Playlist, string, error) {
+	q := url.Values{}
+	q.Set("part", "snippet")
+	q.Set("mine", "true")
+	q.Set("maxResults", "50")
+	if nextPageToken != "" {
+		q.Set("pageToken", nextPageToken)
+	}
+
+	body, err := c.get(ctx, "/playlists", q, OpPlaylistsList, 1)
+	if err != nil {
+		return nil, "", fmt.Errorf("list playlists: %w", err)
+	}
+
+	var raw struct {
+		Items         []playlistListItem `json:"items"`
+		NextPageToken string             `json:"nextPageToken"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, "", fmt.Errorf("decode playlists: %w", err)
+	}
+
+	out := make([]Playlist, 0, len(raw.Items))
+	for _, it := range raw.Items {
+		if it.ID == "" {
+			continue
+		}
+		out = append(out, Playlist{
+			ID:    it.ID,
+			Title: it.Snippet.Title,
+		})
+	}
+	return out, raw.NextPageToken, nil
+}
+
+type playlistListItem struct {
+	ID      string  `json:"id"`
+	Snippet snippet `json:"snippet"`
 }
 
 // Channel represents metadata about a YouTube channel, including the cached

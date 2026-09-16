@@ -1,5 +1,5 @@
 import type { Route } from '../types'
-import { api } from './core'
+import { api, ApiError } from './core'
 
 export async function listRoutes(): Promise<Route[]> {
   const data = await api<{ routes: Route[] }>('/api/routes')
@@ -10,7 +10,7 @@ export async function getRoute(id: number): Promise<Route | undefined> {
   try {
     return await api<Route>(`/api/routes/${id}`)
   } catch (err) {
-    if (err instanceof Error && err.message.includes('not found')) {
+    if (err instanceof ApiError && err.status === 404) {
       return undefined
     }
     throw err

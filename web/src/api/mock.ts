@@ -20,6 +20,7 @@ import type {
   DeferredItem,
   Advisory,
   RetentionPlaylist,
+  Playlist,
 } from '../types'
 
 let mockRoutes: Route[] = [
@@ -33,7 +34,7 @@ let mockRoutes: Route[] = [
     condition_composition: 'AND',
     conditions: [
       { id: 101, route_id: 1, condition_index: 0, field: 'title', operator: 'contains', value: 'music' },
-      { id: 102, route_id: 1, condition_index: 1, field: 'duration_seconds', operator: 'gt', value: '180' },
+      { id: 102, route_id: 1, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', value: '180' },
     ],
     actions: [{ id: 201, route_id: 1, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', action_index: 0 }],
     exclusions: [{ id: 301, route_id: 1, exclusion_type: 'channel', exclusion_value: 'UCexcluded' }],
@@ -50,7 +51,7 @@ let mockRoutes: Route[] = [
     condition_composition: 'OR',
     conditions: [
       { id: 103, route_id: 2, condition_index: 0, field: 'title', operator: 'contains', value: 'ambient' },
-      { id: 104, route_id: 2, condition_index: 1, field: 'duration_seconds', operator: 'gt', value: '600' },
+      { id: 104, route_id: 2, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', value: '600' },
     ],
     actions: [{ id: 202, route_id: 2, action_type: 'playlist_insert', target_playlist_id: 'PLambient', action_index: 0 }],
     exclusions: [],
@@ -146,7 +147,7 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
         decision: 'matched',
         condition_audits: [
           { id: 6001, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Late Night Jazz Mix', matched: true },
-          { id: 6002, condition_index: 1, field: 'duration_seconds', operator: 'gt', expected_value: '180', actual_value: '184', matched: true },
+          { id: 6002, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', expected_value: '180', actual_value: '184', matched: true },
         ],
         actions: [{ id: 7001, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', outcome: 'succeeded' }],
       },
@@ -176,7 +177,7 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
         rejection_reason: 'title does not contain "music"',
         condition_audits: [
           { id: 6011, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Ambient Study Session', matched: false },
-          { id: 6012, condition_index: 1, field: 'duration_seconds', operator: 'gt', expected_value: '180', actual_value: '620', matched: true },
+          { id: 6012, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', expected_value: '180', actual_value: '620', matched: true },
         ],
         actions: [],
       },
@@ -362,6 +363,11 @@ let mockRetentionPlaylists: RetentionPlaylist[] = [
   { id: 1, playlist_id: 'PLrotation', playlist_name: 'Rotation', designated_at: '2026-08-01T10:00:00Z', is_active: true },
 ]
 
+let mockPlaylists: Playlist[] = [
+  { playlist_id: 'PLmusic', playlist_name: 'Music Discovery' },
+  { playlist_id: 'PLambient', playlist_name: 'Ambient' },
+]
+
 let nextId = 10000
 
 function uid(): number {
@@ -430,6 +436,11 @@ export async function reorderRoutes(ids: number[]): Promise<void> {
     r.evaluation_order = i + 1
     return r
   })
+}
+
+export async function listPlaylists(): Promise<Playlist[]> {
+  await delay()
+  return [...mockPlaylists]
 }
 
 export async function listRuns(): Promise<Run[]> {

@@ -219,15 +219,12 @@ func (s *Server) handleGetRunVideo(w http.ResponseWriter, r *http.Request) {
 
 // routeNameMap loads route names into a map keyed by route ID. The run video
 // endpoints use this to make decision summaries human-readable without
-// requiring the client to fetch routes separately.
+// requiring the client to fetch routes separately. Soft-deleted routes are
+// included so historical decision evidence still resolves the route name.
 func (s *Server) routeNameMap(ctx context.Context) (map[int64]string, error) {
-	routes, err := s.routeStore.ListRoutes(ctx)
+	m, err := s.routeStore.ListRouteNamesIncludingDeleted(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing routes: %w", err)
-	}
-	m := make(map[int64]string, len(routes))
-	for _, r := range routes {
-		m[r.ID] = r.Name
+		return nil, fmt.Errorf("listing route names: %w", err)
 	}
 	return m, nil
 }

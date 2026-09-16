@@ -5,7 +5,7 @@ description: Obligation layer for the YouTube subscription discovery and routing
 tags: [requirement-index, youtube, discovery, routing, analytics]
 ---
 
-**Status:** proposed
+**Status:** accepted
 
 ## Source
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -16,17 +17,26 @@ type OnChange func(ctx context.Context, description string) error
 type Store struct {
 	db       *sql.DB
 	onChange OnChange
+	logger   *slog.Logger
 }
 
 // NewStore returns a route store backed by db. Tables are assumed to be created
 // by the state store migration, which owns the shared schema.
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db}
+	return &Store{db: db, logger: slog.Default()}
 }
 
 // WithOnChange registers a callback that is invoked after route mutations.
 func (s *Store) WithOnChange(cb OnChange) *Store {
 	s.onChange = cb
+	return s
+}
+
+// WithLogger sets the structured logger used for operational logging.
+func (s *Store) WithLogger(l *slog.Logger) *Store {
+	if l != nil {
+		s.logger = l
+	}
 	return s
 }
 
@@ -76,7 +86,7 @@ func (s *Store) GetRoute(ctx context.Context, id int64) (*Route, error) {
 	r, err := scanRoute(s.db.QueryRowContext(ctx,
 		`SELECT id, name, description, evaluation_order, is_final, is_enabled,
 		        condition_composition, created_at, updated_at
-		 FROM route WHERE id = ?;`, id))
+		 FROM route WHERE id = ? AND deleted_at IS NULL;`, id))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("route %d: %w", id, ErrRouteNotFound)
@@ -94,7 +104,7 @@ func (s *Store) ListRoutes(ctx context.Context) ([]Route, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, name, description, evaluation_order, is_final, is_enabled,
 		        condition_composition, created_at, updated_at
-		 FROM route ORDER BY evaluation_order;`)
+		 FROM route WHERE deleted_at IS NULL ORDER BY evaluation_order;`)
 	if err != nil {
 		return nil, fmt.Errorf("router: list routes: %w", err)
 	}
@@ -126,7 +136,7 @@ func (s *Store) LoadActiveRoutes(ctx context.Context) ([]Route, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, name, description, evaluation_order, is_final, is_enabled,
 		        condition_composition, created_at, updated_at
-		 FROM route ORDER BY evaluation_order;`)
+		 FROM route WHERE deleted_at IS NULL ORDER BY evaluation_order;`)
 	if err != nil {
 		return nil, fmt.Errorf("router: load active routes: %w", err)
 	}
@@ -152,6 +162,32 @@ func (s *Store) LoadActiveRoutes(ctx context.Context) ([]Route, error) {
 	return routes, nil
 }
 
+// ListRouteNamesIncludingDeleted returns an id-to-name map for every route row,
+// including soft-deleted routes. This is used for historical name resolution in
+// decision detail views so deleted routes retain their identity in evidence.
+func (s *Store) ListRouteNamesIncludingDeleted(ctx context.Context) (map[int64]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name FROM route;`)
+	if err != nil {
+		return nil, fmt.Errorf("router: list route names: %w", err)
+	}
+	defer rows.Close()
+
+	m := make(map[int64]string)
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("router: scan route name: %w", err)
+		}
+		m[id] = name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("router: iterate route names: %w", err)
+	}
+	return m, nil
+}
+
 // UpdateRoute updates a route and replaces its children.
 func (s *Store) UpdateRoute(ctx context.Context, r *Route) error {
 	if r.ID == 0 {
@@ -167,7 +203,7 @@ func (s *Store) UpdateRoute(ctx context.Context, r *Route) error {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE route SET name = ?, description = ?, evaluation_order = ?, is_final = ?,
 		                  is_enabled = ?, condition_composition = ?, updated_at = ?
-		 WHERE id = ?;`,
+		 WHERE id = ? AND deleted_at IS NULL;`,
 		r.Name, r.Description, r.EvaluationOrder, r.IsFinal, r.IsEnabled,
 		r.ConditionComposition, now, r.ID)
 	if err != nil {
@@ -202,17 +238,40 @@ func (s *Store) UpdateRoute(ctx context.Context, r *Route) error {
 	return nil
 }
 
-// DeleteRoute removes a route and its children.
+// DeleteRoute soft-deletes a route so its historical decisions and audits
+// remain intact. The route row is retained with a deleted_at timestamp and is
+// excluded from management and evaluation queries.
 func (s *Store) DeleteRoute(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM route WHERE id = ?;`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("router: delete route %d: %w", id, err)
+		return fmt.Errorf("router: begin delete route %d: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var name string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT name FROM route WHERE id = ? AND deleted_at IS NULL;`, id).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("route %d: %w", id, ErrRouteNotFound)
+		}
+		return fmt.Errorf("router: load route name %d: %w", id, err)
+	}
+
+	now := nowUTC()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE route SET deleted_at = ?, evaluation_order = -id WHERE id = ? AND deleted_at IS NULL;`, now, id)
+	if err != nil {
+		return fmt.Errorf("router: soft-delete route %d: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("route %d: %w", id, ErrRouteNotFound)
 	}
 
-	s.snapshot("deleted route")
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("router: commit delete route %d: %w", id, err)
+	}
+
+	s.snapshot("deleted route: " + name)
 	return nil
 }
 
@@ -228,14 +287,21 @@ func (s *Store) ReorderRoutes(ctx context.Context, routeIDs []int64) error {
 	}
 	defer tx.Rollback()
 
-	// Avoid UNIQUE constraint collisions by shifting existing orders negative.
+	// Shift active orders to a negative band strictly below every soft-deleted
+	// sentinel (-id). Deleted routes already sit at -id, so the shift subtracts
+	// the current max id to guarantee no collision.
+	var maxID int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(id), 0) FROM route;`).Scan(&maxID); err != nil {
+		return fmt.Errorf("router: read max route id: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE route SET evaluation_order = -evaluation_order - 1;`); err != nil {
+		`UPDATE route SET evaluation_order = -evaluation_order - 1 - ? WHERE deleted_at IS NULL;`, maxID); err != nil {
 		return fmt.Errorf("router: shift orders: %w", err)
 	}
 
 	stmt, err := tx.PrepareContext(ctx,
-		`UPDATE route SET evaluation_order = ? WHERE id = ?;`)
+		`UPDATE route SET evaluation_order = ? WHERE id = ? AND deleted_at IS NULL;`)
 	if err != nil {
 		return fmt.Errorf("router: prepare reorder: %w", err)
 	}
@@ -384,9 +450,10 @@ func (s *Store) snapshot(description string) {
 	// Best-effort snapshot; failures are logged but do not fail the route
 	// mutation, which already succeeded.
 	if err := s.onChange(context.Background(), description); err != nil {
-		// The store has no logger; swallow. Callers that need audit guarantees
-		// can inspect config_version directly.
-		_ = err
+		s.logger.ErrorContext(context.Background(), "route config snapshot failed",
+			"error", err,
+			"description", description,
+		)
 	}
 }
 

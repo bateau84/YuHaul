@@ -32,18 +32,20 @@ const (
 )
 
 // ConditionOperator names the comparison operators supported in conditions.
+// The canonical vocabulary matches the accepted design spec: text fields use
+// contains, equals, starts_with, ends_with, matches_regex; duration_seconds
+// uses equals, greater_than, less_than, between.
 type ConditionOperator string
 
 const (
-	ConditionOperatorContains    ConditionOperator = "contains"
-	ConditionOperatorNotContains ConditionOperator = "not_contains"
-	ConditionOperatorEquals      ConditionOperator = "equals"
-	ConditionOperatorNotEquals   ConditionOperator = "not_equals"
-	ConditionOperatorGT          ConditionOperator = "gt"
-	ConditionOperatorGTE         ConditionOperator = "gte"
-	ConditionOperatorLT          ConditionOperator = "lt"
-	ConditionOperatorLTE         ConditionOperator = "lte"
-	ConditionOperatorInList      ConditionOperator = "in_list"
+	ConditionOperatorContains     ConditionOperator = "contains"
+	ConditionOperatorEquals       ConditionOperator = "equals"
+	ConditionOperatorStartsWith   ConditionOperator = "starts_with"
+	ConditionOperatorEndsWith     ConditionOperator = "ends_with"
+	ConditionOperatorMatchesRegex ConditionOperator = "matches_regex"
+	ConditionOperatorGreaterThan  ConditionOperator = "greater_than"
+	ConditionOperatorLessThan     ConditionOperator = "less_than"
+	ConditionOperatorBetween      ConditionOperator = "between"
 )
 
 // ExclusionType names the kinds of route-scoped exclusions.
@@ -72,6 +74,7 @@ type Route struct {
 	Exclusions           []RouteExclusion `json:"exclusions"`
 	CreatedAt            string           `json:"created_at"`
 	UpdatedAt            string           `json:"updated_at"`
+	DeletedAt            string           `json:"deleted_at,omitempty"`
 }
 
 // RouteCondition is one predicate within a route.

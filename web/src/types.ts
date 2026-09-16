@@ -11,14 +11,13 @@ export type ConditionField =
 
 export type ConditionOperator =
   | 'contains'
-  | 'not_contains'
   | 'equals'
-  | 'not_equals'
-  | 'gt'
-  | 'gte'
-  | 'lt'
-  | 'lte'
-  | 'in_list'
+  | 'starts_with'
+  | 'ends_with'
+  | 'matches_regex'
+  | 'greater_than'
+  | 'less_than'
+  | 'between'
 
 export type ExclusionType =
   | 'channel'
@@ -301,6 +300,11 @@ export interface RetentionPlaylist {
   playlist_name: string
   designated_at: string
   is_active: boolean
+}
+
+export interface Playlist {
+  playlist_id: string
+  playlist_name: string
 }
 
 export interface ErrorEntry {

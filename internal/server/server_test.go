@@ -875,6 +875,70 @@ func TestHandleReorderRoutes(t *testing.T) {
 	assert.Equal(t, id1, routes[1].ID)
 }
 
+func TestHandleCreateRoute_InvalidOperator(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	body := `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"gt","value":"100"}],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}]}`
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "operator \\\"gt\\\" is not valid for field \\\"title\\\"")
+}
+
+func TestHandleCreateRoute_InvalidBetween(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	body := `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"duration_seconds","operator":"between","value":"100"}],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}]}`
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "between value must be")
+}
+
+type fakePlaylistProvider struct {
+	playlists []Playlist
+	err       error
+}
+
+func (f *fakePlaylistProvider) ListPlaylists(context.Context) ([]Playlist, error) {
+	return f.playlists, f.err
+}
+
+func TestHandleListPlaylists(t *testing.T) {
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(),
+		WithPlaylistProvider(&fakePlaylistProvider{
+			playlists: []Playlist{{PlaylistID: "PLx", PlaylistName: "My List"}},
+		}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/playlists", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"playlist_id":"PLx"`)
+	assert.Contains(t, body, `"playlist_name":"My List"`)
+}
+
+func TestHandleListPlaylists_NotConfigured(t *testing.T) {
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/playlists", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not authenticated")
+}
+
 func TestAnalyticsRoutesReachable(t *testing.T) {
 	ctx := context.Background()
 	db, stateStore, _, cleanup := setupServerTest(t)

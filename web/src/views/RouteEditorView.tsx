@@ -3,24 +3,8 @@ import { useParams, useNavigate, useMatch, Link } from 'react-router-dom'
 import * as api from '../api/client'
 import { RouteEditor } from '../components/RouteEditor'
 import { useToast } from '../hooks/useToast'
+import { blankRoute } from '../lib/route'
 import type { Route } from '../types'
-
-function blankRoute(evaluationOrder: number): Route {
-  return {
-    id: 0,
-    name: '',
-    description: '',
-    evaluation_order: evaluationOrder,
-    is_final: false,
-    is_enabled: true,
-    condition_composition: 'AND',
-    conditions: [],
-    actions: [],
-    exclusions: [],
-    created_at: '',
-    updated_at: '',
-  }
-}
 
 export function RouteEditorView() {
   const { id } = useParams<{ id: string }>()
@@ -70,13 +54,14 @@ export function RouteEditorView() {
   async function handleSave(form: Route) {
     try {
       if (isNew) {
-        await api.createRoute(form)
+        const created = await api.createRoute(form)
         addToast('Route created', 'success')
+        navigate(`/routes/${created.id}`)
       } else {
         await api.updateRoute(Number(id), form)
         addToast('Route updated', 'success')
+        // Stay on the editor after an update so the operator can keep iterating.
       }
-      navigate('/routes')
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to save route', 'error')
     }

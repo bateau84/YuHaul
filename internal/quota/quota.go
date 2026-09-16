@@ -30,6 +30,7 @@ const (
 	OpPlaylistItemsList   Operation = "playlist_items_list"
 	OpVideosList          Operation = "videos_list"
 	OpPlaylistItemsInsert Operation = "playlist_items_insert"
+	OpPlaylistsList       Operation = "playlists_list"
 	OpSearchList          Operation = "search_list"
 )
 
@@ -40,6 +41,7 @@ var unitCosts = map[Operation]int{
 	OpPlaylistItemsList:   1,
 	OpVideosList:          1,
 	OpPlaylistItemsInsert: 50,
+	OpPlaylistsList:       1,
 	OpSearchList:          100,
 }
 
