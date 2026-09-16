@@ -62,6 +62,7 @@ export interface Route {
   conditions: RouteCondition[]
   actions: RouteAction[]
   exclusions: RouteExclusion[]
+  match_count?: number
   created_at: string
   updated_at: string
 }

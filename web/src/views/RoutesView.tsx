@@ -52,7 +52,6 @@ function conditionSummary(route: Route): string {
 export function RoutesView() {
   const [routes, setRoutes] = useState<Route[]>([])
   const [loading, setLoading] = useState(true)
-  const [stats, setStats] = useState<Record<number, number>>({})
   const [deletingRoute, setDeletingRoute] = useState<Route | null>(null)
   const { addToast } = useToast()
   const navigate = useNavigate()
@@ -64,30 +63,10 @@ export function RoutesView() {
     })
   }, [])
 
-  /* eslint-disable react/set-state-in-effect */
-  useEffect(() => {
-    if (routes.length === 0) return
-    Promise.all(
-      routes.map((r) =>
-        api
-          .getRouteStats(r.id)
-          .then((s) => ({ id: r.id, count: s.match_count }))
-          .catch(() => ({ id: r.id, count: 0 }))
-      )
-    ).then((results) => {
-      const map: Record<number, number> = {}
-      results.forEach((r) => {
-        map[r.id] = r.count
-      })
-      setStats(map)
-    })
-  }, [routes])
-  /* eslint-enable react/set-state-in-effect */
-
   async function move(from: number, to: number) {
     if (to < 0 || to >= routes.length) return
     const previous = routes
-    const next = [...routes]
+    const next = routes.map((r) => ({ ...r }))
     const [moved] = next.splice(from, 1)
     next.splice(to, 0, moved)
     next.forEach((r, i) => (r.evaluation_order = i + 1))
@@ -196,7 +175,7 @@ export function RoutesView() {
                     </label>
                   </td>
                   <td data-label="Final">{r.is_final && <span className="badge badge--accepted">Final</span>}</td>
-                  <td data-label="Matches">{stats[r.id] ?? '—'}</td>
+                  <td data-label="Matches">{r.match_count ?? '—'}</td>
                   <td data-label="Actions">
                     <div style={{ display: 'flex', gap: 8 }}>
                       <button className="icon-button" onClick={() => navigate(`/routes/${r.id}`)} aria-label={`Edit route ${r.name}`}>

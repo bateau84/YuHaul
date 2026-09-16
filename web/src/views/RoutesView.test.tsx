@@ -19,6 +19,7 @@ const routeFixture = (overrides: Partial<RouteModel> = {}): RouteModel => ({
   ],
   actions: [],
   exclusions: [],
+  match_count: 2,
   created_at: '2026-08-01T10:00:00Z',
   updated_at: '2026-09-08T10:00:00Z',
   ...overrides,
@@ -105,5 +106,28 @@ describe('RoutesView', () => {
 
     await waitFor(() => expect(document.querySelector('.toast')).toHaveTextContent(/reorder failed/i))
     expect(screen.getAllByRole('row')[1]).toHaveTextContent('Music Discovery')
+  })
+
+  it('does not corrupt evaluation_order after a failed reorder', async () => {
+    const updateRoute = vi.spyOn(mock, 'updateRoute').mockResolvedValueOnce(routeFixture({ is_enabled: false }))
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([
+      routeFixture(),
+      routeFixture({ id: 2, name: 'Ambient', evaluation_order: 2 }),
+    ])
+    vi.spyOn(mock, 'reorderRoutes').mockRejectedValueOnce(new Error('reorder failed'))
+
+    renderView()
+
+    await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+
+    const rows = screen.getAllByRole('row')
+    fireEvent.click(rows[1].querySelector('[aria-label="Move Music Discovery down"]') as HTMLElement)
+    await waitFor(() => expect(document.querySelector('.toast')).toHaveTextContent(/reorder failed/i))
+
+    fireEvent.click(screen.getByRole('switch', { name: /Disable route Music Discovery/i }))
+
+    await waitFor(() => expect(updateRoute).toHaveBeenCalled())
+    const payload = updateRoute.mock.calls[0][1] as RouteModel
+    expect(payload.evaluation_order).toBe(1)
   })
 })

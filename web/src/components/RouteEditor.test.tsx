@@ -295,4 +295,34 @@ describe('RouteEditor', () => {
     await waitFor(() => expect(screen.getByText('Enter a number')).toBeInTheDocument())
     expect(onSave).not.toHaveBeenCalled()
   })
+
+  it('shows validation error for between operator with a missing bound', async () => {
+    const onSave = vi.fn()
+    render(
+      <RouteEditor
+        route={routeFixture({
+          conditions: [
+            {
+              id: 101,
+              route_id: 1,
+              condition_index: 0,
+              field: 'duration_seconds',
+              operator: 'between',
+              value: '180,',
+            },
+          ],
+        })}
+        existingRoutes={[]}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
+
+    await waitFor(() =>
+      expect(screen.getByText('Enter two numbers separated by a comma')).toBeInTheDocument()
+    )
+    expect(onSave).not.toHaveBeenCalled()
+  })
 })

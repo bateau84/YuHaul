@@ -115,6 +115,35 @@ func (s *Store) CountRouteMatches(ctx context.Context, routeID int64) (int64, er
 	return count, nil
 }
 
+// ListRouteMatchCounts returns a map from route id to the number of
+// production-run `matched` decisions for that route. Routes with zero matches
+// are omitted from the map; callers should default to zero.
+func (s *Store) ListRouteMatchCounts(ctx context.Context) (map[int64]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT rd.route_id, COUNT(*)
+		 FROM route_decision rd
+		 JOIN run ru ON ru.id = rd.run_id
+		 WHERE rd.decision = 'matched' AND ru.run_type IN ('scheduled', 'manual')
+		 GROUP BY rd.route_id;`)
+	if err != nil {
+		return nil, fmt.Errorf("router: list route match counts: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[int64]int64)
+	for rows.Next() {
+		var routeID, count int64
+		if err := rows.Scan(&routeID, &count); err != nil {
+			return nil, fmt.Errorf("router: scan route match count: %w", err)
+		}
+		counts[routeID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("router: iterate route match counts: %w", err)
+	}
+	return counts, nil
+}
+
 // ListRoutes returns all routes ordered by evaluation_order, with children loaded.
 func (s *Store) ListRoutes(ctx context.Context) ([]Route, error) {
 	rows, err := s.db.QueryContext(ctx,

@@ -72,6 +72,7 @@ type Route struct {
 	Conditions           []RouteCondition `json:"conditions"`
 	Actions              []RouteAction    `json:"actions"`
 	Exclusions           []RouteExclusion `json:"exclusions"`
+	MatchCount           int64            `json:"match_count"`
 	CreatedAt            string           `json:"created_at"`
 	UpdatedAt            string           `json:"updated_at"`
 	DeletedAt            string           `json:"deleted_at,omitempty"`

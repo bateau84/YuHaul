@@ -38,6 +38,7 @@ let mockRoutes: Route[] = [
     ],
     actions: [{ id: 201, route_id: 1, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', action_index: 0 }],
     exclusions: [{ id: 301, route_id: 1, exclusion_type: 'channel', exclusion_value: 'UCexcluded' }],
+    match_count: 2,
     created_at: '2026-08-01T10:00:00Z',
     updated_at: '2026-09-08T10:00:00Z',
   },
@@ -55,6 +56,7 @@ let mockRoutes: Route[] = [
     ],
     actions: [{ id: 202, route_id: 2, action_type: 'playlist_insert', target_playlist_id: 'PLambient', action_index: 0 }],
     exclusions: [],
+    match_count: 0,
     created_at: '2026-08-02T10:00:00Z',
     updated_at: '2026-09-08T10:00:00Z',
   },
@@ -408,7 +410,7 @@ export async function getRoute(id: number): Promise<Route | undefined> {
 export async function createRoute(route: Omit<Route, 'id' | 'created_at' | 'updated_at'>): Promise<Route> {
   await delay()
   const now = new Date().toISOString()
-  const created: Route = { ...route, id: uid(), created_at: now, updated_at: now }
+  const created: Route = { ...route, id: uid(), match_count: 0, created_at: now, updated_at: now }
   mockRoutes.push(created)
   return created
 }

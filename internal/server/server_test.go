@@ -699,6 +699,53 @@ func TestHandleListRoutes(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"name":"Music"`)
 }
 
+func TestHandleListRoutes_MatchCount(t *testing.T) {
+	ctx := context.Background()
+	db, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	stateStore, err := state.NewStore(db)
+	require.NoError(t, err)
+	machine := state.NewMachine(stateStore)
+
+	_, err = routerStore.CreateRoute(ctx, &router.Route{
+		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
+		ConditionComposition: "AND",
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "music"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+	})
+	require.NoError(t, err)
+
+	_, err = routerStore.CreateRoute(ctx, &router.Route{
+		Name: "Ambient", EvaluationOrder: 2, IsEnabled: true,
+		ConditionComposition: "AND",
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "ambient"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL2"}},
+	})
+	require.NoError(t, err)
+
+	run := &state.Run{RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	video, err := machine.DiscoverVideo(ctx, runID, "v1", "ch1")
+	require.NoError(t, err)
+
+	engine := router.NewEngine(routerStore)
+	_, err = engine.Evaluate(ctx, runID, video.ID, router.VideoContext{VideoID: "v1", ChannelID: "ch1", Title: "music video"}, machine)
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"match_count":1`)
+	assert.Contains(t, body, `"name":"Music"`)
+	assert.Contains(t, body, `"name":"Ambient"`)
+}
+
 func TestHandleGetRoute(t *testing.T) {
 	ctx := context.Background()
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)

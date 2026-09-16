@@ -113,7 +113,7 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
         } else if (c.operator === 'between') {
           const parts = c.value.split(',')
           if (parts.length !== 2 || parts.some((p) => p.trim() === '' || Number.isNaN(Number(p.trim())))) {
-            next[`condition-${i}-value-min`] = 'Enter two numbers separated by a comma'
+            next[`condition-${i}-value`] = 'Enter two numbers separated by a comma'
           }
         } else if (c.field === 'duration_seconds') {
           const num = Number(c.value.trim())
@@ -159,6 +159,16 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
               ? 'duration-min'
               : first
     )
+    // For between-operator value errors the rendered inputs use a `-min`
+    // suffix; focus the minimum input so the error is announced.
+    if (el == null) {
+      const betweenMatch = /^condition-(\d+)-value$/.exec(first)
+      if (betweenMatch) {
+        const betweenInput = document.getElementById(`condition-${betweenMatch[1]}-value-min`)
+        betweenInput?.focus()
+        return
+      }
+    }
     el?.focus()
   }, [errors])
 
@@ -378,6 +388,7 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
                     placeholder="Min"
                     aria-label={`Condition ${i + 1} minimum value`}
                     aria-invalid={!!errors[`condition-${i}-value`]}
+                    aria-describedby={errors[`condition-${i}-value`] ? `condition-${i}-value-error` : undefined}
                   />
                   <input
                     id={`condition-${i}-value-max`}
@@ -388,6 +399,7 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
                     placeholder="Max"
                     aria-label={`Condition ${i + 1} maximum value`}
                     aria-invalid={!!errors[`condition-${i}-value`]}
+                    aria-describedby={errors[`condition-${i}-value`] ? `condition-${i}-value-error` : undefined}
                   />
                 </div>
               ) : (

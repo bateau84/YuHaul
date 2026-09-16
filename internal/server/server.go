@@ -58,6 +58,7 @@ type RouteStore interface {
 	ReorderRoutes(ctx context.Context, routeIDs []int64) error
 	ListRouteNamesIncludingDeleted(ctx context.Context) (map[int64]string, error)
 	CountRouteMatches(ctx context.Context, routeID int64) (int64, error)
+	ListRouteMatchCounts(ctx context.Context) (map[int64]int64, error)
 }
 
 // RunStore is the subset of state.Store used by the HTTP server for run queries.
@@ -266,6 +267,10 @@ func (noopRouteStore) ListRouteNamesIncludingDeleted(context.Context) (map[int64
 
 func (noopRouteStore) CountRouteMatches(context.Context, int64) (int64, error) {
 	return 0, errors.New("route store not configured")
+}
+
+func (noopRouteStore) ListRouteMatchCounts(context.Context) (map[int64]int64, error) {
+	return nil, errors.New("route store not configured")
 }
 
 type noopRunStore struct{}
@@ -662,6 +667,17 @@ func (s *Server) handleListRoutes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list routes")
 		return
 	}
+
+	counts, err := s.routeStore.ListRouteMatchCounts(r.Context())
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "list route match counts failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list routes")
+		return
+	}
+	for i := range routes {
+		routes[i].MatchCount = counts[routes[i].ID]
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
 }
 
