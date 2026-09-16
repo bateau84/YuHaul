@@ -43,7 +43,7 @@ func (s *Service) ChannelStats(ctx context.Context) ([]ChannelStats, error) {
 }
 
 // ChannelDetail returns statistics for one channel.
-func (s *Service) ChannelDetail(ctx context.Context, channelIDText string) (*ChannelStats, error) {
+func (s *Service) ChannelDetail(ctx context.Context, channelIDText string) (*ChannelDetail, error) {
 	cs, err := s.store.GetChannelStats(ctx, channelIDText)
 	if err != nil {
 		return nil, err
@@ -56,7 +56,29 @@ func (s *Service) ChannelDetail(ctx context.Context, channelIDText string) (*Cha
 	if cs.TotalDiscovered > 0 {
 		cs.DuplicateRate = float64(len(dp)) / float64(cs.TotalDiscovered)
 	}
-	return cs, nil
+
+	dupBreakdown, err := s.store.DuplicateProvenanceBreakdown(ctx, channelIDText)
+	if err != nil {
+		return nil, err
+	}
+	retBreakdown, err := s.store.RetentionSignalBreakdown(ctx, channelIDText)
+	if err != nil {
+		return nil, err
+	}
+	matchedRoutes, err := s.store.MatchedRoutesForChannel(ctx, channelIDText)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ChannelDetail{
+		ChannelStats:          *cs,
+		DuplicateProvenance:   dupBreakdown,
+		RetentionSignals:      retBreakdown,
+		RecentVideos:          make([]VideoSummary, 0),
+		RecentVideoProvenance: make([]VideoProvenance, 0),
+		MatchedRoutes:         matchedRoutes,
+		Advisories:            make([]AdvisorySummary, 0),
+	}, nil
 }
 
 // TemporalStats returns time-bucketed run statistics.

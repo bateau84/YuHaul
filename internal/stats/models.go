@@ -47,7 +47,7 @@ type ChannelStats struct {
 	TotalDiscovered  int        `json:"total_discovered"`
 	TotalRouted      int        `json:"total_routed"`
 	TotalRetained    int        `json:"total_retained"`
-	YieldRate        float64    `json:"yield_rate"`
+	Yield            float64    `json:"yield"`
 	UsefulnessRate   float64    `json:"usefulness_rate"`
 	DuplicateRate    float64    `json:"duplicate_rate"`
 	LastDiscoveredAt *time.Time `json:"last_discovered_at,omitempty"`
@@ -114,4 +114,57 @@ type RouteMatchRate struct {
 	Evaluated int     `json:"evaluated"`
 	Matched   int     `json:"matched"`
 	MatchRate float64 `json:"match_rate"`
+}
+
+// DuplicateProvenanceBreakdown counts how often a channel was the original
+// source of content versus the publisher of a matching duplicate.
+type DuplicateProvenanceBreakdown struct {
+	DiscoveryCredit int `json:"discovery_credit"`
+	RelevanceCredit int `json:"relevance_credit"`
+}
+
+// RetentionProvenanceBreakdown counts retention signals by source.
+type RetentionProvenanceBreakdown struct {
+	UserDriven   int `json:"user_driven"`
+	YuhaulRouted int `json:"yuhaul_routed"`
+}
+
+// ChannelDetail enriches ChannelStats with provenance, recent videos, matched
+// routes, and advisories for the channel analysis view.
+type ChannelDetail struct {
+	ChannelStats
+	DuplicateProvenance   DuplicateProvenanceBreakdown `json:"duplicate_provenance"`
+	RetentionSignals      RetentionProvenanceBreakdown `json:"retention_signals"`
+	RecentVideos          []VideoSummary               `json:"recent_videos"`
+	RecentVideoProvenance []VideoProvenance            `json:"recent_video_provenance"`
+	MatchedRoutes         []string                     `json:"matched_routes"`
+	Advisories            []AdvisorySummary            `json:"advisories"`
+}
+
+// VideoSummary is the subset of video state exposed on the channel detail view.
+type VideoSummary struct {
+	VideoID         string     `json:"video_id"`
+	ChannelID       string     `json:"channel_id"`
+	ProcessingState string     `json:"processing_state"`
+	FinalOutcome    string     `json:"final_outcome"`
+	DiscoveredAt    time.Time  `json:"discovered_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+}
+
+// VideoProvenance tags a recent video with duplicate/retention provenance.
+type VideoProvenance struct {
+	VideoID         string  `json:"video_id"`
+	DuplicateCredit *string `json:"duplicate_credit,omitempty"`
+	RetentionSource *string `json:"retention_source,omitempty"`
+}
+
+// AdvisorySummary is the subset of an advisory shown on the channel view.
+type AdvisorySummary struct {
+	ID               int64          `json:"id"`
+	AdvisoryType     string         `json:"advisory_type"`
+	Status           string         `json:"status"`
+	GeneratedAt      time.Time      `json:"generated_at"`
+	IgnoredUntil     *time.Time     `json:"ignored_until,omitempty"`
+	ActionTaken      *string        `json:"action_taken,omitempty"`
+	EvidenceSnapshot map[string]any `json:"evidence_snapshot"`
 }

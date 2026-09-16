@@ -136,7 +136,7 @@ func TestService_ChannelStats(t *testing.T) {
 	assert.Equal(t, 100, channels[0].TotalDiscovered)
 	assert.Equal(t, 40, channels[0].TotalRouted)
 	assert.Equal(t, 5, channels[0].TotalRetained)
-	assert.InDelta(t, 0.4, channels[0].YieldRate, 0.001)
+	assert.InDelta(t, 0.4, channels[0].Yield, 0.001)
 	assert.InDelta(t, 0.05, channels[0].UsefulnessRate, 0.001)
 }
 
@@ -206,6 +206,38 @@ func TestService_RetentionSignal_UserDrivenCounts(t *testing.T) {
 	require.Len(t, signals, 1)
 	assert.True(t, signals[0].IsRetentionSignal)
 	assert.Equal(t, "user_driven", signals[0].MembershipSource)
+}
+
+func TestService_ChannelDetail(t *testing.T) {
+	ctx := context.Background()
+	db, _, service, cleanup := setupStatsTest(t)
+	defer cleanup()
+
+	seedChannel(t, ctx, db, "UC1", "Channel One", 100, 40, 5)
+	runID := seedRun(t, ctx, db)
+	routeID := seedRoute(t, ctx, db, "Music", 1)
+
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id, processing_state, final_outcome)
+		 VALUES ('v1', 'UC1', ?, ?, 'completed', 'accepted');`, time.Now().UTC(), runID)
+	require.NoError(t, err)
+	videoID, err := res.LastInsertId()
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order, decision, skip_reason, rejection_reason)
+		 VALUES (?, ?, ?, 1, 'matched', NULL, NULL);`, videoID, runID, routeID)
+	require.NoError(t, err)
+
+	detail, err := service.ChannelDetail(ctx, "UC1")
+	require.NoError(t, err)
+	assert.Equal(t, "UC1", detail.ChannelID)
+	assert.InDelta(t, 0.4, detail.Yield, 0.001)
+	assert.NotNil(t, detail.DuplicateProvenance)
+	assert.NotNil(t, detail.RetentionSignals)
+	assert.Equal(t, []string{"Music"}, detail.MatchedRoutes)
+	assert.Empty(t, detail.RecentVideos)
+	assert.Empty(t, detail.Advisories)
 }
 
 func TestService_RouteMatchRates(t *testing.T) {

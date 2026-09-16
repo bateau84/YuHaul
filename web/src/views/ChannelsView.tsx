@@ -144,8 +144,8 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
 
   if (!channel) return <div className="empty-state">Loading channel...</div>
 
-  const dup = channel.duplicate_provenance
-  const ret = channel.retention_signals
+  const dup = channel.duplicate_provenance ?? { discovery_credit: 0, relevance_credit: 0 }
+  const ret = channel.retention_signals ?? { user_driven: 0, yuhaul_routed: 0 }
   const totalDuplicates = dup.discovery_credit + dup.relevance_credit
   const totalRetention = ret.user_driven + ret.yuhaul_routed
 
@@ -220,7 +220,7 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
         </div>
       </div>
 
-      {channel.matched_routes.length > 0 && (
+      {(channel.matched_routes ?? []).length > 0 && (
         <>
           <h2 className="section-title">Matched routes</h2>
           <div className="card" style={{ marginBottom: 16 }}>
@@ -235,12 +235,12 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
         </>
       )}
 
-      {channel.recent_videos.length > 0 && (
+      {(channel.recent_videos ?? []).length > 0 && (
         <>
           <h2 className="section-title">Recent videos</h2>
           <div className="card" style={{ marginBottom: 16 }}>
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-              {channel.recent_videos.map((v) => (
+              {(channel.recent_videos ?? []).map((v) => (
                 <VideoProvenanceRow
                   key={v.video_id}
                   video={v}
@@ -253,10 +253,10 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
       )}
 
       <h2 className="section-title">Advisories</h2>
-      {(channel.advisories?.length ?? 0) === 0 ? (
+      {((channel.advisories ?? []).length) === 0 ? (
         <div className="card empty-state">No advisories for this channel.</div>
       ) : (
-        channel.advisories!.map((a) => <AdvisoryCard key={a.id} advisory={a} onChange={() => setRefresh((n) => n + 1)} />)
+        (channel.advisories ?? []).map((a) => <AdvisoryCard key={a.id} advisory={a} onChange={() => setRefresh((n) => n + 1)} />)
       )}
     </>
   )
@@ -305,9 +305,9 @@ export function ChannelsView() {
                 <tr key={c.channel_id}>
                   <td data-label="Channel">
                     <Link to={`/analytics/channels/${c.channel_id}`}>{c.channel_name}</Link>
-                    {c.advisories && c.advisories.length > 0 && (
+                    {(c.advisories ?? []).length > 0 && (
                       <span style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-                        {c.advisories.map((a) => (
+                        {(c.advisories ?? []).map((a) => (
                           <AdvisoryBadge key={a.id} advisory={a} />
                         ))}
                       </span>

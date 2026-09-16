@@ -53,6 +53,43 @@ func TestHandler_ListChannels(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "UC1")
 }
 
+func TestHandler_GetChannel(t *testing.T) {
+	ctx := context.Background()
+	db, _, service, cleanup := setupStatsTest(t)
+	defer cleanup()
+
+	seedChannel(t, ctx, db, "UC1", "Channel One", 100, 40, 5)
+	runID := seedRun(t, ctx, db)
+	routeID := seedRoute(t, ctx, db, "Music", 1)
+
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id, processing_state, final_outcome)
+		 VALUES ('v1', 'UC1', ?, ?, 'completed', 'accepted');`, time.Now().UTC(), runID)
+	require.NoError(t, err)
+	videoID, err := res.LastInsertId()
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order, decision, skip_reason, rejection_reason)
+		 VALUES (?, ?, ?, 1, 'matched', NULL, NULL);`, videoID, runID, routeID)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := NewHandler(service, logger).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/channels/UC1", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"yield":`)
+	assert.Contains(t, body, `"duplicate_provenance":`)
+	assert.Contains(t, body, `"retention_signals":`)
+	assert.Contains(t, body, `"matched_routes":`)
+	assert.Contains(t, body, `"Music"`)
+}
+
 func TestHandler_RetentionPlaylistCRUD(t *testing.T) {
 	_, _, service, cleanup := setupStatsTest(t)
 	defer cleanup()

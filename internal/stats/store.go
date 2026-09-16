@@ -289,7 +289,7 @@ func scanChannelStats(sc scanner) (ChannelStats, error) {
 		t, _ := time.Parse(time.RFC3339Nano, lastDiscovered.String)
 		cs.LastDiscoveredAt = &t
 	}
-	cs.YieldRate = safeRate(cs.TotalRouted, cs.TotalDiscovered)
+	cs.Yield = safeRate(cs.TotalRouted, cs.TotalDiscovered)
 	cs.UsefulnessRate = safeRate(cs.TotalRetained, cs.TotalDiscovered)
 	cs.DuplicateRate = 0 // populated by service if needed
 	return cs, nil
@@ -369,6 +369,90 @@ func bucketKey(t time.Time, granularity string) string {
 	default:
 		return t.Format("2006-01-02")
 	}
+}
+
+// DuplicateProvenanceBreakdown counts how often a channel was the original
+// discovery source versus the publisher of a matching duplicate.
+func (s *Store) DuplicateProvenanceBreakdown(ctx context.Context, channelIDText string) (DuplicateProvenanceBreakdown, error) {
+	var out DuplicateProvenanceBreakdown
+	// Times this channel published a video that matched a fingerprint from another channel.
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*)
+		 FROM duplicate_match dm
+		 JOIN video v ON v.id = dm.video_id
+		 WHERE v.channel_id = ?;`, channelIDText).Scan(&out.RelevanceCredit)
+	if err != nil {
+		return out, fmt.Errorf("relevance credit for %s: %w", channelIDText, err)
+	}
+	// Times a fingerprint from this channel was matched by a video from another channel.
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*)
+		 FROM duplicate_match dm
+		 JOIN title_fingerprint tf ON tf.id = dm.matched_fingerprint_id
+		 WHERE tf.channel_id = ?;`, channelIDText).Scan(&out.DiscoveryCredit)
+	if err != nil {
+		return out, fmt.Errorf("discovery credit for %s: %w", channelIDText, err)
+	}
+	return out, nil
+}
+
+// RetentionSignalBreakdown counts user-driven versus YuHaul-routed retention
+// signals for a channel.
+func (s *Store) RetentionSignalBreakdown(ctx context.Context, channelIDText string) (RetentionProvenanceBreakdown, error) {
+	var out RetentionProvenanceBreakdown
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT rs.membership_source, rs.is_retention_signal
+		 FROM retention_signal rs
+		 JOIN video v ON v.video_id = rs.video_id
+		 WHERE v.channel_id = ?;`, channelIDText)
+	if err != nil {
+		return out, fmt.Errorf("retention signals for %s: %w", channelIDText, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var source string
+		var isSignal bool
+		if err := rows.Scan(&source, &isSignal); err != nil {
+			return out, fmt.Errorf("scan retention signal for %s: %w", channelIDText, err)
+		}
+		if source == "user_driven" && isSignal {
+			out.UserDriven++
+		} else if source == "yuhaul_routed" {
+			out.YuhaulRouted++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("iterate retention signals for %s: %w", channelIDText, err)
+	}
+	return out, nil
+}
+
+// MatchedRoutesForChannel returns the distinct route names that matched any
+// video from the channel.
+func (s *Store) MatchedRoutesForChannel(ctx context.Context, channelIDText string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT r.name
+		 FROM route_decision rd
+		 JOIN route r ON r.id = rd.route_id
+		 JOIN video v ON v.id = rd.video_id
+		 WHERE v.channel_id = ? AND rd.decision = 'matched'
+		 ORDER BY r.name;`, channelIDText)
+	if err != nil {
+		return nil, fmt.Errorf("matched routes for %s: %w", channelIDText, err)
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan matched route for %s: %w", channelIDText, err)
+		}
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate matched routes for %s: %w", channelIDText, err)
+	}
+	return out, nil
 }
 
 // ListDuplicateProvenance returns duplicate provenance rows where the
