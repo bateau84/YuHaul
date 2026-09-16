@@ -10,6 +10,8 @@ timestamp: 2026-09-08T00:00:00Z
 
 ## 2026-09-16
 
+**Creation**: `adr-006-route-list-match-count.md` — Resolves reviewer MAJOR-6: derive the Route List "match count" column from production-run (`run_type IN ('scheduled','manual')`) `route_decision` rows (`decision = 'matched'`) instead of a materialized `route.match_count` counter, so the statistic cannot drift from decision evidence and dry-run/backtest/replay decisions are excluded. No schema migration; the evaluation engine is untouched.
+
 **Update**: `adr-003-route-soft-delete-preserve-history.md` — Amended Realization/Consequences per the architecture-gate critique (CRITICAL-1, MAJOR-1, MINOR-1): replaced the "reserved position" order-space strategy with a sentinel-negative scheme (`DeleteRoute` sets `evaluation_order = -id`), switched `ReorderRoutes` to a shift below the sentinel band, fixed the migration filename to `010_route_soft_delete`, and added an unfiltered `ListRouteNamesIncludingDeleted` for the `routeNameMap` historical-name path.
 
 **Update**: `adr-004-condition-operator-vocabulary.md` — Amended Realization/Consequences per the architecture-gate critique (MAJOR-2): added write-boundary operator validation in `decodeRouteRequest` (`400` on an operator outside the field kind's canonical set, and on a malformed `between`), an engine `default` case that logs a warning for stored drifted operators instead of silently returning `false`, and a lazy (no-migration) policy for existing drifted rows.
