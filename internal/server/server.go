@@ -563,6 +563,9 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list runs")
 		return
 	}
+	if runs == nil {
+		runs = []state.Run{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 }
 
@@ -666,6 +669,9 @@ func (s *Server) handleListRoutes(w http.ResponseWriter, r *http.Request) {
 		s.logger.ErrorContext(r.Context(), "list routes failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list routes")
 		return
+	}
+	if routes == nil {
+		routes = []router.Route{}
 	}
 
 	counts, err := s.routeStore.ListRouteMatchCounts(r.Context())

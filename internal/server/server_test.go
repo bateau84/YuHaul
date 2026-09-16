@@ -148,6 +148,23 @@ func TestHandleListRuns(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"runs":`)
 }
 
+func TestHandleListRuns_Empty(t *testing.T) {
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithRunStore(stateStore))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"runs":[]`)
+	assert.NotContains(t, body, `"runs":null`)
+}
+
 func TestHandleGetRun(t *testing.T) {
 	ctx := context.Background()
 	_, stateStore, _, cleanup := setupServerTest(t)
@@ -697,6 +714,21 @@ func TestHandleListRoutes(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"name":"Music"`)
+}
+
+func TestHandleListRoutes_Empty(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"routes":[]`)
+	assert.NotContains(t, body, `"routes":null`)
 }
 
 func TestHandleListRoutes_MatchCount(t *testing.T) {

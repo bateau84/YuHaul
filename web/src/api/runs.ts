@@ -3,7 +3,7 @@ import { api } from './core'
 
 export async function listRuns(): Promise<Run[]> {
   const data = await api<{ runs: Run[] }>('/api/runs')
-  return data.runs.sort((a, b) => +new Date(b.started_at) - +new Date(a.started_at))
+  return (data.runs ?? []).sort((a, b) => +new Date(b.started_at) - +new Date(a.started_at))
 }
 
 export async function getRun(id: number): Promise<Run | undefined> {

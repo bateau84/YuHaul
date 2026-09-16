@@ -3,7 +3,7 @@ import { api, ApiError } from './core'
 
 export async function listRoutes(): Promise<Route[]> {
   const data = await api<{ routes: Route[] }>('/api/routes')
-  return data.routes.sort((a, b) => a.evaluation_order - b.evaluation_order)
+  return (data.routes ?? []).sort((a, b) => a.evaluation_order - b.evaluation_order)
 }
 
 export async function getRoute(id: number): Promise<Route | undefined> {

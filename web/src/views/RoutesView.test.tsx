@@ -55,6 +55,24 @@ describe('RoutesView', () => {
     await waitFor(() => expect(screen.getByText('2', { selector: '[data-label="Matches"]' })).toBeInTheDocument())
   })
 
+  it('renders empty state when no routes exist', async () => {
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([])
+
+    renderView()
+
+    const emptyState = await waitFor(() => screen.getByText(/No routes yet/i))
+    expect(emptyState).toBeInTheDocument()
+    expect(emptyState.closest('.empty-state')?.querySelector('a[href="/routes/new"]')).toBeInTheDocument()
+  })
+
+  it('survives a null routes response and renders empty state', async () => {
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce(null as unknown as RouteModel[])
+
+    renderView()
+
+    await waitFor(() => expect(screen.getByText(/No routes yet/i)).toBeInTheDocument())
+  })
+
   it('shows a toast and reverts when toggling enabled fails', async () => {
     vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([routeFixture()])
     vi.spyOn(mock, 'updateRoute').mockRejectedValueOnce(new Error('update failed'))
