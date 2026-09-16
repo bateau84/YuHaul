@@ -211,6 +211,31 @@ func TestService_Diff_DetectsRouteChanges(t *testing.T) {
 	assert.Equal(t, "Blues", result.RoutesAdded[0].Name)
 }
 
+func TestService_Diff_EmptyArraysSerializeAsEmpty(t *testing.T) {
+	ctx := context.Background()
+	_, _, _, _, versioner, cleanup := setupConfigTest(t)
+	defer cleanup()
+
+	id, err := versioner.snapshot(ctx, "empty")
+	require.NoError(t, err)
+
+	result, err := versioner.Diff(ctx, id, id)
+	require.NoError(t, err)
+
+	require.NotNil(t, result.RoutesAdded)
+	require.NotNil(t, result.RoutesRemoved)
+	require.NotNil(t, result.RoutesChanged)
+	assert.Empty(t, result.RoutesAdded)
+	assert.Empty(t, result.RoutesRemoved)
+	assert.Empty(t, result.RoutesChanged)
+
+	data, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"routes_added":[]`)
+	assert.Contains(t, string(data), `"routes_removed":[]`)
+	assert.Contains(t, string(data), `"routes_changed":[]`)
+}
+
 func TestService_Restore_CreatesNewVersionFromHistoricalSnapshot(t *testing.T) {
 	ctx := context.Background()
 	_, _, routerStore, _, versioner, cleanup := setupConfigTest(t)

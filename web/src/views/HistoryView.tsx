@@ -55,11 +55,14 @@ function RouteSnapshot({ route }: { route: Route }) {
 }
 
 function DiffPanel({ diff }: { diff: ConfigDiffResult }) {
+  const routesAdded = diff.routes_added ?? []
+  const routesRemoved = diff.routes_removed ?? []
+  const routesChanged = diff.routes_changed ?? []
   const hasChanges =
     Object.keys(diff.settings_changed).length > 0 ||
-    diff.routes_added.length > 0 ||
-    diff.routes_removed.length > 0 ||
-    diff.routes_changed.length > 0
+    routesAdded.length > 0 ||
+    routesRemoved.length > 0 ||
+    routesChanged.length > 0
 
   return (
     <div>
@@ -80,34 +83,34 @@ function DiffPanel({ diff }: { diff: ConfigDiffResult }) {
           </ul>
         </div>
       )}
-      {diff.routes_added.length > 0 && (
+      {routesAdded.length > 0 && (
         <div style={{ marginTop: 12 }}>
           <h4 className="section-title">Routes added</h4>
-          {diff.routes_added.map((r) => (
+          {routesAdded.map((r) => (
             <div key={r.id} style={{ padding: 8, background: 'rgba(34, 197, 94, 0.1)', borderRadius: 4 }}>
               <strong>{r.name}</strong>
             </div>
           ))}
         </div>
       )}
-      {diff.routes_removed.length > 0 && (
+      {routesRemoved.length > 0 && (
         <div style={{ marginTop: 12 }}>
           <h4 className="section-title">Routes removed</h4>
-          {diff.routes_removed.map((r) => (
+          {routesRemoved.map((r) => (
             <div key={r.id} style={{ padding: 8, background: 'rgba(239, 68, 68, 0.1)', borderRadius: 4 }}>
               <strong>{r.name}</strong>
             </div>
           ))}
         </div>
       )}
-      {diff.routes_changed.length > 0 && (
+      {routesChanged.length > 0 && (
         <div style={{ marginTop: 12 }}>
           <h4 className="section-title">Routes changed</h4>
-          {diff.routes_changed.map((rc) => (
+          {routesChanged.map((rc) => (
             <div key={rc.id} style={{ padding: 8, background: 'rgba(245, 158, 11, 0.1)', borderRadius: 4 }}>
               <strong>{rc.old.name}</strong>
               <ul style={{ marginTop: 4 }}>
-                {rc.changes.map((c, idx) => (
+                {(rc.changes ?? []).map((c, idx) => (
                   <li key={idx}>
                     {c.field}: <span style={{ color: 'var(--color-danger)' }}>{c.old}</span> →{' '}
                     <span style={{ color: 'var(--color-success)' }}>{c.new}</span>

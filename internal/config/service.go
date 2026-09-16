@@ -237,6 +237,9 @@ func diffSnapshots(fromID, toID int64, from, to Snapshot) *DiffResult {
 		FromID:          fromID,
 		ToID:            toID,
 		SettingsChanged: make(map[string]Change),
+		RoutesAdded:     make([]SnapshotRoute, 0),
+		RoutesRemoved:   make([]SnapshotRoute, 0),
+		RoutesChanged:   make([]RouteChange, 0),
 	}
 
 	if from.DuplicateThreshold != to.DuplicateThreshold {
@@ -298,7 +301,7 @@ func routesEqual(a, b SnapshotRoute) bool {
 }
 
 func makeRouteChange(old, new SnapshotRoute) RouteChange {
-	change := RouteChange{ID: new.ID, Old: old, New: new}
+	change := RouteChange{ID: new.ID, Old: old, New: new, Changes: make([]FieldChange, 0)}
 
 	check := func(field, oldV, newV string) {
 		if oldV != newV {

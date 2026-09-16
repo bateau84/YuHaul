@@ -4,6 +4,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { HistoryView } from './HistoryView'
 import { ToastProvider } from '../components/ToastProvider'
 import * as mock from '../api/mock'
+import type { ConfigDiffResult } from '../types'
 
 function renderWithProviders(ui: React.ReactElement, initialEntries = ['/history']) {
   return render(
@@ -61,5 +62,21 @@ describe('HistoryView', () => {
     await waitFor(() => expect(diffSpy).toHaveBeenCalledWith(1, undefined))
 
     expect(await screen.findByText(/Comparing version 1 → version 1/i, undefined, { timeout: 3000 })).toBeInTheDocument()
+  })
+
+  it('renders diff without crashing when server returns null arrays', async () => {
+    const nullDiff = {
+      from_id: 1,
+      to_id: 1,
+      settings_changed: {},
+      routes_added: null,
+      routes_removed: null,
+      routes_changed: null,
+    } as unknown as ConfigDiffResult
+    vi.spyOn(mock, 'diffConfigVersion').mockResolvedValueOnce(nullDiff)
+    renderWithProviders(<HistoryView />, ['/history/1'])
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Configuration Version 1/i })).toBeInTheDocument())
+    expect(await screen.findByText(/No changes between these versions/i)).toBeInTheDocument()
   })
 })
