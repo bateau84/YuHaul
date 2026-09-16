@@ -31,6 +31,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /api/analytics", h.handleSummary)
 	mux.HandleFunc("GET /api/analytics/{$}", h.handleSummary)
 	mux.HandleFunc("GET /api/analytics/trends", h.handleTrends)
+	mux.HandleFunc("GET /api/analytics/route-match-rates", h.handleRouteMatchRates)
 	mux.HandleFunc("GET /api/analytics/channels", h.handleListChannels)
 	mux.HandleFunc("GET /api/analytics/channels/{id}", h.handleGetChannel)
 	mux.HandleFunc("GET /api/analytics/channels/{id}/duplicate-provenance", h.handleDuplicateProvenance)
@@ -112,6 +113,39 @@ func (h *Handler) handleTrends(w http.ResponseWriter, r *http.Request) {
 		"to":          to,
 		"granularity": granularity,
 		"buckets":     buckets,
+	})
+}
+
+func (h *Handler) handleRouteMatchRates(w http.ResponseWriter, r *http.Request) {
+	to := time.Now().UTC()
+	from := to.Add(-30 * 24 * time.Hour)
+	granularity := "day"
+
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			from = t
+		}
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			to = t
+		}
+	}
+	if v := r.URL.Query().Get("granularity"); v != "" {
+		granularity = v
+	}
+
+	routes, err := h.service.RouteMatchRates(r.Context(), from, to, granularity)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "route match rates failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load route match rates")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"from":        from,
+		"to":          to,
+		"granularity": granularity,
+		"routes":      routes,
 	})
 }
 

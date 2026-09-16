@@ -208,6 +208,43 @@ func TestService_RetentionSignal_UserDrivenCounts(t *testing.T) {
 	assert.Equal(t, "user_driven", signals[0].MembershipSource)
 }
 
+func TestService_RouteMatchRates(t *testing.T) {
+	ctx := context.Background()
+	db, _, service, cleanup := setupStatsTest(t)
+	defer cleanup()
+
+	now := time.Now().UTC()
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO run (started_at, run_type, status, videos_discovered, videos_accepted, videos_rejected)
+		 VALUES (?, 'manual', 'completed', 5, 2, 3);`, now)
+	require.NoError(t, err)
+	runID, err := res.LastInsertId()
+	require.NoError(t, err)
+
+	routeID := seedRoute(t, ctx, db, "Music", 1)
+
+	res, err = db.ExecContext(ctx,
+		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id, processing_state, final_outcome)
+		 VALUES ('v1', 'UC1', ?, ?, 'completed', 'accepted');`, now, runID)
+	require.NoError(t, err)
+	videoID, err := res.LastInsertId()
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order, decision, skip_reason, rejection_reason)
+		 VALUES (?, ?, ?, 1, 'matched', NULL, NULL);`, videoID, runID, routeID)
+	require.NoError(t, err)
+
+	rates, err := service.RouteMatchRates(ctx, now.Add(-24*time.Hour), now.Add(24*time.Hour), "day")
+	require.NoError(t, err)
+	require.Len(t, rates, 1)
+	assert.Equal(t, routeID, rates[0].RouteID)
+	assert.Equal(t, "Music", rates[0].RouteName)
+	assert.Equal(t, 1, rates[0].Evaluated)
+	assert.Equal(t, 1, rates[0].Matched)
+	assert.InDelta(t, 1.0, rates[0].MatchRate, 0.001)
+}
+
 func TestService_DuplicateProvenance(t *testing.T) {
 	ctx := context.Background()
 	db, _, service, cleanup := setupStatsTest(t)

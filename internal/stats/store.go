@@ -563,6 +563,65 @@ func scanRetentionPlaylist(sc scanner) (RetentionPlaylist, error) {
 	return rp, nil
 }
 
+// GetRouteMatchRates returns per-route decision counts grouped by bucket.
+func (s *Store) GetRouteMatchRates(ctx context.Context, from, to time.Time, granularity string) ([]RouteMatchRate, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT r.id, r.name, run.started_at, rd.decision
+		 FROM route_decision rd
+		 JOIN route r ON r.id = rd.route_id
+		 JOIN run ON run.id = rd.run_id
+		 WHERE run.started_at >= ? AND run.started_at < ? AND run.status = 'completed'
+		 ORDER BY run.started_at, r.evaluation_order;`,
+		from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("route match rates: %w", err)
+	}
+	defer rows.Close()
+
+	type key struct {
+		routeID int64
+		bucket  string
+	}
+	groups := make(map[key]*RouteMatchRate)
+	for rows.Next() {
+		var routeID int64
+		var routeName, startedAt, decision string
+		if err := rows.Scan(&routeID, &routeName, &startedAt, &decision); err != nil {
+			return nil, fmt.Errorf("scan route match rate: %w", err)
+		}
+		t, err := time.Parse(time.RFC3339Nano, startedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse run time: %w", err)
+		}
+		k := key{routeID: routeID, bucket: bucketKey(t, granularity)}
+		g, ok := groups[k]
+		if !ok {
+			g = &RouteMatchRate{RouteID: routeID, RouteName: routeName, Bucket: k.bucket}
+			groups[k] = g
+		}
+		g.Evaluated++
+		if decision == "matched" {
+			g.Matched++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate route match rates: %w", err)
+	}
+
+	out := make([]RouteMatchRate, 0, len(groups))
+	for _, g := range groups {
+		g.MatchRate = safeRate(g.Matched, g.Evaluated)
+		out = append(out, *g)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Bucket != out[j].Bucket {
+			return out[i].Bucket < out[j].Bucket
+		}
+		return out[i].RouteID < out[j].RouteID
+	})
+	return out, nil
+}
+
 func safeRate(numerator, denominator int) float64 {
 	if denominator == 0 {
 		return 0

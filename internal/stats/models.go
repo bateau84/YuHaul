@@ -105,3 +105,13 @@ type QuotaBreakdown struct {
 	Units     int    `json:"units"`
 	CallCount int    `json:"call_count"`
 }
+
+// RouteMatchRate aggregates route decisions for a single route and bucket.
+type RouteMatchRate struct {
+	RouteID   int64   `json:"route_id"`
+	RouteName string  `json:"route_name"`
+	Bucket    string  `json:"bucket"`
+	Evaluated int     `json:"evaluated"`
+	Matched   int     `json:"matched"`
+	MatchRate float64 `json:"match_rate"`
+}

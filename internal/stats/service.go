@@ -64,6 +64,11 @@ func (s *Service) TemporalStats(ctx context.Context, from, to time.Time, granula
 	return s.store.GetTemporalStats(ctx, from, to, granularity)
 }
 
+// RouteMatchRates returns time-bucketed per-route match rates.
+func (s *Service) RouteMatchRates(ctx context.Context, from, to time.Time, granularity string) ([]RouteMatchRate, error) {
+	return s.store.GetRouteMatchRates(ctx, from, to, granularity)
+}
+
 // DuplicateProvenance returns duplicate credit breakdown for a channel.
 func (s *Service) DuplicateProvenance(ctx context.Context, channelIDText string) ([]DuplicateProvenance, error) {
 	return s.store.ListDuplicateProvenance(ctx, channelIDText)
