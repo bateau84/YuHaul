@@ -41,3 +41,7 @@ export async function reorderRoutes(ids: number[]): Promise<void> {
     body: JSON.stringify({ route_ids: ids }),
   })
 }
+
+export async function getRouteStats(id: number): Promise<{ match_count: number }> {
+  return api<{ match_count: number }>(`/api/routes/${id}/stats`)
+}

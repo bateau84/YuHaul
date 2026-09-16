@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown, Check, X, Loader2, AlertCircle } from 'lucide-react'
 import { DeleteConfirmDialog } from './DeleteConfirmDialog'
 import { listPlaylists } from '../api/client'
@@ -50,22 +50,24 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
   const [playlistsLoading, setPlaylistsLoading] = useState(true)
   const [playlistsError, setPlaylistsError] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    listPlaylists()
-      .then((data) => {
-        if (!cancelled) setPlaylists(data)
-      })
-      .catch((err) => {
-        if (!cancelled) setPlaylistsError(err instanceof Error ? err.message : 'Failed to load playlists')
-      })
-      .finally(() => {
-        if (!cancelled) setPlaylistsLoading(false)
-      })
-    return () => {
-      cancelled = true
+  const loadPlaylists = useCallback(async () => {
+    setPlaylistsLoading(true)
+    setPlaylistsError(null)
+    try {
+      const data = await listPlaylists()
+      setPlaylists(data)
+    } catch (err) {
+      setPlaylistsError(err instanceof Error ? err.message : 'Failed to load playlists')
+    } finally {
+      setPlaylistsLoading(false)
     }
   }, [])
+
+  /* eslint-disable react/set-state-in-effect */
+  useEffect(() => {
+    loadPlaylists()
+  }, [loadPlaylists])
+  /* eslint-enable react/set-state-in-effect */
 
   useEffect(() => {
     function onBeforeUnload(e: BeforeUnloadEvent) {
@@ -111,7 +113,14 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
         } else if (c.operator === 'between') {
           const parts = c.value.split(',')
           if (parts.length !== 2 || parts.some((p) => p.trim() === '' || Number.isNaN(Number(p.trim())))) {
-            next[`condition-${i}-value`] = 'Enter two numbers separated by a comma'
+            next[`condition-${i}-value-min`] = 'Enter two numbers separated by a comma'
+          }
+        } else if (c.field === 'duration_seconds') {
+          const num = Number(c.value.trim())
+          if (Number.isNaN(num)) {
+            next[`condition-${i}-value`] = 'Enter a number'
+          } else if (num < 0) {
+            next[`condition-${i}-value`] = 'Enter a non-negative number'
           }
         }
       })
@@ -159,11 +168,18 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
     onSave(form)
   }
 
-  function normalizeConditionValue(operator: ConditionOperator, currentValue: string): string {
+  function normalizeConditionValue(field: ConditionField, operator: ConditionOperator, currentValue: string): string {
     if (operator === 'between') {
       const parts = currentValue.split(',')
       if (parts.length === 2) return currentValue
       return currentValue.includes(',') ? currentValue : `${currentValue},`
+    }
+    // Leaving the between operator can leave a trailing comma (e.g. "180,").
+    // For numeric fields, keep only the first numeric segment.
+    if (field === 'duration_seconds') {
+      const first = currentValue.split(',')[0].trim()
+      if (first !== '' && !Number.isNaN(Number(first))) return first
+      return ''
     }
     return currentValue
   }
@@ -187,7 +203,7 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
       }
 
       if (patch.operator && patch.operator !== current.operator) {
-        next.value = normalizeConditionValue(patch.operator, current.value)
+        next.value = normalizeConditionValue(current.field, patch.operator, current.value)
       }
 
       conditions[index] = next
@@ -378,6 +394,8 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
                 <input
                   id={`condition-${i}-value`}
                   className="form-input"
+                  type={c.field === 'duration_seconds' ? 'number' : 'text'}
+                  min={c.field === 'duration_seconds' ? 0 : undefined}
                   value={c.value}
                   onChange={(e) => updateCondition(i, { value: e.target.value })}
                   placeholder="Value"
@@ -534,8 +552,9 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
                 className="form-select"
                 value={a.target_playlist_id}
                 onChange={(e) => updateAction(i, { target_playlist_id: e.target.value })}
-                disabled={playlistsLoading}
-                aria-label={`Action ${i + 1} target playlist`}
+                disabled={playlistsLoading || playlistsError !== null}
+                aria-label="Select target playlist"
+                aria-busy={playlistsLoading}
                 aria-invalid={!!errors[`action-${i}-playlist`]}
                 aria-describedby={errors[`action-${i}-playlist`] ? `action-${i}-playlist-error` : undefined}
               >
@@ -554,10 +573,30 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
                 <Trash2 size={16} />
               </button>
             </div>
+            {playlistsLoading && (
+              <div aria-live="polite" style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+                Loading playlists
+              </div>
+            )}
+            {!playlistsLoading && playlists.length === 0 && playlistsError === null && (
+              <div aria-live="polite" style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+                No playlists found.{ ' ' }
+                <a
+                  href="https://www.youtube.com"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Create a playlist on YouTube first.
+                </a>
+              </div>
+            )}
             {playlistsError && (
-              <div className="form-error" aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div className="form-error" role="alert" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <AlertCircle size={14} aria-hidden="true" />
                 {playlistsError}
+                <button type="button" className="button" style={{ marginLeft: 8 }} onClick={loadPlaylists}>
+                  Retry
+                </button>
               </div>
             )}
             {errors[`action-${i}-playlist`] && (

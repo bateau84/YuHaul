@@ -70,7 +70,8 @@ describe('RouteEditorView', () => {
     fireEvent.change(screen.getByLabelText(/Condition 1 value/i), { target: { value: 'test' } })
 
     fireEvent.click(screen.getByRole('button', { name: /Add playlist action/i }))
-    fireEvent.change(screen.getByLabelText(/Action 1 target playlist/i), { target: { value: 'PLmusic' } })
+    const playlistSelect = await waitFor(() => screen.getByLabelText(/Select target playlist/i))
+    fireEvent.change(playlistSelect, { target: { value: 'PLmusic' } })
 
     fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
 
@@ -97,7 +98,8 @@ describe('RouteEditorView', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add condition/i }))
     fireEvent.change(screen.getByLabelText(/Condition 1 value/i), { target: { value: 'x' } })
     fireEvent.click(screen.getByRole('button', { name: /Add playlist action/i }))
-    fireEvent.change(screen.getByLabelText(/Action 1 target playlist/i), { target: { value: 'PLmusic' } })
+    const playlistSelect = await waitFor(() => screen.getByLabelText(/Select target playlist/i))
+    fireEvent.change(playlistSelect, { target: { value: 'PLmusic' } })
     fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
 
     await waitFor(() => expect(document.querySelector('.toast')).toHaveTextContent(/duplicate evaluation order/i))

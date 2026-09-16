@@ -12,6 +12,7 @@ export {
   updateRoute,
   deleteRoute,
   reorderRoutes,
+  getRouteStats,
 } from './routes'
 
 // Run list/detail/start operations are wired to the real backend.

@@ -218,4 +218,81 @@ describe('RouteEditor', () => {
     await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
     expect(onDelete).not.toHaveBeenCalled()
   })
+
+  it('shows empty playlist state with link to YouTube', async () => {
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([])
+    const onSave = vi.fn()
+    render(
+      <RouteEditor
+        route={routeFixture()}
+        existingRoutes={[]}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    )
+
+    await waitFor(() => expect(screen.getByText('No playlists found.')).toBeInTheDocument())
+    expect(screen.getByRole('link', { name: /Create a playlist on YouTube first/i })).toHaveAttribute('href', 'https://www.youtube.com')
+  })
+
+  it('shows playlist error with retry button', async () => {
+    vi.spyOn(mock, 'listPlaylists').mockRejectedValueOnce(new Error('network error'))
+    const onSave = vi.fn()
+    render(
+      <RouteEditor
+        route={routeFixture()}
+        existingRoutes={[]}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    )
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/network error/i))
+    fireEvent.click(screen.getByRole('button', { name: /Retry/i }))
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+  })
+
+  it('cleans the between value when switching to a single-value operator', async () => {
+    const onSave = vi.fn()
+    render(
+      <RouteEditor
+        route={routeFixture({
+          conditions: [{ id: 101, route_id: 1, condition_index: 0, field: 'duration_seconds', operator: 'between', value: '180,300' }],
+        })}
+        existingRoutes={[]}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    )
+
+    fireEvent.change(screen.getByLabelText(/Condition 1 operator/i), { target: { value: 'greater_than' } })
+
+    const valueInput = screen.getByLabelText(/Condition 1 value/i) as HTMLInputElement
+    await waitFor(() => expect(valueInput.value).toBe('180'))
+
+    fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+
+    const submitted = onSave.mock.calls[0][0] as Route
+    expect(submitted.conditions[0].value).toBe('180')
+  })
+
+  it('validates numeric conditions', async () => {
+    const onSave = vi.fn()
+    render(
+      <RouteEditor
+        route={routeFixture({
+          conditions: [{ id: 101, route_id: 1, condition_index: 0, field: 'duration_seconds', operator: 'greater_than', value: 'abc' }],
+        })}
+        existingRoutes={[]}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
+
+    await waitFor(() => expect(screen.getByText('Enter a number')).toBeInTheDocument())
+    expect(onSave).not.toHaveBeenCalled()
+  })
 })

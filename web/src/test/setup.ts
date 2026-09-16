@@ -97,6 +97,12 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     const created = await mock.createRoute(routeFromBody(String(init?.body)))
     return jsonResponse(created, 201)
   }
+  const routeStatsMatch = path.match(/^\/api\/routes\/(\d+)\/stats$/)
+  if (routeStatsMatch && method === 'GET') {
+    const stats = await mock.getRouteStats(Number(routeStatsMatch[1]))
+    return jsonResponse(stats)
+  }
+
   const routeMatch = path.match(/^\/api\/routes\/(\d+)$/)
   if (routeMatch) {
     const id = Number(routeMatch[1])

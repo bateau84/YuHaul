@@ -1,14 +1,59 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Plus, Trash2, Edit2 } from 'lucide-react'
+import { Plus, Trash2, Edit2, Check, X } from 'lucide-react'
 import * as api from '../api/client'
 import { useToast } from '../hooks/useToast'
 import { RouteReorderHandle } from '../components/RouteEditor'
-import type { Route } from '../types'
+import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog'
+import type { Route, RouteCondition } from '../types'
+
+const fieldLabels: Record<RouteCondition['field'], string> = {
+  title: 'title',
+  channel_id: 'channel ID',
+  channel_name: 'channel name',
+  description: 'description',
+  duration_seconds: 'duration',
+}
+
+const operatorLabels: Record<RouteCondition['operator'], string> = {
+  contains: 'contains',
+  equals: 'equals',
+  starts_with: 'starts with',
+  ends_with: 'ends with',
+  matches_regex: 'matches regex',
+  greater_than: '>',
+  less_than: '<',
+  between: 'between',
+}
+
+function formatConditionValue(c: RouteCondition): string {
+  if (c.operator === 'between') {
+    const parts = c.value.split(',')
+    const min = parts[0]?.trim() ?? ''
+    const max = parts[1]?.trim() ?? ''
+    return `${min}–${max}`
+  }
+  return c.value
+}
+
+function conditionSummary(route: Route): string {
+  if (route.conditions.length === 0) return 'No conditions'
+  const parts = route.conditions.map((c) => {
+    const field = fieldLabels[c.field]
+    const op = operatorLabels[c.operator]
+    const value = formatConditionValue(c)
+    return `${field} ${op} ${value}`
+  })
+  const summary = parts.join(` ${route.condition_composition} `)
+  if (summary.length <= 60) return summary
+  return `${summary.slice(0, 57)}…`
+}
 
 export function RoutesView() {
   const [routes, setRoutes] = useState<Route[]>([])
   const [loading, setLoading] = useState(true)
+  const [stats, setStats] = useState<Record<number, number>>({})
+  const [deletingRoute, setDeletingRoute] = useState<Route | null>(null)
   const { addToast } = useToast()
   const navigate = useNavigate()
 
@@ -18,6 +63,26 @@ export function RoutesView() {
       setLoading(false)
     })
   }, [])
+
+  /* eslint-disable react/set-state-in-effect */
+  useEffect(() => {
+    if (routes.length === 0) return
+    Promise.all(
+      routes.map((r) =>
+        api
+          .getRouteStats(r.id)
+          .then((s) => ({ id: r.id, count: s.match_count }))
+          .catch(() => ({ id: r.id, count: 0 }))
+      )
+    ).then((results) => {
+      const map: Record<number, number> = {}
+      results.forEach((r) => {
+        map[r.id] = r.count
+      })
+      setStats(map)
+    })
+  }, [routes])
+  /* eslint-enable react/set-state-in-effect */
 
   async function move(from: number, to: number) {
     if (to < 0 || to >= routes.length) return
@@ -33,6 +98,31 @@ export function RoutesView() {
     } catch (err) {
       setRoutes(previous)
       addToast(err instanceof Error ? err.message : 'Failed to update route order', 'error')
+    }
+  }
+
+  async function toggleEnabled(route: Route) {
+    const updated = { ...route, is_enabled: !route.is_enabled }
+    const previous = routes
+    setRoutes((prev) => prev.map((r) => (r.id === route.id ? updated : r)))
+    try {
+      const { id: _id, created_at: _created, updated_at: _updated, ...payload } = updated
+      await api.updateRoute(route.id, payload)
+      addToast(updated.is_enabled ? 'Route enabled' : 'Route disabled', 'success')
+    } catch (err) {
+      setRoutes(previous)
+      addToast(err instanceof Error ? err.message : 'Failed to update route', 'error')
+    }
+  }
+
+  async function confirmDelete(route: Route) {
+    setDeletingRoute(null)
+    try {
+      await api.deleteRoute(route.id)
+      setRoutes((prev) => prev.filter((r) => r.id !== route.id))
+      addToast('Route deleted', 'success')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to delete route', 'error')
     }
   }
 
@@ -63,6 +153,7 @@ export function RoutesView() {
                 <th scope="col">Conditions</th>
                 <th scope="col">Enabled</th>
                 <th scope="col">Final</th>
+                <th scope="col">Matches</th>
                 <th scope="col">Actions</th>
               </tr>
             </thead>
@@ -76,9 +167,36 @@ export function RoutesView() {
                     <Link to={`/routes/${r.id}`}>{r.name}</Link>
                     <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>{r.description}</p>
                   </td>
-                  <td data-label="Conditions">{r.conditions.length}</td>
-                  <td data-label="Enabled">{r.is_enabled ? 'Yes' : 'No'}</td>
-                  <td data-label="Final">{r.is_final ? 'Yes' : 'No'}</td>
+                  <td data-label="Conditions">
+                    <span style={{ color: r.conditions.length === 0 ? 'var(--color-text-muted)' : undefined }}>
+                      {conditionSummary(r)}
+                    </span>
+                  </td>
+                  <td data-label="Enabled">
+                    <label
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
+                      aria-label={r.is_enabled ? `Disable route ${r.name}` : `Enable route ${r.name}`}
+                    >
+                      <span className="switch">
+                        <span className="switch-track" aria-hidden="true" />
+                        <input
+                          type="checkbox"
+                          role="switch"
+                          aria-checked={r.is_enabled}
+                          checked={r.is_enabled}
+                          onChange={() => toggleEnabled(r)}
+                        />
+                        <span className="switch-thumb" aria-hidden="true">
+                          {r.is_enabled ? <Check size={12} /> : <X size={12} />}
+                        </span>
+                      </span>
+                      <span style={{ color: r.is_enabled ? 'var(--color-status-accepted)' : 'var(--color-status-rejected)', fontWeight: 500 }}>
+                        {r.is_enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </label>
+                  </td>
+                  <td data-label="Final">{r.is_final && <span className="badge badge--accepted">Final</span>}</td>
+                  <td data-label="Matches">{stats[r.id] ?? '—'}</td>
                   <td data-label="Actions">
                     <div style={{ display: 'flex', gap: 8 }}>
                       <button className="icon-button" onClick={() => navigate(`/routes/${r.id}`)} aria-label={`Edit route ${r.name}`}>
@@ -86,15 +204,7 @@ export function RoutesView() {
                       </button>
                       <button
                         className="icon-button"
-                        onClick={async () => {
-                          try {
-                            await api.deleteRoute(r.id)
-                            setRoutes((prev) => prev.filter((x) => x.id !== r.id))
-                            addToast('Route deleted', 'success')
-                          } catch (err) {
-                            addToast(err instanceof Error ? err.message : 'Failed to delete route', 'error')
-                          }
-                        }}
+                        onClick={() => setDeletingRoute(r)}
                         aria-label={`Delete route ${r.name}`}
                       >
                         <Trash2 size={16} />
@@ -106,6 +216,13 @@ export function RoutesView() {
             </tbody>
           </table>
         </div>
+      )}
+      {deletingRoute && (
+        <DeleteConfirmDialog
+          routeName={deletingRoute.name}
+          onCancel={() => setDeletingRoute(null)}
+          onConfirm={() => confirmDelete(deletingRoute)}
+        />
       )}
     </>
   )

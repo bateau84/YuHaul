@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { RoutesView } from './RoutesView'
 import { ToastProvider } from '../components/ToastProvider'
 import * as mock from '../api/mock'
-import type { Route as RouteModel } from '../types'
+import type { Route as RouteModel, RouteCondition } from '../types'
 
 const routeFixture = (overrides: Partial<RouteModel> = {}): RouteModel => ({
   id: 1,
@@ -14,7 +14,9 @@ const routeFixture = (overrides: Partial<RouteModel> = {}): RouteModel => ({
   is_final: false,
   is_enabled: true,
   condition_composition: 'AND',
-  conditions: [],
+  conditions: [
+    { id: 101, route_id: 1, condition_index: 0, field: 'title', operator: 'contains', value: 'music' } as RouteCondition,
+  ],
   actions: [],
   exclusions: [],
   created_at: '2026-08-01T10:00:00Z',
@@ -39,6 +41,33 @@ describe('RoutesView', () => {
     vi.clearAllMocks()
   })
 
+  it('renders condition summary, final badge, and match count', async () => {
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([
+      routeFixture({ is_final: true }),
+    ])
+
+    renderView()
+
+    await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+    expect(screen.getByText(/title contains music/i)).toBeInTheDocument()
+    expect(screen.getByText('Final', { selector: 'span.badge' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('2', { selector: '[data-label="Matches"]' })).toBeInTheDocument())
+  })
+
+  it('shows a toast and reverts when toggling enabled fails', async () => {
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([routeFixture()])
+    vi.spyOn(mock, 'updateRoute').mockRejectedValueOnce(new Error('update failed'))
+
+    renderView()
+
+    await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('switch'))
+
+    await waitFor(() => expect(document.querySelector('.toast')).toHaveTextContent(/update failed/i))
+    expect(screen.getByRole('switch')).toBeChecked()
+  })
+
   it('shows a toast when delete fails', async () => {
     vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([
       routeFixture(),
@@ -51,6 +80,9 @@ describe('RoutesView', () => {
     await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
 
     fireEvent.click(screen.getByRole('button', { name: /Delete route Music Discovery/i }))
+
+    const dialog = await waitFor(() => screen.getByRole('alertdialog'))
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Delete$/i }))
 
     await waitFor(() => expect(document.querySelector('.toast')).toHaveTextContent(/delete failed/i))
     expect(screen.getByText('Music Discovery')).toBeInTheDocument()
