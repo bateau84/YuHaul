@@ -133,8 +133,8 @@ func main() {
 	queueSvc := queue.NewService(queueStore, nil).WithLogger(logger)
 
 	statsStore := stats.NewStore(db)
-	statsSvc := stats.NewService(statsStore, configStore, ledger)
 	advisoryStore := advisory.NewStore(db)
+	statsSvc := stats.NewService(statsStore, configStore, ledger).WithAdvisories(advisoryStore)
 	advisorySvc := advisory.NewService(advisoryStore, statsSvc, configStore)
 
 	pl := pipeline.NewPipeline(

@@ -42,15 +42,16 @@ type RouteStats struct {
 
 // ChannelStats are materialized counters for a channel.
 type ChannelStats struct {
-	ChannelID        string     `json:"channel_id"`
-	ChannelName      string     `json:"channel_name"`
-	TotalDiscovered  int        `json:"total_discovered"`
-	TotalRouted      int        `json:"total_routed"`
-	TotalRetained    int        `json:"total_retained"`
-	Yield            float64    `json:"yield"`
-	UsefulnessRate   float64    `json:"usefulness_rate"`
-	DuplicateRate    float64    `json:"duplicate_rate"`
-	LastDiscoveredAt *time.Time `json:"last_discovered_at,omitempty"`
+	ChannelID        string            `json:"channel_id"`
+	ChannelName      string            `json:"channel_name"`
+	TotalDiscovered  int               `json:"total_discovered"`
+	TotalRouted      int               `json:"total_routed"`
+	TotalRetained    int               `json:"total_retained"`
+	Yield            float64           `json:"yield"`
+	UsefulnessRate   float64           `json:"usefulness_rate"`
+	DuplicateRate    float64           `json:"duplicate_rate"`
+	LastDiscoveredAt *time.Time        `json:"last_discovered_at,omitempty"`
+	Advisories       []AdvisorySummary `json:"advisories,omitempty"`
 }
 
 // TemporalBucket aggregates run outcomes over a calendar period.
@@ -133,20 +134,28 @@ type RetentionProvenanceBreakdown struct {
 // routes, and advisories for the channel analysis view.
 type ChannelDetail struct {
 	ChannelStats
-	DuplicateProvenance   DuplicateProvenanceBreakdown `json:"duplicate_provenance"`
-	RetentionSignals      RetentionProvenanceBreakdown `json:"retention_signals"`
-	RecentVideos          []VideoSummary               `json:"recent_videos"`
-	RecentVideoProvenance []VideoProvenance            `json:"recent_video_provenance"`
-	MatchedRoutes         []string                     `json:"matched_routes"`
-	Advisories            []AdvisorySummary            `json:"advisories"`
+	DuplicateProvenance DuplicateProvenanceBreakdown `json:"duplicate_provenance"`
+	RetentionSignals    RetentionProvenanceBreakdown `json:"retention_signals"`
+	RecentVideos        []VideoSummary               `json:"recent_videos"`
+	// RecentVideoProvenance is the depth-0 JSON key for per-video provenance;
+	// it is matched client-side against recent_videos by video_id.
+	RecentVideoProvenance []VideoProvenance `json:"recent_video_provenance"`
+	MatchedRoutes         []string          `json:"matched_routes"`
+	// Advisories shadows the embedded ChannelStats.Advisories at JSON depth 0.
+	// Both serialize under "advisories" (the client contract); only this one is
+	// populated on the detail path.
+	Advisories []AdvisorySummary `json:"advisories"`
 }
 
 // VideoSummary is the subset of video state exposed on the channel detail view.
 type VideoSummary struct {
+	ID              int64      `json:"id"`
 	VideoID         string     `json:"video_id"`
 	ChannelID       string     `json:"channel_id"`
+	Title           string     `json:"title,omitempty"`
 	ProcessingState string     `json:"processing_state"`
 	FinalOutcome    string     `json:"final_outcome"`
+	PublishedAt     *time.Time `json:"published_at,omitempty"`
 	DiscoveredAt    time.Time  `json:"discovered_at"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 }
@@ -158,9 +167,12 @@ type VideoProvenance struct {
 	RetentionSource *string `json:"retention_source,omitempty"`
 }
 
-// AdvisorySummary is the subset of an advisory shown on the channel view.
+// AdvisorySummary is the subset of an advisory shown on the channel view. Its
+// JSON vocabulary matches the web client's Advisory type.
 type AdvisorySummary struct {
 	ID               int64          `json:"id"`
+	ChannelID        string         `json:"channel_id"`
+	ChannelName      string         `json:"channel_name"`
 	AdvisoryType     string         `json:"advisory_type"`
 	Status           string         `json:"status"`
 	GeneratedAt      time.Time      `json:"generated_at"`

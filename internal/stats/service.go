@@ -14,17 +14,32 @@ type SettingsReader interface {
 	GetSetting(ctx context.Context, key string) (string, error)
 }
 
+// AdvisoryReader returns advisories for a channel. It is implemented by
+// *advisory.Store.
+type AdvisoryReader interface {
+	ListAdvisoriesForChannel(ctx context.Context, channelIDText string) ([]advisory.Advisory, error)
+	ListActiveAdvisories(ctx context.Context) ([]advisory.Advisory, error)
+}
+
 // Service computes analytics views from raw pipeline data.
 type Service struct {
-	store    *Store
-	settings SettingsReader
-	ledger   *quota.Ledger
+	store      *Store
+	settings   SettingsReader
+	ledger     *quota.Ledger
+	advisories AdvisoryReader
 }
 
 // NewService returns an analytics service. ledger may be nil; quota endpoints
 // will return an error in that case.
 func NewService(store *Store, settings SettingsReader, ledger *quota.Ledger) *Service {
 	return &Service{store: store, settings: settings, ledger: ledger}
+}
+
+// WithAdvisories wires an advisory reader into the service so channel detail
+// responses can include advisories.
+func (s *Service) WithAdvisories(reader AdvisoryReader) *Service {
+	s.advisories = reader
+	return s
 }
 
 // RunStats returns statistics for a run.
@@ -37,9 +52,28 @@ func (s *Service) RouteStats(ctx context.Context, runID int64) ([]RouteStats, er
 	return s.store.ListRouteStats(ctx, runID)
 }
 
-// ChannelStats returns statistics for all channels.
+// ChannelStats returns statistics for all channels, each enriched with the
+// channel's active advisories.
 func (s *Service) ChannelStats(ctx context.Context) ([]ChannelStats, error) {
-	return s.store.ListChannelStats(ctx)
+	list, err := s.store.ListChannelStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.advisories == nil || len(list) == 0 {
+		return list, nil
+	}
+	active, err := s.advisories.ListActiveAdvisories(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byChannel := make(map[string][]AdvisorySummary)
+	for _, a := range active {
+		byChannel[a.ChannelIDText] = append(byChannel[a.ChannelIDText], summarizeAdvisory(a, a.ChannelIDText, a.ChannelName))
+	}
+	for i := range list {
+		list[i].Advisories = byChannel[list[i].ChannelID]
+	}
+	return list, nil
 }
 
 // ChannelDetail returns statistics for one channel.
@@ -70,15 +104,78 @@ func (s *Service) ChannelDetail(ctx context.Context, channelIDText string) (*Cha
 		return nil, err
 	}
 
+	recentVideos, err := s.store.ListRecentVideos(ctx, channelIDText)
+	if err != nil {
+		return nil, err
+	}
+
+	provenance, err := s.store.ListRecentVideoProvenance(ctx, channelIDText)
+	if err != nil {
+		return nil, err
+	}
+	recentIDs := make(map[string]bool, len(recentVideos))
+	for _, v := range recentVideos {
+		recentIDs[v.VideoID] = true
+	}
+	recentProvenance := make([]VideoProvenance, 0, len(provenance))
+	for _, p := range provenance {
+		if recentIDs[p.VideoID] {
+			recentProvenance = append(recentProvenance, p)
+		}
+	}
+
+	advisories, err := s.listAdvisoriesForChannel(ctx, channelIDText)
+	if err != nil {
+		return nil, err
+	}
+
 	return &ChannelDetail{
 		ChannelStats:          *cs,
 		DuplicateProvenance:   dupBreakdown,
 		RetentionSignals:      retBreakdown,
-		RecentVideos:          make([]VideoSummary, 0),
-		RecentVideoProvenance: make([]VideoProvenance, 0),
+		RecentVideos:          recentVideos,
+		RecentVideoProvenance: recentProvenance,
 		MatchedRoutes:         matchedRoutes,
-		Advisories:            make([]AdvisorySummary, 0),
+		Advisories:            advisories,
 	}, nil
+}
+
+func (s *Service) listAdvisoriesForChannel(ctx context.Context, channelIDText string) ([]AdvisorySummary, error) {
+	if s.advisories == nil {
+		return make([]AdvisorySummary, 0), nil
+	}
+	list, err := s.advisories.ListAdvisoriesForChannel(ctx, channelIDText)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AdvisorySummary, len(list))
+	for i, a := range list {
+		out[i] = summarizeAdvisory(a, channelIDText, "")
+	}
+	return out, nil
+}
+
+// summarizeAdvisory maps an advisory to its channel-view representation. The
+// channel fields default to what the advisory row itself carries so callers
+// can override them with channel context they already loaded.
+func summarizeAdvisory(a advisory.Advisory, channelID, channelName string) AdvisorySummary {
+	if channelID == "" {
+		channelID = a.ChannelIDText
+	}
+	if channelName == "" {
+		channelName = a.ChannelName
+	}
+	return AdvisorySummary{
+		ID:               a.ID,
+		ChannelID:        channelID,
+		ChannelName:      channelName,
+		AdvisoryType:     string(a.Type),
+		Status:           string(a.Status),
+		GeneratedAt:      a.GeneratedAt,
+		IgnoredUntil:     a.IgnoredUntil,
+		ActionTaken:      a.ActionTaken,
+		EvidenceSnapshot: a.EvidenceSnapshot,
+	}
 }
 
 // TemporalStats returns time-bucketed run statistics.

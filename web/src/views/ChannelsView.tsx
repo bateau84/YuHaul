@@ -116,11 +116,32 @@ function ProvenanceBadge({ type, label }: { type: 'discovery' | 'relevance' | 'u
   )
 }
 
-function VideoProvenanceRow({ video, provenance }: { video: { video_id: string; title?: string }; provenance?: VideoProvenance }) {
+function outcomeLabel(outcome?: string): string | null {
+  switch (outcome) {
+    case 'accepted':
+      return 'Accepted'
+    case 'rejected':
+      return 'Rejected'
+    case 'excluded':
+      return 'Excluded'
+    case 'deferred':
+      return 'Deferred'
+    case 'failed':
+      return 'Failed'
+    case 'not_yet_evaluated':
+      return 'Not evaluated'
+    default:
+      return null
+  }
+}
+
+function VideoProvenanceRow({ video, provenance }: { video: { video_id: string; title?: string; final_outcome?: string }; provenance?: VideoProvenance }) {
+  const label = outcomeLabel(video.final_outcome)
   return (
     <li style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 0', borderBottom: '1px solid var(--color-border-default)' }}>
       <span>{video.title ?? video.video_id}</span>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {label && <span className={`badge badge--${video.final_outcome === 'accepted' ? 'accepted' : video.final_outcome === 'failed' ? 'failed' : 'deferred'}`}>{label}</span>}
         {provenance?.duplicate_credit === 'discovery' && <ProvenanceBadge type="discovery" label="First discovered" />}
         {provenance?.duplicate_credit === 'relevance' && <ProvenanceBadge type="relevance" label="Also published elsewhere" />}
         {provenance?.retention_source === 'user_driven' && <ProvenanceBadge type="user_driven" label="User-added" />}
@@ -139,10 +160,18 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
   const [refresh, setRefresh] = useState(0)
 
   useEffect(() => {
-    api.getChannel(channelId).then((c) => setChannel(c ?? null))
+    let cancelled = false
+    api.getChannel(channelId).then((c) => {
+      if (!cancelled) setChannel(c ?? null)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [channelId, refresh])
 
   if (!channel) return <div className="empty-state">Loading channel...</div>
+
+  const channelAdvisories = channel.advisories ?? []
 
   const dup = channel.duplicate_provenance ?? { discovery_credit: 0, relevance_credit: 0 }
   const ret = channel.retention_signals ?? { user_driven: 0, yuhaul_routed: 0 }
@@ -253,10 +282,10 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
       )}
 
       <h2 className="section-title">Advisories</h2>
-      {((channel.advisories ?? []).length) === 0 ? (
+      {channelAdvisories.length === 0 ? (
         <div className="card empty-state">No advisories for this channel.</div>
       ) : (
-        (channel.advisories ?? []).map((a) => <AdvisoryCard key={a.id} advisory={a} onChange={() => setRefresh((n) => n + 1)} />)
+        channelAdvisories.map((a) => <AdvisoryCard key={a.id} advisory={a} onChange={() => setRefresh((n) => n + 1)} />)
       )}
     </>
   )

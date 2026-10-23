@@ -427,6 +427,152 @@ func (s *Store) RetentionSignalBreakdown(ctx context.Context, channelIDText stri
 	return out, nil
 }
 
+const recentVideoLimit = 10
+
+// ListRecentVideos returns the last N videos discovered for a channel, joined
+// with transient metadata for title and published-at information.
+func (s *Store) ListRecentVideos(ctx context.Context, channelIDText string) ([]VideoSummary, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT v.id, v.video_id, v.channel_id, v.processing_state, v.final_outcome,
+		        v.discovered_at, v.completed_at, tm.title, tm.published_at
+		 FROM video v
+		 LEFT JOIN transient_metadata tm ON tm.video_id = v.video_id
+		 WHERE v.channel_id = ?
+		 ORDER BY v.discovered_at DESC
+		 LIMIT ?;`, channelIDText, recentVideoLimit)
+	if err != nil {
+		return nil, fmt.Errorf("recent videos for %s: %w", channelIDText, err)
+	}
+	defer rows.Close()
+
+	out := make([]VideoSummary, 0)
+	for rows.Next() {
+		var vs VideoSummary
+		var discoveredAt, completedAt, publishedAt sql.NullString
+		var title sql.NullString
+		if err := rows.Scan(&vs.ID, &vs.VideoID, &vs.ChannelID, &vs.ProcessingState, &vs.FinalOutcome,
+			&discoveredAt, &completedAt, &title, &publishedAt); err != nil {
+			return nil, fmt.Errorf("scan recent video: %w", err)
+		}
+		if discoveredAt.Valid {
+			vs.DiscoveredAt, _ = time.Parse(time.RFC3339Nano, discoveredAt.String)
+		}
+		if completedAt.Valid {
+			t, _ := time.Parse(time.RFC3339Nano, completedAt.String)
+			vs.CompletedAt = &t
+		}
+		if title.Valid {
+			vs.Title = title.String
+		}
+		if publishedAt.Valid {
+			t, _ := time.Parse(time.RFC3339Nano, publishedAt.String)
+			vs.PublishedAt = &t
+		}
+		out = append(out, vs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent videos for %s: %w", channelIDText, err)
+	}
+	return out, nil
+}
+
+// ListRecentVideoProvenance returns per-video duplicate and retention
+// provenance for a channel's videos. Duplicate credit is 'discovery' when
+// another channel's video matched a fingerprint this channel published, and
+// 'relevance' when this channel published a video matching a fingerprint
+// discovered elsewhere; discovery takes precedence because it is the stronger
+// credit. Retention source reflects recorded playlist-membership provenance.
+func (s *Store) ListRecentVideoProvenance(ctx context.Context, channelIDText string) ([]VideoProvenance, error) {
+	type provenance struct {
+		duplicateCredit *string
+		retentionSource *string
+	}
+	byVideo := make(map[string]*provenance)
+	get := func(videoID string) *provenance {
+		p := byVideo[videoID]
+		if p == nil {
+			p = &provenance{}
+			byVideo[videoID] = p
+		}
+		return p
+	}
+
+	dupRows, err := s.db.QueryContext(ctx,
+		`SELECT video_id, credit FROM (
+			-- Relevance: this channel published a video that matched a
+			-- fingerprint first discovered elsewhere.
+			SELECT v.video_id AS video_id, 'relevance' AS credit
+			FROM duplicate_match dm
+			JOIN video v ON v.id = dm.video_id
+			WHERE v.channel_id = ?
+			UNION
+			-- Discovery: another channel's video matched a fingerprint this
+			-- channel published first.
+			SELECT tv.video_id AS video_id, 'discovery' AS credit
+			FROM duplicate_match dm
+			JOIN title_fingerprint tf ON tf.id = dm.matched_fingerprint_id
+			JOIN video tv ON tv.video_id = tf.video_id
+			WHERE tf.channel_id = ?
+		 );`, channelIDText, channelIDText)
+	if err != nil {
+		return nil, fmt.Errorf("recent video duplicate provenance for %s: %w", channelIDText, err)
+	}
+	for dupRows.Next() {
+		var videoID, credit string
+		if err := dupRows.Scan(&videoID, &credit); err != nil {
+			dupRows.Close()
+			return nil, fmt.Errorf("scan recent video duplicate provenance: %w", err)
+		}
+		p := get(videoID)
+		// Discovery is the stronger credit; keep it when a video has both.
+		if p.duplicateCredit == nil || credit == "discovery" {
+			c := credit
+			p.duplicateCredit = &c
+		}
+	}
+	if err := dupRows.Err(); err != nil {
+		dupRows.Close()
+		return nil, fmt.Errorf("iterate recent video duplicate provenance: %w", err)
+	}
+	dupRows.Close()
+
+	retRows, err := s.db.QueryContext(ctx,
+		`SELECT rs.video_id, rs.membership_source
+		 FROM retention_signal rs
+		 JOIN video v ON v.video_id = rs.video_id
+		 WHERE v.channel_id = ?
+		   AND ((rs.membership_source = 'user_driven' AND rs.is_retention_signal = 1)
+		     OR rs.membership_source = 'yuhaul_routed');`, channelIDText)
+	if err != nil {
+		return nil, fmt.Errorf("recent video retention provenance for %s: %w", channelIDText, err)
+	}
+	defer retRows.Close()
+	for retRows.Next() {
+		var videoID, source string
+		if err := retRows.Scan(&videoID, &source); err != nil {
+			return nil, fmt.Errorf("scan recent video retention provenance: %w", err)
+		}
+		p := get(videoID)
+		if p.retentionSource == nil {
+			s := source
+			p.retentionSource = &s
+		}
+	}
+	if err := retRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent video retention provenance: %w", err)
+	}
+
+	out := make([]VideoProvenance, 0, len(byVideo))
+	for videoID, p := range byVideo {
+		out = append(out, VideoProvenance{
+			VideoID:         videoID,
+			DuplicateCredit: p.duplicateCredit,
+			RetentionSource: p.retentionSource,
+		})
+	}
+	return out, nil
+}
+
 // MatchedRoutesForChannel returns the distinct route names that matched any
 // video from the channel.
 func (s *Store) MatchedRoutesForChannel(ctx context.Context, channelIDText string) ([]string, error) {
@@ -474,11 +620,16 @@ func (s *Store) ListDuplicateProvenance(ctx context.Context, channelIDText strin
 	out := make([]DuplicateProvenance, 0)
 	for rows.Next() {
 		var dp DuplicateProvenance
+		// title_fingerprint.channel_id and channel.channel_name are nullable
+		// (LEFT JOIN anticipates a missing channel row).
+		var discoveryChannelID, discoveryChannelName sql.NullString
 		if err := rows.Scan(&dp.VideoID, &dp.ChannelID, &dp.MatchedFingerprintID,
 			&dp.SimilarityScore, &dp.MatchType,
-			&dp.DiscoveryCreditChannelID, &dp.DiscoveryCreditChannelName); err != nil {
+			&discoveryChannelID, &discoveryChannelName); err != nil {
 			return nil, fmt.Errorf("scan duplicate provenance: %w", err)
 		}
+		dp.DiscoveryCreditChannelID = discoveryChannelID.String
+		dp.DiscoveryCreditChannelName = discoveryChannelName.String
 		out = append(out, dp)
 	}
 	if err := rows.Err(); err != nil {

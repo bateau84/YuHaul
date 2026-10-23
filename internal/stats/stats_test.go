@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bateau84/YuHaul/internal/advisory"
 	"github.com/bateau84/YuHaul/internal/store"
 )
 
@@ -129,6 +130,23 @@ func TestService_ChannelStats(t *testing.T) {
 
 	seedChannel(t, ctx, db, "UC1", "Channel One", 100, 40, 5)
 
+	var channelID int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM channel WHERE channel_id = 'UC1';`).Scan(&channelID))
+	advisoryStore := advisory.NewStore(db)
+	service.WithAdvisories(advisoryStore)
+	active, err := advisoryStore.CreateAdvisory(ctx, channelID, advisory.AdvisoryTypeLowUsefulness, map[string]any{
+		"window_days": 90,
+		"discovered":  100,
+		"retained":    5,
+	})
+	require.NoError(t, err)
+	dismissed, err := advisoryStore.CreateAdvisory(ctx, channelID, advisory.AdvisoryTypeHighDuplicateRate, map[string]any{
+		"window_days": 90,
+		"discovered":  100,
+	})
+	require.NoError(t, err)
+	require.NoError(t, advisoryStore.DismissAdvisory(ctx, dismissed.ID))
+
 	channels, err := service.ChannelStats(ctx)
 	require.NoError(t, err)
 	require.Len(t, channels, 1)
@@ -138,6 +156,12 @@ func TestService_ChannelStats(t *testing.T) {
 	assert.Equal(t, 5, channels[0].TotalRetained)
 	assert.InDelta(t, 0.4, channels[0].Yield, 0.001)
 	assert.InDelta(t, 0.05, channels[0].UsefulnessRate, 0.001)
+	// Only the active advisory surfaces on the channel row; the dismissed one
+	// does not.
+	require.Len(t, channels[0].Advisories, 1)
+	assert.Equal(t, active.ID, channels[0].Advisories[0].ID)
+	assert.Equal(t, "low_usefulness", channels[0].Advisories[0].AdvisoryType)
+	assert.Equal(t, "UC1", channels[0].Advisories[0].ChannelID)
 }
 
 func TestService_TemporalStats(t *testing.T) {
@@ -217,6 +241,12 @@ func TestService_ChannelDetail(t *testing.T) {
 	runID := seedRun(t, ctx, db)
 	routeID := seedRoute(t, ctx, db, "Music", 1)
 
+	publishedAt := time.Now().UTC().Add(-24 * time.Hour)
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO transient_metadata (video_id, title, published_at, fetched_at, expires_at)
+		 VALUES ('v1', 'Test Title', ?, ?, ?);`, publishedAt, time.Now().UTC(), time.Now().UTC().Add(30*24*time.Hour))
+	require.NoError(t, err)
+
 	res, err := db.ExecContext(ctx,
 		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id, processing_state, final_outcome)
 		 VALUES ('v1', 'UC1', ?, ?, 'completed', 'accepted');`, time.Now().UTC(), runID)
@@ -229,6 +259,41 @@ func TestService_ChannelDetail(t *testing.T) {
 		 VALUES (?, ?, ?, 1, 'matched', NULL, NULL);`, videoID, runID, routeID)
 	require.NoError(t, err)
 
+	// Provenance sources: a fingerprint first seen on another channel (making
+	// v1 a relevance-credit duplicate) and a user-driven retention signal.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO title_fingerprint (video_id, fingerprint, channel_id, source, is_duplicate_reference)
+		 VALUES ('v0', 'fp0', 'UC2', 'api_discovery', 1);`)
+	require.NoError(t, err)
+	var fingerprintID int64
+	err = db.QueryRowContext(ctx, `SELECT id FROM title_fingerprint WHERE video_id = 'v0';`).Scan(&fingerprintID)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO duplicate_match (video_id, matched_fingerprint_id, similarity_score, match_type, threshold_used)
+		 VALUES (?, ?, 0.97, 'fuzzy_title', 0.9);`, videoID, fingerprintID)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO retention_playlist (playlist_id, playlist_name, designated_at, is_active)
+		 VALUES ('PL1', 'Rotation', ?, 1);`, time.Now().UTC())
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO retention_signal (video_id, playlist_id, membership_source, is_retention_signal)
+		 VALUES ('v1', 'PL1', 'user_driven', 1);`)
+	require.NoError(t, err)
+
+	var channelID int64
+	err = db.QueryRowContext(ctx, `SELECT id FROM channel WHERE channel_id = ?;`, "UC1").Scan(&channelID)
+	require.NoError(t, err)
+
+	advisoryStore := advisory.NewStore(db)
+	service.WithAdvisories(advisoryStore)
+	_, err = advisoryStore.CreateAdvisory(ctx, channelID, advisory.AdvisoryTypeLowUsefulness, map[string]any{
+		"window_days": 90,
+		"discovered":  100,
+		"retained":    5,
+	})
+	require.NoError(t, err)
+
 	detail, err := service.ChannelDetail(ctx, "UC1")
 	require.NoError(t, err)
 	assert.Equal(t, "UC1", detail.ChannelID)
@@ -236,8 +301,84 @@ func TestService_ChannelDetail(t *testing.T) {
 	assert.NotNil(t, detail.DuplicateProvenance)
 	assert.NotNil(t, detail.RetentionSignals)
 	assert.Equal(t, []string{"Music"}, detail.MatchedRoutes)
-	assert.Empty(t, detail.RecentVideos)
-	assert.Empty(t, detail.Advisories)
+	require.Len(t, detail.RecentVideos, 1)
+	assert.Equal(t, "v1", detail.RecentVideos[0].VideoID)
+	assert.Equal(t, "Test Title", detail.RecentVideos[0].Title)
+	assert.NotNil(t, detail.RecentVideos[0].PublishedAt)
+	require.Len(t, detail.Advisories, 1)
+	assert.Equal(t, "low_usefulness", detail.Advisories[0].AdvisoryType)
+	assert.Equal(t, "active", detail.Advisories[0].Status)
+	assert.Equal(t, "UC1", detail.Advisories[0].ChannelID)
+	require.Len(t, detail.RecentVideoProvenance, 1)
+	require.NotNil(t, detail.RecentVideoProvenance[0].DuplicateCredit)
+	assert.Equal(t, "relevance", *detail.RecentVideoProvenance[0].DuplicateCredit)
+	require.NotNil(t, detail.RecentVideoProvenance[0].RetentionSource)
+	assert.Equal(t, "user_driven", *detail.RecentVideoProvenance[0].RetentionSource)
+}
+
+func TestService_RecentVideoProvenance_DiscoveryCreditWins(t *testing.T) {
+	ctx := context.Background()
+	db, _, service, cleanup := setupStatsTest(t)
+	defer cleanup()
+
+	seedChannel(t, ctx, db, "UC1", "Channel One", 2, 0, 0)
+	runID := seedRun(t, ctx, db)
+
+	// UC1 published v1 first (own fingerprint), UC2 published v2 matching it,
+	// and UC1 also published v3 matching a fingerprint first seen on UC2.
+	// v1 must show discovery credit (stronger), v3 relevance credit.
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO title_fingerprint (video_id, fingerprint, channel_id, source, is_duplicate_reference)
+		 VALUES ('v1', 'fp1', 'UC1', 'api_discovery', 1);`)
+	require.NoError(t, err)
+	var fpV1 int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM title_fingerprint WHERE video_id = 'v1';`).Scan(&fpV1))
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO title_fingerprint (video_id, fingerprint, channel_id, source)
+		 VALUES ('v0', 'fp0', 'UC2', 'api_discovery');`)
+	require.NoError(t, err)
+	var fpV0 int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM title_fingerprint WHERE video_id = 'v0';`).Scan(&fpV0))
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id, processing_state, final_outcome)
+		 VALUES ('v1', 'UC1', ?, ?, 'completed', 'accepted');`, time.Now().UTC(), runID)
+	require.NoError(t, err)
+	resV3, err := db.ExecContext(ctx,
+		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id, processing_state, final_outcome)
+		 VALUES ('v3', 'UC1', ?, ?, 'completed', 'accepted');`, time.Now().UTC(), runID)
+	require.NoError(t, err)
+	videoV3, err := resV3.LastInsertId()
+	require.NoError(t, err)
+	resV2, err := db.ExecContext(ctx,
+		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id, processing_state, final_outcome)
+		 VALUES ('v2', 'UC2', ?, ?, 'completed', 'accepted');`, time.Now().UTC(), runID)
+	require.NoError(t, err)
+	videoV2, err := resV2.LastInsertId()
+	require.NoError(t, err)
+
+	// v2 (UC2) matched v1's fingerprint: v1 gets discovery credit.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO duplicate_match (video_id, matched_fingerprint_id, similarity_score, match_type, threshold_used)
+		 VALUES (?, ?, 0.95, 'fuzzy_title', 0.9);`, videoV2, fpV1)
+	require.NoError(t, err)
+	// v3 (UC1) matched v0's fingerprint (UC2): v3 gets relevance credit.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO duplicate_match (video_id, matched_fingerprint_id, similarity_score, match_type, threshold_used)
+		 VALUES (?, ?, 0.95, 'fuzzy_title', 0.9);`, videoV3, fpV0)
+	require.NoError(t, err)
+
+	detail, err := service.ChannelDetail(ctx, "UC1")
+	require.NoError(t, err)
+
+	byVideo := map[string]VideoProvenance{}
+	for _, p := range detail.RecentVideoProvenance {
+		byVideo[p.VideoID] = p
+	}
+	require.NotNil(t, byVideo["v1"].DuplicateCredit)
+	assert.Equal(t, "discovery", *byVideo["v1"].DuplicateCredit)
+	require.NotNil(t, byVideo["v3"].DuplicateCredit)
+	assert.Equal(t, "relevance", *byVideo["v3"].DuplicateCredit)
 }
 
 func TestService_RouteMatchRates(t *testing.T) {
