@@ -103,6 +103,9 @@ type Run struct {
 	DurationSeconds       *float64   `json:"duration_seconds"`
 	InterruptReason       *string    `json:"interrupt_reason"`
 	CurrentPhase          *string    `json:"current_phase"`
+
+	// ActionAuthorityVersion is write-once producer evidence; zero is legacy/unknown.
+	ActionAuthorityVersion int `json:"-"`
 }
 
 // Video represents a discovered video and its processing state.

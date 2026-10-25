@@ -97,15 +97,16 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     const created = await mock.createRoute(routeFromBody(String(init?.body)))
     return jsonResponse(created, 201)
   }
-  const routeStatsMatch = path.match(/^\/api\/routes\/(\d+)\/stats$/)
-  if (routeStatsMatch && method === 'GET') {
-    const stats = await mock.getRouteStats(Number(routeStatsMatch[1]))
-    return jsonResponse(stats)
+  // Reorder must be matched before the single-route pattern below, whose UUID
+  // segment would otherwise also match the literal "reorder".
+  if (path === '/api/routes/reorder' && method === 'PUT') {
+    const body = JSON.parse(String(init?.body)) as { route_ids: string[] }
+    await mock.reorderRoutes(body.route_ids)
+    return jsonResponse({ ok: true })
   }
-
-  const routeMatch = path.match(/^\/api\/routes\/(\d+)$/)
+  const routeMatch = path.match(/^\/api\/routes\/([^/]+)$/)
   if (routeMatch) {
-    const id = Number(routeMatch[1])
+    const id = decodeURIComponent(routeMatch[1])
     if (method === 'GET') {
       const route = await mock.getRoute(id)
       if (!route) return jsonResponse({ error: 'not found' }, 404)
@@ -119,11 +120,6 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
       await mock.deleteRoute(id)
       return new Response(null, { status: 204 })
     }
-  }
-  if (path === '/api/routes/reorder' && method === 'PUT') {
-    const body = JSON.parse(String(init?.body)) as { route_ids: number[] }
-    await mock.reorderRoutes(body.route_ids)
-    return jsonResponse({ ok: true })
   }
   if (path === '/api/playlists' && method === 'GET') {
     return jsonResponse({ playlists: await mock.listPlaylists() })
@@ -180,6 +176,42 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
   if (playlistMatch && method === 'DELETE') {
     await mock.deleteRetentionPlaylist(Number(playlistMatch[1]))
     return new Response(null, { status: 204 })
+  }
+
+  // Corpus import (ARS-002). The backend is not implemented yet; component
+  // tests configure these through ../api/mock. Preview must be matched before
+  // the status-by-id pattern below, whose segment would match "preview".
+  if (path === '/api/corpus/import/preview' && method === 'POST') {
+    const file = (init?.body as FormData | undefined)?.get('file')
+    if (!(file instanceof File)) return jsonResponse({ error: 'multipart field "file" is required' }, 400)
+    return jsonResponse(await mock.previewCorpusImport(file))
+  }
+  if (path === '/api/corpus/import' && method === 'POST') {
+    const file = (init?.body as FormData | undefined)?.get('file')
+    if (!(file instanceof File)) return jsonResponse({ error: 'multipart field "file" is required' }, 400)
+    return jsonResponse(await mock.startCorpusImport(file), 202)
+  }
+  if (path === '/api/corpus/import' && method === 'GET') {
+    const state = await mock.getLatestCorpusImport()
+    if (!state) return jsonResponse({ error: 'no import state available' }, 404)
+    return jsonResponse(state)
+  }
+  // Reserved literal route (ARS-002): matched before the status-by-id pattern
+  // below, whose segment would otherwise treat "metadata" as an import id.
+  if (path === '/api/corpus/import/metadata' && method === 'GET') {
+    return jsonResponse(await mock.getCorpusImportMetadata())
+  }
+  const importStatusMatch = path.match(/^\/api\/corpus\/import\/([^/]+)$/)
+  if (importStatusMatch && method === 'GET') {
+    const state = await mock.getCorpusImportStatus(decodeURIComponent(importStatusMatch[1]))
+    if (!state) return jsonResponse({ error: 'import not found' }, 404)
+    return jsonResponse(state)
+  }
+  const importCancelMatch = path.match(/^\/api\/corpus\/import\/([^/]+)\/cancel$/)
+  if (importCancelMatch && method === 'POST') {
+    const state = await mock.cancelCorpusImport(decodeURIComponent(importCancelMatch[1]))
+    if (!state) return jsonResponse({ error: 'import not found' }, 404)
+    return jsonResponse(state, 202)
   }
 
   // Advisories

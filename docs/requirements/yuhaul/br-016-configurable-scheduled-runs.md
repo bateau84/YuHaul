@@ -5,7 +5,7 @@ description: User configures when processing runs execute on a schedule
 tags: [requirement, scheduling, runs, configuration, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

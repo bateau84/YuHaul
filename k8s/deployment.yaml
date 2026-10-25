@@ -7,6 +7,13 @@ metadata:
     app: yuhaul
 spec:
   replicas: 1
+  # Recreate: the old Pod must terminate before the new-version Pod is created.
+  # ARS-004's UUID migration/backfill assumes one SQLite writer; the default
+  # RollingUpdate strategy can temporarily overlap old and new binaries against
+  # the same PVC. Deliberate stop-before-start rollout — downtime is expected
+  # and acceptable; no zero-downtime guarantee is made (ARS-003).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: yuhaul

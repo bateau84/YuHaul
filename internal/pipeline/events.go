@@ -1,5 +1,5 @@
 // Package pipeline orchestrates YuHaul's five-phase processing pipeline:
-// discovery -> duplicate detection -> exclusion -> routing -> action execution.
+// discovery -> exclusion -> duplicate detection -> routing -> action execution.
 //
 // It manages the Run lifecycle, emits SSE events, enforces quota-aware action
 // execution, and guarantees INV-1 terminal-state accounting.

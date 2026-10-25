@@ -5,7 +5,7 @@ description: User can trigger a processing run on demand
 tags: [requirement, runs, manual, on-demand, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

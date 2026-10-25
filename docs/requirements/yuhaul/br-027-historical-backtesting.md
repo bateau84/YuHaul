@@ -5,7 +5,7 @@ description: Backtesting compares routing changes against retained observations 
 tags: [requirement, backtesting, historical, comparison, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

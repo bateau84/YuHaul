@@ -3,7 +3,12 @@ import { api } from './core'
 
 export async function listRuns(): Promise<Run[]> {
   const data = await api<{ runs: Run[] }>('/api/runs')
-  return (data.runs ?? []).sort((a, b) => +new Date(b.started_at) - +new Date(a.started_at))
+  // A missing or non-array collection violates the API contract (ARS-001);
+  // surface it as a failure instead of normalizing it to an empty list.
+  if (!data || !Array.isArray(data.runs)) {
+    throw new Error('Invalid response from /api/runs: runs field missing or not an array')
+  }
+  return data.runs.sort((a, b) => +new Date(b.started_at) - +new Date(a.started_at))
 }
 
 export async function getRun(id: number): Promise<Run | undefined> {

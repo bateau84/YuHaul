@@ -1,9 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown, Check, X, Loader2, AlertCircle } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Trash2, Plus, GripVertical, ArrowUp, ArrowDown, Check, X, Loader2, AlertCircle, Copy } from 'lucide-react'
 import { DeleteConfirmDialog } from './DeleteConfirmDialog'
+import { ModalDialog } from './ModalDialog'
 import { listPlaylists } from '../api/client'
-import { blankRoute, normalizeRoute } from '../lib/route'
-import type { Route, RouteCondition, RouteAction, Composition, ConditionField, ConditionOperator, ExclusionType, Playlist } from '../types'
+import { blankRoute, normalizeRoute, routeLabel } from '../lib/route'
+import type { Route, RouteCondition, RouteAction, RouteActionType, Composition, ConditionField, ConditionOperator, ExclusionType, Playlist } from '../types'
+
+// BR-004 AC8: v1 supports exactly one action type. The selector exists so the
+// user sees and can confirm the action type; unsupported types cannot be chosen
+// and a route whose action carries one cannot be saved.
+const actionTypeOptions: { value: RouteActionType; label: string }[] = [
+  { value: 'add_to_playlist', label: 'Add to playlist' },
+]
+
+function isSupportedActionType(value: string): value is RouteActionType {
+  return actionTypeOptions.some((o) => o.value === value)
+}
 
 const fields: { value: ConditionField; label: string }[] = [
   { value: 'title', label: 'Title' },
@@ -32,20 +44,26 @@ function operatorsForField(field: ConditionField) {
   return field === 'duration_seconds' ? numericOperators : textOperators
 }
 
+function formatMetadataTimestamp(iso: string): string {
+  return iso ? new Date(iso).toLocaleString() : '—'
+}
+
 interface RouteEditorProps {
   route?: Route
-  existingRoutes?: Route[]
   onSave: (route: Route) => void
   onCancel: () => void
   onDelete?: () => void
 }
 
-export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDelete }: RouteEditorProps) {
+export function RouteEditor({ route, onSave, onCancel, onDelete }: RouteEditorProps) {
   const [form, setForm] = useState<Route>(() => (route ? normalizeRoute(route) : blankRoute()))
   const [initialForm] = useState(() => JSON.parse(JSON.stringify(route ? normalizeRoute(route) : blankRoute())))
   const isDirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(initialForm), [form, initialForm])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showDiscardDialog, setShowDiscardDialog] = useState(false)
+  const [copyStatus, setCopyStatus] = useState<'copied' | 'failed' | null>(null)
+  const keepEditingRef = useRef<HTMLButtonElement>(null)
   const [playlists, setPlaylists] = useState<Playlist[]>([])
   const [playlistsLoading, setPlaylistsLoading] = useState(true)
   const [playlistsError, setPlaylistsError] = useState<string | null>(null)
@@ -81,8 +99,8 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
 
   function handleCancel() {
     if (isDirty) {
-      const confirmed = window.confirm('You have unsaved changes. Are you sure you want to leave?')
-      if (!confirmed) return
+      setShowDiscardDialog(true)
+      return
     }
     onCancel()
   }
@@ -90,16 +108,12 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
   function validate(): boolean {
     const next: Record<string, string> = {}
     const nameTrimmed = form.name.trim()
+    // BR-003 AC10 (amended) / design amendment: names need not be unique —
+    // identity is the UUID, so only non-empty and length are validated.
     if (!nameTrimmed) {
       next.name = 'Route name is required'
     } else if (nameTrimmed.length > 100) {
       next.name = 'Route name must be 100 characters or fewer'
-    } else if (
-      existingRoutes.some(
-        (r) => r.id !== form.id && r.name.trim().toLowerCase() === nameTrimmed.toLowerCase()
-      )
-    ) {
-      next.name = 'A route with this name already exists'
     }
 
     if (form.conditions.length === 0) {
@@ -130,6 +144,7 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
       next.actions = 'Add at least one action'
     } else {
       form.actions.forEach((a, i) => {
+        if (!isSupportedActionType(a.action_type)) next[`action-${i}-type`] = 'Select a supported action type'
         if (!a.target_playlist_id.trim()) next[`action-${i}-playlist`] = 'Select a playlist'
       })
     }
@@ -176,6 +191,15 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
     e.preventDefault()
     if (!validate()) return
     onSave(form)
+  }
+
+  async function copyRouteId() {
+    try {
+      await navigator.clipboard.writeText(form.id)
+      setCopyStatus('copied')
+    } catch {
+      setCopyStatus('failed')
+    }
   }
 
   function normalizeConditionValue(field: ConditionField, operator: ConditionOperator, currentValue: string): string {
@@ -255,7 +279,7 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
       ...f,
       actions: [
         ...f.actions,
-        { action_type: 'playlist_insert', target_playlist_id: '', action_index: f.actions.length },
+        { action_type: 'add_to_playlist', target_playlist_id: '', action_index: f.actions.length },
       ],
     }))
   }
@@ -328,6 +352,30 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
           value={form.description}
           onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
         />
+
+        {form.id && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--color-border-default)' }}>
+            <span className="form-label">Route ID</span>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <code style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}>{form.id}</code>
+              <button type="button" className="button" onClick={copyRouteId} aria-label="Copy route ID">
+                <Copy size={14} aria-hidden="true" /> Copy
+              </button>
+            </div>
+            <div aria-live="polite" style={{ fontSize: '0.875rem', marginTop: 4, minHeight: '1.25rem' }}>
+              {copyStatus === 'copied' && (
+                <span style={{ color: 'var(--color-status-accepted)' }}>Route ID copied</span>
+              )}
+              {copyStatus === 'failed' && (
+                <span className="form-error">Could not copy route ID</span>
+              )}
+            </div>
+            <p style={{ margin: '4px 0 0', color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+              Created {formatMetadataTimestamp(route?.created_at ?? '')} · Last modified{' '}
+              {formatMetadataTimestamp(route?.updated_at ?? '')}
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
@@ -558,33 +606,65 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
         <h2 className="section-title">Actions</h2>
         {form.actions.map((a, i) => (
           <div key={i}>
-            <div className="field-row" style={{ gridTemplateColumns: '1fr auto', alignItems: 'end' }}>
-              <select
-                id={`action-${i}-playlist`}
-                className="form-select"
-                value={a.target_playlist_id}
-                onChange={(e) => updateAction(i, { target_playlist_id: e.target.value })}
-                disabled={playlistsLoading || playlistsError !== null}
-                aria-label="Select target playlist"
-                aria-busy={playlistsLoading}
-                aria-invalid={!!errors[`action-${i}-playlist`]}
-                aria-describedby={errors[`action-${i}-playlist`] ? `action-${i}-playlist-error` : undefined}
-              >
-                <option value="">{playlistsLoading ? 'Loading playlists...' : 'Select a playlist'}</option>
-                {playlists.map((p) => (
-                  <option key={p.playlist_id} value={p.playlist_id}>
-                    {p.playlist_name}
-                  </option>
-                ))}
-                {a.target_playlist_id && !playlists.some((p) => p.playlist_id === a.target_playlist_id) && (
-                  <option value={a.target_playlist_id}>{a.target_playlist_id} (unavailable)</option>
-                )}
-              </select>
-              {playlistsLoading && <Loader2 size={16} className="spinner" aria-hidden="true" />}
+            <div
+              className="field-row"
+              style={{ gridTemplateColumns: 'minmax(180px, 1fr) minmax(180px, 2fr) auto', alignItems: 'end' }}
+            >
+              <div>
+                <label className="form-label" htmlFor={`action-${i}-type`}>
+                  Action type
+                </label>
+                <select
+                  id={`action-${i}-type`}
+                  className="form-select"
+                  value={isSupportedActionType(a.action_type) ? a.action_type : ''}
+                  onChange={(e) => updateAction(i, { action_type: e.target.value as RouteActionType })}
+                  aria-invalid={!!errors[`action-${i}-type`]}
+                  aria-describedby={errors[`action-${i}-type`] ? `action-${i}-type-error` : undefined}
+                >
+                  {!isSupportedActionType(a.action_type) && <option value="">Select an action type</option>}
+                  {actionTypeOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="form-label" htmlFor={`action-${i}-playlist`}>
+                  Playlist
+                </label>
+                <select
+                  id={`action-${i}-playlist`}
+                  className="form-select"
+                  value={a.target_playlist_id}
+                  onChange={(e) => updateAction(i, { target_playlist_id: e.target.value })}
+                  disabled={playlistsLoading || playlistsError !== null}
+                  aria-busy={playlistsLoading}
+                  aria-invalid={!!errors[`action-${i}-playlist`]}
+                  aria-describedby={errors[`action-${i}-playlist`] ? `action-${i}-playlist-error` : undefined}
+                >
+                  <option value="">{playlistsLoading ? 'Loading playlists...' : 'Select a playlist'}</option>
+                  {playlists.map((p) => (
+                    <option key={p.playlist_id} value={p.playlist_id}>
+                      {p.playlist_name}
+                    </option>
+                  ))}
+                  {a.target_playlist_id && !playlists.some((p) => p.playlist_id === a.target_playlist_id) && (
+                    <option value={a.target_playlist_id}>{a.target_playlist_id} (unavailable)</option>
+                  )}
+                </select>
+              </div>
+              {playlistsLoading && <Loader2 size={16} className="spinner" aria-hidden="true" style={{ alignSelf: 'end' }} />}
               <button type="button" className="icon-button" onClick={() => removeAction(i)} aria-label={`Remove action ${i + 1}`}>
                 <Trash2 size={16} />
               </button>
             </div>
+            {errors[`action-${i}-type`] && (
+              <div id={`action-${i}-type-error`} className="form-error" aria-live="polite">
+                {errors[`action-${i}-type`]}
+              </div>
+            )}
             {playlistsLoading && (
               <div aria-live="polite" style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
                 Loading playlists
@@ -659,7 +739,11 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
                 type="checkbox"
                 role="switch"
                 aria-checked={form.is_enabled}
-                aria-label={form.is_enabled ? `Disable route ${form.name || 'this route'}` : `Enable route ${form.name || 'this route'}`}
+                aria-label={
+                  form.is_enabled
+                    ? `Disable route ${routeLabel(form.name || 'this route', form.id)}`
+                    : `Enable route ${routeLabel(form.name || 'this route', form.id)}`
+                }
                 checked={form.is_enabled}
                 onChange={(e) => setForm((f) => ({ ...f, is_enabled: e.target.checked }))}
               />
@@ -693,7 +777,7 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
       </div>
       {showDeleteDialog && onDelete && (
         <DeleteConfirmDialog
-          routeName={route?.name ?? form.name}
+          routeLabel={routeLabel(route?.name ?? form.name, route?.id ?? form.id)}
           onCancel={() => setShowDeleteDialog(false)}
           onConfirm={() => {
             setShowDeleteDialog(false)
@@ -701,16 +785,60 @@ export function RouteEditor({ route, existingRoutes = [], onSave, onCancel, onDe
           }}
         />
       )}
+      {showDiscardDialog && (
+        <ModalDialog
+          role="alertdialog"
+          labelledBy="discard-changes-title"
+          describedBy="discard-changes-body"
+          initialFocusRef={keepEditingRef}
+          onCancel={() => setShowDiscardDialog(false)}
+        >
+          <h2 id="discard-changes-title" className="modal-title">
+            Discard unsaved changes?
+          </h2>
+          <p id="discard-changes-body">
+            Your changes to this route have not been saved. Discarding them cannot be undone.
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="button"
+              ref={keepEditingRef}
+              onClick={() => setShowDiscardDialog(false)}
+            >
+              Keep editing
+            </button>
+            <button type="button" className="button button--danger" onClick={onCancel}>
+              Discard
+            </button>
+          </div>
+        </ModalDialog>
+      )}
     </form>
   )
 }
 
-export function RouteReorderHandle({ name, index, total, onMove }: { name: string; index: number; total: number; onMove: (from: number, to: number) => void }) {
+interface RouteReorderHandleProps {
+  name: string
+  index: number
+  total: number
+  onMove: (from: number, to: number) => void
+  /** Callback ref for the grip handle; bind it to the sortable drag source. */
+  handleRef?: React.Ref<HTMLButtonElement>
+}
+
+export function RouteReorderHandle({ name, index, total, onMove, handleRef }: RouteReorderHandleProps) {
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-      <span aria-hidden="true" style={{ color: 'var(--color-text-muted)' }}>
-        <GripVertical size={16} />
-      </span>
+      <button
+        type="button"
+        className="icon-button drag-handle"
+        ref={handleRef}
+        aria-label={`Reorder ${name}`}
+        title={`Reorder ${name}`}
+      >
+        <GripVertical size={16} aria-hidden="true" />
+      </button>
       <button
         type="button"
         className="icon-button"

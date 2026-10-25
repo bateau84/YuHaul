@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // OnChange is invoked after a route mutation that should create a
@@ -46,6 +48,13 @@ func (s *Store) DB() *sql.DB {
 }
 
 // CreateRoute persists a new route, its conditions, actions, and exclusions.
+//
+// The route's stable public UUID (ADR-011/ARS-004) is generated server-side
+// and inserted into route_identity in the same transaction as the route row
+// and its children, so a route never exists without its identity mapping: any
+// failure rolls back route, identity, and children together. Assigned
+// mappings are never regenerated or replaced. On success the assigned public
+// UUID is returned on r.PublicID.
 func (s *Store) CreateRoute(ctx context.Context, r *Route) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -68,6 +77,20 @@ func (s *Store) CreateRoute(ctx context.Context, r *Route) (int64, error) {
 		return 0, fmt.Errorf("router: read route id: %w", err)
 	}
 	r.ID = id
+
+	publicID, err := uuid.NewRandom()
+	if err != nil {
+		return 0, fmt.Errorf("router: generate route uuid: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO route_identity (route_id, public_id) VALUES (?, ?);`,
+		id, publicID.String(),
+	); err != nil {
+		// A primary-key or unique collision aborts the transaction; it
+		// never overwrites or reassigns an existing identity (ARS-004).
+		return 0, fmt.Errorf("router: insert route identity: %w", err)
+	}
+	r.PublicID = publicID.String()
 
 	if err := s.saveRouteChildren(ctx, tx, r); err != nil {
 		return 0, err
@@ -99,28 +122,63 @@ func (s *Store) GetRoute(ctx context.Context, id int64) (*Route, error) {
 	return r, nil
 }
 
-// CountRouteMatches returns the number of production-run `matched` decisions
-// for a route. Production runs are scheduled and manual runs; dry-run,
-// replay, and backtest decisions are excluded.
-func (s *Store) CountRouteMatches(ctx context.Context, routeID int64) (int64, error) {
-	var count int64
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM route_decision rd
-		 JOIN run ru ON ru.id = rd.run_id
-		 WHERE rd.route_id = ? AND rd.decision = 'matched'
-		   AND ru.run_type IN ('scheduled', 'manual');`,
-		routeID).Scan(&count); err != nil {
-		return 0, fmt.Errorf("router: count route matches %d: %w", routeID, err)
+// GetRouteByPublicID loads an active route by its stable public UUID with its
+// conditions, actions, and exclusions. Resolution goes through the
+// route_identity registry (ADR-011); a malformed, unknown, or soft-deleted
+// public ID returns ErrRouteNotFound and never falls back to an integer key,
+// a name match, or a synthesized identity (ARS-004 failure behavior).
+//
+// The argument must be the canonical stored form (lowercase, hyphenated
+// UUIDv4). Accepting or normalizing non-canonical request input, and mapping
+// the result onto the public API DTO, belong to the API boundary.
+func (s *Store) GetRouteByPublicID(ctx context.Context, publicID string) (*Route, error) {
+	r, err := scanRouteWithPublicID(s.db.QueryRowContext(ctx,
+		`SELECT r.id, r.name, r.description, r.evaluation_order, r.is_final,
+		        r.is_enabled, r.condition_composition, r.created_at, r.updated_at,
+		        ri.public_id
+		 FROM route_identity ri
+		 JOIN route r ON r.id = ri.route_id
+		 WHERE ri.public_id = ? AND r.deleted_at IS NULL;`, publicID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("route %s: %w", publicID, ErrRouteNotFound)
+		}
+		return nil, fmt.Errorf("router: load route %s: %w", publicID, err)
 	}
-	return count, nil
+	if err := s.loadRouteChildren(ctx, r); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
-// ListRouteMatchCounts returns a map from route id to the number of
-// production-run `matched` decisions for that route. Routes with zero matches
-// are omitted from the map; callers should default to zero.
+// ResolveRouteID maps a stable public route UUID to its internal integer
+// route key through the route_identity registry. Unlike GetRouteByPublicID it
+// does not require the route row to be active or present, so a soft-deleted
+// route or a snapshot-only historical identity remains resolvable (ADR-011
+// invariant 3). A malformed or unregistered public ID returns
+// ErrRouteNotFound; there is deliberately no integer or name fallback.
+func (s *Store) ResolveRouteID(ctx context.Context, publicID string) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT route_id FROM route_identity WHERE public_id = ?;`, publicID).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("route %s: %w", publicID, ErrRouteNotFound)
+		}
+		return 0, fmt.Errorf("router: resolve route %s: %w", publicID, err)
+	}
+	return id, nil
+}
+
+// ListRouteMatchCounts returns a map from route id to the lifetime number of
+// distinct videos matched by that route in production runs. Only `matched`
+// decisions from scheduled and manual runs contribute; dry-run, replay, and
+// backtest decisions are excluded. A video matched by the same route in
+// several production runs contributes once. Routes with zero matches are
+// omitted from the map; callers should default to zero.
 func (s *Store) ListRouteMatchCounts(ctx context.Context) (map[int64]int64, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT rd.route_id, COUNT(*)
+		`SELECT rd.route_id, COUNT(DISTINCT rd.video_id)
 		 FROM route_decision rd
 		 JOIN run ru ON ru.id = rd.run_id
 		 WHERE rd.decision = 'matched' AND ru.run_type IN ('scheduled', 'manual')
@@ -144,12 +202,54 @@ func (s *Store) ListRouteMatchCounts(ctx context.Context) (map[int64]int64, erro
 	return counts, nil
 }
 
-// ListRoutes returns all routes ordered by evaluation_order, with children loaded.
+// ListRouteIdentities returns an internal-route-key to public-UUID map for
+// every registered route identity. Unlike ListRoutes it reads only
+// route_identity, so it covers soft-deleted routes and snapshot-only
+// historical keys whose route row no longer exists (ADR-003/ARS-004
+// historical preservation). It backs historical evidence projection —
+// run-video decisions reference routes that may have been renamed or deleted
+// since the run — where every referenced key must resolve to its stable UUID
+// or the endpoint fails. An empty mapping is an integrity error, never a
+// reason to emit an integer key or a route-name match (ARS-004 invariant 6).
+func (s *Store) ListRouteIdentities(ctx context.Context) (map[int64]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT route_id, public_id FROM route_identity;`)
+	if err != nil {
+		return nil, fmt.Errorf("router: list route identities: %w", err)
+	}
+	defer rows.Close()
+
+	m := make(map[int64]string)
+	for rows.Next() {
+		var id int64
+		var publicID string
+		if err := rows.Scan(&id, &publicID); err != nil {
+			return nil, fmt.Errorf("router: scan route identity: %w", err)
+		}
+		if publicID == "" {
+			return nil, fmt.Errorf("router: route %d has an empty public identity", id)
+		}
+		m[id] = publicID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("router: iterate route identities: %w", err)
+	}
+	return m, nil
+}
+
+// ListRoutes returns all routes ordered by evaluation_order, with children and
+// their stable public UUID loaded. A route without a route_identity mapping is
+// an integrity error, not a reason to omit the route or expose an internal
+// integer (ARS-004 invariant 1/6); the startup backfill guarantees the mapping
+// exists before the API serves.
 func (s *Store) ListRoutes(ctx context.Context) ([]Route, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, description, evaluation_order, is_final, is_enabled,
-		        condition_composition, created_at, updated_at
-		 FROM route WHERE deleted_at IS NULL ORDER BY evaluation_order;`)
+		`SELECT r.id, r.name, r.description, r.evaluation_order, r.is_final,
+		        r.is_enabled, r.condition_composition, r.created_at, r.updated_at,
+		        ri.public_id
+		 FROM route r
+		 LEFT JOIN route_identity ri ON ri.route_id = r.id
+		 WHERE r.deleted_at IS NULL ORDER BY r.evaluation_order;`)
 	if err != nil {
 		return nil, fmt.Errorf("router: list routes: %w", err)
 	}
@@ -157,7 +257,7 @@ func (s *Store) ListRoutes(ctx context.Context) ([]Route, error) {
 
 	routes := make([]Route, 0)
 	for rows.Next() {
-		r, err := scanRoute(rows)
+		r, err := scanRouteWithPublicID(rows)
 		if err != nil {
 			return nil, fmt.Errorf("router: scan route: %w", err)
 		}
@@ -513,6 +613,27 @@ func scanRoute(sc scanner) (*Route, error) {
 	if desc.Valid {
 		r.Description = desc.String
 	}
+	return r, nil
+}
+
+// scanRouteWithPublicID scans a route row joined with its route_identity
+// mapping. A NULL public_id means the registry mapping required by ARS-004 is
+// missing; that is an integrity error, never a silently unidentified route.
+func scanRouteWithPublicID(sc scanner) (*Route, error) {
+	r := &Route{}
+	var desc, publicID sql.NullString
+	err := sc.Scan(&r.ID, &r.Name, &desc, &r.EvaluationOrder, &r.IsFinal,
+		&r.IsEnabled, &r.ConditionComposition, &r.CreatedAt, &r.UpdatedAt, &publicID)
+	if err != nil {
+		return nil, err
+	}
+	if desc.Valid {
+		r.Description = desc.String
+	}
+	if !publicID.Valid {
+		return nil, fmt.Errorf("route %d: missing route identity mapping", r.ID)
+	}
+	r.PublicID = publicID.String
 	return r, nil
 }
 

@@ -19,7 +19,8 @@ RUN apk add --no-cache ca-certificates git
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 
 # CGO is not required: modernc.org/sqlite is a pure-Go SQLite driver.
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/yuhaul ./cmd/server
@@ -29,7 +30,8 @@ FROM alpine:latest
 
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -u 1000 yuhaul && \
-    mkdir -p /data /app/web
+    mkdir -p /data /app/web && \
+    chown 1000:1000 /data
 
 COPY --from=builder /bin/yuhaul /app/yuhaul
 COPY --from=spa-builder /web/dist /app/web

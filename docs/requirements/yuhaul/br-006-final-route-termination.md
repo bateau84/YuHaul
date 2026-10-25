@@ -5,7 +5,7 @@ description: A route marked final terminates further route evaluation after succ
 tags: [requirement, routes, final, termination, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

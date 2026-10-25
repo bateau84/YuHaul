@@ -5,7 +5,7 @@ description: Replace the hard-delete of routes with a soft-delete (deleted_at ti
 tags: [architecture, decision, yuhaul, routes, soft-delete, decision-evidence, history]
 ---
 
-**Status:** proposed
+**Status:** accepted
 
 ## Depends on
 

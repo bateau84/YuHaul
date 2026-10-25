@@ -48,12 +48,44 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
+// RunTimestampLayout is the canonical text layout for run timestamps in
+// SQLite: RFC3339 in UTC with fixed-width nanoseconds. Fixed width keeps
+// lexical SQL comparison identical to chronological order (RFC3339Nano's
+// trimmed trailing zeros would make "…00.5Z" sort before "…00Z").
+const RunTimestampLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+// formatRunTime renders a run timestamp as fixed-width RFC3339 text in UTC.
+//
+// The SQLite driver stores a bound time.Time in Go's String() format
+// ("2006-01-02 15:04:05.999999999 -0700 MST"), which does not compare
+// chronologically against RFC3339 strings in SQL range predicates (see
+// stats.Store.GetTemporalStats). Formatting explicitly keeps lexical order
+// equal to chronological order for the UTC timestamps the pipeline writes.
+func formatRunTime(t time.Time) string {
+	return t.UTC().Format(RunTimestampLayout)
+}
+
 // CreateRun persists a new run and returns its generated ID.
 func (s *Store) CreateRun(ctx context.Context, run *Run) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO run (started_at, run_type, status, config_version_id)
-		 VALUES (?, ?, ?, ?);`,
-		run.StartedAt, run.RunType, run.Status, run.ConfigVersionID)
+	return s.createRun(ctx, s.db, run)
+}
+
+// CreateRunTx persists a new run inside the caller's transaction and returns
+// its generated ID. It exists so proposal ingest (ADR-012) can commit the run
+// row in the same SQLite transaction as the proposal's identity anchors and
+// ConfigVersion snapshot.
+func (s *Store) CreateRunTx(ctx context.Context, tx *sql.Tx, run *Run) (int64, error) {
+	return s.createRun(ctx, tx, run)
+}
+
+func (s *Store) createRun(ctx context.Context, db execer, run *Run) (int64, error) {
+	if run.ActionAuthorityVersion == 1 && ((run.RunType != RunTypeManual && run.RunType != RunTypeScheduled) || run.ConfigVersionID == nil) {
+		return 0, errors.New("action authority version 1 requires a production run linked to its snapshot")
+	}
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO run (started_at, run_type, status, config_version_id, action_authority_version)
+		 VALUES (?, ?, ?, ?, ?);`,
+		formatRunTime(run.StartedAt), run.RunType, run.Status, run.ConfigVersionID, run.ActionAuthorityVersion)
 	if err != nil {
 		return 0, fmt.Errorf("creating run: %w", err)
 	}
@@ -70,7 +102,7 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
-		        duration_seconds, interrupt_reason, current_phase
+		        duration_seconds, interrupt_reason, current_phase, action_authority_version
 		 FROM run ORDER BY started_at DESC;`)
 	if err != nil {
 		return nil, fmt.Errorf("listing runs: %w", err)
@@ -97,7 +129,7 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
-		        duration_seconds, interrupt_reason, current_phase
+		        duration_seconds, interrupt_reason, current_phase, action_authority_version
 		 FROM run WHERE status = ? ORDER BY started_at ASC;`, RunStatusInterrupted)
 	if err != nil {
 		return nil, fmt.Errorf("listing interrupted runs: %w", err)
@@ -124,7 +156,7 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
-		        duration_seconds, interrupt_reason, current_phase
+		        duration_seconds, interrupt_reason, current_phase, action_authority_version
 		 FROM run WHERE id = ?;`, id)
 	r, err := scanRun(row)
 	if err != nil {
@@ -142,7 +174,7 @@ func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float
 		`UPDATE run
 		 SET status = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
 		 WHERE id = ?;`,
-		RunStatusCompleted, time.Now().UTC(), durationSeconds, quotaCost, id)
+		RunStatusCompleted, formatRunTime(time.Now()), durationSeconds, quotaCost, id)
 	if err != nil {
 		return fmt.Errorf("completing run %d: %w", id, err)
 	}
@@ -160,7 +192,7 @@ func (s *Store) FailRun(ctx context.Context, id int64, reason string, durationSe
 		`UPDATE run
 		 SET status = ?, interrupt_reason = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
 		 WHERE id = ?;`,
-		RunStatusFailed, reason, time.Now().UTC(), durationSeconds, quotaCost, id)
+		RunStatusFailed, reason, formatRunTime(time.Now()), durationSeconds, quotaCost, id)
 	if err != nil {
 		return fmt.Errorf("failing run %d: %w", id, err)
 	}
@@ -309,7 +341,11 @@ func (s *Store) updateVideoState(ctx context.Context, exec execer, id int64, sta
 
 // CreateRouteDecision persists a route decision.
 func (s *Store) CreateRouteDecision(ctx context.Context, d *RouteDecision) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
+	return createRouteDecision(ctx, s.db, d)
+}
+
+func createRouteDecision(ctx context.Context, db execer, d *RouteDecision) (int64, error) {
+	res, err := db.ExecContext(ctx,
 		`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order,
 		                             decision, skip_reason, rejection_reason)
 		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
@@ -403,21 +439,61 @@ func (s *Store) ListRetainedVideos(ctx context.Context) ([]Video, error) {
 	return out, nil
 }
 
-// ListRunVideos returns paginated videos discovered in a specific run, ordered
-// by discovered_at descending (newest first). It also returns the total count
-// of videos in the run for pagination metadata.
-func (s *Store) ListRunVideos(ctx context.Context, runID int64, limit, offset int) ([]Video, int64, error) {
+// runVideoInspection projects read-only run membership and simulation outcomes.
+// Discovery ownership is retained; decisions also establish membership for
+// historical evaluation and receiving runs. Aggregated evidence avoids multiplying
+// videos by their route/action counts. Simulation outcomes follow the same bounded
+// successful-evaluation classification as RecomputeRunCountersFromDecisions.
+const runVideoInspection = `WITH requested_run AS (
+ SELECT id, run_type FROM run WHERE id = ?
+), evidence AS (
+ SELECT video_id,
+        MAX(decision = 'matched') AS matched,
+        MAX(decision = 'not_matched') AS not_matched,
+        MAX(decision = 'skipped' AND skip_reason = 'exclusion') AS excluded
+ FROM route_decision WHERE run_id = (SELECT id FROM requested_run)
+ GROUP BY video_id
+), inspection AS (
+ SELECT v.id, v.video_id, v.channel_id, v.discovered_at, v.discovered_in_run_id,
+        v.processing_state,
+        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN
+          CASE WHEN e.matched = 1 THEN 'accepted'
+               WHEN e.not_matched = 1 THEN 'rejected'
+               WHEN e.excluded = 1 THEN 'excluded'
+               ELSE 'not_yet_evaluated' END
+          ELSE v.final_outcome END AS final_outcome,
+        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE v.deferred_reason END AS deferred_reason,
+        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE v.error_message END AS error_message,
+        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE v.completed_at END AS completed_at
+ FROM video v CROSS JOIN requested_run r LEFT JOIN evidence e ON e.video_id = v.id
+ WHERE v.discovered_in_run_id = r.id OR e.video_id IS NOT NULL
+) `
+
+// ListRunVideos returns paginated videos inspected in a specific run, ordered
+// by discovered_at descending (newest first). When outcomeFilter is a non-empty
+// final outcome, only videos classified with that outcome are returned and
+// counted, so the returned total and pagination metadata describe the filtered
+// set. An empty outcomeFilter returns every video in the run. It also returns
+// the total count of matching videos in the run for pagination metadata.
+func (s *Store) ListRunVideos(ctx context.Context, runID int64, limit, offset int, outcomeFilter VideoFinalOutcome) ([]Video, int64, error) {
+	where := "1 = 1"
+	args := []any{runID}
+	if outcomeFilter != "" {
+		where += " AND final_outcome = ?"
+		args = append(args, outcomeFilter)
+	}
+
 	var total int64
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ?;`, runID).Scan(&total); err != nil {
+		runVideoInspection+`SELECT COUNT(*) FROM inspection WHERE `+where+`;`, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting run %d videos: %w", runID, err)
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
+		runVideoInspection+`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
 		        processing_state, final_outcome, deferred_reason, error_message, completed_at
-		 FROM video WHERE discovered_in_run_id = ? ORDER BY discovered_at DESC LIMIT ? OFFSET ?;`,
-		runID, limit, offset)
+		 FROM inspection WHERE `+where+` ORDER BY discovered_at DESC, id DESC LIMIT ? OFFSET ?;`,
+		append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing run %d videos: %w", runID, err)
 	}
@@ -438,13 +514,13 @@ func (s *Store) ListRunVideos(ctx context.Context, runID int64, limit, offset in
 }
 
 // GetVideoByExternalIDInRun loads a video by its YouTube video ID only if it
-// was discovered in the specified run. This scopes the lookup so that a video
-// ID reused across runs is still bound to the run in the request path.
+// was discovered or evaluated in the specified run. It shares membership and
+// outcome projection with ListRunVideos, without changing persisted video state.
 func (s *Store) GetVideoByExternalIDInRun(ctx context.Context, runID int64, videoID string) (*Video, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
+		runVideoInspection+`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
 		        processing_state, final_outcome, deferred_reason, error_message, completed_at
-		 FROM video WHERE video_id = ? AND discovered_in_run_id = ?;`, videoID, runID)
+		 FROM inspection WHERE video_id = ?;`, runID, videoID)
 	v, err := scanVideo(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -581,7 +657,11 @@ func (s *Store) GetConditionAuditsForDecision(ctx context.Context, decisionID in
 
 // CreateConditionAudit persists a condition audit record.
 func (s *Store) CreateConditionAudit(ctx context.Context, a *ConditionAudit) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
+	return createConditionAudit(ctx, s.db, a)
+}
+
+func createConditionAudit(ctx context.Context, db execer, a *ConditionAudit) (int64, error) {
+	res, err := db.ExecContext(ctx,
 		`INSERT INTO condition_audit (route_decision_id, condition_index, field,
 		                              operator, expected_value, actual_value, matched)
 		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
@@ -647,7 +727,8 @@ func (s *Store) IncrementChannelRetainedTx(ctx context.Context, tx *sql.Tx, chan
 // RecomputeRunCountersFromDecisions recomputes outcome counters for a
 // replay/backtest run from the route decisions recorded in the run. Videos are
 // counted as accepted when at least one route matched, rejected when no route
-// matched and not excluded, excluded when skipped due to an exclusion rule, and
+// matched and an applicable route did not match, excluded when only exclusion
+// evidence exists (without a matched or not-matched route), and
 // discovered when any route decision was recorded.
 func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int64) error {
 	_, err := s.db.ExecContext(ctx,
@@ -671,7 +752,7 @@ func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int
 		      FROM route_decision rd
 		      WHERE rd.run_id = ? AND rd.decision = ? AND rd.skip_reason = ?
 		        AND rd.video_id NOT IN (
-		            SELECT video_id FROM route_decision WHERE run_id = ? AND decision = ?
+		            SELECT video_id FROM route_decision WHERE run_id = ? AND decision IN (?, ?)
 		        )
 		  ),
 		  videos_deferred = 0,
@@ -680,7 +761,7 @@ func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int
 		 WHERE id = ?;`,
 		runID, runID, RouteDecisionMatched,
 		runID, RouteDecisionNotMatched, runID, RouteDecisionMatched,
-		runID, RouteDecisionSkipped, SkipReasonExclusion, runID, RouteDecisionMatched,
+		runID, RouteDecisionSkipped, SkipReasonExclusion, runID, RouteDecisionMatched, RouteDecisionNotMatched,
 		runID)
 	if err != nil {
 		return fmt.Errorf("recomputing run %d counters from decisions: %w", runID, err)
@@ -701,13 +782,16 @@ func scanRun(sc interface {
 	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
 		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
-		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase)
+		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion)
 	if err != nil {
 		return nil, err
 	}
 	if completedAt.Valid {
 		t, _ := time.Parse(time.RFC3339Nano, completedAt.String)
 		r.CompletedAt = &t
+	}
+	if r.ActionAuthorityVersion != 0 && r.ActionAuthorityVersion != 1 {
+		return nil, fmt.Errorf("unsupported action authority version %d", r.ActionAuthorityVersion)
 	}
 	if configVersionID.Valid {
 		r.ConfigVersionID = &configVersionID.Int64

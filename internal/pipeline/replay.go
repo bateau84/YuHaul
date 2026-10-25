@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
@@ -62,27 +63,26 @@ func (p *Pipeline) ExecuteReplay(ctx context.Context, runID int64) {
 
 // Backtest creates a backtest run and starts it. The caller must invoke
 // ExecuteBacktest in a goroutine.
-func (p *Pipeline) Backtest(ctx context.Context, proposed config.Snapshot) (*state.Run, error) {
+//
+// The proposed configuration is a public proposal (ADR-012): its route UUID
+// identities are translated to internal integer keys — creating inactive
+// identity anchors and registry mappings where required — in the same SQLite
+// transaction that stores the immutable ConfigVersion snapshot and the run
+// row.
+func (p *Pipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error) {
+	if proposed == nil {
+		return nil, fmt.Errorf("pipeline: backtest requires a proposed configuration")
+	}
+
 	run := &state.Run{
 		StartedAt: time.Now().UTC(),
 		RunType:   state.RunTypeBacktest,
 		Status:    state.RunStatusRunning,
 	}
 
-	if p.configStore == nil {
-		return nil, fmt.Errorf("pipeline: backtest requires a config store")
+	if err := p.ingestProposalRun(ctx, "backtest proposed configuration", proposed, run); err != nil {
+		return nil, err
 	}
-	cfgID, err := p.configStore.Create(ctx, proposed, "backtest proposed configuration")
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: persist backtest config: %w", err)
-	}
-	run.ConfigVersionID = &cfgID
-
-	id, err := p.stateStore.CreateRun(ctx, run)
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: create backtest: %w", err)
-	}
-	run.ID = id
 
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	return run, nil
@@ -129,8 +129,13 @@ func (p *Pipeline) executeHistorical(ctx context.Context, runID int64, runType s
 	p.setPhase(ctx, runID, PhaseRouting)
 	p.broadcastPhase(runID, PhaseRouting)
 
+	detector, err := p.detectorForRun(ctx, runID)
+	if err != nil {
+		p.failHistoricalRun(ctx, runID, "load duplicate configuration failed", err)
+		return
+	}
 	for _, v := range videos {
-		if err := p.evaluateHistoricalVideo(ctx, runID, &v, routes, label); err != nil {
+		if err := p.evaluateHistoricalVideo(ctx, runID, &v, routes, label, detector); err != nil {
 			p.failHistoricalRun(ctx, runID, fmt.Sprintf("%s video failed", label), err)
 			return
 		}
@@ -139,7 +144,7 @@ func (p *Pipeline) executeHistorical(ctx context.Context, runID int64, runType s
 	p.completeHistoricalRun(ctx, runID)
 }
 
-func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *state.Video, routes []router.Route, label string) error {
+func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *state.Video, routes []router.Route, label string, detector *duplicate.Detector) error {
 	meta := &metadata.TransientMetadata{VideoID: v.VideoID}
 	if p.meta != nil {
 		fetched, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
@@ -156,18 +161,6 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 		title = *meta.Title
 	}
 
-	// Duplicate detection against the retained corpus. The match itself is not
-	// recorded to avoid contaminating production statistics.
-	if p.detector != nil {
-		match, err := p.detector.Detect(ctx, v.VideoID, title)
-		if err != nil {
-			return fmt.Errorf("detect duplicate for %s: %w", v.VideoID, err)
-		}
-		if match != nil {
-			return nil
-		}
-	}
-
 	vc := videoContextFromMetadata(v.VideoID, v.ChannelID, meta)
 
 	// Global exclusion gate: videos excluded by every enabled route are marked
@@ -180,6 +173,14 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 		return nil
 	}
 
+	// Detection is read-only in simulations. A distinct match is supporting
+	// information, never a reason to skip eligible routes or actions.
+	if detector != nil {
+		if _, err := detector.Detect(ctx, v.VideoID, title); err != nil {
+			return fmt.Errorf("detect duplicate for %s: %w", v.VideoID, err)
+		}
+	}
+
 	if _, err := p.router.EvaluateWithRoutes(ctx, runID, v.ID, vc, p.machine, routes); err != nil {
 		return fmt.Errorf("evaluate video %s: %w", v.VideoID, err)
 	}
@@ -190,7 +191,11 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 	}
 
 	matched := false
+	notMatched := false
 	for _, d := range decisions {
+		if d.Decision == state.RouteDecisionNotMatched {
+			notMatched = true
+		}
 		if d.Decision == state.RouteDecisionMatched {
 			matched = true
 			if err := p.simulateAction(ctx, runID, v.ID, &d, routes); err != nil {
@@ -202,7 +207,7 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 	outcome := state.FinalOutcomeRejected
 	if matched {
 		outcome = state.FinalOutcomeAccepted
-	} else if hasExclusionDecision(decisions) {
+	} else if !notMatched && hasExclusionDecision(decisions) {
 		outcome = state.FinalOutcomeExcluded
 	}
 	p.broadcastVideo(runID, v, outcome, matched)

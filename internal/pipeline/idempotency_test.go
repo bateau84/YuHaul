@@ -339,6 +339,7 @@ func setupIdempotencyTest(t *testing.T, videos []mockVideo) *idempotencyTestEnv 
 	broadcast := NewBroadcaster()
 	p := NewPipeline(db, machine, stateStore, disc, detector, routerEngine, executor, ledger, meta, nil, broadcast,
 		WithVersioner(versioner),
+		WithConfigStore(cfgStore),
 		WithLogger(logger),
 	)
 
@@ -421,60 +422,24 @@ func TestIdempotency_CrashResume(t *testing.T) {
 		makeJazzVideo("V2", publishedAt.Add(1*time.Minute)),
 	})
 
-	// Create an interrupted run that has already completed routing and one
-	// successful action, simulating a crash during action execution.
-	run := &state.Run{
-		StartedAt: time.Now().UTC().Add(-1 * time.Hour),
-		RunType:   state.RunTypeManual,
-		Status:    state.RunStatusInterrupted,
-	}
-	runID, err := env.stateStore.CreateRun(ctx, run)
+	// Drive real capture, discovery, routing and the first insertion, then stop
+	// before the second video. No fabricated success or decision is injected.
+	p := env.pipeline
+	run, err := p.StartRun(ctx, state.RunTypeManual)
+	require.NoError(t, err)
+	runID := run.ID
+	vs, err := p.phaseDiscovery(ctx, runID)
+	require.NoError(t, err)
+	vs, err = p.phaseExclusion(ctx, runID, vs)
+	require.NoError(t, err)
+	require.NoError(t, p.phaseDuplicateDetection(ctx, runID, vs))
+	vs, err = p.phaseRouting(ctx, runID, vs)
+	require.NoError(t, err)
+	require.Len(t, vs, 2)
+	_, err = p.executeVideoActions(ctx, runID, vs[0])
 	require.NoError(t, err)
 	require.NoError(t, env.stateStore.SetRunPhase(ctx, runID, string(PhaseActionExecution)))
-
-	v1, err := env.machine.DiscoverVideo(ctx, runID, "V1", "UC1")
-	require.NoError(t, err)
-	v2, err := env.machine.DiscoverVideo(ctx, runID, "V2", "UC1")
-	require.NoError(t, err)
-
-	// Move both videos through routing.
-	for _, v := range []*state.Video{v1, v2} {
-		_, err := env.machine.TransitionVideoState(ctx, v.ID, state.VideoStateNotYetEvaluated, state.VideoStateEvaluating)
-		require.NoError(t, err)
-		_, err = env.machine.TransitionVideoState(ctx, v.ID, state.VideoStateEvaluating, state.VideoStateEvaluated)
-		require.NoError(t, err)
-	}
-
-	// Record matched route decisions for both videos.
-	dec1, err := env.machine.RecordRouteDecision(ctx, &state.RouteDecision{
-		VideoID:         v1.ID,
-		RunID:           runID,
-		RouteID:         env.routeID,
-		EvaluationOrder: 1,
-		Decision:        state.RouteDecisionMatched,
-	})
-	require.NoError(t, err)
-	_, err = env.machine.RecordRouteDecision(ctx, &state.RouteDecision{
-		VideoID:         v2.ID,
-		RunID:           runID,
-		RouteID:         env.routeID,
-		EvaluationOrder: 1,
-		Decision:        state.RouteDecisionMatched,
-	})
-	require.NoError(t, err)
-
-	// Simulate that V1 was already inserted before the crash.
-	now := time.Now().UTC()
-	_, err = env.machine.RecordExecutedAction(ctx, &state.ExecutedAction{
-		RouteDecisionID:  dec1.ID,
-		RunID:            runID,
-		VideoID:          v1.ID,
-		ActionType:       "playlist_insert",
-		TargetPlaylistID: env.playlistID,
-		Outcome:          state.ActionOutcomeSucceeded,
-		ExecutedAt:       &now,
-	})
-	require.NoError(t, err)
+	require.NoError(t, env.stateStore.InterruptRun(ctx, runID, "injected interruption after first completion"))
 
 	// Resume the interrupted run.
 	env.pipeline.Execute(ctx, runID)
@@ -484,8 +449,11 @@ func TestIdempotency_CrashResume(t *testing.T) {
 	require.Equal(t, state.RunStatusCompleted, loaded.Status)
 
 	insertions := env.server.Insertions()
-	require.Len(t, insertions, 1, "resume should insert only the pending video")
-	assert.Equal(t, "V2", insertions[0].VideoID)
+	require.Len(t, insertions, 2, "resume should insert only the pending video")
+	assert.Equal(t, "V2", insertions[1].VideoID)
+	var routed int
+	require.NoError(t, p.db.QueryRowContext(ctx, `SELECT total_routed FROM channel WHERE channel_id='UC1'`).Scan(&routed))
+	require.Equal(t, 2, routed, "recovery must not finalize the first video twice")
 }
 
 // TestIdempotency_RetryCompletedAction verifies that retrying an already
@@ -505,14 +473,13 @@ func TestIdempotency_RetryCompletedAction(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, decisions, 1)
 
-	// Retry the completed action by invoking the executor directly with the
-	// same route match. The executor must see the existing succeeded
-	// ExecutedAction and return without calling YouTube.
+	// Completed runs are inspection-only, even when a direct caller supplies
+	// genuine historical matches. Receiving-run idempotency is tested separately.
 	outcome, err := env.pipeline.executor.Execute(ctx, runID, v.ID, []RouteMatch{
 		{RouteDecisionID: decisions[0].ID, RouteID: env.routeID},
 	})
-	require.NoError(t, err)
-	assert.Equal(t, state.FinalOutcomeAccepted, outcome)
+	require.ErrorContains(t, err, "no production action authority")
+	assert.Equal(t, state.FinalOutcomeFailed, outcome)
 
 	assert.Len(t, env.server.Insertions(), 1, "retrying a completed action produced a new insertion")
 }
@@ -544,4 +511,57 @@ func TestIdempotency_RediscoverySkipsRoutedVideo(t *testing.T) {
 	assert.Equal(t, 0, run2.VideosDiscovered, "re-discovered video should not create a new video record")
 	assert.Equal(t, 0, run2.VideosAccepted)
 	assert.Len(t, env.server.Insertions(), 1, "re-discovering a routed video produced a new insertion")
+}
+
+// BR-008 AC8 / OC-004: the assembled import → native persistence → duplicate
+// evaluation path must not record a self-match. V1 arrives with an imported
+// reference under its own ID, native discovery re-upserts that ID with its
+// normal false flag before evaluation, and a distinct V2 with the same title
+// must still be recorded against V1's reference.
+func TestIdempotency_ImportedSameIDReferenceProducesNoSelfMatch(t *testing.T) {
+	ctx := context.Background()
+	publishedAt := time.Now().UTC().Add(-1 * time.Hour)
+	env := setupIdempotencyTest(t, []mockVideo{
+		makeJazzVideo("V1", publishedAt),
+		makeJazzVideo("V2", publishedAt.Add(1*time.Minute)),
+	})
+
+	batchID := "batch-import"
+	v1RefID, err := duplicate.SaveFingerprint(ctx, env.pipeline.db, "V1", "UC1",
+		"user_import", "Jazz Live Session", true, &batchID)
+	require.NoError(t, err)
+
+	runID := env.runProductionRun(t)
+
+	// Native discovery persisted V1 with its normal false flag before the
+	// duplicate phase; the imported eligibility must survive it (ADR-013).
+	var isRef int
+	require.NoError(t, env.pipeline.db.QueryRowContext(ctx,
+		`SELECT is_duplicate_reference FROM title_fingerprint WHERE video_id = 'V1';`).Scan(&isRef))
+	require.Equal(t, 1, isRef)
+
+	var selfMatches int
+	require.NoError(t, env.pipeline.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM duplicate_match dm
+		   INNER JOIN video v ON v.id = dm.video_id
+		  WHERE v.video_id = 'V1';`).Scan(&selfMatches))
+	require.Zero(t, selfMatches, "V1 must not be persisted as a duplicate of itself")
+
+	var distinctMatches int
+	require.NoError(t, env.pipeline.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM duplicate_match dm
+		   INNER JOIN video v ON v.id = dm.video_id
+		  WHERE v.video_id = 'V2';`).Scan(&distinctMatches))
+	require.Equal(t, 1, distinctMatches, "a distinct video with the same title must still be recorded")
+
+	var matchedFingerprintID int64
+	require.NoError(t, env.pipeline.db.QueryRowContext(ctx,
+		`SELECT matched_fingerprint_id FROM duplicate_match dm
+		   INNER JOIN video v ON v.id = dm.video_id
+		  WHERE v.video_id = 'V2';`).Scan(&matchedFingerprintID))
+	require.Equal(t, v1RefID, matchedFingerprintID, "the distinct match must reference V1's row")
+
+	loaded, err := env.stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, loaded.VideosAccepted, "self-match suppression must not stop routing")
 }

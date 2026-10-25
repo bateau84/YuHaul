@@ -1,0 +1,32 @@
+# Allow only build inputs. In particular, never send checkout credentials,
+# local secrets/databases, release tooling, host dependencies or binaries.
+**
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!web/
+!web/package.json
+!web/package-lock.json
+!web/index.html
+!web/tsconfig*.json
+!web/vite.config.ts
+!web/src/
+!web/src/**
+!web/public/
+!web/public/**
+**/*.db
+**/*.db-*
+**/*.sqlite*
+**/*.pem
+**/*.key
+**/.env*
+**/.git
+**/node_modules
+**/.npmrc
+**/.netrc
+**/credentials*

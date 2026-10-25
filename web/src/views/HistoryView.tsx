@@ -1,18 +1,34 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import * as api from '../api/client'
+import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
+import { shortRouteId } from '../lib/route'
 import type { ConfigVersion, ConfigDiffResult, Route } from '../types'
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString()
 }
 
+function RecordedDuplicateExplanation() {
+  return (
+    <p className="duplicate-handling-explanation">
+      This is a recorded configuration value, not a current handling choice. Current evaluation continues after duplicate matches regardless of this value, including replay and backtest. It does not establish what actions occurred in earlier runs; inspect their recorded outcomes and actions.
+    </p>
+  )
+}
+
+function RecordedDuplicateValue({ value }: { value: string | undefined }) {
+  return <span className="recorded-duplicate-value">{value === undefined || value === '' ? 'Empty or not recorded' : value}</span>
+}
+
 function RouteSnapshot({ route }: { route: Route }) {
   return (
     <div style={{ marginBottom: 12, padding: 12, border: '1px solid var(--color-border-default)', borderRadius: 8 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <strong>{route.name}</strong>
+        <strong>
+          {route.name} <span className="route-short-id">({shortRouteId(route.id)})</span>
+        </strong>
         <div style={{ display: 'flex', gap: 8 }}>
           {route.is_final && <span className="badge badge--info">Final</span>}
           {!route.is_enabled && <span className="badge badge--muted">Disabled</span>}
@@ -75,10 +91,19 @@ function DiffPanel({ diff }: { diff: ConfigDiffResult }) {
           <h4 className="section-title">Settings changed</h4>
           <ul>
             {Object.entries(diff.settings_changed).map(([key, change]) => (
-              <li key={key}>
-                {key}: <span style={{ color: 'var(--color-danger)' }}>{change.old}</span> →{' '}
-                <span style={{ color: 'var(--color-success)' }}>{change.new}</span>
-              </li>
+              key === 'duplicate_behavior' ? (
+                <li key={key}>
+                  <div>Duplicate handling (recorded legacy values)</div>
+                  <div>Previous: <RecordedDuplicateValue value={change.old} /></div>
+                  <div>This version: <RecordedDuplicateValue value={change.new} /></div>
+                  <RecordedDuplicateExplanation />
+                </li>
+              ) : (
+                <li key={key}>
+                  {key}: <span style={{ color: 'var(--color-danger)' }}>{change.old}</span> →{' '}
+                  <span style={{ color: 'var(--color-success)' }}>{change.new}</span>
+                </li>
+              )
             ))}
           </ul>
         </div>
@@ -88,7 +113,9 @@ function DiffPanel({ diff }: { diff: ConfigDiffResult }) {
           <h4 className="section-title">Routes added</h4>
           {routesAdded.map((r) => (
             <div key={r.id} style={{ padding: 8, background: 'rgba(34, 197, 94, 0.1)', borderRadius: 4 }}>
-              <strong>{r.name}</strong>
+              <strong>
+                {r.name} <span className="route-short-id">({shortRouteId(r.id)})</span>
+              </strong>
             </div>
           ))}
         </div>
@@ -98,7 +125,9 @@ function DiffPanel({ diff }: { diff: ConfigDiffResult }) {
           <h4 className="section-title">Routes removed</h4>
           {routesRemoved.map((r) => (
             <div key={r.id} style={{ padding: 8, background: 'rgba(239, 68, 68, 0.1)', borderRadius: 4 }}>
-              <strong>{r.name}</strong>
+              <strong>
+                {r.name} <span className="route-short-id">({shortRouteId(r.id)})</span>
+              </strong>
             </div>
           ))}
         </div>
@@ -108,7 +137,9 @@ function DiffPanel({ diff }: { diff: ConfigDiffResult }) {
           <h4 className="section-title">Routes changed</h4>
           {routesChanged.map((rc) => (
             <div key={rc.id} style={{ padding: 8, background: 'rgba(245, 158, 11, 0.1)', borderRadius: 4 }}>
-              <strong>{rc.old.name}</strong>
+              <strong>
+                {rc.new.name} <span className="route-short-id">({shortRouteId(rc.id)})</span>
+              </strong>
               <ul style={{ marginTop: 4 }}>
                 {(rc.changes ?? []).map((c, idx) => (
                   <li key={idx}>
@@ -166,6 +197,8 @@ function VersionDetail({ version }: { version: ConfigVersion }) {
         <p>Created: {formatDate(version.created_at)}</p>
         <p>Routes: {version.snapshot.routes.length}</p>
         <p>Duplicate threshold: {version.snapshot.duplicate_threshold}</p>
+        <p>Duplicate handling (recorded legacy value): <RecordedDuplicateValue value={version.snapshot.duplicate_behavior} /></p>
+        <RecordedDuplicateExplanation />
       </div>
       <div className="card" style={{ marginBottom: 16 }}>
         <h2 className="section-title">Diff vs previous version</h2>
@@ -188,6 +221,11 @@ export function HistoryView() {
   const { versionId } = useParams<{ versionId?: string }>()
   const [versions, setVersions] = useState<ConfigVersion[]>([])
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  const retryButtonRef = useRef<HTMLButtonElement>(null)
+  const firstRowRef = useRef<HTMLTableRowElement>(null)
+  const recoveredRef = useRef(false)
   const { addToast } = useToast()
 
   useEffect(() => {
@@ -197,17 +235,45 @@ export function HistoryView() {
       .then((v) => {
         if (cancelled) return
         setVersions(v)
+        setFetchError(false)
         setLoading(false)
       })
-      .catch((err) => {
+      .catch(() => {
         if (cancelled) return
-        addToast(err instanceof Error ? err.message : 'Failed to load history', 'error')
+        setFetchError(true)
         setLoading(false)
       })
     return () => {
       cancelled = true
     }
-  }, [addToast])
+  }, [])
+
+  // Focus the Retry button whenever the view settles into the fetch-error
+  // state: on first entry and again after a failed retry re-enables it.
+  useEffect(() => {
+    if (fetchError && !retrying) retryButtonRef.current?.focus()
+  }, [fetchError, retrying])
+
+  // After a successful retry, move focus to the first version row.
+  useEffect(() => {
+    if (!recoveredRef.current || loading || fetchError || versionId) return
+    recoveredRef.current = false
+    firstRowRef.current?.focus()
+  })
+
+  async function handleRetry() {
+    setRetrying(true)
+    try {
+      const v = await api.listConfigVersions()
+      setVersions(v)
+      setFetchError(false)
+      recoveredRef.current = true
+    } catch {
+      addToast('Retry failed. Please try again.', 'error')
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   async function restore(id: number) {
     try {
@@ -220,13 +286,29 @@ export function HistoryView() {
     }
   }
 
+  if (loading) return <div className="empty-state">Loading history...</div>
+
+  if (fetchError) {
+    return (
+      <>
+        <div className="page-header">
+          <h1 className="page-title">Configuration History</h1>
+        </div>
+        <FetchErrorRegion
+          ref={retryButtonRef}
+          message="Failed to load configuration history. Check your connection and try again."
+          onRetry={handleRetry}
+          retrying={retrying}
+        />
+      </>
+    )
+  }
+
   if (versionId) {
     const version = versions.find((v) => v.id === Number(versionId))
     if (!version) return <div className="empty-state">Loading version...</div>
     return <VersionDetail version={version} />
   }
-
-  if (loading) return <div className="empty-state">Loading history...</div>
 
   return (
     <>
@@ -247,8 +329,8 @@ export function HistoryView() {
               </tr>
             </thead>
             <tbody>
-              {versions.map((v) => (
-                <tr key={v.id}>
+              {versions.map((v, i) => (
+                <tr key={v.id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
                   <td data-label="Created">
                     <Link to={`/history/${v.id}`}>{formatDate(v.created_at)}</Link>
                   </td>

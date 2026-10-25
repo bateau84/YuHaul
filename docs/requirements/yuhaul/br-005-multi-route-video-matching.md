@@ -5,7 +5,7 @@ description: A single video may satisfy conditions of multiple routes during eva
 tags: [requirement, routes, matching, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

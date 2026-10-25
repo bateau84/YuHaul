@@ -21,14 +21,18 @@ import (
 )
 
 // Pipeline is the subset of the pipeline package used by the HTTP server.
+// Dry-run and backtest proposals cross this seam as public configurations
+// whose route IDs are canonical UUIDv4 strings; the pipeline translates them
+// to internal integer keys in its single proposal-ingest transaction
+// (ADR-012).
 type Pipeline interface {
 	StartRun(ctx context.Context, runType state.RunType) (*state.Run, error)
 	Execute(ctx context.Context, runID int64)
-	DryRun(ctx context.Context, draft *config.Snapshot) (*state.Run, error)
+	DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error)
 	ExecuteDryRun(ctx context.Context, runID int64)
 	Replay(ctx context.Context, configVersionID *int64) (*state.Run, error)
 	ExecuteReplay(ctx context.Context, runID int64)
-	Backtest(ctx context.Context, proposed config.Snapshot) (*state.Run, error)
+	Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error)
 	ExecuteBacktest(ctx context.Context, runID int64)
 }
 
@@ -48,16 +52,20 @@ type QueueHandler interface {
 	DeferredHandler() http.Handler
 }
 
-// RouteStore is the subset of router.Store used by the HTTP server.
+// RouteStore is the subset of router.Store used by the HTTP server. Route
+// identity crosses this seam as the stable public UUID (ARS-004); the
+// internal integer key is resolved through the route_identity registry and
+// never leaves the API boundary.
 type RouteStore interface {
 	CreateRoute(ctx context.Context, r *router.Route) (int64, error)
-	GetRoute(ctx context.Context, id int64) (*router.Route, error)
+	GetRouteByPublicID(ctx context.Context, publicID string) (*router.Route, error)
+	ResolveRouteID(ctx context.Context, publicID string) (int64, error)
 	ListRoutes(ctx context.Context) ([]router.Route, error)
 	UpdateRoute(ctx context.Context, r *router.Route) error
 	DeleteRoute(ctx context.Context, id int64) error
 	ReorderRoutes(ctx context.Context, routeIDs []int64) error
 	ListRouteNamesIncludingDeleted(ctx context.Context) (map[int64]string, error)
-	CountRouteMatches(ctx context.Context, routeID int64) (int64, error)
+	ListRouteIdentities(ctx context.Context) (map[int64]string, error)
 	ListRouteMatchCounts(ctx context.Context) (map[int64]int64, error)
 }
 
@@ -70,12 +78,20 @@ type RunStore interface {
 // RunVideoStore is the subset of state.Store used by the run video handlers.
 // It is defined in run_handlers.go and repeated here for the Server field.
 type RunVideoStore interface {
-	ListRunVideos(ctx context.Context, runID int64, limit, offset int) ([]state.Video, int64, error)
+	ListRunVideos(ctx context.Context, runID int64, limit, offset int, outcomeFilter state.VideoFinalOutcome) ([]state.Video, int64, error)
 	GetRun(ctx context.Context, id int64) (*state.Run, error)
 	GetVideoByExternalIDInRun(ctx context.Context, runID int64, videoID string) (*state.Video, error)
 	GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.RouteDecision, error)
 	GetConditionAuditsForDecision(ctx context.Context, decisionID int64) ([]state.ConditionAudit, error)
 	GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.ExecutedAction, error)
+}
+
+// ConfigVersionStore is the subset of config.Store used by the run handlers.
+// Run-video evidence projects route labels from the run's immutable
+// ConfigVersion snapshot (OC-003/ARS-004), so the handler needs the stored
+// snapshot for the run's linked config version.
+type ConfigVersionStore interface {
+	Get(ctx context.Context, id int64) (*config.ConfigVersion, error)
 }
 
 // Overview is the dashboard summary returned by GET /api/overview.
@@ -97,6 +113,13 @@ type PlaylistProvider interface {
 	ListPlaylists(ctx context.Context) ([]Playlist, error)
 }
 
+// CorpusImportHandler serves the ARS-002 corpus import endpoints under
+// /api/corpus/. The manager behind it is process-local; the server only mounts
+// the routes.
+type CorpusImportHandler interface {
+	Handler() http.Handler
+}
+
 // Playlist is the shape returned by GET /api/playlists.
 type Playlist struct {
 	PlaylistID   string `json:"playlist_id"`
@@ -105,18 +128,20 @@ type Playlist struct {
 
 // Server serves the YuHaul REST API and SSE endpoints.
 type Server struct {
-	pipeline         Pipeline
-	broadcast        *pipeline.Broadcaster
-	configHandler    ConfigHandler
-	analyticsHandler AnalyticsHandler
-	advisoryHandler  AnalyticsHandler
-	queueHandler     QueueHandler
-	routeStore       RouteStore
-	runStore         RunStore
-	runVideoStore    RunVideoStore
-	overviewProvider OverviewProvider
-	playlistProvider PlaylistProvider
-	logger           *slog.Logger
+	pipeline            Pipeline
+	broadcast           *pipeline.Broadcaster
+	configHandler       ConfigHandler
+	analyticsHandler    AnalyticsHandler
+	advisoryHandler     AnalyticsHandler
+	queueHandler        QueueHandler
+	routeStore          RouteStore
+	runStore            RunStore
+	runVideoStore       RunVideoStore
+	configVersionStore  ConfigVersionStore
+	overviewProvider    OverviewProvider
+	playlistProvider    PlaylistProvider
+	corpusImportHandler CorpusImportHandler
+	logger              *slog.Logger
 }
 
 // Option configures a Server.
@@ -195,6 +220,16 @@ func WithRunVideoStore(store RunVideoStore) Option {
 	}
 }
 
+// WithConfigVersionStore registers the store used by run handlers to read the
+// immutable ConfigVersion snapshot of a run.
+func WithConfigVersionStore(store ConfigVersionStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.configVersionStore = store
+		}
+	}
+}
+
 // WithOverviewProvider registers the dashboard overview provider.
 func WithOverviewProvider(provider OverviewProvider) Option {
 	return func(s *Server) {
@@ -213,21 +248,33 @@ func WithPlaylistProvider(provider PlaylistProvider) Option {
 	}
 }
 
+// WithCorpusImportHandler registers the corpus import HTTP handler
+// (ARS-002 /api/corpus/* endpoints).
+func WithCorpusImportHandler(h CorpusImportHandler) Option {
+	return func(s *Server) {
+		if h != nil {
+			s.corpusImportHandler = h
+		}
+	}
+}
+
 // NewServer returns an API server.
 func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Option) *Server {
 	s := &Server{
-		pipeline:         pipeline,
-		broadcast:        broadcast,
-		configHandler:    &noopHandler{},
-		analyticsHandler: &noopHandler{},
-		advisoryHandler:  &noopHandler{},
-		queueHandler:     noopQueueHandler{},
-		routeStore:       noopRouteStore{},
-		runStore:         noopRunStore{},
-		runVideoStore:    noopRunVideoStore{},
-		overviewProvider: noopOverviewProvider{},
-		playlistProvider: noopPlaylistProvider{},
-		logger:           slog.Default(),
+		pipeline:            pipeline,
+		broadcast:           broadcast,
+		configHandler:       &noopHandler{},
+		analyticsHandler:    &noopHandler{},
+		advisoryHandler:     &noopHandler{},
+		queueHandler:        noopQueueHandler{},
+		routeStore:          noopRouteStore{},
+		runStore:            noopRunStore{},
+		runVideoStore:       noopRunVideoStore{},
+		configVersionStore:  noopConfigVersionStore{},
+		overviewProvider:    noopOverviewProvider{},
+		playlistProvider:    noopPlaylistProvider{},
+		corpusImportHandler: noopCorpusImportHandler{},
+		logger:              slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -246,8 +293,11 @@ type noopRouteStore struct{}
 func (noopRouteStore) CreateRoute(context.Context, *router.Route) (int64, error) {
 	return 0, errors.New("route store not configured")
 }
-func (noopRouteStore) GetRoute(context.Context, int64) (*router.Route, error) {
+func (noopRouteStore) GetRouteByPublicID(context.Context, string) (*router.Route, error) {
 	return nil, errors.New("route store not configured")
+}
+func (noopRouteStore) ResolveRouteID(context.Context, string) (int64, error) {
+	return 0, errors.New("route store not configured")
 }
 func (noopRouteStore) ListRoutes(context.Context) ([]router.Route, error) {
 	return nil, errors.New("route store not configured")
@@ -265,8 +315,8 @@ func (noopRouteStore) ListRouteNamesIncludingDeleted(context.Context) (map[int64
 	return nil, errors.New("route store not configured")
 }
 
-func (noopRouteStore) CountRouteMatches(context.Context, int64) (int64, error) {
-	return 0, errors.New("route store not configured")
+func (noopRouteStore) ListRouteIdentities(context.Context) (map[int64]string, error) {
+	return nil, errors.New("route store not configured")
 }
 
 func (noopRouteStore) ListRouteMatchCounts(context.Context) (map[int64]int64, error) {
@@ -284,7 +334,7 @@ func (noopRunStore) GetRun(context.Context, int64) (*state.Run, error) {
 
 type noopRunVideoStore struct{}
 
-func (noopRunVideoStore) ListRunVideos(context.Context, int64, int, int) ([]state.Video, int64, error) {
+func (noopRunVideoStore) ListRunVideos(context.Context, int64, int, int, state.VideoFinalOutcome) ([]state.Video, int64, error) {
 	return nil, 0, errors.New("run video store not configured")
 }
 func (noopRunVideoStore) GetRun(context.Context, int64) (*state.Run, error) {
@@ -303,6 +353,15 @@ func (noopRunVideoStore) GetExecutedActionsForVideoInRun(context.Context, int64,
 	return nil, errors.New("run video store not configured")
 }
 
+// noopConfigVersionStore reports "not found" so run handlers treat the run as
+// having no usable configuration snapshot (OC-003 incomplete context) and fall
+// back to current persisted route labels instead of failing the endpoint.
+type noopConfigVersionStore struct{}
+
+func (noopConfigVersionStore) Get(context.Context, int64) (*config.ConfigVersion, error) {
+	return nil, state.ErrNotFound
+}
+
 type noopOverviewProvider struct{}
 
 func (noopOverviewProvider) Overview(context.Context) (*Overview, error) {
@@ -313,6 +372,17 @@ type noopPlaylistProvider struct{}
 
 func (noopPlaylistProvider) ListPlaylists(context.Context) ([]Playlist, error) {
 	return nil, errors.New("playlist provider not configured")
+}
+
+// noopCorpusImportHandler reports "not configured" for every corpus import
+// route so an unwired server fails loud instead of routing /api/corpus/* into
+// the SPA fallback (ARS-002).
+type noopCorpusImportHandler struct{}
+
+func (noopCorpusImportHandler) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "corpus import handler not configured")
+	})
 }
 
 type noopQueueHandler struct{}
@@ -352,7 +422,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/routes", s.handleCreateRoute)
 	mux.HandleFunc("GET /api/routes/{$}", s.handleListRoutes)
 	mux.HandleFunc("POST /api/routes/{$}", s.handleCreateRoute)
-	mux.HandleFunc("GET /api/routes/{id}/stats", s.handleGetRouteStats)
 	mux.HandleFunc("GET /api/routes/{id}", s.handleGetRoute)
 	mux.HandleFunc("PUT /api/routes/{id}", s.handleUpdateRoute)
 	mux.HandleFunc("DELETE /api/routes/{id}", s.handleDeleteRoute)
@@ -390,6 +459,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/analytics", s.analyticsHandler.Handler())
 	mux.Handle("/api/analytics/{$}", s.analyticsHandler.Handler())
 	mux.Handle("/api/analytics/", s.analyticsHandler.Handler())
+
+	// Corpus import endpoints (ARS-002) are served by a dedicated handler
+	// that owns its full /api/corpus/* paths.
+	mux.Handle("/api/corpus/", s.corpusImportHandler.Handler())
 	return mux
 }
 
@@ -440,7 +513,7 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		DraftConfiguration *config.Snapshot `json:"draft_configuration"`
+		DraftConfiguration *proposalRequest `json:"draft_configuration"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
 		s.logger.ErrorContext(r.Context(), "failed to decode dry-run body", "error", err)
@@ -448,14 +521,25 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var draft *config.ProposalSnapshot
 	if body.DraftConfiguration != nil {
-		if body.DraftConfiguration.DuplicateThreshold < 0.0 || body.DraftConfiguration.DuplicateThreshold > 1.0 {
+		snap, err := body.DraftConfiguration.snapshot()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if snap.DuplicateThreshold < 0.0 || snap.DuplicateThreshold > 1.0 {
 			writeError(w, http.StatusBadRequest, "duplicate_threshold must be between 0.0 and 1.0")
 			return
 		}
+		if err := normalizeProposalActions(snap); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		draft = snap
 	}
 
-	run, err := s.pipeline.DryRun(r.Context(), body.DraftConfiguration)
+	run, err := s.pipeline.DryRun(r.Context(), draft)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to start dry-run", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to start dry-run")
@@ -523,7 +607,7 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ProposedConfiguration config.Snapshot `json:"proposed_configuration"`
+		ProposedConfiguration *proposalRequest `json:"proposed_configuration"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to decode backtest body", "error", err)
@@ -531,12 +615,29 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.ProposedConfiguration.DuplicateThreshold < 0.0 || body.ProposedConfiguration.DuplicateThreshold > 1.0 {
+	// An absent proposed_configuration keeps its historical behavior: the
+	// backtest runs with an empty proposal snapshot.
+	req := body.ProposedConfiguration
+	if req == nil {
+		req = &proposalRequest{}
+	}
+
+	proposed, err := req.snapshot()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if proposed.DuplicateThreshold < 0.0 || proposed.DuplicateThreshold > 1.0 {
 		writeError(w, http.StatusBadRequest, "duplicate_threshold must be between 0.0 and 1.0")
 		return
 	}
 
-	run, err := s.pipeline.Backtest(r.Context(), body.ProposedConfiguration)
+	if err := normalizeProposalActions(proposed); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	run, err := s.pipeline.Backtest(r.Context(), proposed)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to start backtest", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to start backtest")
@@ -684,53 +785,50 @@ func (s *Server) handleListRoutes(w http.ResponseWriter, r *http.Request) {
 		routes[i].MatchCount = counts[routes[i].ID]
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
+	entries := make([]routeListEntry, 0, len(routes))
+	for i := range routes {
+		entry, err := newRouteResponse(&routes[i])
+		if err != nil {
+			// A route without a resolvable public identity fails the whole
+			// response; it is never serialized with an integer or omitted
+			// silently (ARS-004 failure behavior).
+			s.logger.ErrorContext(r.Context(), "serialize route failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to list routes")
+			return
+		}
+		entries = append(entries, routeListEntry{
+			routeResponse: entry,
+			MatchCount:    routes[i].MatchCount,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"routes": entries})
 }
 
 func (s *Server) handleGetRoute(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	publicID, ok := parseRoutePublicID(r.PathValue("id"))
+	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid route id")
 		return
 	}
 
-	route, err := s.routeStore.GetRoute(r.Context(), id)
+	route, err := s.routeStore.GetRouteByPublicID(r.Context(), publicID)
 	if err != nil {
 		if errors.Is(err, router.ErrRouteNotFound) {
 			writeError(w, http.StatusNotFound, "route not found")
 			return
 		}
-		s.logger.ErrorContext(r.Context(), "get route failed", "error", err, "id", id)
+		s.logger.ErrorContext(r.Context(), "get route failed", "error", err, "id", publicID)
 		writeError(w, http.StatusInternalServerError, "failed to load route")
 		return
 	}
-	writeJSON(w, http.StatusOK, route)
-}
-
-func (s *Server) handleGetRouteStats(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	resp, err := newRouteResponse(route)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid route id")
+		s.logger.ErrorContext(r.Context(), "serialize route failed", "error", err, "id", publicID)
+		writeError(w, http.StatusInternalServerError, "failed to load route")
 		return
 	}
-
-	if _, err := s.routeStore.GetRoute(r.Context(), id); err != nil {
-		if errors.Is(err, router.ErrRouteNotFound) {
-			writeError(w, http.StatusNotFound, "route not found")
-			return
-		}
-		s.logger.ErrorContext(r.Context(), "get route stats failed", "error", err, "id", id)
-		writeError(w, http.StatusInternalServerError, "failed to load route stats")
-		return
-	}
-
-	count, err := s.routeStore.CountRouteMatches(r.Context(), id)
-	if err != nil {
-		s.logger.ErrorContext(r.Context(), "count route matches failed", "error", err, "id", id)
-		writeError(w, http.StatusInternalServerError, "failed to load route stats")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"match_count": count})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
@@ -739,27 +837,38 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// ARS-004: the server assigns the UUID. A caller-supplied route ID —
+	// numeric, UUID, or otherwise — is invalid input and never an alias.
+	if len(req.ID) > 0 {
+		writeError(w, http.StatusBadRequest, "invalid route id")
+		return
+	}
 
 	route := req.toRoute()
-	id, err := s.routeStore.CreateRoute(r.Context(), route)
-	if err != nil {
+	if _, err := s.routeStore.CreateRoute(r.Context(), route); err != nil {
 		s.logger.ErrorContext(r.Context(), "create route failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to create route")
 		return
 	}
 
-	created, err := s.routeStore.GetRoute(r.Context(), id)
+	created, err := s.routeStore.GetRouteByPublicID(r.Context(), route.PublicID)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "load created route failed", "error", err, "id", id)
+		s.logger.ErrorContext(r.Context(), "load created route failed", "error", err, "id", route.PublicID)
 		writeError(w, http.StatusInternalServerError, "failed to load created route")
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	resp, err := newRouteResponse(created)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "serialize route failed", "error", err, "id", route.PublicID)
+		writeError(w, http.StatusInternalServerError, "failed to load created route")
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	publicID, ok := parseRoutePublicID(r.PathValue("id"))
+	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid route id")
 		return
 	}
@@ -770,31 +879,61 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	existing, err := s.routeStore.GetRouteByPublicID(r.Context(), publicID)
+	if err != nil {
+		if errors.Is(err, router.ErrRouteNotFound) {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "update route failed", "error", err, "id", publicID)
+		writeError(w, http.StatusInternalServerError, "failed to update route")
+		return
+	}
+
+	// The path UUID identifies the route; the registry mapping is never
+	// rewritten, so the public identity survives rename and reconfiguration.
 	route := req.toRoute()
-	route.ID = id
+	route.ID = existing.ID
 	if err := s.routeStore.UpdateRoute(r.Context(), route); err != nil {
 		if errors.Is(err, router.ErrRouteNotFound) {
 			writeError(w, http.StatusNotFound, "route not found")
 			return
 		}
-		s.logger.ErrorContext(r.Context(), "update route failed", "error", err, "id", id)
+		s.logger.ErrorContext(r.Context(), "update route failed", "error", err, "id", publicID)
 		writeError(w, http.StatusInternalServerError, "failed to update route")
 		return
 	}
 
-	updated, err := s.routeStore.GetRoute(r.Context(), id)
+	updated, err := s.routeStore.GetRouteByPublicID(r.Context(), publicID)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "load updated route failed", "error", err, "id", id)
+		s.logger.ErrorContext(r.Context(), "load updated route failed", "error", err, "id", publicID)
 		writeError(w, http.StatusInternalServerError, "failed to load updated route")
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	resp, err := newRouteResponse(updated)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "serialize route failed", "error", err, "id", publicID)
+		writeError(w, http.StatusInternalServerError, "failed to load updated route")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleDeleteRoute(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	publicID, ok := parseRoutePublicID(r.PathValue("id"))
+	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid route id")
+		return
+	}
+
+	id, err := s.routeStore.ResolveRouteID(r.Context(), publicID)
+	if err != nil {
+		if errors.Is(err, router.ErrRouteNotFound) {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "delete route failed", "error", err, "id", publicID)
+		writeError(w, http.StatusInternalServerError, "failed to delete route")
 		return
 	}
 
@@ -803,7 +942,7 @@ func (s *Server) handleDeleteRoute(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "route not found")
 			return
 		}
-		s.logger.ErrorContext(r.Context(), "delete route failed", "error", err, "id", id)
+		s.logger.ErrorContext(r.Context(), "delete route failed", "error", err, "id", publicID)
 		writeError(w, http.StatusInternalServerError, "failed to delete route")
 		return
 	}
@@ -812,7 +951,7 @@ func (s *Server) handleDeleteRoute(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReorderRoutes(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		RouteIDs []int64 `json:"route_ids"`
+		RouteIDs []string `json:"route_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -823,7 +962,58 @@ func (s *Server) handleReorderRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.routeStore.ReorderRoutes(r.Context(), body.RouteIDs); err != nil {
+	publicIDs := make([]string, len(body.RouteIDs))
+	seen := make(map[string]bool, len(body.RouteIDs))
+	for i, raw := range body.RouteIDs {
+		publicID, ok := parseRoutePublicID(raw)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid route id")
+			return
+		}
+		if seen[publicID] {
+			writeError(w, http.StatusBadRequest, "duplicate route id in route_ids")
+			return
+		}
+		seen[publicID] = true
+		publicIDs[i] = publicID
+	}
+
+	// The reorder request is a permutation of the active route set: every
+	// entry must name an active route, and every active route must appear.
+	active, err := s.routeStore.ListRoutes(r.Context())
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "reorder routes failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to reorder routes")
+		return
+	}
+	activeIDs := make(map[string]bool, len(active))
+	for i := range active {
+		activeIDs[active[i].PublicID] = true
+	}
+	for _, publicID := range publicIDs {
+		if !activeIDs[publicID] {
+			// Unknown and soft-deleted UUIDs share the existing route 404.
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+	}
+	if len(publicIDs) != len(activeIDs) {
+		writeError(w, http.StatusBadRequest, "route_ids must include every active route")
+		return
+	}
+
+	routeIDs := make([]int64, len(publicIDs))
+	for i, publicID := range publicIDs {
+		id, err := s.routeStore.ResolveRouteID(r.Context(), publicID)
+		if err != nil {
+			s.logger.ErrorContext(r.Context(), "reorder routes failed", "error", err, "id", publicID)
+			writeError(w, http.StatusInternalServerError, "failed to reorder routes")
+			return
+		}
+		routeIDs[i] = id
+	}
+
+	if err := s.routeStore.ReorderRoutes(r.Context(), routeIDs); err != nil {
 		s.logger.ErrorContext(r.Context(), "reorder routes failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to reorder routes")
 		return
@@ -831,16 +1021,53 @@ func (s *Server) handleReorderRoutes(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// parseRoutePublicID validates a public route identifier from a request via
+// router.ParsePublicRouteID (canonical hyphenated UUIDv4, uppercase hex
+// accepted, no numeric alias).
+func parseRoutePublicID(raw string) (string, bool) {
+	return router.ParsePublicRouteID(raw)
+}
+
+// routeRequest is the public write shape of a route. `id` and the child
+// identity fields are decoded leniently and discarded: a client may echo back
+// the UUID strings it read from a response, but identity is never taken from a
+// request body — the path resolves the target route, the server assigns the
+// created route's UUID, and the store assigns child row IDs (ARS-004).
 type routeRequest struct {
+	ID                   json.RawMessage         `json:"id"`
 	Name                 string                  `json:"name"`
 	Description          string                  `json:"description"`
 	EvaluationOrder      int                     `json:"evaluation_order"`
 	IsFinal              bool                    `json:"is_final"`
 	IsEnabled            bool                    `json:"is_enabled"`
 	ConditionComposition string                  `json:"condition_composition"`
-	Conditions           []router.RouteCondition `json:"conditions"`
-	Actions              []router.RouteAction    `json:"actions"`
-	Exclusions           []router.RouteExclusion `json:"exclusions"`
+	Conditions           []routeConditionRequest `json:"conditions"`
+	Actions              []routeActionRequest    `json:"actions"`
+	Exclusions           []routeExclusionRequest `json:"exclusions"`
+}
+
+type routeConditionRequest struct {
+	ID             json.RawMessage          `json:"id"`
+	RouteID        json.RawMessage          `json:"route_id"`
+	ConditionIndex int                      `json:"condition_index"`
+	Field          router.ConditionField    `json:"field"`
+	Operator       router.ConditionOperator `json:"operator"`
+	Value          string                   `json:"value"`
+}
+
+type routeActionRequest struct {
+	ID               json.RawMessage `json:"id"`
+	RouteID          json.RawMessage `json:"route_id"`
+	ActionIndex      int             `json:"action_index"`
+	ActionType       string          `json:"action_type"`
+	TargetPlaylistID string          `json:"target_playlist_id"`
+}
+
+type routeExclusionRequest struct {
+	ID             json.RawMessage      `json:"id"`
+	RouteID        json.RawMessage      `json:"route_id"`
+	ExclusionType  router.ExclusionType `json:"exclusion_type"`
+	ExclusionValue string               `json:"exclusion_value"`
 }
 
 func decodeRouteRequest(r *http.Request) (*routeRequest, error) {
@@ -874,7 +1101,168 @@ func decodeRouteRequest(r *http.Request) (*routeRequest, error) {
 			return nil, fmt.Errorf("condition %d: %w", i, err)
 		}
 	}
+	for i := range req.Actions {
+		if err := normalizeRouteAction(&req.Actions[i]); err != nil {
+			return nil, fmt.Errorf("action %d: %w", i, err)
+		}
+	}
+	for i, e := range req.Exclusions {
+		if err := validateRouteExclusion(e); err != nil {
+			return nil, fmt.Errorf("exclusion %d: %w", i, err)
+		}
+	}
+	if err := validateDurationExclusionRange(req.Exclusions); err != nil {
+		return nil, err
+	}
 	return &req, nil
+}
+
+// normalizeRouteAction enforces the public action contract (ADR-007, BR-004
+// AC8): the action type must be the canonical public value and the target
+// playlist must be selected. The action is rewritten to the internal
+// representation before persistence.
+func normalizeRouteAction(a *routeActionRequest) error {
+	internal, err := router.FromPublicActionType(a.ActionType)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(a.TargetPlaylistID) == "" {
+		return fmt.Errorf("target_playlist_id is required")
+	}
+	a.ActionType = internal
+	return nil
+}
+
+// proposalRequest is the public request shape of a dry-run draft
+// (`draft_configuration`) or backtest proposed configuration
+// (`proposed_configuration`). Route `id` values are decoded leniently so that
+// a missing, numeric, malformed, or non-UUIDv4 route identity fails with the
+// route-id error contract rather than a JSON type error (ADR-012/ARS-004).
+type proposalRequest struct {
+	Routes             []proposalRouteRequest `json:"routes"`
+	DuplicateThreshold float64                `json:"duplicate_threshold"`
+	DuplicateBehavior  string                 `json:"duplicate_behavior"`
+}
+
+type proposalRouteRequest struct {
+	ID                   json.RawMessage            `json:"id"`
+	Name                 string                     `json:"name"`
+	Description          string                     `json:"description"`
+	EvaluationOrder      int                        `json:"evaluation_order"`
+	IsFinal              bool                       `json:"is_final"`
+	IsEnabled            bool                       `json:"is_enabled"`
+	ConditionComposition string                     `json:"condition_composition"`
+	Conditions           []config.SnapshotCondition `json:"conditions"`
+	Actions              []config.SnapshotAction    `json:"actions"`
+	Exclusions           []config.SnapshotExclusion `json:"exclusions"`
+}
+
+// snapshot validates the proposal route identities and converts the request
+// into the pipeline's proposal configuration. Per ADR-012 §1 every route id
+// must be a canonical UUIDv4 (uppercase hex accepted, canonical lowercase
+// stored) and no UUID may repeat within one proposal; display names are
+// labels only and duplicate names remain independent. A missing, malformed,
+// non-v4, numeric-alias, or duplicate route id is invalid input and is
+// reported with the existing `invalid route id` error (ARS-004).
+func (req *proposalRequest) snapshot() (*config.ProposalSnapshot, error) {
+	snap := &config.ProposalSnapshot{
+		Routes:             make([]config.ProposalRoute, len(req.Routes)),
+		DuplicateThreshold: req.DuplicateThreshold,
+		DuplicateBehavior:  req.DuplicateBehavior,
+	}
+	seen := make(map[string]bool, len(req.Routes))
+	for i, r := range req.Routes {
+		var raw string
+		if err := json.Unmarshal(r.ID, &raw); err != nil {
+			return nil, errors.New("invalid route id")
+		}
+		canonical, ok := parseRoutePublicID(raw)
+		if !ok {
+			return nil, errors.New("invalid route id")
+		}
+		if seen[canonical] {
+			return nil, errors.New("invalid route id")
+		}
+		seen[canonical] = true
+		snap.Routes[i] = config.ProposalRoute{
+			ID:                   canonical,
+			Name:                 r.Name,
+			Description:          r.Description,
+			EvaluationOrder:      r.EvaluationOrder,
+			IsFinal:              r.IsFinal,
+			IsEnabled:            r.IsEnabled,
+			ConditionComposition: r.ConditionComposition,
+			Conditions:           r.Conditions,
+			Actions:              r.Actions,
+			Exclusions:           r.Exclusions,
+		}
+	}
+	return snap, nil
+}
+
+// normalizeProposalActions enforces the public action contract (ADR-007) on a
+// dry-run draft or backtest proposed configuration decoded from a public
+// request. Every action type must be the canonical public value and is
+// rewritten to the internal representation before the snapshot is persisted as
+// a configuration version or evaluated, so configuration history and simulated
+// executed-action evidence keep the internal key.
+func normalizeProposalActions(snap *config.ProposalSnapshot) error {
+	for ri := range snap.Routes {
+		for ai := range snap.Routes[ri].Actions {
+			internal, err := router.FromPublicActionType(snap.Routes[ri].Actions[ai].ActionType)
+			if err != nil {
+				return fmt.Errorf("route %d action %d: %w", ri, ai, err)
+			}
+			snap.Routes[ri].Actions[ai].ActionType = internal
+		}
+	}
+	return nil
+}
+
+// validateRouteExclusion enforces BR-007 AC9-11: only the supported
+// route-scoped exclusion categories are accepted, and every entry must carry a
+// usable value. Duration bounds must be bare non-negative integers because the
+// engine parses them with Atoi and no trimming.
+func validateRouteExclusion(e routeExclusionRequest) error {
+	switch e.ExclusionType {
+	case router.ExclusionTypeChannel, router.ExclusionTypeVideo,
+		router.ExclusionTypeTitle, router.ExclusionTypeWord:
+		if strings.TrimSpace(e.ExclusionValue) == "" {
+			return fmt.Errorf("%s exclusion value is required", e.ExclusionType)
+		}
+	case router.ExclusionTypeDurationMin, router.ExclusionTypeDurationMax:
+		n, err := strconv.Atoi(e.ExclusionValue)
+		if err != nil || n < 0 {
+			return fmt.Errorf("%s exclusion value must be a whole number of seconds at or above 0", e.ExclusionType)
+		}
+	default:
+		return fmt.Errorf("exclusion type %q is not supported", e.ExclusionType)
+	}
+	return nil
+}
+
+// validateDurationExclusionRange enforces BR-007 AC10: when one route supplies
+// both duration limits, the minimum must not exceed the maximum. The check is
+// scoped to a single route's own exclusion list.
+func validateDurationExclusionRange(exclusions []routeExclusionRequest) error {
+	const absent = -1
+	minSec, maxSec := absent, absent
+	for _, e := range exclusions {
+		n, err := strconv.Atoi(e.ExclusionValue)
+		if err != nil {
+			continue // per-entry validation already rejected unusable values
+		}
+		switch e.ExclusionType {
+		case router.ExclusionTypeDurationMin:
+			minSec = n
+		case router.ExclusionTypeDurationMax:
+			maxSec = n
+		}
+	}
+	if minSec != absent && maxSec != absent && minSec > maxSec {
+		return fmt.Errorf("duration minimum %d must not exceed duration maximum %d", minSec, maxSec)
+	}
+	return nil
 }
 
 // validateConditionOperator rejects operators outside the canonical set for a
@@ -928,6 +1316,30 @@ func validateConditionOperator(field router.ConditionField, op router.ConditionO
 }
 
 func (req *routeRequest) toRoute() *router.Route {
+	conditions := make([]router.RouteCondition, 0, len(req.Conditions))
+	for _, c := range req.Conditions {
+		conditions = append(conditions, router.RouteCondition{
+			ConditionIndex: c.ConditionIndex,
+			Field:          c.Field,
+			Operator:       c.Operator,
+			Value:          c.Value,
+		})
+	}
+	actions := make([]router.RouteAction, 0, len(req.Actions))
+	for _, a := range req.Actions {
+		actions = append(actions, router.RouteAction{
+			ActionIndex:      a.ActionIndex,
+			ActionType:       a.ActionType,
+			TargetPlaylistID: a.TargetPlaylistID,
+		})
+	}
+	exclusions := make([]router.RouteExclusion, 0, len(req.Exclusions))
+	for _, e := range req.Exclusions {
+		exclusions = append(exclusions, router.RouteExclusion{
+			ExclusionType:  e.ExclusionType,
+			ExclusionValue: e.ExclusionValue,
+		})
+	}
 	return &router.Route{
 		Name:                 req.Name,
 		Description:          req.Description,
@@ -935,10 +1347,121 @@ func (req *routeRequest) toRoute() *router.Route {
 		IsFinal:              req.IsFinal,
 		IsEnabled:            req.IsEnabled,
 		ConditionComposition: req.ConditionComposition,
-		Conditions:           req.Conditions,
-		Actions:              req.Actions,
-		Exclusions:           req.Exclusions,
+		Conditions:           conditions,
+		Actions:              actions,
+		Exclusions:           exclusions,
 	}
+}
+
+// routeConditionResponse is the public representation of a route condition.
+// route_id is the route's stable public UUID; the condition row's own `id`
+// remains its unchanged non-route identifier (ARS-004).
+type routeConditionResponse struct {
+	ID             int64                    `json:"id"`
+	RouteID        string                   `json:"route_id"`
+	ConditionIndex int                      `json:"condition_index"`
+	Field          router.ConditionField    `json:"field"`
+	Operator       router.ConditionOperator `json:"operator"`
+	Value          string                   `json:"value"`
+}
+
+// routeActionResponse is the public representation of a route action. It
+// always emits the canonical public action type, regardless of the stored
+// legacy value (ADR-007), and carries the route's stable public UUID.
+type routeActionResponse struct {
+	ID               int64  `json:"id"`
+	RouteID          string `json:"route_id"`
+	ActionIndex      int    `json:"action_index"`
+	ActionType       string `json:"action_type"`
+	TargetPlaylistID string `json:"target_playlist_id"`
+}
+
+// routeExclusionResponse is the public representation of a route exclusion.
+type routeExclusionResponse struct {
+	ID             int64                `json:"id"`
+	RouteID        string               `json:"route_id"`
+	ExclusionType  router.ExclusionType `json:"exclusion_type"`
+	ExclusionValue string               `json:"exclusion_value"`
+}
+
+// routeResponse is the public configuration representation of a route. Its
+// `id` is the stable public UUID (ARS-004) and it carries no Route List
+// statistics projection (ARS-001).
+type routeResponse struct {
+	ID                   string                   `json:"id"`
+	Name                 string                   `json:"name"`
+	Description          string                   `json:"description"`
+	EvaluationOrder      int                      `json:"evaluation_order"`
+	IsFinal              bool                     `json:"is_final"`
+	IsEnabled            bool                     `json:"is_enabled"`
+	ConditionComposition string                   `json:"condition_composition"`
+	Conditions           []routeConditionResponse `json:"conditions"`
+	Actions              []routeActionResponse    `json:"actions"`
+	Exclusions           []routeExclusionResponse `json:"exclusions"`
+	CreatedAt            string                   `json:"created_at"`
+	UpdatedAt            string                   `json:"updated_at"`
+	DeletedAt            string                   `json:"deleted_at,omitempty"`
+}
+
+// routeListEntry adds the Route List statistics projection to the public
+// route configuration shape (ARS-001).
+type routeListEntry struct {
+	routeResponse
+	MatchCount int64 `json:"match_count"`
+}
+
+// newRouteResponse projects an internal route onto the public DTO. A route
+// without a public UUID cannot be represented: the caller must fail the
+// endpoint rather than emit an internal integer or omit identity (ARS-004).
+func newRouteResponse(r *router.Route) (routeResponse, error) {
+	if r.PublicID == "" {
+		return routeResponse{}, fmt.Errorf("route %d has no public identity", r.ID)
+	}
+	conditions := make([]routeConditionResponse, 0, len(r.Conditions))
+	for _, c := range r.Conditions {
+		conditions = append(conditions, routeConditionResponse{
+			ID:             c.ID,
+			RouteID:        r.PublicID,
+			ConditionIndex: c.ConditionIndex,
+			Field:          c.Field,
+			Operator:       c.Operator,
+			Value:          c.Value,
+		})
+	}
+	actions := make([]routeActionResponse, 0, len(r.Actions))
+	for _, a := range r.Actions {
+		actions = append(actions, routeActionResponse{
+			ID:               a.ID,
+			RouteID:          r.PublicID,
+			ActionIndex:      a.ActionIndex,
+			ActionType:       router.ToPublicActionType(a.ActionType),
+			TargetPlaylistID: a.TargetPlaylistID,
+		})
+	}
+	exclusions := make([]routeExclusionResponse, 0, len(r.Exclusions))
+	for _, e := range r.Exclusions {
+		exclusions = append(exclusions, routeExclusionResponse{
+			ID:             e.ID,
+			RouteID:        r.PublicID,
+			ExclusionType:  e.ExclusionType,
+			ExclusionValue: e.ExclusionValue,
+		})
+	}
+	return routeResponse{
+		ID:                   r.PublicID,
+		Name:                 r.Name,
+		Description:          r.Description,
+		EvaluationOrder:      r.EvaluationOrder,
+		IsFinal:              r.IsFinal,
+		IsEnabled:            r.IsEnabled,
+		ConditionComposition: r.ConditionComposition,
+		Conditions:           conditions,
+		Actions:              actions,
+		Exclusions:           exclusions,
+		CreatedAt:            r.CreatedAt,
+		UpdatedAt:            r.UpdatedAt,
+		DeletedAt:            r.DeletedAt,
+	}, nil
 }
 
 func writeSSE(w http.ResponseWriter, ev pipeline.Event) error {

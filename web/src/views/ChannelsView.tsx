@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Check, AlertTriangle, TrendingDown, Copy, ExternalLink, Star, Pin, Sparkles, Repeat } from 'lucide-react'
 import * as api from '../api/client'
+import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
+import { shortRouteId } from '../lib/route'
 import type { ChannelStats, ChannelDetail, Advisory, VideoProvenance } from '../types'
 
 const advisoryLabels: Record<Advisory['advisory_type'], string> = {
@@ -255,8 +257,13 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
           <div className="card" style={{ marginBottom: 16 }}>
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
               {channel.matched_routes.map((r) => (
-                <li key={r} style={{ padding: '6px 0' }}>
-                  {r}
+                // Keyed by route UUID: same-named routes stay distinct rows.
+                <li key={r.route_id} style={{ padding: '6px 0' }}>
+                  {r.name} <span className="route-short-id">({shortRouteId(r.route_id)})</span>
+                  <span style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+                    {' '}
+                    — {r.match_count} match{r.match_count === 1 ? '' : 'es'}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -296,13 +303,58 @@ export function ChannelsView() {
   const navigate = useNavigate()
   const [channels, setChannels] = useState<ChannelStats[]>([])
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  const retryButtonRef = useRef<HTMLButtonElement>(null)
+  const firstRowRef = useRef<HTMLTableRowElement>(null)
+  const recoveredRef = useRef(false)
+  const { addToast } = useToast()
 
   useEffect(() => {
-    api.listChannels().then((c) => {
-      setChannels(c)
-      setLoading(false)
-    })
+    let cancelled = false
+    api.listChannels()
+      .then((c) => {
+        if (cancelled) return
+        setChannels(c)
+        setFetchError(false)
+        setLoading(false)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setFetchError(true)
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
+
+  // Focus the Retry button whenever the view settles into the fetch-error
+  // state: on first entry and again after a failed retry re-enables it.
+  useEffect(() => {
+    if (fetchError && !retrying) retryButtonRef.current?.focus()
+  }, [fetchError, retrying])
+
+  // After a successful retry, move focus to the first channel row.
+  useEffect(() => {
+    if (!recoveredRef.current || loading || fetchError) return
+    recoveredRef.current = false
+    firstRowRef.current?.focus()
+  })
+
+  async function handleRetry() {
+    setRetrying(true)
+    try {
+      const c = await api.listChannels()
+      setChannels(c)
+      setFetchError(false)
+      recoveredRef.current = true
+    } catch {
+      addToast('Retry failed. Please try again.', 'error')
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   if (channelId) {
     return <ChannelDetailView channelId={channelId} onBack={() => navigate('/analytics/channels')} />
@@ -315,7 +367,14 @@ export function ChannelsView() {
       <div className="page-header">
         <h1 className="page-title">Channel Analysis</h1>
       </div>
-      {channels.length === 0 ? (
+      {fetchError ? (
+        <FetchErrorRegion
+          ref={retryButtonRef}
+          message="Failed to load channels. Check your connection and try again."
+          onRetry={handleRetry}
+          retrying={retrying}
+        />
+      ) : channels.length === 0 ? (
         <div className="card empty-state">No channel data yet.</div>
       ) : (
         <div className="card">
@@ -330,8 +389,8 @@ export function ChannelsView() {
               </tr>
             </thead>
             <tbody>
-              {channels.map((c) => (
-                <tr key={c.channel_id}>
+              {channels.map((c, i) => (
+                <tr key={c.channel_id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
                   <td data-label="Channel">
                     <Link to={`/analytics/channels/${c.channel_id}`}>{c.channel_name}</Link>
                     {(c.advisories ?? []).length > 0 && (

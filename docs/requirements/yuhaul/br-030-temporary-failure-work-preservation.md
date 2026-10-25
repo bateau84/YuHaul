@@ -5,7 +5,7 @@ description: Temporary API, quota, authorization, and runtime failures do not si
 tags: [requirement, failure, resilience, work-preservation, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

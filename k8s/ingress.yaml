@@ -1,3 +1,56 @@
+# YuHaul Ingresses — two-route Traefik pattern (ADR-010 / ARS-003).
+#
+# HTTP (entrypoint `web`): redirect-only. Attaches ONLY the yuhaul-https-redirect
+# Middleware and targets the endpoint-free yuhaul-http-sink Service. It never
+# references the yuhaul Service, so plain HTTP cannot be dispatched to the
+# application even if the redirect Middleware is missing or broken (the request
+# fails at the sink or has no route instead). Router priority is pinned to `1`
+# so a cert-manager HTTP-01 solver Ingress (default priority = rule length, i.e.
+# greater than 1) deterministically outranks this sink while a challenge is
+# active; the challenge reaches only the solver, never the sink or YuHaul.
+# Requires static providers.kubernetesIngress.allowEmptyServices: true;
+# otherwise Traefik omits this empty-sink router before its redirect can run.
+#
+# HTTPS (entrypoint `websecure`): the only route to the YuHaul Service. The
+# BasicAuth Middleware runs on the whole `/` Prefix route (SPA, /api/, OAuth
+# callback, SSE alike) and TLS terminates with Secret yuhaul-tls. Fail-closed:
+# if the yuhaul-auth Middleware or the yuhaul-basic-auth Secret is missing or
+# malformed, Traefik cannot build this router and answers 404 rather than
+# forwarding the request to YuHaul. cert-manager ingress-shim observes the
+# `cert-manager.io/cluster-issuer` annotation and issues/renews yuhaul-tls from
+# this Ingress's `spec.tls` block; the issuer NAME is a deployment patch point,
+# and the repository supplies no ClusterIssuer, ACME account key, or DNS
+# credential.
+#
+# The yuhaul-basic-auth Secret is provisioned by the operator outside this
+# repository; no credential or key material belongs in source control. The
+# yuhaul-tls Secret is owned by cert-manager while this annotation is present —
+# do not create or mutate it by hand.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: yuhaul-http-redirect
+  namespace: default
+  labels:
+    app: yuhaul
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.middlewares: default-yuhaul-https-redirect@kubernetescrd
+    traefik.ingress.kubernetes.io/router.priority: "1"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: yuhaul.bateau.cloud
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: yuhaul-http-sink
+                port:
+                  number: 80
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -6,10 +59,17 @@ metadata:
   labels:
     app: yuhaul
   annotations:
-    # If your cluster uses a different ingress class, change this value.
-    kubernetes.io/ingress.class: nginx
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-yuhaul-auth@kubernetescrd
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    acme.cert-manager.io/http01-ingress-ingressclassname: traefik
 spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - yuhaul.bateau.cloud
+      secretName: yuhaul-tls
   rules:
     - host: yuhaul.bateau.cloud
       http:

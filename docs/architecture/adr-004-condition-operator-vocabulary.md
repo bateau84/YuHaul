@@ -5,7 +5,7 @@ description: Realize the accepted design spec's condition-operator vocabulary (c
 tags: [architecture, decision, yuhaul, routes, conditions, operators, vocabulary]
 ---
 
-**Status:** proposed
+**Status:** accepted
 
 ## Depends on
 

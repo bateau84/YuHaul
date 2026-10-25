@@ -5,7 +5,7 @@ description: Thread the existing youtube.WithBaseURL option through the shipped 
 tags: [architecture, decision, yuhaul, youtube, provider-seam, product-acceptance]
 ---
 
-**Status:** proposed
+**Status:** accepted
 
 ## Depends on
 
@@ -81,8 +81,9 @@ The base URL remains the *only* substitutable dimension of the client. OAuth tok
 
 ## Confirmation
 
-- Product Acceptance re-run of PA-001 with `YUHAUL_YOUTUBE_BASE_URL` pointed at a fake YouTube serving recorded responses: discovery populates videos, `run.quota_cost > 0` is observed through the real quota ledger, and no binary modification is required.
-- Unit test: `discovery.WithBaseURL` and `pipeline.WithYouTubeBaseURL` produce a client whose requests hit the override URL (verify via `httptest.Server` request path).
+The decision is accepted and its seam is implemented. Current source wires `YUHAUL_YOUTUBE_BASE_URL` through the discovery engine, action executor, and metadata fetcher to `youtube.WithBaseURL`. The unit tests `TestWithBaseURLUsesOverrideURL` and `TestExecutor_WithYouTubeBaseURLUsesOverrideURL` exercise requests against an `httptest.Server`. The independent [pre-merge readiness rerun](../ephemeral-reports/critic/yuhaul-pre-merge-readiness/rerun-review.md) records the three-site wiring, successful unit/integration/build/vet checks, and resolution of the former provider-seam MAJOR.
+
+Still outstanding: run the assembled-binary PA-001 confirmation with `YUHAUL_YOUTUBE_BASE_URL` pointing at the fake provider. The former gate explicitly recorded that this specific confirmation had not yet been executed; this is a remaining product-acceptance proof, not an unresolved architecture option or a claim that the run has passed.
 
 ## Open questions
 

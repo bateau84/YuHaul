@@ -4,16 +4,18 @@ import { RouteEditor } from './RouteEditor'
 import * as mock from '../api/mock'
 import type { Route } from '../types'
 
+const ROUTE_UUID = '11111111-2222-4333-8444-555555555555'
+
 const routeFixture = (overrides: Partial<Route> = {}): Route => ({
-  id: 1,
+  id: ROUTE_UUID,
   name: 'Music Discovery',
   description: '',
   evaluation_order: 1,
   is_final: false,
   is_enabled: true,
   condition_composition: 'AND',
-  conditions: [{ id: 101, route_id: 1, condition_index: 0, field: 'title', operator: 'contains', value: 'music' }],
-  actions: [{ id: 201, route_id: 1, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', action_index: 0 }],
+  conditions: [{ id: 101, route_id: ROUTE_UUID, condition_index: 0, field: 'title', operator: 'contains', value: 'music' }],
+  actions: [{ id: 201, route_id: ROUTE_UUID, action_type: 'add_to_playlist', target_playlist_id: 'PLmusic', action_index: 0 }],
   exclusions: [],
   created_at: '2026-08-01T10:00:00Z',
   updated_at: '2026-09-08T10:00:00Z',
@@ -34,7 +36,6 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture({ name: '', conditions: [], actions: [] })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -58,7 +59,6 @@ describe('RouteEditor', () => {
           actions: null as unknown as RouteAction[],
           exclusions: null as unknown as RouteExclusion[],
         })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -77,7 +77,6 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture({ name: 'a'.repeat(101), conditions: [], actions: [] })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -91,12 +90,12 @@ describe('RouteEditor', () => {
     expect(onSave).not.toHaveBeenCalled()
   })
 
-  it('shows validation error when name is not unique', async () => {
+  it('accepts a duplicate display name (identity is the UUID, not the name)', async () => {
     const onSave = vi.fn()
+    const duplicateUuid = '99999999-8888-4777-a666-555555555555'
     render(
       <RouteEditor
-        route={routeFixture({ id: 2, name: 'Ambient' })}
-        existingRoutes={[routeFixture({ id: 1, name: 'Ambient' })]}
+        route={routeFixture({ id: duplicateUuid, name: 'Ambient' })}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -104,10 +103,9 @@ describe('RouteEditor', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
 
-    await waitFor(() =>
-      expect(screen.getByText('A route with this name already exists')).toBeInTheDocument()
-    )
-    expect(onSave).not.toHaveBeenCalled()
+    // BR-003 AC10 (amended): a name matching another route is not an error.
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+    expect(screen.queryByText('A route with this name already exists')).not.toBeInTheDocument()
   })
 
   it('shows per-condition value validation errors', async () => {
@@ -115,9 +113,8 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture({
-          conditions: [{ id: 101, route_id: 1, condition_index: 0, field: 'title', operator: 'contains', value: '' }],
+          conditions: [{ id: 101, route_id: ROUTE_UUID, condition_index: 0, field: 'title', operator: 'contains', value: '' }],
         })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -134,9 +131,8 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture({
-          actions: [{ id: 201, route_id: 1, action_type: 'playlist_insert', target_playlist_id: '', action_index: 0 }],
+          actions: [{ id: 201, route_id: ROUTE_UUID, action_type: 'add_to_playlist', target_playlist_id: '', action_index: 0 }],
         })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -153,7 +149,6 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture({ exclusions: [] })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -178,7 +173,6 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture({ exclusions: [] })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -203,7 +197,6 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture()}
-        existingRoutes={[]}
         onSave={() => {}}
         onCancel={() => {}}
         onDelete={onDelete}
@@ -214,7 +207,7 @@ describe('RouteEditor', () => {
 
     await waitFor(() => expect(screen.getByRole('alertdialog')).toBeInTheDocument())
     const dialog = screen.getByRole('alertdialog')
-    expect(within(dialog).getByText(/Delete route 'Music Discovery'?/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/Delete route 'Music Discovery \(11111111\)'?/)).toBeInTheDocument()
 
     fireEvent.click(within(dialog).getByRole('button', { name: /^Delete$/i }))
 
@@ -226,7 +219,6 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture()}
-        existingRoutes={[]}
         onSave={() => {}}
         onCancel={() => {}}
         onDelete={onDelete}
@@ -249,7 +241,6 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture()}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -265,7 +256,6 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture()}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -281,9 +271,8 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture({
-          conditions: [{ id: 101, route_id: 1, condition_index: 0, field: 'duration_seconds', operator: 'between', value: '180,300' }],
+          conditions: [{ id: 101, route_id: ROUTE_UUID, condition_index: 0, field: 'duration_seconds', operator: 'between', value: '180,300' }],
         })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -306,9 +295,8 @@ describe('RouteEditor', () => {
     render(
       <RouteEditor
         route={routeFixture({
-          conditions: [{ id: 101, route_id: 1, condition_index: 0, field: 'duration_seconds', operator: 'greater_than', value: 'abc' }],
+          conditions: [{ id: 101, route_id: ROUTE_UUID, condition_index: 0, field: 'duration_seconds', operator: 'greater_than', value: 'abc' }],
         })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -328,7 +316,7 @@ describe('RouteEditor', () => {
           conditions: [
             {
               id: 101,
-              route_id: 1,
+              route_id: ROUTE_UUID,
               condition_index: 0,
               field: 'duration_seconds',
               operator: 'between',
@@ -336,7 +324,6 @@ describe('RouteEditor', () => {
             },
           ],
         })}
-        existingRoutes={[]}
         onSave={onSave}
         onCancel={() => {}}
       />
@@ -348,5 +335,150 @@ describe('RouteEditor', () => {
       expect(screen.getByText('Enter two numbers separated by a comma')).toBeInTheDocument()
     )
     expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('moves focus to Cancel on open, traps Tab inside the delete dialog, and restores focus on Escape', async () => {
+    const onDelete = vi.fn()
+    render(
+      <RouteEditor
+        route={routeFixture()}
+        onSave={() => {}}
+        onCancel={() => {}}
+        onDelete={onDelete}
+      />
+    )
+
+    const deleteButton = screen.getByRole('button', { name: /^Delete$/ })
+    deleteButton.focus()
+    fireEvent.click(deleteButton)
+
+    const dialog = await waitFor(() => screen.getByRole('alertdialog'))
+    const cancel = within(dialog).getByRole('button', { name: /^Cancel$/ })
+    const confirm = within(dialog).getByRole('button', { name: /^Delete$/ })
+    await waitFor(() => expect(cancel).toHaveFocus())
+
+    // Shift+Tab from the first control wraps to the last one instead of
+    // escaping into the page behind the dialog.
+    fireEvent.keyDown(cancel, { key: 'Tab', shiftKey: true })
+    expect(confirm).toHaveFocus()
+    // Tab from the last control wraps back to the first.
+    fireEvent.keyDown(confirm, { key: 'Tab' })
+    expect(cancel).toHaveFocus()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(deleteButton).toHaveFocus()
+    expect(onDelete).not.toHaveBeenCalled()
+  })
+
+  it('asks before discarding unsaved changes and keeps editing when asked to', async () => {
+    const onCancel = vi.fn()
+    render(<RouteEditor route={routeFixture()} onSave={() => {}} onCancel={onCancel} />)
+
+    fireEvent.change(screen.getByLabelText(/Route name/i), { target: { value: 'Renamed route' } })
+    const cancelButton = screen.getByRole('button', { name: /^Cancel$/ })
+    cancelButton.focus()
+    fireEvent.click(cancelButton)
+
+    const dialog = await waitFor(() => screen.getByRole('alertdialog'))
+    expect(within(dialog).getByText('Discard unsaved changes?')).toBeInTheDocument()
+    const keepEditing = within(dialog).getByRole('button', { name: /Keep editing/i })
+    await waitFor(() => expect(keepEditing).toHaveFocus())
+
+    fireEvent.click(keepEditing)
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(cancelButton).toHaveFocus()
+  })
+
+  it('leaves the editor when unsaved changes are discarded', async () => {
+    const onCancel = vi.fn()
+    render(<RouteEditor route={routeFixture()} onSave={() => {}} onCancel={onCancel} />)
+
+    fireEvent.change(screen.getByLabelText(/Route name/i), { target: { value: 'Renamed route' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Cancel$/ }))
+
+    const dialog = await waitFor(() => screen.getByRole('alertdialog'))
+    fireEvent.click(within(dialog).getByRole('button', { name: /Discard/i }))
+
+    await waitFor(() => expect(onCancel).toHaveBeenCalled())
+  })
+
+  it('cancels immediately when there are no unsaved changes', async () => {
+    const onCancel = vi.fn()
+    render(<RouteEditor route={routeFixture()} onSave={() => {}} onCancel={onCancel} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^Cancel$/ }))
+
+    expect(onCancel).toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('shows the v1 action type selector with the playlist action selected', async () => {
+    render(<RouteEditor route={routeFixture()} onSave={() => {}} onCancel={() => {}} />)
+
+    const typeSelect = await waitFor(() => screen.getByLabelText('Action type'))
+    expect(typeSelect).toHaveValue('add_to_playlist')
+    // BR-004 AC8: v1 offers exactly one action type.
+    expect(within(typeSelect).getAllByRole('option')).toHaveLength(1)
+  })
+
+  it('rejects saving an action whose type is not supported', async () => {
+    const onSave = vi.fn()
+    render(
+      <RouteEditor
+        route={routeFixture({
+          actions: [
+            {
+              id: 201,
+              route_id: ROUTE_UUID,
+              action_type: 'unsupported' as never,
+              target_playlist_id: 'PLmusic',
+              action_index: 0,
+            },
+          ],
+        })}
+        onSave={onSave}
+        onCancel={() => {}}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
+
+    await waitFor(() => expect(screen.getByText('Select a supported action type')).toBeInTheDocument())
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('appends a new action row that defaults to the playlist action type', async () => {
+    render(<RouteEditor route={routeFixture()} onSave={() => {}} onCancel={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add playlist action/i }))
+
+    const typeSelects = screen.getAllByLabelText('Action type')
+    expect(typeSelects).toHaveLength(2)
+    expect(typeSelects[1]).toHaveValue('add_to_playlist')
+  })
+
+  it('shows the full UUID and timestamps with a copy control in edit mode', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<RouteEditor route={routeFixture()} onSave={() => {}} onCancel={() => {}} />)
+
+    // The full canonical UUID (not only the short suffix) is visible and copyable.
+    expect(screen.getByText(ROUTE_UUID)).toBeInTheDocument()
+    expect(screen.getByText(new Date('2026-08-01T10:00:00Z').toLocaleString(), { exact: false })).toBeInTheDocument()
+    expect(screen.getByText(new Date('2026-09-08T10:00:00Z').toLocaleString(), { exact: false })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Copy route ID/i }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(ROUTE_UUID))
+    await waitFor(() => expect(screen.getByText('Route ID copied')).toBeInTheDocument())
+  })
+
+  it('hides the route ID metadata for an unsaved new route', () => {
+    render(<RouteEditor onSave={() => {}} onCancel={() => {}} />)
+
+    expect(screen.queryByText('Route ID')).not.toBeInTheDocument()
   })
 })

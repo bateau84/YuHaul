@@ -5,7 +5,7 @@ description: User can inspect historical runs and understand why videos were acc
 tags: [requirement, inspection, history, run-history, transparency, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

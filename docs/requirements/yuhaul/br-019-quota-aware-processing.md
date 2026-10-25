@@ -5,7 +5,7 @@ description: Processing avoids unnecessary external API expenditure
 tags: [requirement, quota, efficiency, cost-awareness, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

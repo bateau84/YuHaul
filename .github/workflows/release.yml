@@ -1,0 +1,170 @@
+name: Verify and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+# Do not cancel active publication. GitHub can supersede pending runs.
+concurrency:
+  group: release-${{ github.repository }}-${{ github.event_name == 'push' && 'main' || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  verify-go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - run: go test -tags=integration -count=1 ./e2e/...
+
+  verify-web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  verify-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - name: Check Conventional Commit PR title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: npm run check-pr-title
+
+  verify-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build actual runtime image
+        run: docker build --platform linux/amd64 -t yuhaul-smoke:verify .
+      - name: Verify default entrypoint with fresh volumes
+        run: sh scripts/smoke-image.sh yuhaul-smoke:verify
+
+  release:
+    needs: [verify-go, verify-web, verify-release, verify-image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      published: ${{ steps.release.outputs.published }}
+      version: ${{ steps.release.outputs.version }}
+      git_tag: ${{ steps.release.outputs.git_tag }}
+      git_head: ${{ steps.release.outputs.git_head }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - id: release
+        run: npm run release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  image:
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_TAG: ${{ needs.release.outputs.git_tag }}
+      RELEASE_SHA: ${{ needs.release.outputs.git_head }}
+    steps:
+      - name: Validate release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$RELEASE_TAG" == "v$RELEASE_VERSION" ]]
+          [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$RELEASE_SHA" == "$GITHUB_SHA" ]]
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release.outputs.git_head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assert tag and derive repository-scoped image name
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]]
+          [[ "$(git rev-parse "$RELEASE_TAG^{commit}")" == "$RELEASE_SHA" ]]
+          # New GHCR packages default private. Administrators must verify any
+          # existing destination is private before enabling this workflow.
+          # The Packages REST API documents classic-PAT authentication; do not
+          # add that credential or a token-incompatible preflight here.
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ needs.release.outputs.git_tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.release.outputs.git_head }}
+      - name: Record published image identity
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          printf 'Image: `%s:%s`\n\nDigest: `%s@%s`\n' "$IMAGE" "$RELEASE_TAG" "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

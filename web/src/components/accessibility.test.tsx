@@ -9,7 +9,7 @@ import { useToast } from '../hooks/useToast'
 import type { Route } from '../types'
 
 const testRoute: Route = {
-  id: 1,
+  id: '11111111-2222-4333-8444-555555555555',
   name: 'Music Discovery',
   description: '',
   evaluation_order: 1,
@@ -49,7 +49,7 @@ describe('accessibility', () => {
     const toggle = screen.getByRole('switch')
     expect(toggle).toBeInTheDocument()
     expect(toggle).toHaveAttribute('aria-checked', 'true')
-    expect(toggle).toHaveAttribute('aria-label', 'Disable route Music Discovery')
+    expect(toggle).toHaveAttribute('aria-label', 'Disable route Music Discovery (11111111)')
   })
 
   it('ConfirmDialog labels itself via aria-labelledby', () => {

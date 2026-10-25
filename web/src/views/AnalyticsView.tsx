@@ -12,6 +12,7 @@ import {
   Bar,
 } from 'recharts'
 import * as api from '../api/client'
+import { routeLabel } from '../lib/route'
 import type { TrendBucket, RouteMatchRate } from '../types'
 
 interface CombinedBucket extends TrendBucket {
@@ -22,6 +23,37 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString()
 }
 
+const PRESETS = ['7d', '30d', '90d', 'all']
+
+interface RangeParams {
+  from?: string
+  to?: string
+  error?: string
+}
+
+// Converts the selected range into the RFC3339 from/to parameters the
+// analytics endpoints filter on. The backend treats `to` as an exclusive
+// upper bound, so a custom to-date is extended to the next day's midnight
+// to include the whole selected day.
+function computeRangeParams(range: string, customFrom: string, customTo: string): RangeParams {
+  if (range === 'custom') {
+    if (!customFrom || !customTo) return {}
+    if (customFrom > customTo) {
+      return { error: 'From date must be on or before to date.' }
+    }
+    const to = new Date(`${customTo}T00:00:00Z`)
+    to.setUTCDate(to.getUTCDate() + 1)
+    return { from: `${customFrom}T00:00:00Z`, to: to.toISOString() }
+  }
+  const now = new Date()
+  if (range === 'all') return { from: '1970-01-01T00:00:00Z' }
+  const days = Number.parseInt(range, 10)
+  return {
+    from: new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString(),
+    to: now.toISOString(),
+  }
+}
+
 function summarizeTrends(data: CombinedBucket[]): string {
   if (data.length === 0) return 'No trend data available.'
   const totalDiscovered = data.reduce((sum, b) => sum + b.discovered, 0)
@@ -30,25 +62,31 @@ function summarizeTrends(data: CombinedBucket[]): string {
   return `${data.length} periods. ${totalDiscovered} discovered, ${totalAccepted} accepted. Average acceptance rate ${avgRate.toFixed(1)}%.`
 }
 
+// Aggregates per-bucket rates by route UUID, not display name: two routes may
+// share a name and MUST stay separate series (ARS-004). The returned key is
+// the chart column/dataKey, which doubles as the disambiguated legend label.
 function summarizeRouteMatchRates(rates: RouteMatchRate[]): string {
   if (rates.length === 0) return 'No route match rate data available.'
-  const byRoute = new Map<string, { evaluated: number; matched: number }>()
+  const byRoute = new Map<string, { label: string; evaluated: number; matched: number }>()
   for (const r of rates) {
-    const current = byRoute.get(r.route_name) ?? { evaluated: 0, matched: 0 }
+    const label = routeLabel(r.route_name, r.route_id)
+    const current = byRoute.get(r.route_id) ?? { label, evaluated: 0, matched: 0 }
     current.evaluated += r.evaluated
     current.matched += r.matched
-    byRoute.set(r.route_name, current)
+    byRoute.set(r.route_id, current)
   }
-  return Array.from(byRoute.entries())
-    .map(([name, { evaluated, matched }]) => {
+  return Array.from(byRoute.values())
+    .map(({ label, evaluated, matched }) => {
       const rate = evaluated > 0 ? (matched / evaluated) * 100 : 0
-      return `${name}: ${rate.toFixed(1)}% match rate`
+      return `${label}: ${rate.toFixed(1)}% match rate`
     })
     .join('. ')
 }
 
 export function AnalyticsView() {
   const [range, setRange] = useState('30d')
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
   const [data, setData] = useState<TrendBucket[]>([])
   const [routeRates, setRouteRates] = useState<RouteMatchRate[]>([])
   const [loading, setLoading] = useState(true)
@@ -60,9 +98,20 @@ export function AnalyticsView() {
   const routesId = useId()
   const volumesId = useId()
 
+  const rangeParams = useMemo(
+    () => computeRangeParams(range, customFrom, customTo),
+    [range, customFrom, customTo]
+  )
+  // An incomplete custom range (only one date set) must not trigger a
+  // request: the backend would silently apply its default 30d window.
+  const incompleteCustom = range === 'custom' && !rangeParams.from && !rangeParams.error
+
   useEffect(() => {
+    // A half-entered or invalid custom range keeps the previously loaded
+    // charts on screen instead of issuing a misleading request.
+    if (rangeParams.error || incompleteCustom) return
     let cancelled = false
-    Promise.all([api.getTrends(), api.getRouteMatchRates()])
+    Promise.all([api.getTrends(rangeParams.from, rangeParams.to), api.getRouteMatchRates(rangeParams.from, rangeParams.to)])
       .then(([trends, rates]) => {
         if (cancelled) return
         setData(trends.buckets)
@@ -77,7 +126,7 @@ export function AnalyticsView() {
     return () => {
       cancelled = true
     }
-  }, [range, retryKey])
+  }, [rangeParams.from, rangeParams.to, rangeParams.error, incompleteCustom, retryKey])
 
   function retry() {
     setLoading(true)
@@ -92,18 +141,26 @@ export function AnalyticsView() {
     }))
   }, [data])
 
+  // One entry per route UUID, keeping same-named routes as distinct series.
+  const routeSeries = useMemo(() => {
+    const byId = new Map<string, string>()
+    for (const r of routeRates) {
+      if (!byId.has(r.route_id)) byId.set(r.route_id, routeLabel(r.route_name, r.route_id))
+    }
+    return Array.from(byId, ([route_id, label]) => ({ route_id, label }))
+  }, [routeRates])
+
   const routeRatePivot = useMemo(() => {
     const buckets = Array.from(new Set(routeRates.map((r) => r.bucket))).sort()
-    const routeNames = Array.from(new Set(routeRates.map((r) => r.route_name)))
     return buckets.map((bucket) => {
       const row: Record<string, number | string> = { bucket }
-      for (const name of routeNames) {
-        const rate = routeRates.find((r) => r.bucket === bucket && r.route_name === name)
-        row[name] = rate ? Number((rate.match_rate * 100).toFixed(1)) : 0
+      for (const { route_id, label } of routeSeries) {
+        const rate = routeRates.find((r) => r.bucket === bucket && r.route_id === route_id)
+        row[label] = rate ? Number((rate.match_rate * 100).toFixed(1)) : 0
       }
       return row
     })
-  }, [routeRates])
+  }, [routeRates, routeSeries])
 
   if (loading) return <div className="empty-state">Loading analytics...</div>
   if (error) {
@@ -120,8 +177,8 @@ export function AnalyticsView() {
     <>
       <div className="page-header">
         <h1 className="page-title">Analytics</h1>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {['7d', '30d', '90d'].map((r) => (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {PRESETS.map((r) => (
             <button
               key={r}
               className={`button ${range === r ? 'button--primary' : ''}`}
@@ -131,11 +188,58 @@ export function AnalyticsView() {
               {r}
             </button>
           ))}
+          <button
+            className={`button ${range === 'custom' ? 'button--primary' : ''}`}
+            onClick={() => setRange('custom')}
+            aria-pressed={range === 'custom'}
+          >
+            Custom
+          </button>
           <button className="button" onClick={() => setShowTable((v) => !v)} aria-pressed={showTable}>
             {showTable ? 'Hide data table' : 'Show data table'}
           </button>
         </div>
       </div>
+
+      {range === 'custom' && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <h2 className="section-title">Custom date range</h2>
+          <div style={{ display: 'grid', gap: 12, gridTemplateColumns: '1fr 1fr' }}>
+            <div>
+              <label className="form-label" htmlFor="analytics-from-date">
+                From date
+              </label>
+              <input
+                id="analytics-from-date"
+                type="date"
+                className="form-input"
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="form-label" htmlFor="analytics-to-date">
+                To date
+              </label>
+              <input
+                id="analytics-to-date"
+                type="date"
+                className="form-input"
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+              />
+            </div>
+          </div>
+          <p className="form-label" style={{ marginBottom: 0 }}>
+            Format: YYYY-MM-DD
+          </p>
+          {rangeParams.error && (
+            <p role="alert" style={{ color: 'var(--color-status-rejected)' }}>
+              {rangeParams.error}
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="card" style={{ marginBottom: 16 }}>
         <h2 className="section-title" id={trendsId}>Acceptance rate</h2>
@@ -207,15 +311,15 @@ export function AnalyticsView() {
               <YAxis unit="%" />
               <Tooltip formatter={(value) => [`${value}%`, 'Match rate']} />
               <Legend />
-              {Array.from(new Set(routeRates.map((r) => r.route_name))).map((name, i) => {
+              {routeSeries.map(({ route_id, label }, i) => {
                 const colors = ['var(--color-status-accepted)', 'var(--color-status-in-progress)', 'var(--color-status-deferred)']
                 return (
                   <Line
-                    key={name}
+                    key={route_id}
                     type="monotone"
-                    dataKey={name}
+                    dataKey={label}
                     stroke={colors[i % colors.length]}
-                    name={name}
+                    name={label}
                     strokeWidth={2}
                     dot={{ r: 4 }}
                     activeDot={{ r: 6 }}

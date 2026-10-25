@@ -5,7 +5,7 @@ description: Quota-limited work deferred rather than lost or falsely rejected
 tags: [requirement, quota, deferral, resilience, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

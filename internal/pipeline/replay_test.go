@@ -60,9 +60,9 @@ type replayDeps struct {
 	metaStore   *metadata.Store
 }
 
-func createReplayRouteWithAction(t *testing.T, ctx context.Context, deps *replayDeps, name, value, playlistID string) int64 {
+func createReplayRouteWithAction(t *testing.T, ctx context.Context, deps *replayDeps, name, value, playlistID string) *router.Route {
 	t.Helper()
-	routeID, err := deps.routerStore.CreateRoute(ctx, &router.Route{
+	r := &router.Route{
 		Name:                 name,
 		EvaluationOrder:      1,
 		IsEnabled:            true,
@@ -83,9 +83,10 @@ func createReplayRouteWithAction(t *testing.T, ctx context.Context, deps *replay
 				TargetPlaylistID: playlistID,
 			},
 		},
-	})
+	}
+	_, err := deps.routerStore.CreateRoute(ctx, r)
 	require.NoError(t, err)
-	return routeID
+	return r
 }
 
 func createRetainedVideo(t *testing.T, ctx context.Context, deps *replayDeps, runID int64, videoID, channelID, title string) *state.Video {
@@ -111,7 +112,7 @@ func TestReplay_EvaluatesRetainedVideosWithoutMutations(t *testing.T) {
 	deps, cleanup := setupReplayPipeline(t)
 	defer cleanup()
 
-	routeID := createReplayRouteWithAction(t, ctx, deps, "Jazz", "jazz", "PLjazz")
+	route := createReplayRouteWithAction(t, ctx, deps, "Jazz", "jazz", "PLjazz")
 
 	prodRun := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
 	prodRunID, err := deps.stateStore.CreateRun(ctx, prodRun)
@@ -136,7 +137,7 @@ func TestReplay_EvaluatesRetainedVideosWithoutMutations(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, decisions, 1)
 	assert.Equal(t, state.RouteDecisionMatched, decisions[0].Decision)
-	assert.Equal(t, routeID, decisions[0].RouteID)
+	assert.Equal(t, route.ID, decisions[0].RouteID)
 
 	actions, err := deps.stateStore.GetExecutedActionsForVideo(ctx, video.ID)
 	require.NoError(t, err)
@@ -259,7 +260,7 @@ func TestBacktest_UsesProposedConfig(t *testing.T) {
 	deps, cleanup := setupReplayPipeline(t)
 	defer cleanup()
 
-	activeRouteID := createReplayRouteWithAction(t, ctx, deps, "Rock", "rock", "PLrock")
+	activeRoute := createReplayRouteWithAction(t, ctx, deps, "Rock", "rock", "PLrock")
 
 	prodRun := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
 	prodRunID, err := deps.stateStore.CreateRun(ctx, prodRun)
@@ -267,12 +268,12 @@ func TestBacktest_UsesProposedConfig(t *testing.T) {
 
 	video := createRetainedVideo(t, ctx, deps, prodRunID, "vid_jazz", "ch1", "cool jazz live")
 
-	proposed := config.Snapshot{
+	proposed := config.ProposalSnapshot{
 		DuplicateThreshold: 0.5,
 		DuplicateBehavior:  "skip",
-		Routes: []config.SnapshotRoute{
+		Routes: []config.ProposalRoute{
 			{
-				ID:                   activeRouteID,
+				ID:                   activeRoute.PublicID,
 				Name:                 "JazzProposed",
 				EvaluationOrder:      1,
 				IsFinal:              true,
@@ -288,7 +289,7 @@ func TestBacktest_UsesProposedConfig(t *testing.T) {
 		},
 	}
 
-	run, err := deps.pipeline.Backtest(ctx, proposed)
+	run, err := deps.pipeline.Backtest(ctx, &proposed)
 	require.NoError(t, err)
 	require.Equal(t, state.RunTypeBacktest, run.RunType)
 	require.NotNil(t, run.ConfigVersionID)
@@ -299,12 +300,14 @@ func TestBacktest_UsesProposedConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, decisions, 1)
 	assert.Equal(t, state.RouteDecisionMatched, decisions[0].Decision)
-	assert.Equal(t, activeRouteID, decisions[0].RouteID)
+	assert.Equal(t, activeRoute.ID, decisions[0].RouteID)
 
 	actions, err := deps.stateStore.GetExecutedActionsForVideo(ctx, video.ID)
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
 	assert.Equal(t, "PLjazz", actions[0].TargetPlaylistID)
+	assert.Equal(t, router.InternalActionAddToPlaylist, actions[0].ActionType,
+		"simulated backtest actions keep the internal action key")
 	assert.Equal(t, state.ActionOutcomeNotAttempted, actions[0].Outcome)
 	assert.Equal(t, run.ID, actions[0].RunID)
 
@@ -312,6 +315,65 @@ func TestBacktest_UsesProposedConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, loaded.VideosDiscovered)
 	assert.Equal(t, 1, loaded.VideosAccepted)
+}
+
+// ADR-007: previously stored configuration snapshots keep the internal action
+// key and remain replayable; the evaluator records simulated actions under the
+// same internal key.
+func TestReplay_OlderStoredConfigKeepsInternalActionType(t *testing.T) {
+	ctx := context.Background()
+	deps, cleanup := setupReplayPipeline(t)
+	defer cleanup()
+
+	// The route exists in storage; historical snapshots referenced real route
+	// IDs with the internal action key.
+	route := createReplayRouteWithAction(t, ctx, deps, "Jazz", "jazz", "PLjazz")
+
+	prodRun := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	prodRunID, err := deps.stateStore.CreateRun(ctx, prodRun)
+	require.NoError(t, err)
+
+	video := createRetainedVideo(t, ctx, deps, prodRunID, "vid1", "ch1", "cool jazz live")
+
+	// A snapshot persisted before the public vocabulary existed, as written by
+	// older route saves: the action type is the internal key.
+	versionID, err := deps.pipeline.configStore.Create(ctx, config.Snapshot{
+		DuplicateThreshold: 0.5,
+		DuplicateBehavior:  "skip",
+		Routes: []config.SnapshotRoute{
+			{
+				ID:                   route.ID,
+				Name:                 "Legacy Jazz",
+				EvaluationOrder:      1,
+				IsFinal:              true,
+				IsEnabled:            true,
+				ConditionComposition: "AND",
+				Conditions: []config.SnapshotCondition{
+					{ConditionIndex: 0, Field: "title", Operator: "contains", Value: "jazz"},
+				},
+				Actions: []config.SnapshotAction{
+					{ActionIndex: 0, ActionType: router.InternalActionAddToPlaylist, TargetPlaylistID: "PLjazz"},
+				},
+			},
+		},
+	}, "legacy snapshot")
+	require.NoError(t, err)
+
+	run, err := deps.pipeline.Replay(ctx, &versionID)
+	require.NoError(t, err)
+	deps.pipeline.ExecuteReplay(ctx, run.ID)
+
+	decisions, err := deps.stateStore.GetRouteDecisionsForVideoInRun(ctx, video.ID, run.ID)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	assert.Equal(t, state.RouteDecisionMatched, decisions[0].Decision)
+
+	actions, err := deps.stateStore.GetExecutedActionsForVideo(ctx, video.ID)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	assert.Equal(t, router.InternalActionAddToPlaylist, actions[0].ActionType,
+		"older stored snapshots keep evaluating with the internal action key")
+	assert.Equal(t, state.ActionOutcomeNotAttempted, actions[0].Outcome)
 }
 
 func TestReplay_DetectsDuplicatesAgainstRetainedCorpus(t *testing.T) {
@@ -327,13 +389,60 @@ func TestReplay_DetectsDuplicatesAgainstRetainedCorpus(t *testing.T) {
 
 	video := createRetainedVideo(t, ctx, deps, prodRunID, "vid1", "ch1", "cool jazz live")
 
-	// Insert a duplicate-reference fingerprint with the same video_id.
-	_, err = deps.db.ExecContext(ctx,
-		`INSERT INTO title_fingerprint (video_id, fingerprint, fingerprint_tokens, channel_id, source, is_duplicate_reference)
-		 VALUES (?, 'fp', 'fp', ?, 'api_discovery', 1);`, video.VideoID, video.ChannelID)
+	// Insert a duplicate-reference fingerprint for a different video carrying
+	// the same canonical title, so replay detects a distinct duplicate.
+	batchID := "replay-import"
+	_, err = duplicate.SaveFingerprint(ctx, deps.db, "vid_reference", video.ChannelID,
+		"user_import", "cool jazz live", true, &batchID)
 	require.NoError(t, err)
 
 	// Wire in the real detector now that the reference exists.
+	deps.pipeline.detector = duplicate.NewDetector(deps.db)
+	match, err := deps.pipeline.detector.Detect(ctx, video.VideoID, "cool jazz live")
+	require.NoError(t, err)
+	require.NotNil(t, match, "fixture must independently prove a distinct duplicate")
+
+	run, err := deps.pipeline.Replay(ctx, nil)
+	require.NoError(t, err)
+	deps.pipeline.ExecuteReplay(ctx, run.ID)
+
+	decisions, err := deps.stateStore.GetRouteDecisionsForVideoInRun(ctx, video.ID, run.ID)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	assert.Equal(t, state.RouteDecisionMatched, decisions[0].Decision)
+	actions, err := deps.stateStore.GetExecutedActionsForVideo(ctx, video.ID)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	assert.Equal(t, state.ActionOutcomeNotAttempted, actions[0].Outcome)
+
+	loaded, err := deps.stateStore.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, loaded.VideosDiscovered)
+	assert.Equal(t, 1, loaded.VideosAccepted)
+	assert.Equal(t, 0, loaded.VideosRejected)
+}
+
+// BR-008 AC8 / OC-004: a retained video whose own ID is an eligible reference
+// (imported history natively observed under the same ID) is not a duplicate of
+// itself, so replay must evaluate it instead of skipping it as a duplicate.
+func TestReplay_DoesNotSkipSelfMatchedVideo(t *testing.T) {
+	ctx := context.Background()
+	deps, cleanup := setupReplayPipeline(t)
+	defer cleanup()
+
+	createReplayRouteWithAction(t, ctx, deps, "Jazz", "jazz", "PLjazz")
+
+	prodRun := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	prodRunID, err := deps.stateStore.CreateRun(ctx, prodRun)
+	require.NoError(t, err)
+
+	video := createRetainedVideo(t, ctx, deps, prodRunID, "vid1", "ch1", "cool jazz live")
+
+	batchID := "replay-import"
+	_, err = duplicate.SaveFingerprint(ctx, deps.db, video.VideoID, video.ChannelID,
+		"user_import", "cool jazz live", true, &batchID)
+	require.NoError(t, err)
+
 	deps.pipeline.detector = duplicate.NewDetector(deps.db)
 
 	run, err := deps.pipeline.Replay(ctx, nil)
@@ -342,13 +451,11 @@ func TestReplay_DetectsDuplicatesAgainstRetainedCorpus(t *testing.T) {
 
 	decisions, err := deps.stateStore.GetRouteDecisionsForVideoInRun(ctx, video.ID, run.ID)
 	require.NoError(t, err)
-	assert.Empty(t, decisions)
+	require.Len(t, decisions, 1, "a video must not be skipped as a duplicate of itself")
 
 	loaded, err := deps.stateStore.GetRun(ctx, run.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 0, loaded.VideosDiscovered)
-	assert.Equal(t, 0, loaded.VideosAccepted)
-	assert.Equal(t, 0, loaded.VideosRejected)
+	assert.Equal(t, 1, loaded.VideosAccepted)
 }
 
 func TestReplay_SkipsDuplicateDetectionWhenDetectorNil(t *testing.T) {
@@ -380,14 +487,14 @@ func TestReplay_HistoricalConfigVersion(t *testing.T) {
 	deps, cleanup := setupReplayPipeline(t)
 	defer cleanup()
 
-	activeRouteID := createReplayRouteWithAction(t, ctx, deps, "Rock", "rock", "PLrock")
+	historicalRoute := createReplayRouteWithAction(t, ctx, deps, "Rock", "rock", "PLrock")
 
 	historicalCfgID, err := deps.pipeline.configStore.Create(ctx, config.Snapshot{
 		DuplicateThreshold: 0.5,
 		DuplicateBehavior:  "skip",
 		Routes: []config.SnapshotRoute{
 			{
-				ID:                   activeRouteID,
+				ID:                   historicalRoute.ID,
 				Name:                 "JazzHistorical",
 				EvaluationOrder:      1,
 				IsFinal:              true,
@@ -445,7 +552,7 @@ func TestBacktest_RequiresConfigStore(t *testing.T) {
 	defer cleanup()
 
 	deps.pipeline.configStore = nil
-	_, err := deps.pipeline.Backtest(ctx, config.Snapshot{})
+	_, err := deps.pipeline.Backtest(ctx, &config.ProposalSnapshot{})
 	require.Error(t, err)
 }
 
@@ -468,10 +575,10 @@ func TestBacktest_DoesNotChangeChannelCounters(t *testing.T) {
 		"ch1", time.Now().UTC(), time.Now().UTC())
 	require.NoError(t, err)
 
-	run, err := deps.pipeline.Backtest(ctx, config.Snapshot{
+	run, err := deps.pipeline.Backtest(ctx, &config.ProposalSnapshot{
 		DuplicateThreshold: 0.5,
 		DuplicateBehavior:  "skip",
-		Routes:             []config.SnapshotRoute{},
+		Routes:             []config.ProposalRoute{},
 	})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteBacktest(ctx, run.ID)

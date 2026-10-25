@@ -5,7 +5,7 @@ description: Route and configuration history sufficient to interpret historical 
 tags: [requirement, configuration, history, statistics, traceability, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

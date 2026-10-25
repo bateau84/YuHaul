@@ -1,4 +1,4 @@
-import type { VideoOutcome, DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome } from '../types'
+import type { VideoOutcome, DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome, RouteActionType } from '../types'
 import { api } from './core'
 
 interface VideoListResponse {
@@ -33,7 +33,9 @@ interface VideoDetailResponse {
 }
 
 interface BackendRouteDecision {
-  route_id: number
+  // Public route identity is the stable UUID string (ARS-004/ARS-001); the
+  // internal integer route key is never emitted on this surface.
+  route_id: string
   route_name: string
   evaluation_order: number
   decision: RouteDecision['decision']
@@ -53,7 +55,7 @@ interface BackendConditionAudit {
 }
 
 interface BackendExecutedAction {
-  action_type: string
+  action_type: RouteActionType
   target_playlist_id: string
   outcome: ActionOutcome['outcome']
   error_message?: string
@@ -112,9 +114,30 @@ function toRouteDecisions(decisions: BackendRouteDecision[] | null | undefined):
   }))
 }
 
-export async function getRunVideos(id: number): Promise<VideoOutcome[]> {
-  const data = await api<VideoListResponse>(`/api/runs/${id}/videos`)
-  return data.videos.map(toVideoOutcome)
+// RunVideoPage is one page of a run's video outcomes plus the server-side
+// total for that (possibly outcome-filtered) set.
+export interface RunVideoPage {
+  videos: VideoOutcome[]
+  total: number
+}
+
+export interface RunVideoQuery {
+  /** final_outcome category; narrows the server-side result and totals. */
+  outcome?: VideoOutcome['final_outcome']
+  /** page size requested from the server (server max is 100). */
+  pageSize?: number
+}
+
+export async function getRunVideos(id: number, query: RunVideoQuery = {}): Promise<RunVideoPage> {
+  const params = new URLSearchParams()
+  if (query.outcome) params.set('outcome', query.outcome)
+  if (query.pageSize) params.set('page_size', String(query.pageSize))
+  const search = params.toString()
+  const data = await api<VideoListResponse>(`/api/runs/${id}/videos${search ? `?${search}` : ''}`)
+  return {
+    videos: data.videos.map(toVideoOutcome),
+    total: data.pagination?.total ?? data.videos.length,
+  }
 }
 
 export async function getDecisionDetail(

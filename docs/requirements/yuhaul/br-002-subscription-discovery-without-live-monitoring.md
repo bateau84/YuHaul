@@ -5,7 +5,7 @@ description: System discovers newly published videos from subscribed channels vi
 tags: [requirement, discovery, subscriptions, polling, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

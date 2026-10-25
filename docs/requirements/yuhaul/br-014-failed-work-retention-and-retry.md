@@ -5,7 +5,7 @@ description: Failed work retained in inspectable error queue with retry and remo
 tags: [requirement, failure, retry, error-queue, resilience, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

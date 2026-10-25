@@ -94,7 +94,7 @@ describe('ChannelsView', () => {
         },
       ],
       recent_video_provenance: [],
-      matched_routes: ['Music'],
+      matched_routes: [{ route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', name: 'Music', match_count: 3 }],
       advisories: [
         {
           id: 1,
@@ -124,6 +124,37 @@ describe('ChannelsView', () => {
     expect(screen.getByText('Accepted')).toBeInTheDocument()
   })
 
+  // Two routes may share a display name (BR-003 AC10); the matched-route
+  // breakdown must keep them as separate rows keyed by route UUID.
+  it('keeps same-named matched routes distinct with short UUID suffixes and counts', async () => {
+    const duplicateNameDetail = {
+      channel_id: 'UCdup',
+      channel_name: 'Duplicate Routes Channel',
+      total_discovered: 30,
+      total_routed: 9,
+      total_retained: 2,
+      usefulness_rate: 0.067,
+      yield: 0.222,
+      duplicate_provenance: { discovery_credit: 0, relevance_credit: 0 },
+      retention_signals: { user_driven: 0, yuhaul_routed: 0 },
+      recent_videos: [],
+      matched_routes: [
+        { route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', name: 'Ambient', match_count: 7 },
+        { route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', name: 'Ambient', match_count: 2 },
+      ],
+      advisories: [],
+    } satisfies ChannelDetail
+    vi.spyOn(api, 'getChannel').mockResolvedValue(duplicateNameDetail)
+
+    renderView('/analytics/channels/UCdup')
+    await waitFor(() => expect(screen.getByText('Duplicate Routes Channel')).toBeInTheDocument())
+
+    expect(screen.getByText('(3a554e96)')).toBeInTheDocument()
+    expect(screen.getByText('(4c7c3b7e)')).toBeInTheDocument()
+    expect(screen.getByText(/— 7 matches/)).toBeInTheDocument()
+    expect(screen.getByText(/— 2 matches/)).toBeInTheDocument()
+  })
+
   it('dismisses an advisory from the detail view', async () => {
     const dismissSpy = vi.spyOn(mock, 'dismissAdvisory')
     renderView('/analytics/channels/UCdemo1')
@@ -131,5 +162,59 @@ describe('ChannelsView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Dismiss/i }))
     await waitFor(() => expect(dismissSpy).toHaveBeenCalledWith(1))
+  })
+
+  it('shows an accessible fetch-error state when the channel list fetch fails', async () => {
+    vi.spyOn(mock, 'listChannels').mockRejectedValueOnce(new Error('network down'))
+
+    renderView()
+
+    const alert = await waitFor(() => screen.getByRole('alert'))
+    expect(alert).toHaveTextContent('Failed to load channels. Check your connection and try again.')
+    expect(alert).toHaveAttribute('aria-live', 'assertive')
+
+    const retry = screen.getByRole('button', { name: /^Retry$/ })
+    await waitFor(() => expect(retry).toHaveFocus())
+
+    // A failed fetch never renders the empty state.
+    expect(screen.queryByText(/No channel data yet/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('renders the empty state only when the fetch succeeds with an empty list', async () => {
+    vi.spyOn(mock, 'listChannels').mockResolvedValueOnce([])
+
+    renderView()
+
+    await waitFor(() => expect(screen.getByText('No channel data yet.')).toBeInTheDocument())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('recovers to the channel list after a successful retry', async () => {
+    vi.spyOn(mock, 'listChannels').mockRejectedValueOnce(new Error('network down'))
+
+    renderView()
+
+    const retry = await waitFor(() => screen.getByRole('button', { name: /^Retry$/ }))
+    fireEvent.click(retry)
+
+    await waitFor(() => expect(screen.getByText('Jazz Club')).toBeInTheDocument())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('stays in the fetch-error state and re-enables retry when retry also fails', async () => {
+    vi.spyOn(mock, 'listChannels')
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockRejectedValueOnce(new Error('still down'))
+
+    renderView()
+
+    const retry = await waitFor(() => screen.getByRole('button', { name: /^Retry$/ }))
+    fireEvent.click(retry)
+
+    await waitFor(() => expect(document.querySelector('.toast')).toHaveTextContent(/Retry failed. Please try again./i))
+    expect(screen.getByText('Failed to load channels. Check your connection and try again.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Retry$/ })).toBeEnabled())
+    expect(screen.queryByText(/No channel data yet/)).not.toBeInTheDocument()
   })
 })

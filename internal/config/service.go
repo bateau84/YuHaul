@@ -14,14 +14,17 @@ type RouteStore interface {
 	ListRoutes(ctx context.Context) ([]router.Route, error)
 }
 
-// ConfigStore is the subset of Store used by the config versioner.
+// ConfigStore is the subset of Store used by the config versioner. It
+// includes the route_identity registry read because the public history
+// serializers resolve stored snapshot route keys through it (ARS-004).
 type ConfigStore interface {
 	Create(ctx context.Context, snapshot Snapshot, description string) (int64, error)
 	Get(ctx context.Context, id int64) (*ConfigVersion, error)
 	List(ctx context.Context) ([]ConfigVersion, error)
-	LatestID(ctx context.Context) (*int64, error)
+	MatchingID(ctx context.Context, snapshot Snapshot) (*int64, error)
 	GetSetting(ctx context.Context, key string) (string, error)
 	SetSetting(ctx context.Context, key, value string) error
+	RouteIdentities(ctx context.Context) (map[int64]string, error)
 }
 
 // Service creates and queries configuration snapshots.
@@ -58,26 +61,34 @@ func (s *Service) snapshot(ctx context.Context, description string) (int64, erro
 	return id, nil
 }
 
-// ActiveVersionID returns the latest ConfigVersion ID, creating an initial
-// snapshot if none exists. This ensures every production run has a config
-// version to link to.
+// ActiveVersionID captures the saved effective configuration, reusing an exact
+// historical match when available. Explicit proposals and historical copies do
+// not activate configuration merely by being appended to history.
 func (s *Service) ActiveVersionID(ctx context.Context) (*int64, error) {
-	id, err := s.store.LatestID(ctx)
+	snap, err := s.buildSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	id, err := s.store.MatchingID(ctx, snap)
 	if err != nil {
 		return nil, err
 	}
 	if id != nil {
 		return id, nil
 	}
-	// No configuration history yet; materialize the initial effective config.
-	newID, err := s.snapshot(ctx, "initial configuration")
+	// Also repairs legacy history or an uncaptured saved edit without rewriting
+	// any immutable version or changing an existing run's reference.
+	newID, err := s.store.Create(ctx, snap, "effective configuration at run initiation")
 	if err != nil {
 		return nil, err
 	}
 	return &newID, nil
 }
 
-// Restore creates a new ConfigVersion from a historical snapshot.
+// Restore creates a new ConfigVersion from a historical snapshot. The new
+// version persists the stored internal representation — integer route keys
+// and legacy action values — unchanged; only its public HTTP representation
+// projects route UUIDs (ADR-011/ARS-004).
 func (s *Service) Restore(ctx context.Context, id int64, description string) (*ConfigVersion, error) {
 	cv, err := s.store.Get(ctx, id)
 	if err != nil {
@@ -93,7 +104,11 @@ func (s *Service) Restore(ctx context.Context, id int64, description string) (*C
 	return s.store.Get(ctx, newID)
 }
 
-// Diff compares two ConfigVersions and returns a structural diff.
+// Diff compares two ConfigVersions and returns a structural diff. The
+// comparison itself runs on the stored snapshots — internal integer route
+// keys and legacy action values — so public UUID projection (which happens
+// at the HTTP boundary) can never fabricate or hide a route change
+// (ADR-011/ARS-004).
 func (s *Service) Diff(ctx context.Context, fromID, toID int64) (*DiffResult, error) {
 	from, err := s.store.Get(ctx, fromID)
 	if err != nil {
@@ -114,6 +129,15 @@ func (s *Service) List(ctx context.Context) ([]ConfigVersion, error) {
 // Get returns a ConfigVersion by ID.
 func (s *Service) Get(ctx context.Context, id int64) (*ConfigVersion, error) {
 	return s.store.Get(ctx, id)
+}
+
+// RouteIdentities returns the complete route_identity registry as an
+// internal-key → public-UUID map (ADR-011/ARS-004). It backs the public
+// configuration-history serializers: a stored snapshot route key without a
+// registry mapping must fail the response rather than be emitted as an
+// integer or substituted by route name.
+func (s *Service) RouteIdentities(ctx context.Context) (map[int64]string, error) {
+	return s.store.RouteIdentities(ctx)
 }
 
 // DuplicateThreshold returns the current configured threshold, defaulting to
@@ -148,29 +172,16 @@ func (s *Service) SetDuplicateThreshold(ctx context.Context, threshold float64) 
 	return s.Snapshot(ctx, fmt.Sprintf("duplicate threshold changed to %.3f", threshold))
 }
 
-// DuplicateBehavior returns the current configured duplicate behavior,
-// defaulting to "skip" if unset.
+// DuplicateBehavior returns fixed continuation. Legacy settings are inert;
+// historical snapshots retain their recorded strings independently.
 func (s *Service) DuplicateBehavior(ctx context.Context) (string, error) {
-	v, err := s.store.GetSetting(ctx, "duplicate_behavior")
-	if err != nil {
-		return "", err
-	}
-	if v == "" {
-		return "skip", nil
-	}
-	return v, nil
+	return "continue", nil
 }
 
-// SetDuplicateBehavior persists a new duplicate behavior and snapshots the
-// effective configuration.
+// SetDuplicateBehavior accepts legacy callers without changing settings or
+// creating a configuration version. Continuation is not configurable.
 func (s *Service) SetDuplicateBehavior(ctx context.Context, behavior string) error {
-	if behavior == "" {
-		behavior = "skip"
-	}
-	if err := s.store.SetSetting(ctx, "duplicate_behavior", behavior); err != nil {
-		return err
-	}
-	return s.Snapshot(ctx, fmt.Sprintf("duplicate behavior changed to %s", behavior))
+	return nil
 }
 
 func (s *Service) buildSnapshot(ctx context.Context) (Snapshot, error) {

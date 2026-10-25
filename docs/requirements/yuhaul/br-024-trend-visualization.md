@@ -2,34 +2,29 @@
 type: requirement
 title: BR-024 — Trend Visualization
 description: Useful trends rendered graphically
-tags: [requirement, statistics, visualization, trends, priority:SHOULD]
+tags: [requirement, statistics, visualization, trends, priority:MUST]
 ---
 
-**Status:** proposed
-**Priority:** SHOULD
+**Status:** accepted
+**Priority:** MUST
 
 ## Statement
 
-The system SHOULD render useful statistical trends graphically in the administration interface, providing visual context that text-based statistics alone do not convey.
+The system SHALL present useful historical statistical trends graphically in the administration interface.
 
 ## Acceptance criteria
 
-1. The administration interface presents graphical visualizations for key trends: route acceptance rates over time, channel productivity over time, quota consumption patterns.
-2. Visualizations are responsive and usable on both desktop and mobile screens.
-3. Visualizations update to reflect the latest available data without requiring manual refresh.
-4. The user can select time ranges for visualizations.
-5. Graphical visualization is not required for all statistics; text/tabular presentation remains available as an alternative.
-6. The choice of charting framework is not constrained by this requirement.
+1. The administration interface presents a graphical representation of at least one useful historical statistic that makes its change over time discernible.
+2. A presentation containing only numerical or tabular statistics, or a graphic that does not depict change over time, does not satisfy this requirement.
+3. This requirement does not prescribe which statistics are useful, a chart form or framework, interaction controls, or a refresh cadence.
 
 ## Derived from
 
-- Anchor: youtube-discovery-routing.md (AC24, Not This: particular charting framework requirement)
+- Anchor: youtube-discovery-routing.md (AC24; v1 Scope states that the acceptance criteria above define v1)
 
 ## Verified by
 
-- UI test: trend visualizations render with data.
-- Responsive test: visualizations usable on mobile viewport.
-- Selection test: time range selector filters visualization data.
+- With historical values over time for a useful statistic, observe that the administration interface presents a graphical representation from which change over time is discernible. A numerical/tabular-only presentation or a graphic without temporal change falsifies the requirement. No particular statistic, chart form/framework, interaction, or refresh cadence is required.
 
 ## Depends on
 

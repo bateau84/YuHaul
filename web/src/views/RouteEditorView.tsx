@@ -3,7 +3,7 @@ import { useParams, useNavigate, useMatch, Link } from 'react-router-dom'
 import * as api from '../api/client'
 import { RouteEditor } from '../components/RouteEditor'
 import { useToast } from '../hooks/useToast'
-import { blankRoute } from '../lib/route'
+import { blankRoute, routeLabel } from '../lib/route'
 import type { Route } from '../types'
 
 export function RouteEditorView() {
@@ -12,7 +12,6 @@ export function RouteEditorView() {
   const { addToast } = useToast()
   const isNew = useMatch('/routes/new') !== null
   const [route, setRoute] = useState<Route | undefined>()
-  const [existingRoutes, setExistingRoutes] = useState<Route[]>([])
   const [nextOrder, setNextOrder] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<'not-found' | 'network' | null>(null)
@@ -24,12 +23,11 @@ export function RouteEditorView() {
       try {
         const routes = await api.listRoutes()
         if (cancelled) return
-        setExistingRoutes(routes)
         const maxOrder = routes.length > 0 ? Math.max(...routes.map((r) => r.evaluation_order)) : 0
         setNextOrder(maxOrder + 1)
 
         if (!isNew) {
-          const r = await api.getRoute(Number(id))
+          const r = await api.getRoute(id ?? '')
           if (cancelled) return
           if (r === undefined) {
             setError('not-found')
@@ -58,7 +56,7 @@ export function RouteEditorView() {
         addToast('Route created', 'success')
         navigate(`/routes/${created.id}`)
       } else {
-        await api.updateRoute(Number(id), form)
+        await api.updateRoute(id ?? '', form)
         addToast('Route updated', 'success')
         // Stay on the editor after an update so the operator can keep iterating.
       }
@@ -70,7 +68,7 @@ export function RouteEditorView() {
   async function handleDelete() {
     if (isNew) return
     try {
-      await api.deleteRoute(Number(id))
+      await api.deleteRoute(id ?? '')
       addToast('Route deleted', 'success')
       navigate('/routes')
     } catch (err) {
@@ -115,12 +113,15 @@ export function RouteEditorView() {
   return (
     <>
       <div className="page-header">
-        <h1 className="page-title">{isNew ? 'New Route' : `Edit Route: ${route?.name ?? ''}`}</h1>
+        <h1 className="page-title">
+          {isNew
+            ? 'New Route'
+            : `Edit Route · ${routeLabel(route?.name ?? '', route?.id ?? '')}`}
+        </h1>
       </div>
       <RouteEditor
         key={isNew ? 'new' : route?.id ?? id}
         route={initialRoute}
-        existingRoutes={existingRoutes}
         onSave={handleSave}
         onCancel={() => navigate('/routes')}
         onDelete={isNew ? undefined : handleDelete}

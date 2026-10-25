@@ -3,9 +3,10 @@ type: obligation-contract
 title: OC-002 — Route Evaluation Outcome Semantics
 description: Shared vocabulary and classification rules for routing outcomes, consumed by evaluation, persistence, statistics, and inspection
 tags: [obligation-contract, routes, outcomes, classification, semantics]
+timestamp: 2026-10-25T00:00:00Z
 ---
 
-**Status:** proposed
+**Status:** accepted
 
 ## Participants
 - **Evaluation Engine**: the component that evaluates videos against route conditions and determines outcomes.
@@ -30,6 +31,7 @@ tags: [obligation-contract, routes, outcomes, classification, semantics]
 8. The classification of a video can change across runs (e.g., deferred in run N, accepted in run N+1 after re-authorization).
 9. All downstream consumers (State Manager, Statistics, Inspection UI) use this shared vocabulary and do not introduce local classification variants.
 10. Absence of processing is never represented as a negative routing decision.
+11. A duplicate match is supporting match/provenance information, not a primary outcome or an exclusion reason. Evaluation, persistence, reporting, and inspection apply [BR-008 AC9](br-008-exact-and-fuzzy-duplicate-detection.md): a distinct matching video continues through eligible routes/actions and receives its outcome from that processing. Duplicate status alone is not accepted, rejected, excluded, deferred, or failed and cannot stand in for route/action evidence.
 
 ## Semantic inputs and outputs
 - **Input**: Video metadata, route conditions, exclusion results, duplicate detection results, API response status.
@@ -48,12 +50,14 @@ tags: [obligation-contract, routes, outcomes, classification, semantics]
 
 ## Derived from
 - Anchor: youtube-discovery-routing.md (AC32, AC15, AC20, AC28)
+- [BR-008](br-008-exact-and-fuzzy-duplicate-detection.md) AC9, recording the user's 2026-10-25 “Continue, yes” decision; Guarantee 11 derives the shared reporting meaning without adding an outcome category.
 
 ## Verified by
 - Unit test: every video in a run has exactly one outcome classification.
 - Unit test: unprocessed video classified as not-yet-evaluated.
 - Consistency test: outcome categories match across state, statistics, and inspection views.
 - Evidence test: each outcome record contains sufficient evaluation path data.
+- Composed continuation test: a distinct duplicate and eligible matching route yield duplicate/provenance information and route/action evidence across evaluation, state, statistics, and inspection. A condition non-match remains rejected and a genuine exclusion remains excluded; neither is inferred merely from the duplicate flag. Simulation is not represented as an external execution.
 
 ## Open questions
 - None

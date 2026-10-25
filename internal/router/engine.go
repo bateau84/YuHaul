@@ -17,6 +17,44 @@ type Engine struct {
 	logger *slog.Logger
 }
 
+// ExpectedEvaluation is non-recording evidence, independent of persisted rows.
+type ExpectedEvaluation struct {
+	Decision state.RouteDecision
+	Audits   []state.ConditionAudit
+}
+
+// ExpectedEvaluations uses the normal predicates without recovery or writes.
+func (e *Engine) ExpectedEvaluations(runID, videoID int64, vc VideoContext, routes []Route) []ExpectedEvaluation {
+	allExcluded, enabled := true, false
+	for _, r := range routes {
+		if r.IsEnabled {
+			enabled = true
+			allExcluded = allExcluded && Excluded(r, vc) != nil
+		}
+	}
+	var out []ExpectedEvaluation
+	final := false
+	for _, r := range routes {
+		if enabled && allExcluded && !r.IsEnabled {
+			continue
+		}
+		var d state.RouteDecision
+		var audits []state.ConditionAudit
+		matched := false
+		if enabled && allExcluded {
+			d = state.RouteDecision{EvaluationOrder: r.EvaluationOrder, Decision: state.RouteDecisionSkipped, SkipReason: skipPtr(state.SkipReasonExclusion)}
+		} else if final {
+			d = state.RouteDecision{EvaluationOrder: r.EvaluationOrder, Decision: state.RouteDecisionSkipped, SkipReason: skipPtr(state.SkipReasonFinalRouteMatched)}
+		} else {
+			d, audits, matched = e.evaluateRoute(r, vc)
+		}
+		d.RunID, d.VideoID, d.RouteID = runID, videoID, r.ID
+		out = append(out, ExpectedEvaluation{d, audits})
+		final = final || (matched && r.IsFinal)
+	}
+	return out
+}
+
 // NewEngine returns a router engine backed by store.
 func NewEngine(store *Store) *Engine {
 	return &Engine{store: store, logger: slog.Default()}
@@ -76,18 +114,13 @@ func (e *Engine) EvaluateWithRoutes(ctx context.Context, runID int64, videoID in
 		decision.RunID = runID
 		decision.RouteID = route.ID
 
-		recorded, err := machine.RecordRouteDecision(ctx, &decision)
+		recorded, err := machine.RecordRouteEvaluation(ctx, &decision, audits)
 		if err != nil {
 			return nil, fmt.Errorf("router: record decision for route %d: %w", route.ID, err)
 		}
 
-		for i := range audits {
-			audits[i].RouteDecisionID = recorded.ID
-			if _, err := machine.RecordConditionAudit(ctx, &audits[i]); err != nil {
-				return nil, fmt.Errorf("router: record audit: %w", err)
-			}
-		}
-
+		// A recovered decision is authoritative even if metadata has changed.
+		matched = recorded.Decision == state.RouteDecisionMatched
 		if matched {
 			result.MatchedRoutes = append(result.MatchedRoutes, route.ID)
 			if route.IsFinal {

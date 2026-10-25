@@ -5,7 +5,7 @@ description: Every meaningful route decision explainable from durable evidence
 tags: [requirement, explainability, decisions, evidence, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

@@ -5,7 +5,7 @@ description: Stable configuration snapshots attached to runs so historical stati
 tags: [obligation-contract, configuration, snapshot, history, statistics, backtesting]
 ---
 
-**Status:** proposed
+**Status:** accepted
 
 ## Participants
 - **Configuration Manager**: the component that stores and manages route, exclusion, and duplicate detection configuration.

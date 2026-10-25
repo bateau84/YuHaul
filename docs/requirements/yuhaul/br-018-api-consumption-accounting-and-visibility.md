@@ -5,7 +5,7 @@ description: External API consumption tracked and visible to the user
 tags: [requirement, api, quota, accounting, visibility, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

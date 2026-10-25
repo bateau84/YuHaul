@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
@@ -15,44 +16,40 @@ import (
 
 // DryRun creates a dry-run record and starts it. The caller must invoke
 // ExecuteDryRun in a goroutine to perform the evaluation.
-func (p *Pipeline) DryRun(ctx context.Context, draft *config.Snapshot) (*state.Run, error) {
+//
+// A non-nil draft is a public proposal configuration (ADR-012): its route
+// UUID identities are translated to internal integer keys — creating inactive
+// identity anchors and registry mappings where required — in the same SQLite
+// transaction that stores the immutable ConfigVersion snapshot and the run
+// row. A nil draft evaluates the currently active configuration.
+func (p *Pipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error) {
 	run := &state.Run{
 		StartedAt: time.Now().UTC(),
 		RunType:   state.RunTypeDryRun,
 		Status:    state.RunStatusRunning,
 	}
 
-	cfgID, err := p.resolveDryRunConfig(ctx, draft)
-	if err != nil {
-		return nil, err
+	if draft != nil {
+		if err := p.ingestProposalRun(ctx, "dry-run draft configuration", draft, run); err != nil {
+			return nil, err
+		}
+	} else {
+		if p.versioner != nil {
+			cfgID, err := p.versioner.ActiveVersionID(ctx)
+			if err != nil {
+				return nil, err
+			}
+			run.ConfigVersionID = cfgID
+		}
+		id, err := p.stateStore.CreateRun(ctx, run)
+		if err != nil {
+			return nil, fmt.Errorf("pipeline: create dry-run: %w", err)
+		}
+		run.ID = id
 	}
-	run.ConfigVersionID = cfgID
-
-	id, err := p.stateStore.CreateRun(ctx, run)
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: create dry-run: %w", err)
-	}
-	run.ID = id
 
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	return run, nil
-}
-
-func (p *Pipeline) resolveDryRunConfig(ctx context.Context, draft *config.Snapshot) (*int64, error) {
-	if draft != nil {
-		if p.configStore == nil {
-			return nil, fmt.Errorf("pipeline: dry-run draft requires a config store")
-		}
-		id, err := p.configStore.Create(ctx, *draft, "dry-run draft configuration")
-		if err != nil {
-			return nil, fmt.Errorf("pipeline: persist dry-run draft: %w", err)
-		}
-		return &id, nil
-	}
-	if p.versioner != nil {
-		return p.versioner.ActiveVersionID(ctx)
-	}
-	return nil, nil
 }
 
 // ExecuteDryRun evaluates the current pending workload against the
@@ -94,14 +91,21 @@ func (p *Pipeline) ExecuteDryRun(ctx context.Context, runID int64) {
 	p.setPhase(ctx, runID, PhaseRouting)
 	p.broadcastPhase(runID, PhaseRouting)
 
+	detector, err := p.detectorForRun(ctx, runID)
+	if err != nil {
+		p.failRun(ctx, runID, "load duplicate configuration failed", err)
+		return
+	}
 	for _, v := range videos {
-		if err := p.dryRunVideo(ctx, runID, &v, routes); err != nil {
+		if err := p.dryRunVideo(ctx, runID, &v, routes, detector); err != nil {
 			p.failRun(ctx, runID, "dry-run video failed", err)
 			return
 		}
 	}
 
-	p.completeRun(ctx, runID)
+	// Pending videos were discovered in production runs. Derive hypothetical
+	// outcomes from this run's decisions, not their unchanged production state.
+	p.completeHistoricalRun(ctx, runID)
 }
 
 func (p *Pipeline) dryRunRoutes(ctx context.Context, run *state.Run) ([]router.Route, error) {
@@ -118,7 +122,7 @@ func (p *Pipeline) dryRunRoutes(ctx context.Context, run *state.Run) ([]router.R
 	return p.router.Routes(ctx)
 }
 
-func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video, routes []router.Route) error {
+func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video, routes []router.Route, detector *duplicate.Detector) error {
 	meta := &metadata.TransientMetadata{VideoID: v.VideoID}
 	if p.meta != nil {
 		fetched, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
@@ -141,6 +145,15 @@ func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video,
 		return nil
 	}
 
+	// Read-only detection uses this run's threshold, not current settings.
+	// Matches always continue to eligible routes/actions without production
+	// duplicate-match writes.
+	if detector != nil {
+		if _, err := detector.Detect(ctx, v.VideoID, vc.Title); err != nil {
+			return fmt.Errorf("detect duplicate for %s: %w", v.VideoID, err)
+		}
+	}
+
 	if _, err := p.router.EvaluateWithRoutes(ctx, runID, v.ID, vc, p.machine, routes); err != nil {
 		return fmt.Errorf("evaluate video %s: %w", v.VideoID, err)
 	}
@@ -151,7 +164,11 @@ func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video,
 	}
 
 	matched := false
+	notMatched := false
 	for _, d := range decisions {
+		if d.Decision == state.RouteDecisionNotMatched {
+			notMatched = true
+		}
 		if d.Decision == state.RouteDecisionMatched {
 			matched = true
 			if err := p.simulateAction(ctx, runID, v.ID, &d, routes); err != nil {
@@ -163,7 +180,7 @@ func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video,
 	outcome := state.FinalOutcomeRejected
 	if matched {
 		outcome = state.FinalOutcomeAccepted
-	} else if hasExclusionDecision(decisions) {
+	} else if !notMatched && hasExclusionDecision(decisions) {
 		outcome = state.FinalOutcomeExcluded
 	}
 	p.broadcastVideo(runID, v, outcome, matched)

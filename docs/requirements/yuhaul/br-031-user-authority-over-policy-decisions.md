@@ -5,7 +5,7 @@ description: System provides evidence-backed advice but does not autonomously ch
 tags: [requirement, authority, user-control, policy, autonomy, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

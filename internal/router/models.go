@@ -62,7 +62,17 @@ const (
 
 // Route is a single ordered routing rule.
 type Route struct {
-	ID                   int64            `json:"id"`
+	// ID is the internal integer database key. It stays in storage and
+	// foreign keys (ADR-011/ARS-004) but is not a public identifier; the
+	// API layer must serialize PublicID instead.
+	ID int64 `json:"id"`
+	// PublicID is the stable public route identity: a canonical lowercase
+	// UUIDv4 from the route_identity registry (ADR-011/ARS-004). The store
+	// populates it on create, in ListRoutes, and on UUID lookups; it never
+	// changes across rename, reorder, enable/disable, or soft delete.
+	// json:"-" keeps this persistence model out of public JSON: the API
+	// layer serializes its own DTO with PublicID in the `id` field.
+	PublicID             string           `json:"-"`
 	Name                 string           `json:"name"`
 	Description          string           `json:"description"`
 	EvaluationOrder      int              `json:"evaluation_order"`

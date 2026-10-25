@@ -11,15 +11,15 @@ import (
 
 // phaseExclusion runs the global exclusion gate for a production run. Videos
 // excluded by every enabled route are marked FinalOutcomeExcluded and removed
-// from the slice returned to the routing phase.
+// from the slice returned to duplicate detection and routing.
 func (p *Pipeline) phaseExclusion(ctx context.Context, runID int64, videos []*state.Video) ([]*state.Video, error) {
 	p.setPhase(ctx, runID, PhaseExclusion)
 	p.broadcastPhase(runID, PhaseExclusion)
+	return p.filterExcludedVideos(ctx, runID, videos)
+}
 
-	if p.router == nil {
-		return videos, nil
-	}
-	routes, err := p.router.Routes(ctx)
+func (p *Pipeline) filterExcludedVideos(ctx context.Context, runID int64, videos []*state.Video) ([]*state.Video, error) {
+	routes, err := p.productionRoutes(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("load routes for exclusion gate: %w", err)
 	}
@@ -35,13 +35,30 @@ func (p *Pipeline) runExclusionGate(ctx context.Context, runID int64, videos []*
 	var remaining []*state.Video
 
 	for _, v := range videos {
+		if mutate {
+			run, _, err := productionAuthority(ctx, p.db, p.configStore, runID)
+			if err != nil {
+				return nil, err
+			}
+			if err := admitLegacy(ctx, p.db, run, v.ID, routes, false); err != nil {
+				return nil, err
+			}
+		}
 		existing, err := p.stateStore.GetRouteDecisionsForVideoInRun(ctx, v.ID, runID)
 		if err != nil {
 			return nil, fmt.Errorf("load decisions for video %d: %w", v.ID, err)
 		}
-		if len(existing) > 0 {
-			// A previous attempt already processed this video; let downstream
-			// phases resolve it from durable decisions.
+		excludedDecisionRoutes := make(map[int64]bool)
+		processed := false
+		for _, d := range existing {
+			if d.Decision == state.RouteDecisionSkipped && d.SkipReason != nil && *d.SkipReason == state.SkipReasonExclusion {
+				excludedDecisionRoutes[d.RouteID] = true
+			} else if d.Decision != state.RouteDecisionSkipped {
+				processed = true
+			}
+		}
+		if processed {
+			// Preserve downstream recovery for videos already condition-evaluated.
 			remaining = append(remaining, v)
 			continue
 		}
@@ -52,17 +69,29 @@ func (p *Pipeline) runExclusionGate(ctx context.Context, runID int64, videos []*
 		}
 
 		excludedRoutes := enabledRoutesThatExclude(routes, vc)
+		// Durable exclusion evidence survives unavailable transient metadata.
+		for _, r := range routes {
+			if r.IsEnabled && excludedDecisionRoutes[r.ID] && router.Excluded(r, vc) == nil {
+				excludedRoutes = append(excludedRoutes, r)
+			}
+		}
 		if len(excludedRoutes) == 0 || len(excludedRoutes) < enabledRouteCount(routes) {
 			remaining = append(remaining, v)
 			continue
 		}
 
 		if mutate {
-			if err := p.markVideoExcluded(ctx, runID, v, excludedRoutes); err != nil {
+			if v.ProcessingState == state.VideoStateEvaluated && v.FinalOutcome == state.FinalOutcomeExcluded {
+				continue
+			}
+			if err := p.markVideoExcluded(ctx, runID, v, excludedRoutes, excludedDecisionRoutes); err != nil {
 				return nil, err
 			}
 		} else {
 			for _, r := range excludedRoutes {
+				if excludedDecisionRoutes[r.ID] {
+					continue
+				}
 				if _, err := p.machine.RecordRouteDecision(ctx, &state.RouteDecision{
 					VideoID:         v.ID,
 					RunID:           runID,
@@ -104,7 +133,7 @@ func enabledRoutesThatExclude(routes []router.Route, vc router.VideoContext) []r
 	return out
 }
 
-func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.Video, routes []router.Route) error {
+func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.Video, routes []router.Route, recorded map[int64]bool) error {
 	if v.ProcessingState != state.VideoStateEvaluating {
 		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
 			state.VideoStateNotYetEvaluated, state.VideoStateEvaluating); err != nil {
@@ -113,6 +142,9 @@ func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.
 	}
 
 	for _, r := range routes {
+		if recorded[r.ID] {
+			continue
+		}
 		if _, err := p.machine.RecordRouteDecision(ctx, &state.RouteDecision{
 			VideoID:         v.ID,
 			RunID:           runID,

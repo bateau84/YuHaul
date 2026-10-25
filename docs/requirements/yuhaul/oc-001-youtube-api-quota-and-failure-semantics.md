@@ -5,7 +5,7 @@ description: Agreement between the system and the YouTube Data API v3 on how quo
 tags: [obligation-contract, youtube, api, quota, failure]
 ---
 
-**Status:** proposed
+**Status:** accepted
 
 ## Participants
 - **System** (YuHaul application): the party initiating YouTube Data API v3 calls for discovery, playlist management, and channel enumeration.

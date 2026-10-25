@@ -5,7 +5,7 @@ description: Dry-run evaluates routes without mutating external YouTube state
 tags: [requirement, dry-run, evaluation, external-state, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

@@ -1,15 +1,50 @@
-import type { VideoProcessingState, VideoFinalOutcome, RouteDecisionType, SkipReason } from '../types'
+import type { RunType, VideoProcessingState, VideoFinalOutcome, RouteDecisionType, SkipReason } from '../types'
 
-export type BadgeVariant = 'accepted' | 'rejected' | 'deferred' | 'failed' | 'not-evaluated' | 'in-progress'
+export type BadgeVariant = 'accepted' | 'rejected' | 'excluded' | 'deferred' | 'failed' | 'not-evaluated' | 'in-progress'
 
-export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFinalOutcome): { variant: BadgeVariant; label: string } {
+// Badge/filter labels for the BR-032 outcome-category vocabulary, shared by
+// the Run Detail outcome filter and the outcome badge so the two never drift.
+export const videoOutcomeLabels: Record<VideoFinalOutcome, string> = {
+  accepted: 'Accepted',
+  rejected: 'Rejected',
+  excluded: 'Excluded',
+  deferred: 'Deferred',
+  failed: 'Failed',
+  not_yet_evaluated: 'Not evaluated',
+}
+
+export const simulationExplanation = 'Simulation only. Results are hypothetical; no playlist actions were executed by this run.'
+
+export function simulationMode(mode: RunType): string | null {
+  switch (mode) {
+    case 'backtest': return 'Backtest'
+    case 'replay': return 'Replay'
+    case 'dry_run': return 'Dry-run'
+    default: return null
+  }
+}
+
+export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFinalOutcome | null | undefined, mode?: RunType): { variant: BadgeVariant; label: string } {
+  if (mode && simulationMode(mode)) {
+    switch (finalOutcome) {
+      case 'accepted': return { variant: 'accepted', label: 'Hypothetical accepted' }
+      case 'rejected': return { variant: 'rejected', label: 'Hypothetical rejected' }
+      case 'excluded': return { variant: 'excluded', label: 'Hypothetical excluded' }
+      case 'deferred': return { variant: 'deferred', label: 'Deferred' }
+      case 'failed': return { variant: 'failed', label: 'Failed' }
+      case 'not_yet_evaluated': return { variant: 'not-evaluated', label: 'Not evaluated' }
+      default: return { variant: 'not-evaluated', label: 'Outcome unavailable' }
+    }
+  }
   switch (state) {
     case 'completed':
       return { variant: 'accepted', label: 'Accepted' }
     case 'acted':
       return { variant: 'failed', label: 'Failed' }
     case 'evaluated':
-      return finalOutcome === 'rejected' ? { variant: 'rejected', label: 'Rejected' } : { variant: 'not-evaluated', label: 'Not evaluated' }
+      if (finalOutcome === 'rejected') return { variant: 'rejected', label: 'Rejected' }
+      if (finalOutcome === 'excluded') return { variant: 'excluded', label: 'Excluded' }
+      return { variant: 'not-evaluated', label: 'Not evaluated' }
     case 'deferred':
       return { variant: 'deferred', label: 'Deferred' }
     case 'not_yet_evaluated':

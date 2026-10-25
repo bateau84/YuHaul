@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
@@ -37,7 +39,9 @@ func setupExclusionPipeline(t *testing.T) (*exclusionDeps, func()) {
 	inserter := &recordingInserter{}
 	exec := newTestExecutor(t, db, ledger, inserter)
 
-	p := NewPipeline(db, machine, stateStore, nil, nil, router.NewEngine(routerStore), exec, ledger, metaMgr, nil, broadcast,
+	p := NewPipeline(db, machine, stateStore, nil, duplicate.NewDetector(db), router.NewEngine(routerStore), exec, ledger, metaMgr, nil, broadcast,
+		WithConfigStore(config.NewStore(db)),
+		WithVersioner(config.NewService(routerStore, config.NewStore(db))),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
 
@@ -54,6 +58,10 @@ func setupExclusionPipeline(t *testing.T) (*exclusionDeps, func()) {
 func createInterruptedRunAtExclusion(t *testing.T, ctx context.Context, deps *exclusionDeps) int64 {
 	t.Helper()
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusInterrupted}
+	cfgID, err := config.NewService(deps.routerStore, config.NewStore(deps.db)).ActiveVersionID(ctx)
+	require.NoError(t, err)
+	run.ConfigVersionID = cfgID
+	run.ActionAuthorityVersion = 1
 	runID, err := deps.stateStore.CreateRun(ctx, run)
 	require.NoError(t, err)
 	require.NoError(t, deps.stateStore.SetRunPhase(ctx, runID, string(PhaseExclusion)))

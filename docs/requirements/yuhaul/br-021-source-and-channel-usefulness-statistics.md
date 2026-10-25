@@ -5,7 +5,7 @@ description: Source and channel contribution to value measured
 tags: [requirement, statistics, channels, sources, usefulness, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

@@ -4,6 +4,7 @@ title: YuHaul Admin Interface Design Specification
 description: "Human-centered design specification for the YuHaul web administration interface — a responsive, device-aware operational dashboard for managing YouTube subscription routing, inspecting processing decisions, and analyzing content discovery performance."
 tags: [design-spec, web-ui, admin-dashboard, youtube]
 status: accepted
+timestamp: 2026-10-25T00:00:00Z
 ---
 
 ## Design Spec: YuHaul Admin Interface
@@ -81,10 +82,10 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 
 **US-002: Import Historical Corpus**
 - **Actor:** YuHaul administrator migrating from the previous application
-- **Context:** Existing corpus of 10,000+ titles must be preserved for duplicate detection
-- **Trigger:** User navigates to Settings > Data and uploads a CSV or JSON file
-- **Desired outcome:** Historical titles are imported into the duplicate detection corpus; duplicates with existing entries are identified and skipped; corpus integrity is preserved
-- **Observable success:** Import summary shows count of new titles added, duplicates skipped, and total corpus size; duplicate detection works identically for imported and native titles
+- **Context:** Existing corpus of 10,000+ titles in the prior application's SQLite database must be preserved for duplicate detection
+- **Trigger:** User navigates to Settings > Data and uploads a SQLite database file
+- **Desired outcome:** Historical titles are imported into the duplicate detection corpus; titles with video identifiers already present are identified and skipped; corpus integrity is preserved
+- **Observable success:** Import summary shows, for this import's source rows, how many were newly inserted, how many video identifiers were already present in the destination (skipped), and how many failed; total corpus size reports the actual destination row count after import. Duplicate detection works identically for imported and native titles.
 - **Source:** AC 9
 
 #### Route Configuration
@@ -342,7 +343,7 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 
 #### SC-004: Importing Historical Corpus (Desktop, 10 minutes)
 
-**Context:** The user is migrating from the old YuHaul application and has a CSV file with 12,000 historical video titles.
+**Context:** The user is migrating from the old YuHaul application and has a SQLite database file containing 12,000 historical video titles with their video identifiers.
 
 **Goal:** Import the historical corpus so duplicate detection works from day one.
 
@@ -350,16 +351,16 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 1. User navigates to Settings > Data
 2. User sees "Historical Corpus Import" section
 3. User clicks "Import" — file picker appears
-4. User selects the CSV file
-5. System validates format and shows preview: "12,000 titles found. Date range: 2020-01-15 to 2026-09-01. First 10 titles shown for confirmation. 847 titles already exist in corpus (duplicates to skip)."
-6. User selects "Append" mode (default)
-7. User confirms import — progress indicator shows: "Importing: 3,200 of 12,000 titles (27%) — ~180 titles/sec — estimated 49 seconds remaining"
-8. Import completes: toast "Imported 11,153 new historical titles (847 duplicates skipped). Total corpus: 11,153 titles."
-9. User clicks "Export" to verify the corpus can be backed up
+4. User selects the SQLite database file
+5. System validates the database schema (expects one table with `video_id` and `title` columns, optional `channel_id`) and shows preview: "12,000 titles found in source database. 847 video identifiers already exist in corpus (will be skipped). First 10 sample titles shown for confirmation."
+6. User confirms import
+7. Progress indicator shows: "Importing: 3,200 of 12,000 titles (27%) — ~180 titles/sec — estimated 49 seconds remaining"
+8. Import completes: toast "Imported 11,153 new historical titles (847 already present, 0 errors). Total corpus: 12,000 titles."
+   - Note: "inserted" (11,153), "already present" (847), and "errors" (0) reconcile the 12,000 source rows from this import. "Total corpus" (12,000) is the actual destination row count after import. This example assumes the destination held only the 847 already-present rows before import; when other destination rows exist, total may exceed inserted + already-present.
 
-**Outcome:** Historical corpus imported, duplicates identified and skipped, corpus integrity preserved.
+**Outcome:** Historical corpus imported, already-present video identifiers skipped, processing errors reported, corpus integrity preserved.
 
-**Edge condition:** If the file format is invalid, the system must show a clear error ("Expected CSV with title column, or JSON array of objects with 'title' field") without losing the user's context. If the user cancels mid-import in Append mode, already-imported titles are preserved.
+**Edge condition:** If the database schema is invalid (no table with both `video_id` and `title` columns, or multiple tables match), the system shows a clear error: "Expected SQLite database with exactly one table containing video_id and title columns" without losing the user's context. If the user cancels mid-import, already-committed titles are preserved (Append mode).
 
 ---
 
@@ -571,6 +572,8 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
   - Filter region: date range, run type (manual/scheduled/dry-run/replay/backtest), status filter
   - Run list region: chronological list of runs
 - **Components:** Run row (timestamp, type badge, duration, video count, outcome summary, quota cost, status), empty state, filter controls
+- **Filter behavior:** Filters apply to the runs returned by `GET /api/runs`. The date range matches the run start date as a UTC calendar day, inclusive of both endpoints; run type and status match the run's `run_type` and `status` values. Filters combine — a run must satisfy every active filter. `GET /api/runs` accepts no query parameters (ARS-001), so filtering happens in the client over the fetched list; server-side filtering would require extending that API contract.
+- **Filter-empty state:** When filters are active and no run matches, the run list region shows "No runs match the current filters." instead of the unfiltered empty state. Filter controls remain usable.
 
 **View: Run Detail** — Inspect a single run; user job: understand what happened in this run and why.
 - **Regions:**
@@ -578,6 +581,7 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
   - Summary region: outcome counts (accepted/rejected/deferred/failed), quota cost summary
   - Video outcomes region: filterable list of videos processed in this run
 - **Components:** Outcome summary cards, video outcome row (title, channel, outcome badge, route match info, expand action), filter by outcome type, quota cost breakdown, configuration version link
+- **Mode-aware interpretation:** Run and video inspection follow “Simulation Inspection — Requested-Run Results” below; production lifecycle state is not a simulation result.
 
 **View: Decision Detail** — Inspect a single video's routing outcome; user job: understand exactly why this video was accepted, rejected, deferred, or failed — across all three layers of the outcome model.
 - **Regions:**
@@ -587,6 +591,63 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
   - Action execution region: per-action results (succeeded/failed/deferred)
   - Evidence trail region: step-by-step route evaluation showing conditions matched/not-matched
 - **Components:** Video metadata, processing outcome badge, route decision row (route name, decision, icon, skip reason if skipped), action execution row (action type, target, result), condition evaluation row (route name, condition, result, icon)
+
+#### Simulation Inspection — Requested-Run Results
+
+**Amendment scope:** Correct the interpretation and wording of existing Run Detail and Decision Detail, not a new simulation workflow or visual direction. Applies to `backtest`, `replay`, and `dry_run`; `manual` and `scheduled` remain actual production runs. Existing US-011, US-012 and SC-005 supply the stories/scenario; no duplicate story artifacts are added.
+
+**Walkthrough:** A person opens a completed backtest to see whether a proposed rule would accept a video. They see “Backtest run 2” and a persistent simulation explanation before the results. Choosing Accepted shows “Hypothetical accepted” even if that video's production state is still `evaluated`. Opening the video preserves the backtest context and shows the matching rule and “Not attempted” simulated action. A second video already completed in production can correctly show “Hypothetical rejected”. Neither view implies a playlist insertion occurred.
+
+**Human-experience authority:** [BR-027 AC6](/docs/requirements/yuhaul/br-027-historical-backtesting.md), US-012 above, and [ARS-005, Recovery and inspection membership / Counting and projection](/docs/architecture/duplicate-continuation/specifications/ars-005-duplicate-continuation-compatibility-results.md). This section refines the two view descriptions above for non-production inspection; it does not alter production outcome or execution semantics.
+
+**Exact mode/context copy:**
+
+| Requested run type | Run Detail H1 | Decision Detail H1 | Persistent explanation on both views, immediately after header |
+|---|---|---|---|
+| `backtest` | `Backtest run {id}` | `Backtest decision detail` | `Simulation only. Results are hypothetical; no playlist actions were executed by this run.` |
+| `replay` | `Replay run {id}` | `Replay decision detail` | Same simulation explanation. |
+| `dry_run` | `Dry-run {id}` | `Dry-run decision detail` | Same simulation explanation. |
+| `manual`, `scheduled` | Existing `Run {id}` | Existing `Decision Detail` | No simulation explanation. Preserve real production state and results. |
+
+Simulation Decision Detail also shows `Run {id}` beside/below the H1 so a direct link identifies the inspected run. Explanation is persistent ordinary text, not a dismissible warning or hover-only tooltip. “No playlist actions” does not claim dry-run/replay make no read requests. Keep Backtest's separate no-external-call constraint intact.
+
+**Simulation regions and labels:**
+
+- Put summary cards under H2 `Hypothetical results`. Use `Evaluated videos` instead of `Discovered`: this existing count represents distinct videos with decisions, not fresh discovery or complete selected-corpus coverage. Keep outcome card labels `Accepted`, `Rejected`, `Deferred`, `Failed` within this explicitly hypothetical region; no new metrics are added. A run's completion means the simulation finished, not that playlist actions succeeded.
+- Video-list H2: `Hypothetical video outcomes`; filter label and outcome column/mobile data label: `Hypothetical outcome`. Keep `All outcomes` and the existing category option labels/values. Filter, totals, row badges and detail outcome all describe the same requested run.
+- Decision Detail H2: `Layer 1 — Hypothetical outcome`; H2 `Layer 2 — Route decisions` stays unchanged. Hide the production `Processing state: …` line and production deferred/error/completion annotations in simulation result regions. Do not relabel the production lifecycle state as a simulation state.
+- Per-route action subsection: `Simulated actions`. Layer 3 H2: `Layer 3 — Simulated action outcomes`. Under that H2 show `These actions were not executed. Accepted means the video matched this simulation's routing rules, not that a playlist was changed.` Keep actual route/condition results (`Matched`, `Did not match`, `Skipped`) and recorded targets unchanged.
+- Simulation action badge `not_attempted`: `Not attempted`, with its existing neutral treatment; never `Succeeded`, `Executed` or `Would succeed`. Empty Layer 3: `No simulated actions recorded for this video.` An empty action set is not proof of rejection.
+- Simulation list empty: `No hypothetical video outcomes yet.` Filter-empty copy and Clear outcome filter remain unchanged. Fetch-error wording: `Failed to load hypothetical video outcomes. Check your connection and try again.` Do not show production results as a fallback after a failed simulation fetch.
+- Production per-route action subsection becomes neutral `Actions`, replacing `Actions executed` even when rows are failed/deferred/not attempted. Keep H2 `Layer 3 — Action outcomes`, real row badges (`Succeeded`, `Failed`, `Deferred`, `Not attempted`), and production outcome/lifecycle explanation. Production empty Layer 3: `No action outcomes recorded for this video.` No fabricated prior success or already-applied evidence is introduced.
+
+**Badge interpretation/precedence:** Establish the requested run's mode before interpreting a result. In simulation mode, use the requested-run `final_outcome` projection exclusively; the unchanged production `processing_state` never overrides it. Use the same mapping on list and detail:
+
+| Simulation `final_outcome` | Visible badge text | Semantic treatment |
+|---|---|---|
+| `accepted` | `Hypothetical accepted` | Accepted category; no execution-success claim |
+| `rejected` | `Hypothetical rejected` | Rejected category |
+| `excluded` | `Hypothetical excluded` | Excluded category |
+| `deferred` | `Deferred` | Deferred evaluation, not predicted action execution |
+| `failed` | `Failed` | Failed evaluation, not predicted action failure |
+| `not_yet_evaluated` | `Not evaluated` | No result; never infer rejection |
+
+For Deferred/Failed in simulations, visible adjacent explanation is respectively `Simulation evaluation was deferred.` / `Simulation evaluation failed.` Missing/unsupported result uses neutral `Outcome unavailable`, not an inferred result from production state. This is a presentation fallback, not a new stored outcome. No new precedence for mixed deferred/failed/matched evidence is defined here. For actual `manual`/`scheduled` runs preserve genuine lifecycle interpretation: discovered/evaluating → `In progress`; not_yet_evaluated → `Not evaluated`; evaluated with rejected/excluded → that category; completed → `Accepted`; acted/failed → `Failed`; deferred → `Deferred`. Do not globally replace production badge derivation with simulation precedence.
+
+**Mode loading and continuity:** Decision Detail needs the requested run's type as well as its existing detail response; the existing run lookup supplies that context. A direct URL/new tab/refresh cannot depend on navigation-only state. Until mode is known, show `Loading run context…` without an interpreted badge or production action title. If mode lookup fails or is unsupported, show `Run context unavailable. Results cannot be interpreted safely.` with `Retry` and the existing `Back to run` link; retain the run/video location. Retry reloads context and only then presents mode-qualified results. Do not momentarily render a production badge while context loads. Normal route navigation moves focus to the new H1; background context/result refresh does not steal focus. Back returns to the same run; no simulation-to-production promotion or mutation control is added.
+
+**Capability boundary:** Source inspection confirms run mode is available from the run lookup and requested-run hypothetical `final_outcome` is available from list/detail. The inspected detail response has no separately identified original production outcome. US-012's alongside-original comparison remains a capability limitation to resolve with the API/architecture owner; do not derive an “original outcome” from `processing_state`, use the projected hypothetical outcome twice, or claim current production state is the actual outcome of an earlier run. This correction does not certify the broader comparison journey as complete.
+
+**Accessibility and representative browser checks (verification targets, not observed passes):**
+
+- WCAG 2.2 AA, SC 1.3.1/1.3.2/1.4.1: mode explanation precedes result regions in visual and screen-reader reading order; headings and table/mobile labels express hypothetical meaning in text. Badge text is exposed once, decorative icons are hidden, and simulation meaning never depends on color. Verify accessible tree/reading order on both views, including direct video links.
+- SC 1.4.3/1.4.10: badge/explanation text meets 4.5:1 contrast and wraps without clipping at 320 CSS px and 200% zoom. Retain the complete “Hypothetical” qualifier and action target; never truncate away the distinction.
+- SC 2.1.1/2.4.3/2.4.7/2.4.11/4.1.2: keyboard users can select the visibly labeled outcome filter, activate a video link and Retry/Back controls with visible unobscured focus; static mode/badges add no tab stops. Check H1 focus on navigation and stable focus on background refresh. A failed context load announces its visible error once; successful asynchronous context/result load announces the mode-qualified result region politely (SC 4.1.3), not on every polling tick.
+- Real replay **and** backtest: fixture A has production `evaluated` and requested-run accepted; fixture B has production `completed` and requested-run rejected. Accepted filter shows only A with `Hypothetical accepted`; rejected filter shows only B with `Hypothetical rejected`. Detail and run counts agree; no production `Processing state` line appears as simulation evidence. Also check globally excluded result and no-evaluation fallback without manufacturing rejection.
+- On both fixture details, see the persistent simulation explanation, `Simulated actions` / `Simulated action outcomes`, `Not attempted`, and correct target, with no `Actions executed` claim. Check an empty action set uses the exact simulation empty copy. Repeat a dry-run inspection for consistent mode isolation.
+- Open a completed actual production run and a real deferred/failed/in-progress production run: genuine state/result labels remain unchanged, action subsections say `Actions`, recorded successes remain `Succeeded`, and no hypothetical qualifier or simulation disclaimer appears. Context failure/retry, direct links, refresh and browser Back never change run identity or expose unqualified stale results.
+
+**Decision:** A bounded wording/precedence amendment wins over (a) globally preferring `final_outcome`, which erases genuine production lifecycle meaning, and (b) a disclaimer alone, which leaves false badges and execution headings intact. No new layout or brand direction is needed. Evidence: reviewer browser artifact `/tmp/opencode/followup-authority/browser-result.json` plus inspected RunDetailView, DecisionDetailView, outcome helper and response types. This design amendment is not a browser conformance approval; production code and post-fix browser/assistive-technology verification remain outstanding.
 
 **View: Analytics Dashboard** — Temporal trend visualization; user job: identify patterns and changes over time.
 - **Regions:**
@@ -638,9 +699,49 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
   - Account region: YouTube account connection status, re-authenticate option
   - Retention playlists region: designate which playlists represent the user's actual keep signal
   - Duplicate detection region: fuzzy matching threshold configuration
-  - Data region: historical corpus import/export, data management
+  - Data region: historical corpus import, data management
   - Danger zone region: disconnect account
-- **Components:** Schedule form, quota display with ledger breakdown, account status card, retention playlist selector (multi-select from user's YouTube playlists), threshold slider with numeric display and explanation, import/export controls, danger action buttons
+- **Components:** Schedule form, quota display with ledger breakdown, account status card, retention playlist selector (multi-select from user's YouTube playlists), threshold slider with numeric display and explanation, import controls, danger action buttons
+
+#### Fixed Duplicate Continuation — Settings and Recorded History
+
+**Accepted amendment (2026-10-25):** This bounded clarification follows the user's “Continue, yes”, [BR-008 AC9–AC11](/docs/requirements/yuhaul/br-008-exact-and-fuzzy-duplicate-detection.md), [ADR-017](/docs/architecture/duplicate-continuation/decisions/adr-017-fixed-duplicate-continuation.md), and [ARS-005](/docs/architecture/duplicate-continuation/specifications/ars-005-duplicate-continuation-compatibility-results.md). It is intended design, not a claim that the UI or evaluator has been updated.
+
+**Walkthrough:** An administrator opens Settings to tune fuzzy matching. The existing threshold remains editable. Nearby text explains that a duplicate match does not stop eligible routing. When the administrator inspects an older version containing `skip`, History shows that recorded value unchanged and explains that today's evaluation continues regardless. Neither screen offers a handling choice; neither a match nor a historical string proves that a playlist action occurred.
+
+**Settings — exact copy and placement:** In the existing **Duplicate detection** card, retain the threshold label, slider, numeric value, and the existing exact/fuzzy/self-match explanation verbatim. Immediately after that explanation, add one ordinary paragraph:
+
+> Duplicate matches do not stop routing. Videos continue through eligible routes and playlist actions; exclusions, route conditions and order, final-route rules, quota and failure handling, and completed-action checks still apply.
+
+This is fixed explanatory text, not a field, badge requiring interaction, disabled selector, toggle, or save action. Do not say “default”, offer `skip`/`flag`, or echo a legacy settings value as effective policy. Current Settings readback is `continue` under ARS-005. Existing loading/error/retry behavior and threshold interaction remain unchanged by this amendment. Keep Data/import copy and counts unchanged: skipping an already-present video ID during import is not suppressing routing after a distinct-video duplicate match. No new imported-reference or discovery-credit wording is introduced.
+
+**History version detail — exact copy and placement:** In **Summary**, immediately after **Duplicate threshold**, display a read-only text row:
+
+> Duplicate handling (recorded legacy value): `{recorded value}`
+
+Show the returned recorded string without translating `skip`, `flag`, or arbitrary strings to `continue`, including in a restored historical copy. For an empty string or absent field represented as empty by the API, show `Empty or not recorded` rather than a blank value or an invented policy. This display fallback does not change stored data or distinguish absence from empty when the API cannot. For nonempty strings, preserve characters (including whitespace); render as text, not markup.
+
+Directly below this row, show:
+
+> This is a recorded configuration value, not a current handling choice. Current evaluation continues after duplicate matches regardless of this value, including replay and backtest. It does not establish what actions occurred in earlier runs; inspect their recorded outcomes and actions.
+
+Use this label and explanation for every displayed value, including `continue`: “legacy” identifies the retired field, not a claim about the age of a version. Preserve existing version descriptions, IDs, dates, thresholds, route snapshots, and past outcome/action evidence. Do not rewrite a historical description mentioning skip. No new history-list column is needed.
+
+**History diff — exact copy and placement:** Within **Settings changed**, special-case only the `duplicate_behavior` row's presentation. Replace its bare technical key with **Duplicate handling (recorded legacy values)**. Display both unmodified values with explicit **Previous:** and **This version:** labels; apply the same empty/absent fallback above. Beneath that row, show the same explanatory paragraph used in Summary. Show this row only when the returned diff contains it; do not fabricate a change when recorded values are equal. Other diff rows and the no-changes state remain unchanged. A `skip → continue` comparison describes recorded values, not a proven transition in past execution behavior.
+
+**Accessibility and responsive presentation:** These additions are selectable, wrapping text in the existing reading order, not tooltips or live alerts. Under WCAG 2.2 AA SC 1.3.1/1.3.2, each historical label, value, and explanation is read together in that order; verify by DOM/accessibility-tree inspection. Under SC 1.4.1, previous/this-version meaning is explicit in text, never only red/green or an arrow; verify without color. Under SC 1.4.3/1.4.4/1.4.10, explanation text meets 4.5:1 contrast and remains available at 200% text resize and 320 CSS px width, with long recorded strings wrapping; verify in the browser. Static text adds no tab stops or focus movement. Existing keyboard threshold and History navigation remain intact. No implementation accessibility approval is claimed here.
+
+**Design decision:** Inline explanation is the smallest correction to the accepted threshold-only Settings design and generic History diff. A disabled selector is rejected because it implies another available mode; hiding or normalizing historical strings is rejected because it conceals evidence. No new flow or separate story/scenario artifact is needed: this refines US-007 (threshold tuning) and the existing configuration-history inspection journey without adding capability.
+
+**Downstream checks (not executed by this documentation change):**
+
+1. Settings with active `continue` shows the exact paragraph and editable threshold, with no handling control or skip/default claim. Threshold changes and current loading/error/retry paths still work. Data/import already-present/skipped counts and copy are unchanged.
+2. Open versions containing `skip`, `flag`, `continue`, an arbitrary string, empty, and absent behavior. Confirm the row, fallback, explanation, unchanged threshold/routes/descriptions, and unchanged underlying recorded history. A copied old version still displays its recorded value.
+3. Diff `skip → continue`, `flag → skip`, and empty → `continue`. Confirm both recorded values, explicit previous/this-version labels, and explanation; equal-value comparisons add no handling row. Unrelated settings diffs remain unchanged.
+4. Keyboard and screen-reader inspection finds no fake handling control; reading order includes the explanation. Check contrast, no-color interpretation, text resize, narrow-width wrapping, and long-string safety against the accessibility conditions above.
+5. The assembled evaluator/API continuation and historical immutability proofs belong to ARS-005; UI copy or fixtures alone do not establish them. Do not claim simulation actions succeeded or past actions occurred from a duplicate flag or handling string.
+
+**Known boundary:** Source inspection found Settings already has no handling selector; its missing clarification and History's bare `duplicate_behavior` diff are the bounded corrections. History Summary currently omits this value, but the snapshot supplies it; no new API capability is needed. The existing History “Restore” action/toast promises more than ARS-005's copy-only implementation establishes. Complete restore semantics remain with the requirements/implementation owners; this amendment does not approve active restoration or redesign that separate journey. No user-owned ambiguity blocks the copy and labeling above.
 
 #### Three-Layer Video Outcome Model
 
@@ -848,6 +949,7 @@ Advisories are system-generated suggestions based on channel and route performan
 **Empty states:**
 - Route list empty: "No routes yet. Create your first route to start routing videos." + "New Route" button
 - Run list empty: "No runs yet. Start a processing run to see results here." + "Run Now" button
+- Run list filtered empty: "No runs match the current filters." (shown only when filters are active and the fetch succeeded)
 - Error queue empty: "No errors. All processing is running smoothly." + checkmark icon
 - Deferred queue empty: "No deferred work. All pending items have been processed." + checkmark icon
 - Analytics empty: "Not enough data yet. Analytics will appear after a few processing runs."

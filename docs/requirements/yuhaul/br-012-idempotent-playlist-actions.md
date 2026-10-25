@@ -5,7 +5,7 @@ description: Repeated execution does not repeat already completed playlist mutat
 tags: [requirement, idempotency, playlist, actions, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

@@ -5,7 +5,7 @@ description: Outcomes distinguish rejected, deferred, failed, and not-yet-evalua
 tags: [requirement, outcomes, classification, semantics, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement
@@ -24,12 +24,14 @@ The system SHALL distinguish between rejected, deferred, failed, and not-yet-eva
 ## Derived from
 
 - Anchor: youtube-discovery-routing.md (AC32)
+- [Admin Interface Design Specification](../../design/yuhaul-admin-ui-design.md), §View: Run Detail (AC5's filter by outcome type)
 
 ## Verified by
 
 - Unit test: unprocessed video is classified as not-yet-evaluated.
 - Unit test: no video is classified as rejected without an actual route evaluation producing rejection.
 - Consistency test: outcome categories match across history, statistics, and inspection views.
+- UI test: selecting an outcome category in a historical run filters its video-outcome list to matching items; clearing the filter restores the full list.
 - Semantics test: absence of processing never appears as negative outcome.
 
 ## Depends on

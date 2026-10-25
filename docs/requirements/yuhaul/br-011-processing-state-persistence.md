@@ -5,7 +5,7 @@ description: Processing state survives across runs and application restarts
 tags: [requirement, state, persistence, resilience, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

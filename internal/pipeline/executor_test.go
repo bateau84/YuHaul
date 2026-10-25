@@ -18,7 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
+	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/quota"
+	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
 	"github.com/bateau84/YuHaul/internal/youtube"
@@ -72,9 +74,13 @@ func newTestExecutor(t *testing.T, db *sql.DB, ledger *quota.Ledger, inserter *r
 	)
 }
 
-func createRunAndVideo(t *testing.T, ctx context.Context, stateStore *state.Store) (int64, int64, string) {
+func createRunAndVideo(t *testing.T, ctx context.Context, db *sql.DB, stateStore *state.Store) (int64, int64, string) {
 	t.Helper()
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	cfgID, err := config.NewService(router.NewStore(db), config.NewStore(db)).ActiveVersionID(ctx)
+	require.NoError(t, err)
+	run.ConfigVersionID = cfgID
+	run.ActionAuthorityVersion = 1
 	runID, err := stateStore.CreateRun(ctx, run)
 	require.NoError(t, err)
 
@@ -89,7 +95,7 @@ func TestExecutor_NoMatchesRejected(t *testing.T) {
 	db, stateStore, ledger, cleanup := setupExecutorTest(t)
 	defer cleanup()
 
-	_, videoID, _ := createRunAndVideo(t, ctx, stateStore)
+	_, videoID, _ := createRunAndVideo(t, ctx, db, stateStore)
 	exec := newTestExecutor(t, db, ledger, nil)
 
 	outcome, err := exec.Execute(ctx, 1, videoID, nil)
@@ -102,11 +108,10 @@ func TestExecutor_ExecutesAndRecordsAction(t *testing.T) {
 	db, stateStore, ledger, cleanup := setupExecutorTest(t)
 	defer cleanup()
 
-	runID, videoID, _ := createRunAndVideo(t, ctx, stateStore)
-
 	// Create a route with an action.
 	routeID := createRoute(t, ctx, db, "Jazz", 1)
 	createRouteAction(t, ctx, db, routeID, "PLjazz")
+	runID, videoID, _ := createRunAndVideo(t, ctx, db, stateStore)
 
 	// Record a matched decision.
 	decisionID := createRouteDecision(t, ctx, stateStore, videoID, runID, routeID, 1, state.RouteDecisionMatched)
@@ -132,9 +137,9 @@ func TestExecutor_DeferredWhenQuotaExhausted(t *testing.T) {
 	defer cleanup()
 	require.NoError(t, ledger.SetDailyLimit(ctx, 10))
 
-	runID, videoID, _ := createRunAndVideo(t, ctx, stateStore)
 	routeID := createRoute(t, ctx, db, "Jazz", 1)
 	createRouteAction(t, ctx, db, routeID, "PLjazz")
+	runID, videoID, _ := createRunAndVideo(t, ctx, db, stateStore)
 	decisionID := createRouteDecision(t, ctx, stateStore, videoID, runID, routeID, 1, state.RouteDecisionMatched)
 
 	inserter := &recordingInserter{}
@@ -151,9 +156,9 @@ func TestExecutor_WithYouTubeBaseURLUsesOverrideURL(t *testing.T) {
 	db, stateStore, ledger, cleanup := setupExecutorTest(t)
 	defer cleanup()
 
-	runID, videoID, _ := createRunAndVideo(t, ctx, stateStore)
 	routeID := createRoute(t, ctx, db, "Jazz", 1)
 	createRouteAction(t, ctx, db, routeID, "PLjazz")
+	runID, videoID, _ := createRunAndVideo(t, ctx, db, stateStore)
 	decisionID := createRouteDecision(t, ctx, stateStore, videoID, runID, routeID, 1, state.RouteDecisionMatched)
 
 	var requestPath string
@@ -183,9 +188,9 @@ func TestExecutor_FailedActionRecordsOutcome(t *testing.T) {
 	db, stateStore, ledger, cleanup := setupExecutorTest(t)
 	defer cleanup()
 
-	runID, videoID, _ := createRunAndVideo(t, ctx, stateStore)
 	routeID := createRoute(t, ctx, db, "Jazz", 1)
 	createRouteAction(t, ctx, db, routeID, "PLjazz")
+	runID, videoID, _ := createRunAndVideo(t, ctx, db, stateStore)
 	decisionID := createRouteDecision(t, ctx, stateStore, videoID, runID, routeID, 1, state.RouteDecisionMatched)
 
 	inserter := &recordingInserter{err: errors.New("api error")}
@@ -198,12 +203,7 @@ func TestExecutor_FailedActionRecordsOutcome(t *testing.T) {
 
 func createRoute(t *testing.T, ctx context.Context, db *sql.DB, name string, order int) int64 {
 	t.Helper()
-	res, err := db.ExecContext(ctx,
-		`INSERT INTO route (name, evaluation_order, is_final, is_enabled, condition_composition, created_at, updated_at)
-		 VALUES (?, ?, 0, 1, 'AND', ?, ?);`,
-		name, order, time.Now().UTC(), time.Now().UTC())
-	require.NoError(t, err)
-	id, err := res.LastInsertId()
+	id, err := router.NewStore(db).CreateRoute(ctx, &router.Route{Name: name, EvaluationOrder: order, IsEnabled: true, ConditionComposition: "AND"})
 	require.NoError(t, err)
 	return id
 }

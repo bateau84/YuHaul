@@ -21,11 +21,15 @@ import type {
   Advisory,
   RetentionPlaylist,
   Playlist,
+  CorpusImportPreview,
+  CorpusImportStart,
+  CorpusImportStatus,
+  CorpusImportMetadata,
 } from '../types'
 
 let mockRoutes: Route[] = [
   {
-    id: 1,
+    id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
     name: 'Music Discovery',
     description: 'Route music-related uploads to the discovery playlist.',
     evaluation_order: 1,
@@ -33,17 +37,17 @@ let mockRoutes: Route[] = [
     is_enabled: true,
     condition_composition: 'AND',
     conditions: [
-      { id: 101, route_id: 1, condition_index: 0, field: 'title', operator: 'contains', value: 'music' },
-      { id: 102, route_id: 1, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', value: '180' },
+      { id: 101, route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', condition_index: 0, field: 'title', operator: 'contains', value: 'music' },
+      { id: 102, route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', condition_index: 1, field: 'duration_seconds', operator: 'greater_than', value: '180' },
     ],
-    actions: [{ id: 201, route_id: 1, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', action_index: 0 }],
-    exclusions: [{ id: 301, route_id: 1, exclusion_type: 'channel', exclusion_value: 'UCexcluded' }],
+    actions: [{ id: 201, route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', action_type: 'add_to_playlist', target_playlist_id: 'PLmusic', action_index: 0 }],
+    exclusions: [{ id: 301, route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', exclusion_type: 'channel', exclusion_value: 'UCexcluded' }],
     match_count: 2,
     created_at: '2026-08-01T10:00:00Z',
     updated_at: '2026-09-08T10:00:00Z',
   },
   {
-    id: 2,
+    id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
     name: 'Ambient',
     description: 'Long-form ambient and atmospheric content.',
     evaluation_order: 2,
@@ -51,10 +55,10 @@ let mockRoutes: Route[] = [
     is_enabled: false,
     condition_composition: 'OR',
     conditions: [
-      { id: 103, route_id: 2, condition_index: 0, field: 'title', operator: 'contains', value: 'ambient' },
-      { id: 104, route_id: 2, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', value: '600' },
+      { id: 103, route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', condition_index: 0, field: 'title', operator: 'contains', value: 'ambient' },
+      { id: 104, route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', condition_index: 1, field: 'duration_seconds', operator: 'greater_than', value: '600' },
     ],
-    actions: [{ id: 202, route_id: 2, action_type: 'playlist_insert', target_playlist_id: 'PLambient', action_index: 0 }],
+    actions: [{ id: 202, route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', action_type: 'add_to_playlist', target_playlist_id: 'PLambient', action_index: 0 }],
     exclusions: [],
     match_count: 0,
     created_at: '2026-08-02T10:00:00Z',
@@ -142,8 +146,8 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     final_outcome: 'accepted',
     route_decisions: [
       {
-        id: 5001,
-        route_id: 1,
+        id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
+        route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
         route_name: 'Music Discovery',
         evaluation_order: 1,
         decision: 'matched',
@@ -151,11 +155,11 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
           { id: 6001, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Late Night Jazz Mix', matched: true },
           { id: 6002, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', expected_value: '180', actual_value: '184', matched: true },
         ],
-        actions: [{ id: 7001, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', outcome: 'succeeded' }],
+        actions: [{ id: 7001, action_type: 'add_to_playlist', target_playlist_id: 'PLmusic', outcome: 'succeeded' }],
       },
       {
-        id: 5002,
-        route_id: 2,
+        id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
+        route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
         route_name: 'Ambient',
         evaluation_order: 2,
         decision: 'skipped',
@@ -171,8 +175,8 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     final_outcome: 'rejected',
     route_decisions: [
       {
-        id: 5011,
-        route_id: 1,
+        id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
+        route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
         route_name: 'Music Discovery',
         evaluation_order: 1,
         decision: 'not_matched',
@@ -184,8 +188,8 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
         actions: [],
       },
       {
-        id: 5012,
-        route_id: 2,
+        id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
+        route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
         route_name: 'Ambient',
         evaluation_order: 2,
         decision: 'skipped',
@@ -201,15 +205,15 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     final_outcome: 'deferred',
     route_decisions: [
       {
-        id: 5021,
-        route_id: 1,
+        id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
+        route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
         route_name: 'Music Discovery',
         evaluation_order: 1,
         decision: 'matched',
         condition_audits: [
           { id: 6021, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Pop Hit 2026', matched: false },
         ],
-        actions: [{ id: 7021, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', outcome: 'deferred' }],
+        actions: [{ id: 7021, action_type: 'add_to_playlist', target_playlist_id: 'PLmusic', outcome: 'deferred' }],
       },
     ],
   },
@@ -231,7 +235,7 @@ const mockChannels: ChannelDetail[] = [
     recent_video_provenance: [
       { video_id: 'dQw4w9WgXcQ', title: 'Late Night Jazz Mix', duplicate_credit: 'discovery', retention_source: 'user_driven' },
     ],
-    matched_routes: ['Music Discovery'],
+    matched_routes: [{ route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', name: 'Music Discovery', match_count: 2 }],
     advisories: [
       {
         id: 1,
@@ -265,7 +269,7 @@ const mockChannels: ChannelDetail[] = [
     recent_video_provenance: [
       { video_id: 'abc123', title: 'Ambient Study Session', duplicate_credit: 'relevance', retention_source: 'user_driven' },
     ],
-    matched_routes: ['Ambient'],
+    matched_routes: [{ route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', name: 'Ambient', match_count: 1 }],
     advisories: [
       {
         id: 2,
@@ -297,7 +301,7 @@ const mockTrends: TrendBucket[] = Array.from({ length: 14 }).map((_, i) => ({
 const mockRouteMatchRates: RouteMatchRate[] = Array.from({ length: 14 }).flatMap((_, i) => [
   {
     bucket: `2026-08-${String(26 + i).padStart(2, '0')}T00:00:00Z`,
-    route_id: 1,
+    route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
     route_name: 'Music Discovery',
     evaluated: 8 + i,
     matched: 1 + (i % 3),
@@ -305,7 +309,7 @@ const mockRouteMatchRates: RouteMatchRate[] = Array.from({ length: 14 }).flatMap
   },
   {
     bucket: `2026-08-${String(26 + i).padStart(2, '0')}T00:00:00Z`,
-    route_id: 2,
+    route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
     route_name: 'Ambient',
     evaluated: 4 + i,
     matched: i % 4 === 0 ? 1 : 0,
@@ -326,7 +330,7 @@ let mockSettings: Settings = {
   schedule: '0 6 * * *',
   quota_limit: 10000,
   duplicate_threshold: 0.5,
-  duplicate_behavior: 'skip',
+  duplicate_behavior: 'continue',
   account_connected: true,
   account_email: 'user@example.com',
 }
@@ -376,6 +380,18 @@ function uid(): number {
   return nextId++
 }
 
+// Mock counterpart of the server-assigned UUIDv4 route identity (ARS-004).
+function mockUuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    const v = c === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
+
 function delay(ms = 300): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -402,7 +418,7 @@ export async function listRoutes(): Promise<Route[]> {
   return [...mockRoutes].sort((a, b) => a.evaluation_order - b.evaluation_order)
 }
 
-export async function getRoute(id: number): Promise<Route | undefined> {
+export async function getRoute(id: string): Promise<Route | undefined> {
   await delay()
   return mockRoutes.find((r) => r.id === id)
 }
@@ -410,12 +426,12 @@ export async function getRoute(id: number): Promise<Route | undefined> {
 export async function createRoute(route: Omit<Route, 'id' | 'created_at' | 'updated_at'>): Promise<Route> {
   await delay()
   const now = new Date().toISOString()
-  const created: Route = { ...route, id: uid(), match_count: 0, created_at: now, updated_at: now }
+  const created: Route = { ...route, id: mockUuid(), match_count: 0, created_at: now, updated_at: now }
   mockRoutes.push(created)
   return created
 }
 
-export async function updateRoute(id: number, route: Omit<Route, 'id' | 'created_at' | 'updated_at'>): Promise<Route> {
+export async function updateRoute(id: string, route: Omit<Route, 'id' | 'created_at' | 'updated_at'>): Promise<Route> {
   await delay()
   const idx = mockRoutes.findIndex((r) => r.id === id)
   if (idx === -1) throw new Error('route not found')
@@ -424,12 +440,12 @@ export async function updateRoute(id: number, route: Omit<Route, 'id' | 'created
   return mockRoutes[idx]
 }
 
-export async function deleteRoute(id: number): Promise<void> {
+export async function deleteRoute(id: string): Promise<void> {
   await delay()
   mockRoutes = mockRoutes.filter((r) => r.id !== id)
 }
 
-export async function reorderRoutes(ids: number[]): Promise<void> {
+export async function reorderRoutes(ids: string[]): Promise<void> {
   await delay()
   const map = new Map(mockRoutes.map((r) => [r.id, r]))
   mockRoutes = ids.map((id, i) => {
@@ -438,14 +454,6 @@ export async function reorderRoutes(ids: number[]): Promise<void> {
     r.evaluation_order = i + 1
     return r
   })
-}
-
-export async function getRouteStats(id: number): Promise<{ match_count: number }> {
-  await delay()
-  const count = Object.values(mockDecisionDetails)
-    .flatMap((d) => d.route_decisions ?? [])
-    .filter((rd) => rd.route_id === id && rd.decision === 'matched').length
-  return { match_count: count }
 }
 
 export async function listPlaylists(): Promise<Playlist[]> {
@@ -750,6 +758,40 @@ export async function createRetentionPlaylist(playlist: { playlist_id: string; p
 export async function deleteRetentionPlaylist(id: number): Promise<void> {
   await delay()
   mockRetentionPlaylists = mockRetentionPlaylists.filter((p) => p.id !== id)
+}
+
+// Corpus import (ARS-002). These exist only for the test fetch shim in
+// src/test/setup.ts; the real client calls the contract paths directly and
+// never falls back to mock data. Tests configure them with vi.spyOn; the
+// defaults fail loudly when a flow is exercised without configuration, except
+// getLatestCorpusImport, whose honest default is "no import state" (404), and
+// getCorpusImportMetadata, whose honest default is "no recorded timestamp"
+// (null), never a fabricated date.
+export async function previewCorpusImport(_file: File): Promise<CorpusImportPreview> {
+  throw new Error('corpus import preview is not configured in the mock layer')
+}
+
+export async function startCorpusImport(_file: File): Promise<CorpusImportStart> {
+  throw new Error('corpus import start is not configured in the mock layer')
+}
+
+export async function getCorpusImportStatus(_importId: string): Promise<CorpusImportStatus | undefined> {
+  throw new Error('corpus import status is not configured in the mock layer')
+}
+
+export async function getLatestCorpusImport(): Promise<CorpusImportStatus | null> {
+  return null
+}
+
+// Honest default: no recorded completion timestamp (fresh or legacy database),
+// mirroring getLatestCorpusImport's "no import state" default. It never
+// fabricates a date; tests that assert recency configure it with vi.spyOn.
+export async function getCorpusImportMetadata(): Promise<CorpusImportMetadata> {
+  return { last_successful_corpus_import_at: null }
+}
+
+export async function cancelCorpusImport(_importId: string): Promise<CorpusImportStatus | undefined> {
+  throw new Error('corpus import cancel is not configured in the mock layer')
 }
 
 export async function listAdvisories(): Promise<Advisory[]> {

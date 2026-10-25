@@ -49,16 +49,28 @@ func setupPipelineTest(t *testing.T) (*sql.DB, *state.Store, *state.Machine, *Br
 	return db, stateStore, machine, broadcast, cleanup
 }
 
+// Capture before creating a native recovery fixture, never promote a resumed run.
+func captureNativeTestRun(t *testing.T, ctx context.Context, db *sql.DB, run *state.Run) {
+	t.Helper()
+	id, err := config.NewService(router.NewStore(db), config.NewStore(db)).ActiveVersionID(ctx)
+	require.NoError(t, err)
+	run.ConfigVersionID = id
+	run.ActionAuthorityVersion = 1
+}
+
 func TestPipeline_StartRun(t *testing.T) {
 	ctx := context.Background()
-	_, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
 	defer cleanup()
 
 	p := &Pipeline{
-		stateStore: stateStore,
-		machine:    machine,
-		broadcast:  broadcast,
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:          db,
+		configStore: config.NewStore(db),
+		versioner:   config.NewService(router.NewStore(db), config.NewStore(db)),
+		stateStore:  stateStore,
+		machine:     machine,
+		broadcast:   broadcast,
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// In a fresh database the first run is ID 1, so subscribe before creating it.
@@ -112,11 +124,13 @@ func TestPipeline_StartRun_LinksConfigVersion(t *testing.T) {
 	require.NoError(t, err)
 
 	p := &Pipeline{
-		stateStore: stateStore,
-		machine:    machine,
-		broadcast:  broadcast,
-		versioner:  versioner,
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		stateStore:  stateStore,
+		machine:     machine,
+		broadcast:   broadcast,
+		versioner:   versioner,
+		configStore: cfgStore,
+		db:          db,
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	run, err := p.StartRun(ctx, state.RunTypeManual)
@@ -155,6 +169,7 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 
 	// Create an interrupted run with a video and a matched route decision.
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeScheduled, Status: state.RunStatusInterrupted}
+	captureNativeTestRun(t, ctx, db, run)
 	runID, err := stateStore.CreateRun(ctx, run)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx,
@@ -187,6 +202,7 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 	require.NoError(t, err)
 
 	p := NewPipeline(db, machine, stateStore, nil, nil, nil, exec, ledger, nil, nil, broadcast,
+		WithConfigStore(config.NewStore(db)),
 		WithQueueStore(queueStore),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
@@ -206,7 +222,7 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 	assert.Equal(t, "PLresume", inserter.calls[0].PlaylistID)
 }
 
-func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
+func TestPipeline_DeferredItemsCannotReplayEarlierRunDecisions(t *testing.T) {
 	ctx := context.Background()
 	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
 	defer cleanup()
@@ -261,6 +277,7 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 
 	// Create run2 (scheduled) that will process the deferred item.
 	run2 := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeScheduled, Status: state.RunStatusRunning}
+	captureNativeTestRun(t, ctx, db, run2)
 	run2ID, err := stateStore.CreateRun(ctx, run2)
 	require.NoError(t, err)
 
@@ -274,6 +291,7 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 
 	p := NewPipeline(db, machine, stateStore, disc, nil, nil, exec, ledger, nil, nil, broadcast,
 		WithQueueStore(queueStore),
+		WithConfigStore(config.NewStore(db)),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
 
@@ -283,19 +301,17 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
 
-	// The deferred item should be completed and the action executed.
+	// No receiving-run evaluation exists. Retain pending work rather than
+	// replaying the earlier run's match or acknowledging an empty match set.
 	items, err := queueStore.ListDeferredItems(ctx, "")
 	require.NoError(t, err)
 	require.Len(t, items, 1)
-	assert.Equal(t, queue.DeferredStatusCompleted, items[0].Status)
+	assert.Equal(t, queue.DeferredStatusPending, items[0].Status)
 
 	actions, err := stateStore.GetExecutedActionsForVideo(ctx, video.ID)
 	require.NoError(t, err)
-	require.Len(t, actions, 1)
-	assert.Equal(t, state.ActionOutcomeSucceeded, actions[0].Outcome)
-
-	assert.Len(t, inserter.calls, 1)
-	assert.Equal(t, "PLdefer", inserter.calls[0].PlaylistID)
+	require.Empty(t, actions)
+	assert.Empty(t, inserter.calls)
 }
 
 func TestPipeline_FailRunSetsFailedStatus(t *testing.T) {
@@ -326,11 +342,13 @@ func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {
 	defer cleanup()
 
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	captureNativeTestRun(t, ctx, db, run)
 	runID, err := stateStore.CreateRun(ctx, run)
 	require.NoError(t, err)
 
 	// Leave discovery nil so phaseDiscovery panics with a nil pointer dereference.
 	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithConfigStore(config.NewStore(db)),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
 
@@ -404,6 +422,7 @@ func TestPipeline_ActionExecutionUpdatesChannelCounters(t *testing.T) {
 	require.NoError(t, err)
 
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	captureNativeTestRun(t, ctx, db, run)
 	runID, err := stateStore.CreateRun(ctx, run)
 	require.NoError(t, err)
 
@@ -437,6 +456,7 @@ func TestPipeline_ActionExecutionUpdatesChannelCounters(t *testing.T) {
 	exec := newTestExecutor(t, db, ledger, inserter)
 
 	p := NewPipeline(db, machine, stateStore, nil, nil, nil, exec, ledger, nil, nil, broadcast,
+		WithConfigStore(config.NewStore(db)),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
 

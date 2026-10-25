@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/bateau84/YuHaul/internal/auth"
+	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/scheduler"
 	"github.com/bateau84/YuHaul/internal/state"
 )
@@ -88,7 +90,23 @@ func (h *Handler) handleListVersions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list config versions")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
+	ids, err := h.service.RouteIdentities(r.Context())
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "load route identities failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list config versions")
+		return
+	}
+	public := make([]PublicConfigVersion, 0, len(versions))
+	for _, v := range versions {
+		pv, err := publicConfigVersion(v, ids)
+		if err != nil {
+			h.logger.ErrorContext(r.Context(), "project config version failed", "error", err, "id", v.ID)
+			writeError(w, http.StatusInternalServerError, "failed to list config versions")
+			return
+		}
+		public = append(public, pv)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versions": public})
 }
 
 func (h *Handler) handleGetVersion(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +127,20 @@ func (h *Handler) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, cv)
+	ids, err := h.service.RouteIdentities(r.Context())
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "load route identities failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to load config version")
+		return
+	}
+	public, err := publicConfigVersion(*cv, ids)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "project config version failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to load config version")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, public)
 }
 
 func (h *Handler) handleDiffVersion(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +180,19 @@ func (h *Handler) handleDiffVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to diff config versions")
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	ids, err := h.service.RouteIdentities(r.Context())
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "load route identities failed", "error", err, "from", compareTo, "to", id)
+		writeError(w, http.StatusInternalServerError, "failed to diff config versions")
+		return
+	}
+	public, err := publicDiffResult(*result, ids)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "project config diff failed", "error", err, "from", compareTo, "to", id)
+		writeError(w, http.StatusInternalServerError, "failed to diff config versions")
+		return
+	}
+	writeJSON(w, http.StatusOK, public)
 }
 
 func (h *Handler) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +207,31 @@ func (h *Handler) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
+	// Validate the historical snapshot's public projection before persisting
+	// the restored version, so an identity-registry integrity failure never
+	// commits a config version that the history endpoints cannot serve.
+	source, err := h.service.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, state.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "config version not found")
+			return
+		}
+		h.logger.ErrorContext(r.Context(), "restore config version failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to restore config version")
+		return
+	}
+	ids, err := h.service.RouteIdentities(r.Context())
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "load route identities failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to restore config version")
+		return
+	}
+	if _, err := publicSnapshot(source.Snapshot, ids); err != nil {
+		h.logger.ErrorContext(r.Context(), "project restored config version failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to restore config version")
+		return
+	}
+
 	cv, err := h.service.Restore(r.Context(), id, body.Description)
 	if err != nil {
 		if errors.Is(err, state.ErrNotFound) {
@@ -175,7 +243,14 @@ func (h *Handler) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, cv)
+	public, err := publicConfigVersion(*cv, ids)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "project restored config version failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "failed to restore config version")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, public)
 }
 
 func (h *Handler) handleGetThreshold(w http.ResponseWriter, r *http.Request) {
@@ -275,13 +350,8 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if body.DuplicateBehavior != nil {
-		if err := h.service.SetDuplicateBehavior(ctx, *body.DuplicateBehavior); err != nil {
-			h.logger.ErrorContext(ctx, "set duplicate behavior failed", "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to update duplicate behavior")
-			return
-		}
-	}
+	// DuplicateBehavior is decoded for legacy string/null admission only.
+	// It cannot change fixed continuation or independently create history.
 
 	resp, err := h.settingsResponse(ctx)
 	if err != nil {
@@ -345,6 +415,113 @@ func (h *Handler) settingsResponse(ctx context.Context) (map[string]any, error) 
 
 func parseID(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
+}
+
+// publicConfigVersion projects a stored ConfigVersion onto its public API
+// representation (ADR-011/ARS-004): route identities become the stable
+// public UUIDs resolved through the route_identity registry, and action
+// types use the public vocabulary (ADR-007). The stored snapshot keeps the
+// internal integer route keys and legacy action values and is never mutated.
+// A route key without a registry mapping fails the projection — it must
+// never be emitted as an integer, omitted, or substituted by route name.
+func publicConfigVersion(cv ConfigVersion, ids map[int64]string) (PublicConfigVersion, error) {
+	snapshot, err := publicSnapshot(cv.Snapshot, ids)
+	if err != nil {
+		return PublicConfigVersion{}, err
+	}
+	return PublicConfigVersion{
+		ID:                cv.ID,
+		CreatedAt:         cv.CreatedAt,
+		Snapshot:          snapshot,
+		ChangeDescription: cv.ChangeDescription,
+	}, nil
+}
+
+// publicDiffResult projects a computed diff onto its public API
+// representation. The comparison ran on the stored internal snapshots
+// before this projection, so duplicate route names and legacy action values
+// never affect which routes count as added, removed, or changed; only the
+// emitted identities and action vocabulary change.
+func publicDiffResult(d DiffResult, ids map[int64]string) (PublicDiffResult, error) {
+	result := PublicDiffResult{
+		FromID:          d.FromID,
+		ToID:            d.ToID,
+		SettingsChanged: d.SettingsChanged,
+		RoutesAdded:     make([]PublicSnapshotRoute, 0, len(d.RoutesAdded)),
+		RoutesRemoved:   make([]PublicSnapshotRoute, 0, len(d.RoutesRemoved)),
+		RoutesChanged:   make([]PublicRouteChange, 0, len(d.RoutesChanged)),
+	}
+	for _, r := range d.RoutesAdded {
+		publicRoute, err := publicSnapshotRoute(r, ids)
+		if err != nil {
+			return PublicDiffResult{}, err
+		}
+		result.RoutesAdded = append(result.RoutesAdded, publicRoute)
+	}
+	for _, r := range d.RoutesRemoved {
+		publicRoute, err := publicSnapshotRoute(r, ids)
+		if err != nil {
+			return PublicDiffResult{}, err
+		}
+		result.RoutesRemoved = append(result.RoutesRemoved, publicRoute)
+	}
+	for _, c := range d.RoutesChanged {
+		old, err := publicSnapshotRoute(c.Old, ids)
+		if err != nil {
+			return PublicDiffResult{}, err
+		}
+		new, err := publicSnapshotRoute(c.New, ids)
+		if err != nil {
+			return PublicDiffResult{}, err
+		}
+		result.RoutesChanged = append(result.RoutesChanged, PublicRouteChange{
+			ID:      new.ID,
+			Old:     old,
+			New:     new,
+			Changes: c.Changes,
+		})
+	}
+	return result, nil
+}
+
+func publicSnapshot(snap Snapshot, ids map[int64]string) (PublicSnapshot, error) {
+	routes := make([]PublicSnapshotRoute, 0, len(snap.Routes))
+	for _, r := range snap.Routes {
+		publicRoute, err := publicSnapshotRoute(r, ids)
+		if err != nil {
+			return PublicSnapshot{}, err
+		}
+		routes = append(routes, publicRoute)
+	}
+	return PublicSnapshot{
+		Routes:             routes,
+		DuplicateThreshold: snap.DuplicateThreshold,
+		DuplicateBehavior:  snap.DuplicateBehavior,
+	}, nil
+}
+
+func publicSnapshotRoute(r SnapshotRoute, ids map[int64]string) (PublicSnapshotRoute, error) {
+	publicID, ok := ids[r.ID]
+	if !ok {
+		return PublicSnapshotRoute{}, fmt.Errorf("config: route %d has no route identity mapping", r.ID)
+	}
+	actions := make([]SnapshotAction, 0, len(r.Actions))
+	for _, a := range r.Actions {
+		a.ActionType = router.ToPublicActionType(a.ActionType)
+		actions = append(actions, a)
+	}
+	return PublicSnapshotRoute{
+		ID:                   publicID,
+		Name:                 r.Name,
+		Description:          r.Description,
+		EvaluationOrder:      r.EvaluationOrder,
+		IsFinal:              r.IsFinal,
+		IsEnabled:            r.IsEnabled,
+		ConditionComposition: r.ConditionComposition,
+		Conditions:           r.Conditions,
+		Actions:              actions,
+		Exclusions:           r.Exclusions,
+	}, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

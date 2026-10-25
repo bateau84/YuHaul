@@ -231,28 +231,74 @@ func WithErrorMessage(msg string) TransitionOption {
 
 // RecordRouteDecision persists a per-route decision and returns it.
 func (m *Machine) RecordRouteDecision(ctx context.Context, d *RouteDecision) (*RouteDecision, error) {
-	if d.VideoID == 0 {
-		return nil, errors.New("state: VideoID is required")
+	if err := validateRouteDecision(d); err != nil {
+		return nil, err
 	}
-	if d.RunID == 0 {
-		return nil, errors.New("state: RunID is required")
-	}
-	if d.RouteID == 0 {
-		return nil, errors.New("state: RouteID is required")
-	}
-	if !d.Decision.Valid() {
-		return nil, fmt.Errorf("state: invalid decision %q", d.Decision)
-	}
-	if d.Decision == RouteDecisionSkipped && d.SkipReason == nil {
-		return nil, errors.New("state: skipped decision requires a SkipReason")
-	}
-
 	id, err := m.store.CreateRouteDecision(ctx, d)
 	if err != nil {
 		return nil, fmt.Errorf("recording route decision: %w", err)
 	}
 	d.ID = id
 	return d, nil
+}
+
+func validateRouteDecision(d *RouteDecision) error {
+	if d.VideoID == 0 {
+		return errors.New("state: VideoID is required")
+	}
+	if d.RunID == 0 {
+		return errors.New("state: RunID is required")
+	}
+	if d.RouteID == 0 {
+		return errors.New("state: RouteID is required")
+	}
+	if !d.Decision.Valid() {
+		return fmt.Errorf("state: invalid decision %q", d.Decision)
+	}
+	if d.Decision == RouteDecisionSkipped && d.SkipReason == nil {
+		return errors.New("state: skipped decision requires a SkipReason")
+	}
+	return nil
+}
+
+// RecordRouteEvaluation atomically persists a decision and its condition evidence.
+// Recovery reuses an existing run/video/route decision without rewriting history.
+func (m *Machine) RecordRouteEvaluation(ctx context.Context, d *RouteDecision, audits []ConditionAudit) (*RouteDecision, error) {
+	if err := validateRouteDecision(d); err != nil {
+		return nil, err
+	}
+	tx, err := m.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin route evaluation: %w", err)
+	}
+	defer tx.Rollback()
+	existing, err := scanRouteDecision(tx.QueryRowContext(ctx,
+		`SELECT id, video_id, run_id, route_id, evaluation_order, decision, skip_reason, rejection_reason
+		 FROM route_decision WHERE video_id = ? AND run_id = ? AND route_id = ?`, d.VideoID, d.RunID, d.RouteID))
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("load route evaluation: %w", err)
+	}
+	recorded := *d
+	recorded.ID, err = createRouteDecision(ctx, tx, &recorded)
+	if err != nil {
+		return nil, err
+	}
+	for _, audit := range audits {
+		if audit.Field == "" || audit.Operator == "" {
+			return nil, errors.New("state: condition audit requires Field and Operator")
+		}
+		audit.RouteDecisionID = recorded.ID
+		if _, err := createConditionAudit(ctx, tx, &audit); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit route evaluation: %w", err)
+	}
+	return &recorded, nil
 }
 
 // RecordExecutedAction persists a per-action outcome.
@@ -322,10 +368,12 @@ func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 	}
 
 	duration := started.Sub(run.StartedAt).Seconds()
-	if err := m.store.CompleteRun(ctx, runID, duration, quotaCost); err != nil {
+	// Completed is the publication barrier for HTTP pollers: finish all
+	// finalization writes before exposing it, as for historical runs.
+	if err := m.store.RecomputeRunCounters(ctx, runID); err != nil {
 		return nil, err
 	}
-	if err := m.store.RecomputeRunCounters(ctx, runID); err != nil {
+	if err := m.store.CompleteRun(ctx, runID, duration, quotaCost); err != nil {
 		return nil, err
 	}
 	return m.store.GetRun(ctx, runID)
@@ -371,10 +419,12 @@ func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run,
 	}
 
 	duration := started.Sub(run.StartedAt).Seconds()
-	if err := m.store.CompleteRun(ctx, runID, duration, quotaCost); err != nil {
+	// Publish completed status only after decision-derived counts are final;
+	// HTTP pollers may observe completion before this method returns.
+	if err := m.store.RecomputeRunCountersFromDecisions(ctx, runID); err != nil {
 		return nil, err
 	}
-	if err := m.store.RecomputeRunCountersFromDecisions(ctx, runID); err != nil {
+	if err := m.store.CompleteRun(ctx, runID, duration, quotaCost); err != nil {
 		return nil, err
 	}
 	return m.store.GetRun(ctx, runID)

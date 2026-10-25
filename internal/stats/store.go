@@ -3,22 +3,29 @@ package stats
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 )
 
 // Store queries analytics data from the YuHaul SQLite schema.
 type Store struct {
 	db *sql.DB
+	// routes reads the shared route_identity registry so statistics project
+	// route keys through the same seam the route API and run-video decisions
+	// use (ARS-004).
+	routes *router.Store
 }
 
 // NewStore returns a stats store backed by db.
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db}
+	return &Store{db: db, routes: router.NewStore(db)}
 }
 
 // GetRunStats loads the computed statistics for a run.
@@ -127,51 +134,107 @@ func (s *Store) quotaBreakdown(ctx context.Context, runID int64) (map[string]int
 	return out, nil
 }
 
-// ListRouteStats returns per-route statistics for a run.
+// ListRouteStats returns per-route statistics for a run. Public identity is
+// the route's stable UUID resolved through the route_identity registry; the
+// route label comes from the run's immutable ConfigVersion snapshot so a later
+// rename does not rewrite what that run evaluated (ARS-001). Internal joins
+// and enrichment stay keyed by the integer route id.
+//
+// The emitted evaluation_order is the route's order in the requested run, not
+// the route row's current order: it is projected from the run's immutable
+// ConfigVersion snapshot, falls back to persisted route_decision orders only
+// when the snapshot has no usable order for the route, and is omitted when
+// neither source supplies one consistent positive order (ARS-001). The
+// current route.evaluation_order is never consulted for the field — ADR-003
+// and ADR-012 store the negative -route_id sentinel there for soft-deleted
+// routes and proposal-only anchors.
 func (s *Store) ListRouteStats(ctx context.Context, runID int64) ([]RouteStats, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.name, r.evaluation_order,
+		`SELECT r.id, r.name,
 		        COUNT(rd.id) AS evaluated,
 		        SUM(CASE WHEN rd.decision = 'matched' THEN 1 ELSE 0 END) AS matched,
 		        SUM(CASE WHEN rd.decision = 'not_matched' THEN 1 ELSE 0 END) AS not_matched,
 		        SUM(CASE WHEN rd.decision = 'skipped' THEN 1 ELSE 0 END) AS skipped
 		 FROM route r
 		 LEFT JOIN route_decision rd ON rd.route_id = r.id AND rd.run_id = ?
-		 GROUP BY r.id, r.name, r.evaluation_order
+		 GROUP BY r.id, r.name
 		 ORDER BY r.evaluation_order;`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("route stats for run %d: %w", runID, err)
 	}
 	defer rows.Close()
 
-	out := make([]RouteStats, 0)
+	// routeKey carries the internal integer through enrichment; it is never
+	// serialized, and the public RouteID is filled in after the lookups below.
+	type pending struct {
+		routeKey int64
+		stats    RouteStats
+	}
+	entries := make([]pending, 0)
 	for rows.Next() {
-		var rs RouteStats
-		if err := rows.Scan(&rs.RouteID, &rs.RouteName, &rs.EvaluationOrder,
-			&rs.VideosEvaluated, &rs.VideosMatched, &rs.VideosNotMatched, &rs.VideosSkipped); err != nil {
+		var p pending
+		if err := rows.Scan(&p.routeKey, &p.stats.RouteName,
+			&p.stats.VideosEvaluated, &p.stats.VideosMatched, &p.stats.VideosNotMatched, &p.stats.VideosSkipped); err != nil {
 			return nil, fmt.Errorf("scan route stats: %w", err)
 		}
-		out = append(out, rs)
+		entries = append(entries, p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate route stats: %w", err)
 	}
 
-	for i := range out {
-		if err := s.enrichRouteStats(ctx, runID, &out[i]); err != nil {
+	for i := range entries {
+		if err := s.enrichRouteStats(ctx, runID, entries[i].routeKey, &entries[i].stats); err != nil {
 			return nil, err
 		}
+	}
+
+	publicIDs, err := s.routes.ListRouteIdentities(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("route stats for run %d: %w", runID, err)
+	}
+	labels, orders, err := s.runRouteContext(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	decisionOrders, err := s.decisionRouteOrders(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]RouteStats, 0, len(entries))
+	for _, e := range entries {
+		publicID, err := publicRouteID(publicIDs, e.routeKey)
+		if err != nil {
+			return nil, err
+		}
+		e.stats.RouteID = publicID
+		// A route outside the evaluated snapshot (for example one created
+		// after the run) has no historical label; its current label is the
+		// only one that exists and identity is unaffected.
+		if label, ok := labels[e.routeKey]; ok {
+			e.stats.RouteName = label
+		}
+		// Historical order: snapshot first; persisted decision orders only
+		// where the snapshot has no usable order; otherwise omitted. Never
+		// the current row's value, never a transformed sentinel.
+		if order, ok := orders[e.routeKey]; ok {
+			e.stats.EvaluationOrder = &order
+		} else if order, ok := decisionOrders[e.routeKey]; ok {
+			e.stats.EvaluationOrder = &order
+		}
+		out = append(out, e.stats)
 	}
 	return out, nil
 }
 
-func (s *Store) enrichRouteStats(ctx context.Context, runID int64, rs *RouteStats) error {
+func (s *Store) enrichRouteStats(ctx context.Context, runID, routeKey int64, rs *RouteStats) error {
 	// Rejection reason breakdown.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT COALESCE(rejection_reason, 'unknown'), COUNT(*)
 		 FROM route_decision
 		 WHERE run_id = ? AND route_id = ? AND decision = 'not_matched'
-		 GROUP BY COALESCE(rejection_reason, 'unknown');`, runID, rs.RouteID)
+		 GROUP BY COALESCE(rejection_reason, 'unknown');`, runID, routeKey)
 	if err != nil {
 		return fmt.Errorf("route rejection breakdown: %w", err)
 	}
@@ -194,7 +257,7 @@ func (s *Store) enrichRouteStats(ctx context.Context, runID int64, rs *RouteStat
 		`SELECT COALESCE(skip_reason, 'unknown'), COUNT(*)
 		 FROM route_decision
 		 WHERE run_id = ? AND route_id = ? AND decision = 'skipped'
-		 GROUP BY COALESCE(skip_reason, 'unknown');`, runID, rs.RouteID)
+		 GROUP BY COALESCE(skip_reason, 'unknown');`, runID, routeKey)
 	if err != nil {
 		return fmt.Errorf("route skip breakdown: %w", err)
 	}
@@ -219,7 +282,7 @@ func (s *Store) enrichRouteStats(ctx context.Context, runID int64, rs *RouteStat
 		        COUNT(ea.id)
 		 FROM route_decision rd
 		 LEFT JOIN executed_action ea ON ea.route_decision_id = rd.id
-		 WHERE rd.run_id = ? AND rd.route_id = ? AND rd.decision = 'matched';`, runID, rs.RouteID)
+		 WHERE rd.run_id = ? AND rd.route_id = ? AND rd.decision = 'matched';`, runID, routeKey)
 	if err != nil {
 		return fmt.Errorf("route action outcomes: %w", err)
 	}
@@ -314,7 +377,7 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 		        videos_deferred, videos_failed, videos_not_yet_evaluated
 		 FROM run
 		 WHERE started_at >= ? AND started_at < ? AND status = 'completed'
-		 ORDER BY started_at;`, from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano))
+		 ORDER BY started_at;`, from.UTC().Format(state.RunTimestampLayout), to.UTC().Format(state.RunTimestampLayout))
 	if err != nil {
 		return nil, fmt.Errorf("temporal stats: %w", err)
 	}
@@ -371,27 +434,168 @@ func bucketKey(t time.Time, granularity string) string {
 	}
 }
 
-// DuplicateProvenanceBreakdown counts how often a channel was the original
-// discovery source versus the publisher of a matching duplicate.
-func (s *Store) DuplicateProvenanceBreakdown(ctx context.Context, channelIDText string) (DuplicateProvenanceBreakdown, error) {
-	var out DuplicateProvenanceBreakdown
-	// Times this channel published a video that matched a fingerprint from another channel.
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*)
+// discoveredAtLayouts are the stored representations of video.discovered_at.
+// Current writes (bound time.Time values, explicit text, and the schema
+// default) land as RFC3339 text, while rows written by earlier driver
+// versions carry Go's String() format. Both decode to the same chronological
+// instants, so ordering compares decoded times, never raw SQLite text
+// (ADR-014 §6).
+var discoveredAtLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+}
+
+// parseDiscoveredAt decodes a stored video.discovered_at value. ok is false
+// for unparseable values: unknown evidence must never fall back to imported
+// fingerprint metadata (ADR-014 §3, §6).
+func parseDiscoveredAt(raw string) (time.Time, bool) {
+	for _, layout := range discoveredAtLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// duplicateMatchFact is one distinct-pair duplicate_match row joined with the
+// durable per-video evidence on both sides: the evaluated video's native
+// record and the matched fingerprint's native video record (ADR-014). Legacy
+// same-ID self-match rows are excluded before facts are returned.
+type duplicateMatchFact struct {
+	matchedFingerprintID int64
+	similarityScore      float64
+	matchType            string
+
+	// Evaluated side: the video that was matched against historical records.
+	videoID          string
+	videoChannelID   string
+	videoChannelName string
+	videoTime        time.Time
+	videoTimeOK      bool
+
+	// Reference side: the matched fingerprint's native video record. Empty
+	// when the fingerprint has no native observation.
+	refVideoID     string
+	refChannelID   string
+	refChannelName string
+	refTime        time.Time
+	refTimeOK      bool
+}
+
+// pairRoles are the chronology-derived ADR-014 roles for one distinct match
+// pair: the earlier native observation's channel earns discovery credit, the
+// later one earns relevance credit.
+type pairRoles struct {
+	discoveryChannelID   string
+	discoveryChannelName string
+	relevanceChannelID   string
+	relevanceChannelName string
+	discoveryVideoID     string
+	relevanceVideoID     string
+}
+
+// roles returns the pair's discovery/relevance attribution. ok is false when
+// the pair has no orderable chronology — no native reference record, or
+// decoded discovery times that are equal or unparseable. Neither the imported
+// fingerprint association nor an assumed reference role may stand in for
+// missing chronology (ADR-014 §3, §5).
+func (f duplicateMatchFact) roles() (pairRoles, bool) {
+	if f.refVideoID == "" || !f.videoTimeOK || !f.refTimeOK {
+		return pairRoles{}, false
+	}
+	if f.videoTime.Before(f.refTime) {
+		return pairRoles{
+			discoveryChannelID:   f.videoChannelID,
+			discoveryChannelName: f.videoChannelName,
+			relevanceChannelID:   f.refChannelID,
+			relevanceChannelName: f.refChannelName,
+			discoveryVideoID:     f.videoID,
+			relevanceVideoID:     f.refVideoID,
+		}, true
+	}
+	if f.refTime.Before(f.videoTime) {
+		return pairRoles{
+			discoveryChannelID:   f.refChannelID,
+			discoveryChannelName: f.refChannelName,
+			relevanceChannelID:   f.videoChannelID,
+			relevanceChannelName: f.videoChannelName,
+			discoveryVideoID:     f.refVideoID,
+			relevanceVideoID:     f.videoID,
+		}, true
+	}
+	return pairRoles{}, false
+}
+
+// loadDuplicateMatchFacts returns every distinct-pair duplicate_match row with
+// both sides' native video evidence. Legacy same-ID self-matches are not
+// duplicate events and earn neither discovery nor relevance credit
+// (ADR-014 §4). Attribution is decided per pair from decoded discovery times,
+// independent of which side the detector returned as the matched fingerprint.
+func (s *Store) loadDuplicateMatchFacts(ctx context.Context) ([]duplicateMatchFact, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT dm.matched_fingerprint_id, dm.similarity_score, dm.match_type,
+		        v.video_id, v.channel_id, vc.channel_name, v.discovered_at,
+		        rv.video_id, rv.channel_id, rvc.channel_name, rv.discovered_at
 		 FROM duplicate_match dm
 		 JOIN video v ON v.id = dm.video_id
-		 WHERE v.channel_id = ?;`, channelIDText).Scan(&out.RelevanceCredit)
-	if err != nil {
-		return out, fmt.Errorf("relevance credit for %s: %w", channelIDText, err)
-	}
-	// Times a fingerprint from this channel was matched by a video from another channel.
-	err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*)
-		 FROM duplicate_match dm
+		 LEFT JOIN channel vc ON vc.channel_id = v.channel_id
 		 JOIN title_fingerprint tf ON tf.id = dm.matched_fingerprint_id
-		 WHERE tf.channel_id = ?;`, channelIDText).Scan(&out.DiscoveryCredit)
+		 LEFT JOIN video rv ON rv.video_id = tf.video_id
+		 LEFT JOIN channel rvc ON rvc.channel_id = rv.channel_id
+		 WHERE tf.video_id <> v.video_id;`)
 	if err != nil {
-		return out, fmt.Errorf("discovery credit for %s: %w", channelIDText, err)
+		return nil, fmt.Errorf("load duplicate match facts: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]duplicateMatchFact, 0)
+	for rows.Next() {
+		var f duplicateMatchFact
+		var videoChannelName, refVideoID, refChannelID, refChannelName, refDiscoveredAt sql.NullString
+		var videoDiscoveredAt string
+		if err := rows.Scan(&f.matchedFingerprintID, &f.similarityScore, &f.matchType,
+			&f.videoID, &f.videoChannelID, &videoChannelName, &videoDiscoveredAt,
+			&refVideoID, &refChannelID, &refChannelName, &refDiscoveredAt); err != nil {
+			return nil, fmt.Errorf("scan duplicate match fact: %w", err)
+		}
+		f.videoChannelName = videoChannelName.String
+		f.videoTime, f.videoTimeOK = parseDiscoveredAt(videoDiscoveredAt)
+		if refVideoID.Valid {
+			f.refVideoID = refVideoID.String
+			f.refChannelID = refChannelID.String
+			f.refChannelName = refChannelName.String
+			f.refTime, f.refTimeOK = parseDiscoveredAt(refDiscoveredAt.String)
+		}
+		out = append(out, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate duplicate match facts: %w", err)
+	}
+	return out, nil
+}
+
+// DuplicateProvenanceBreakdown counts how often a channel earned discovery
+// credit — its native video observation preceded the matched pair's other
+// native observation — versus relevance credit, earned by the later
+// observation of the pair. Pairs without orderable native chronology and
+// legacy same-ID self-matches contribute to neither (ADR-014).
+func (s *Store) DuplicateProvenanceBreakdown(ctx context.Context, channelIDText string) (DuplicateProvenanceBreakdown, error) {
+	var out DuplicateProvenanceBreakdown
+	facts, err := s.loadDuplicateMatchFacts(ctx)
+	if err != nil {
+		return out, fmt.Errorf("duplicate provenance breakdown for %s: %w", channelIDText, err)
+	}
+	for _, f := range facts {
+		roles, ok := f.roles()
+		if !ok {
+			continue
+		}
+		if roles.discoveryChannelID == channelIDText {
+			out.DiscoveryCredit++
+		}
+		if roles.relevanceChannelID == channelIDText {
+			out.RelevanceCredit++
+		}
 	}
 	return out, nil
 }
@@ -477,11 +681,13 @@ func (s *Store) ListRecentVideos(ctx context.Context, channelIDText string) ([]V
 }
 
 // ListRecentVideoProvenance returns per-video duplicate and retention
-// provenance for a channel's videos. Duplicate credit is 'discovery' when
-// another channel's video matched a fingerprint this channel published, and
-// 'relevance' when this channel published a video matching a fingerprint
-// discovered elsewhere; discovery takes precedence because it is the stronger
-// credit. Retention source reflects recorded playlist-membership provenance.
+// provenance for a channel's videos. Duplicate credit follows the recorded
+// pair's native chronology (ADR-014): a video tagged 'discovery' was the
+// earlier native observation in a distinct matched pair, and 'relevance' the
+// later one; discovery takes precedence because it is the stronger credit.
+// Pairs without orderable native evidence and legacy same-ID self-matches
+// contribute no credit. Retention source reflects recorded playlist-
+// membership provenance.
 func (s *Store) ListRecentVideoProvenance(ctx context.Context, channelIDText string) ([]VideoProvenance, error) {
 	type provenance struct {
 		duplicateCredit *string
@@ -497,44 +703,29 @@ func (s *Store) ListRecentVideoProvenance(ctx context.Context, channelIDText str
 		return p
 	}
 
-	dupRows, err := s.db.QueryContext(ctx,
-		`SELECT video_id, credit FROM (
-			-- Relevance: this channel published a video that matched a
-			-- fingerprint first discovered elsewhere.
-			SELECT v.video_id AS video_id, 'relevance' AS credit
-			FROM duplicate_match dm
-			JOIN video v ON v.id = dm.video_id
-			WHERE v.channel_id = ?
-			UNION
-			-- Discovery: another channel's video matched a fingerprint this
-			-- channel published first.
-			SELECT tv.video_id AS video_id, 'discovery' AS credit
-			FROM duplicate_match dm
-			JOIN title_fingerprint tf ON tf.id = dm.matched_fingerprint_id
-			JOIN video tv ON tv.video_id = tf.video_id
-			WHERE tf.channel_id = ?
-		 );`, channelIDText, channelIDText)
+	facts, err := s.loadDuplicateMatchFacts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("recent video duplicate provenance for %s: %w", channelIDText, err)
 	}
-	for dupRows.Next() {
-		var videoID, credit string
-		if err := dupRows.Scan(&videoID, &credit); err != nil {
-			dupRows.Close()
-			return nil, fmt.Errorf("scan recent video duplicate provenance: %w", err)
+	for _, f := range facts {
+		roles, ok := f.roles()
+		if !ok {
+			continue
 		}
-		p := get(videoID)
-		// Discovery is the stronger credit; keep it when a video has both.
-		if p.duplicateCredit == nil || credit == "discovery" {
-			c := credit
+		if roles.discoveryChannelID == channelIDText {
+			// Discovery is the stronger credit; keep it over relevance.
+			p := get(roles.discoveryVideoID)
+			c := "discovery"
 			p.duplicateCredit = &c
 		}
+		if roles.relevanceChannelID == channelIDText {
+			p := get(roles.relevanceVideoID)
+			if p.duplicateCredit == nil {
+				c := "relevance"
+				p.duplicateCredit = &c
+			}
+		}
 	}
-	if err := dupRows.Err(); err != nil {
-		dupRows.Close()
-		return nil, fmt.Errorf("iterate recent video duplicate provenance: %w", err)
-	}
-	dupRows.Close()
 
 	retRows, err := s.db.QueryContext(ctx,
 		`SELECT rs.video_id, rs.membership_source
@@ -573,67 +764,106 @@ func (s *Store) ListRecentVideoProvenance(ctx context.Context, channelIDText str
 	return out, nil
 }
 
-// MatchedRoutesForChannel returns the distinct route names that matched any
-// video from the channel.
-func (s *Store) MatchedRoutesForChannel(ctx context.Context, channelIDText string) ([]string, error) {
+// MatchedRoutesForChannel returns one entry per route identity that matched a
+// video from this channel in a production run. The count is the number of
+// distinct internal video records that route matched for this channel; dry-run,
+// replay, and backtest decisions never contribute (BR-027 AC7, ARS-001).
+// Soft-deleted routes keep their entries while production evidence exists.
+// Entries are ordered by display name and then public UUID, and a route key
+// without a registry mapping fails the whole read instead of degrading to an
+// integer or a name-only entry.
+func (s *Store) MatchedRoutesForChannel(ctx context.Context, channelIDText string) ([]MatchedRoute, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT r.name
+		`SELECT rd.route_id, r.name, COUNT(DISTINCT rd.video_id)
 		 FROM route_decision rd
-		 JOIN route r ON r.id = rd.route_id
+		 JOIN run ON run.id = rd.run_id
 		 JOIN video v ON v.id = rd.video_id
+		 LEFT JOIN route r ON r.id = rd.route_id
 		 WHERE v.channel_id = ? AND rd.decision = 'matched'
-		 ORDER BY r.name;`, channelIDText)
+		   AND run.run_type IN ('scheduled','manual')
+		 GROUP BY rd.route_id, r.name;`, channelIDText)
 	if err != nil {
 		return nil, fmt.Errorf("matched routes for %s: %w", channelIDText, err)
 	}
 	defer rows.Close()
-	out := make([]string, 0)
+
+	type pending struct {
+		routeKey   int64
+		name       sql.NullString
+		matchCount int
+	}
+	entries := make([]pending, 0)
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var p pending
+		if err := rows.Scan(&p.routeKey, &p.name, &p.matchCount); err != nil {
 			return nil, fmt.Errorf("scan matched route for %s: %w", channelIDText, err)
 		}
-		out = append(out, name)
+		entries = append(entries, p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate matched routes for %s: %w", channelIDText, err)
 	}
+
+	publicIDs, err := s.routes.ListRouteIdentities(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("matched routes for %s: %w", channelIDText, err)
+	}
+
+	out := make([]MatchedRoute, 0, len(entries))
+	for _, e := range entries {
+		if !e.name.Valid {
+			// The decision evidence exists but its route row does not, so the
+			// required display label cannot be produced honestly.
+			return nil, fmt.Errorf("route %d: missing route row for matched-route label", e.routeKey)
+		}
+		publicID, err := publicRouteID(publicIDs, e.routeKey)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, MatchedRoute{
+			RouteID:    publicID,
+			Name:       e.name.String,
+			MatchCount: e.matchCount,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].RouteID < out[j].RouteID
+	})
 	return out, nil
 }
 
-// ListDuplicateProvenance returns duplicate provenance rows where the
-// relevance-credit channel matches channelIDText.
+// ListDuplicateProvenance returns distinct-pair duplicate-match rows anchored
+// at this channel's evaluated videos. DiscoveryCreditChannelID/Name come from
+// the pair's two native video observations' chronology — the earlier
+// observation's channel (ADR-014) — and stay empty when the pair has no
+// orderable native evidence. The matched fingerprint's channel association is
+// never substituted, and legacy same-ID self-match rows are excluded.
 func (s *Store) ListDuplicateProvenance(ctx context.Context, channelIDText string) ([]DuplicateProvenance, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT v.video_id, v.channel_id, dm.matched_fingerprint_id, dm.similarity_score,
-		        dm.match_type, tf.channel_id, tfp.channel_name
-		 FROM duplicate_match dm
-		 JOIN video v ON v.id = dm.video_id
-		 JOIN title_fingerprint tf ON tf.id = dm.matched_fingerprint_id
-		 LEFT JOIN channel tfp ON tfp.channel_id = tf.channel_id
-		 WHERE v.channel_id = ?;`, channelIDText)
+	facts, err := s.loadDuplicateMatchFacts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("duplicate provenance for %s: %w", channelIDText, err)
 	}
-	defer rows.Close()
 
 	out := make([]DuplicateProvenance, 0)
-	for rows.Next() {
-		var dp DuplicateProvenance
-		// title_fingerprint.channel_id and channel.channel_name are nullable
-		// (LEFT JOIN anticipates a missing channel row).
-		var discoveryChannelID, discoveryChannelName sql.NullString
-		if err := rows.Scan(&dp.VideoID, &dp.ChannelID, &dp.MatchedFingerprintID,
-			&dp.SimilarityScore, &dp.MatchType,
-			&discoveryChannelID, &discoveryChannelName); err != nil {
-			return nil, fmt.Errorf("scan duplicate provenance: %w", err)
+	for _, f := range facts {
+		if f.videoChannelID != channelIDText {
+			continue
 		}
-		dp.DiscoveryCreditChannelID = discoveryChannelID.String
-		dp.DiscoveryCreditChannelName = discoveryChannelName.String
+		dp := DuplicateProvenance{
+			VideoID:              f.videoID,
+			ChannelID:            f.videoChannelID,
+			MatchedFingerprintID: f.matchedFingerprintID,
+			SimilarityScore:      f.similarityScore,
+			MatchType:            f.matchType,
+		}
+		if roles, ok := f.roles(); ok {
+			dp.DiscoveryCreditChannelID = roles.discoveryChannelID
+			dp.DiscoveryCreditChannelName = roles.discoveryChannelName
+		}
 		out = append(out, dp)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate duplicate provenance: %w", err)
 	}
 	return out, nil
 }
@@ -799,6 +1029,10 @@ func scanRetentionPlaylist(sc scanner) (RetentionPlaylist, error) {
 }
 
 // GetRouteMatchRates returns per-route decision counts grouped by bucket.
+// Grouping stays keyed by the internal integer route id so same-named routes
+// never merge; the returned route_id is that key's stable public UUID and the
+// route_name is the current persisted display label (cross-run analytics are
+// not run-scoped, ARS-001).
 func (s *Store) GetRouteMatchRates(ctx context.Context, from, to time.Time, granularity string) ([]RouteMatchRate, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.id, r.name, run.started_at, rd.decision
@@ -807,7 +1041,7 @@ func (s *Store) GetRouteMatchRates(ctx context.Context, from, to time.Time, gran
 		 JOIN run ON run.id = rd.run_id
 		 WHERE run.started_at >= ? AND run.started_at < ? AND run.status = 'completed'
 		 ORDER BY run.started_at, r.evaluation_order;`,
-		from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano))
+		from.UTC().Format(state.RunTimestampLayout), to.UTC().Format(state.RunTimestampLayout))
 	if err != nil {
 		return nil, fmt.Errorf("route match rates: %w", err)
 	}
@@ -817,7 +1051,14 @@ func (s *Store) GetRouteMatchRates(ctx context.Context, from, to time.Time, gran
 		routeID int64
 		bucket  string
 	}
-	groups := make(map[key]*RouteMatchRate)
+	type group struct {
+		routeKey  int64
+		routeName string
+		bucket    string
+		evaluated int
+		matched   int
+	}
+	groups := make(map[key]*group)
 	for rows.Next() {
 		var routeID int64
 		var routeName, startedAt, decision string
@@ -831,26 +1072,44 @@ func (s *Store) GetRouteMatchRates(ctx context.Context, from, to time.Time, gran
 		k := key{routeID: routeID, bucket: bucketKey(t, granularity)}
 		g, ok := groups[k]
 		if !ok {
-			g = &RouteMatchRate{RouteID: routeID, RouteName: routeName, Bucket: k.bucket}
+			g = &group{routeKey: routeID, routeName: routeName, bucket: k.bucket}
 			groups[k] = g
 		}
-		g.Evaluated++
+		g.evaluated++
 		if decision == "matched" {
-			g.Matched++
+			g.matched++
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate route match rates: %w", err)
 	}
 
+	publicIDs, err := s.routes.ListRouteIdentities(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("route match rates: %w", err)
+	}
+
 	out := make([]RouteMatchRate, 0, len(groups))
 	for _, g := range groups {
-		g.MatchRate = safeRate(g.Matched, g.Evaluated)
-		out = append(out, *g)
+		publicID, err := publicRouteID(publicIDs, g.routeKey)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, RouteMatchRate{
+			RouteID:   publicID,
+			RouteName: g.routeName,
+			Bucket:    g.bucket,
+			Evaluated: g.evaluated,
+			Matched:   g.matched,
+			MatchRate: safeRate(g.matched, g.evaluated),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Bucket != out[j].Bucket {
 			return out[i].Bucket < out[j].Bucket
+		}
+		if out[i].RouteName != out[j].RouteName {
+			return out[i].RouteName < out[j].RouteName
 		}
 		return out[i].RouteID < out[j].RouteID
 	})
@@ -862,6 +1121,118 @@ func safeRate(numerator, denominator int) float64 {
 		return 0
 	}
 	return float64(numerator) / float64(denominator)
+}
+
+// publicRouteID resolves one internal route key to its public UUID. A key with
+// no registry row is an integrity error: the endpoint fails rather than
+// emitting an integer, a route name, or a partial result (ARS-004 invariant 6).
+func publicRouteID(ids map[int64]string, routeKey int64) (string, error) {
+	publicID, ok := ids[routeKey]
+	if !ok || publicID == "" {
+		return "", fmt.Errorf("route %d: missing route identity mapping", routeKey)
+	}
+	return publicID, nil
+}
+
+// runRouteContext returns the route labels and evaluation orders captured in
+// the run's immutable ConfigVersion snapshot (OC-003), keyed by internal
+// route key. It returns nil maps with no error when the run has no linked
+// snapshot, the version row is missing, or the stored snapshot is
+// undecodable: OC-003 treats those as incomplete configuration context, and
+// the caller falls back to the current persisted label and to decision-order
+// evidence — the same policy the run-video decision projection uses. A
+// failure to read the snapshot row is a real error and fails the request.
+//
+// Only positive snapshot orders are returned as usable historical order; a
+// non-positive stored value is not a historical ordinal and is not
+// transformed into one.
+func (s *Store) runRouteContext(ctx context.Context, runID int64) (map[int64]string, map[int64]int, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT cv.snapshot
+		 FROM run
+		 LEFT JOIN config_version cv ON cv.id = run.config_version_id
+		 WHERE run.id = ?;`, runID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("run route context for run %d: %w", runID, err)
+	}
+	if !raw.Valid {
+		return nil, nil, nil
+	}
+
+	// Only the route id/name/order triples are read here; the rest of the
+	// immutable snapshot stays opaque, mirroring internal/store's snapshot
+	// decode.
+	var snapshot struct {
+		Routes []struct {
+			ID              json.RawMessage `json:"id"`
+			Name            string          `json:"name"`
+			EvaluationOrder int             `json:"evaluation_order"`
+		} `json:"routes"`
+	}
+	if err := json.Unmarshal([]byte(raw.String), &snapshot); err != nil {
+		// A malformed stored snapshot is OC-003 incomplete configuration
+		// context, not a failed read: warn and let current persisted labels
+		// and decision evidence fill in rather than failing run inspection
+		// or fabricating a label or an order.
+		slog.WarnContext(ctx, "run configuration snapshot unavailable; using current route names",
+			"run_id", runID, "error", err)
+		return nil, nil, nil
+	}
+	labels := make(map[int64]string, len(snapshot.Routes))
+	orders := make(map[int64]int, len(snapshot.Routes))
+	for _, r := range snapshot.Routes {
+		var routeKey int64
+		if err := json.Unmarshal(r.ID, &routeKey); err != nil {
+			// A non-integer id is not a recoverable key; that route keeps the
+			// current persisted label instead.
+			continue
+		}
+		labels[routeKey] = r.Name
+		if r.EvaluationOrder > 0 {
+			orders[routeKey] = r.EvaluationOrder
+		}
+	}
+	return labels, orders, nil
+}
+
+// decisionRouteOrders returns each route's evaluation order for the run from
+// persisted route_decision rows, keyed by internal route key. An order is
+// returned only when every persisted decision for that route in the run
+// agrees on one positive integer: agreement is the evidence that this was the
+// route's order when the run evaluated it. Disagreeing, zero, or negative
+// values yield no order for the route — the caller omits the field rather
+// than transforming internal sentinel bookkeeping into an apparent ordinal
+// (ARS-001). A route with no decision rows in the run has no order here.
+func (s *Store) decisionRouteOrders(ctx context.Context, runID int64) (map[int64]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT route_id, MIN(evaluation_order), COUNT(DISTINCT evaluation_order)
+		 FROM route_decision
+		 WHERE run_id = ?
+		 GROUP BY route_id;`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("decision route orders for run %d: %w", runID, err)
+	}
+	defer rows.Close()
+
+	out := make(map[int64]int)
+	for rows.Next() {
+		var routeKey, distinct int64
+		var order int
+		if err := rows.Scan(&routeKey, &order, &distinct); err != nil {
+			return nil, fmt.Errorf("scan decision route orders: %w", err)
+		}
+		if distinct == 1 && order > 0 {
+			out[routeKey] = order
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate decision route orders: %w", err)
+	}
+	return out, nil
 }
 
 type scanner interface {

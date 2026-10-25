@@ -5,7 +5,7 @@ description: Administration interface usable on desktop and mobile
 tags: [requirement, interface, responsive, desktop, mobile, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

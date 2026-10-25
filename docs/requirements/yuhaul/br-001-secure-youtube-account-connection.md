@@ -5,7 +5,7 @@ description: User can securely connect and manage YouTube account authorization 
 tags: [requirement, account, authentication, youtube, priority:MUST]
 ---
 
-**Status:** proposed
+**Status:** accepted
 **Priority:** MUST
 
 ## Statement

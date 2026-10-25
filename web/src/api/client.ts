@@ -1,7 +1,8 @@
 // API client boundary. Operations with wired backend endpoints call the real
 // REST API; remaining operations fall back to the in-memory mock layer. Set
 // VITE_USE_MOCK=false to disable mock-backed functions where a real endpoint
-// exists.
+// exists. Corpus import (ARS-002) calls its contract paths directly while the
+// backend implementation is pending; it never falls back to mock data.
 export { USE_MOCK } from './mock'
 
 // Route CRUD is wired to the real backend.
@@ -12,7 +13,6 @@ export {
   updateRoute,
   deleteRoute,
   reorderRoutes,
-  getRouteStats,
 } from './routes'
 
 // Run list/detail/start operations are wired to the real backend.
@@ -70,6 +70,17 @@ export { getRunVideos, getDecisionDetail } from './run-videos'
 
 // Playlist listing is wired to the real backend.
 export { listPlaylists } from './playlists'
+
+// Corpus import follows the ARS-002 contract paths. The backend endpoints are
+// not implemented yet, so failures surface as real errors rather than mocks.
+export {
+  previewCorpusImport,
+  startCorpusImport,
+  getCorpusImportStatus,
+  getLatestCorpusImport,
+  getCorpusImportMetadata,
+  cancelCorpusImport,
+} from './corpus-import'
 
 // Advisory operations are wired to the real backend.
 export {

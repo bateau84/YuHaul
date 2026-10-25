@@ -1,0 +1,33 @@
+# Traefik Middlewares for the YuHaul Ingresses (ADR-010 / ARS-003).
+#
+# yuhaul-auth: BasicAuth for the HTTPS (websecure) Ingress only. The referenced
+# credential Secret (yuhaul-basic-auth) is provisioned by the operator outside
+# this repository. It must contain exactly one key, `users`, holding
+# newline-separated bcrypt htpasswd records. No credential material belongs in
+# source control.
+#
+# yuhaul-https-redirect: HTTP→HTTPS redirect for the HTTP (web) Ingress only.
+# It is never combined with BasicAuth and never routes to YuHaul; the HTTP
+# Ingress backend is the endpoint-free yuhaul-http-sink Service, so a missing
+# or broken redirect still cannot dispatch plaintext to the application.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: yuhaul-auth
+  namespace: default
+spec:
+  basicAuth:
+    secret: yuhaul-basic-auth
+    realm: YuHaul
+    removeHeader: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: yuhaul-https-redirect
+  namespace: default
+spec:
+  redirectScheme:
+    scheme: https
+    port: "443"
+    permanent: true

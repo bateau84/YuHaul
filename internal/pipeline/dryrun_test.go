@@ -69,9 +69,9 @@ func createPendingVideo(t *testing.T, ctx context.Context, deps *dryRunDeps, run
 	return video
 }
 
-func createRouteWithAction(t *testing.T, ctx context.Context, deps *dryRunDeps, name, value, playlistID string) int64 {
+func createRouteWithAction(t *testing.T, ctx context.Context, deps *dryRunDeps, name, value, playlistID string) *router.Route {
 	t.Helper()
-	routeID, err := deps.routerStore.CreateRoute(ctx, &router.Route{
+	r := &router.Route{
 		Name:                 name,
 		EvaluationOrder:      1,
 		IsEnabled:            true,
@@ -92,9 +92,10 @@ func createRouteWithAction(t *testing.T, ctx context.Context, deps *dryRunDeps, 
 				TargetPlaylistID: playlistID,
 			},
 		},
-	})
+	}
+	_, err := deps.routerStore.CreateRoute(ctx, r)
 	require.NoError(t, err)
-	return routeID
+	return r
 }
 
 func TestDryRun_EvaluatesPendingVideoWithoutMutations(t *testing.T) {
@@ -102,7 +103,7 @@ func TestDryRun_EvaluatesPendingVideoWithoutMutations(t *testing.T) {
 	deps, cleanup := setupDryRunPipeline(t)
 	defer cleanup()
 
-	routeID := createRouteWithAction(t, ctx, deps, "Jazz", "jazz", "PLjazz")
+	route := createRouteWithAction(t, ctx, deps, "Jazz", "jazz", "PLjazz")
 
 	prodRun := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
 	prodRunID, err := deps.stateStore.CreateRun(ctx, prodRun)
@@ -124,7 +125,7 @@ func TestDryRun_EvaluatesPendingVideoWithoutMutations(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, decisions, 1)
 	assert.Equal(t, state.RouteDecisionMatched, decisions[0].Decision)
-	assert.Equal(t, routeID, decisions[0].RouteID)
+	assert.Equal(t, route.ID, decisions[0].RouteID)
 
 	actions, err := deps.stateStore.GetExecutedActionsForVideo(ctx, video.ID)
 	require.NoError(t, err)
@@ -145,7 +146,7 @@ func TestDryRun_DraftConfigOverridesActive(t *testing.T) {
 	defer cleanup()
 
 	// Active route does not match the pending video.
-	activeRouteID := createRouteWithAction(t, ctx, deps, "Rock", "rock", "PLrock")
+	activeRoute := createRouteWithAction(t, ctx, deps, "Rock", "rock", "PLrock")
 
 	prodRun := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
 	prodRunID, err := deps.stateStore.CreateRun(ctx, prodRun)
@@ -153,12 +154,12 @@ func TestDryRun_DraftConfigOverridesActive(t *testing.T) {
 
 	video := createPendingVideo(t, ctx, deps, prodRunID, "vid_jazz", "ch1", "cool jazz live")
 
-	draft := config.Snapshot{
+	draft := config.ProposalSnapshot{
 		DuplicateThreshold: 0.5,
 		DuplicateBehavior:  "skip",
-		Routes: []config.SnapshotRoute{
+		Routes: []config.ProposalRoute{
 			{
-				ID:                   activeRouteID,
+				ID:                   activeRoute.PublicID,
 				Name:                 "JazzDraft",
 				EvaluationOrder:      1,
 				IsFinal:              true,
@@ -184,12 +185,14 @@ func TestDryRun_DraftConfigOverridesActive(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, decisions, 1)
 	assert.Equal(t, state.RouteDecisionMatched, decisions[0].Decision)
-	assert.Equal(t, activeRouteID, decisions[0].RouteID)
+	assert.Equal(t, activeRoute.ID, decisions[0].RouteID)
 
 	actions, err := deps.stateStore.GetExecutedActionsForVideo(ctx, video.ID)
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
 	assert.Equal(t, "PLjazz", actions[0].TargetPlaylistID)
+	assert.Equal(t, router.InternalActionAddToPlaylist, actions[0].ActionType,
+		"simulated dry-run actions keep the internal action key")
 	assert.Equal(t, state.ActionOutcomeNotAttempted, actions[0].Outcome)
 }
 
