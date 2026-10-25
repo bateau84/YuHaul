@@ -36,26 +36,15 @@ export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFina
       default: return { variant: 'not-evaluated', label: 'Outcome unavailable' }
     }
   }
-  switch (state) {
-    case 'completed':
-      return { variant: 'accepted', label: 'Accepted' }
-    case 'acted':
-      return { variant: 'failed', label: 'Failed' }
-    case 'evaluated':
-      if (finalOutcome === 'rejected') return { variant: 'rejected', label: 'Rejected' }
-      if (finalOutcome === 'excluded') return { variant: 'excluded', label: 'Excluded' }
-      return { variant: 'not-evaluated', label: 'Not evaluated' }
-    case 'deferred':
-      return { variant: 'deferred', label: 'Deferred' }
-    case 'not_yet_evaluated':
-      return { variant: 'not-evaluated', label: 'Not evaluated' }
-    case 'discovered':
-    case 'evaluating':
-      return { variant: 'in-progress', label: 'In progress' }
-    case 'failed':
-      return { variant: 'failed', label: 'Failed' }
-    default:
-      return { variant: 'not-evaluated', label: 'Not evaluated' }
+  if (state === 'discovered' || state === 'evaluating') return { variant: 'in-progress', label: 'In progress' }
+  switch (finalOutcome) {
+    case 'accepted': return { variant: 'accepted', label: 'Accepted' }
+    case 'rejected': return { variant: 'rejected', label: 'Rejected' }
+    case 'excluded': return { variant: 'excluded', label: 'Excluded' }
+    case 'deferred': return { variant: 'deferred', label: 'Deferred' }
+    case 'failed': return { variant: 'failed', label: 'Failed' }
+    case 'not_yet_evaluated': return { variant: 'not-evaluated', label: 'Not evaluated' }
+    default: return { variant: 'not-evaluated', label: 'Outcome unavailable' }
   }
 }
 

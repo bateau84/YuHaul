@@ -117,6 +117,7 @@ type Video struct {
 	DiscoveredInRunID int64
 	ProcessingState   VideoProcessingState
 	FinalOutcome      VideoFinalOutcome
+	FinalOutcomeKnown bool
 	DeferredReason    *string
 	ErrorMessage      *string
 	CompletedAt       *time.Time

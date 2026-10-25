@@ -14,7 +14,7 @@ const icons = {
 
 interface BadgeProps {
   state: VideoProcessingState
-  finalOutcome: VideoFinalOutcome
+  finalOutcome: VideoFinalOutcome | null
   mode?: RunType
 }
 

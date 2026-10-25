@@ -157,9 +157,8 @@ func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.
 		}
 	}
 
-	if _, err := p.machine.TransitionVideoState(ctx, v.ID,
-		state.VideoStateEvaluating, state.VideoStateEvaluated,
-		state.WithFinalOutcome(state.FinalOutcomeExcluded)); err != nil {
+	if _, err := p.machine.TransitionRunVideoState(ctx, runID, v.ID,
+		state.VideoStateEvaluating, state.VideoStateEvaluated, state.FinalOutcomeExcluded, nil, nil); err != nil {
 		return fmt.Errorf("mark video %d excluded: %w", v.ID, err)
 	}
 	p.broadcastVideo(runID, v, state.FinalOutcomeExcluded, false)

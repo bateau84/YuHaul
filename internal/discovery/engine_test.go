@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -254,6 +255,76 @@ func TestDiscoveryWatermarkSkipsOldVideos(t *testing.T) {
 	result2, err := eng.Run(ctx, runID2)
 	require.NoError(t, err)
 	require.Equal(t, 0, result2.VideosDiscovered, "no new videos after watermark")
+}
+
+func TestIncompleteUploadsPaginationCanResumeAfterQuotaRecovery(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	pageCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"snippet": map[string]any{"resourceId": map[string]any{"channelId": "UCpage"}}}}})
+	})
+	mux.HandleFunc("/channels", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": "UCpage", "snippet": map[string]any{"title": "Page channel"}, "contentDetails": map[string]any{"relatedPlaylists": map[string]any{"uploads": "UUpage"}}}}})
+	})
+	mux.HandleFunc("/playlistItems", func(w http.ResponseWriter, r *http.Request) {
+		pageCalls++
+		if r.URL.Query().Get("pageToken") == "older" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{playlistItemJSON("older-video", "Older", "UCpage", now.Add(-2*time.Hour))}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{playlistItemJSON("first-page-video", "First", "UCpage", now.Add(-time.Hour))}, "nextPageToken": "older"})
+	})
+	mux.HandleFunc("/videos", func(w http.ResponseWriter, r *http.Request) {
+		ids := r.URL.Query().Get("id")
+		var items []map[string]any
+		for _, id := range strings.Split(ids, ",") {
+			items = append(items, videoJSON(id, id, "UCpage", "Page channel", "PT1M", now.Add(-time.Hour)))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	db := openTestDB(t)
+	st, err := state.NewStore(db)
+	require.NoError(t, err)
+	ledger := quota.New(db)
+	require.NoError(t, ledger.SetDailyLimit(context.Background(), 3)) // subscriptions, channels, first uploads page
+	eng := newEngineForDB(t, db, server.URL, ledger)
+	ctx := context.Background()
+	runID, err := st.CreateRun(ctx, &state.Run{StartedAt: now, RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	result, err := eng.Run(ctx, runID)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.VideosDiscovered)
+	var watermark sql.NullTime
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT last_discovered_at FROM channel WHERE channel_id = ?`, "UCpage").Scan(&watermark))
+	require.False(t, watermark.Valid, "partial pagination must not advance the watermark")
+	require.NoError(t, ledger.SetDailyLimit(ctx, 100))
+
+	// Reconstruct the engine to prove recovery uses durable state, not in-memory page progress.
+	eng = newEngineForDB(t, db, server.URL, ledger)
+	runID, err = st.CreateRun(ctx, &state.Run{StartedAt: now.Add(time.Minute), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	result, err = eng.Run(ctx, runID)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.VideosDiscovered)
+	_, err = st.GetVideoByExternalID(ctx, "older-video")
+	require.NoError(t, err)
+	_, err = st.GetVideoByExternalID(ctx, "first-page-video")
+	require.NoError(t, err)
+	require.Equal(t, 3, pageCalls, "first run fetches one page; resumed run fetches both pages")
+}
+
+func newEngineForDB(t *testing.T, db *sql.DB, baseURL string, ledger *quota.Ledger) *Engine {
+	t.Helper()
+	st, err := state.NewStore(db)
+	require.NoError(t, err)
+	factory := func(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
+		return youtube.NewClient(ctx, token, youtube.WithBaseURL(baseURL), youtube.WithRecorder(recorder))
+	}
+	return NewEngine(&stubTokenProvider{token: &oauth2.Token{AccessToken: "test-token"}}, state.NewMachine(st), ledger, db, WithClientFactory(factory))
 }
 
 func TestDiscoveryWithoutAuthFails(t *testing.T) {

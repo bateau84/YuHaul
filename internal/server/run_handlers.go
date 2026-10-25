@@ -20,6 +20,14 @@ const (
 	maxPageSize     = 100
 )
 
+func nullableOutcome(video state.Video) *string {
+	if !video.FinalOutcomeKnown {
+		return nil
+	}
+	outcome := string(video.FinalOutcome)
+	return &outcome
+}
+
 // videoListItem is the response shape for a video in the run video list.
 type videoListItem struct {
 	ID              int64                  `json:"id"`
@@ -27,7 +35,7 @@ type videoListItem struct {
 	ChannelID       string                 `json:"channel_id"`
 	DiscoveredAt    time.Time              `json:"discovered_at"`
 	ProcessingState string                 `json:"processing_state"`
-	FinalOutcome    string                 `json:"final_outcome"`
+	FinalOutcome    *string                `json:"final_outcome"`
 	DeferredReason  *string                `json:"deferred_reason,omitempty"`
 	ErrorMessage    *string                `json:"error_message,omitempty"`
 	CompletedAt     *time.Time             `json:"completed_at,omitempty"`
@@ -103,7 +111,7 @@ type videoDetail struct {
 	ChannelID       string                `json:"channel_id"`
 	DiscoveredAt    time.Time             `json:"discovered_at"`
 	ProcessingState string                `json:"processing_state"`
-	FinalOutcome    string                `json:"final_outcome"`
+	FinalOutcome    *string               `json:"final_outcome"`
 	DeferredReason  *string               `json:"deferred_reason,omitempty"`
 	ErrorMessage    *string               `json:"error_message,omitempty"`
 	CompletedAt     *time.Time            `json:"completed_at,omitempty"`
@@ -379,7 +387,7 @@ func (s *Server) buildVideoDetail(ctx context.Context, runID int64, video state.
 		ChannelID:       video.ChannelID,
 		DiscoveredAt:    video.DiscoveredAt,
 		ProcessingState: string(video.ProcessingState),
-		FinalOutcome:    string(video.FinalOutcome),
+		FinalOutcome:    nullableOutcome(video),
 		DeferredReason:  video.DeferredReason,
 		ErrorMessage:    video.ErrorMessage,
 		CompletedAt:     video.CompletedAt,
@@ -411,7 +419,7 @@ func toVideoListItem(video state.Video, decisions []state.RouteDecision,
 		ChannelID:       video.ChannelID,
 		DiscoveredAt:    video.DiscoveredAt,
 		ProcessingState: string(video.ProcessingState),
-		FinalOutcome:    string(video.FinalOutcome),
+		FinalOutcome:    nullableOutcome(video),
 		DeferredReason:  video.DeferredReason,
 		ErrorMessage:    video.ErrorMessage,
 		CompletedAt:     video.CompletedAt,

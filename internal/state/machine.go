@@ -94,15 +94,35 @@ func (m *Machine) discoverVideo(ctx context.Context, tx *sql.Tx, runID int64, vi
 		ProcessingState:   VideoStateNotYetEvaluated,
 		FinalOutcome:      FinalOutcomeNotYetEvaluated,
 	}
+	owned := false
+	if tx == nil {
+		var err error
+		tx, err = m.store.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("beginning discovery transaction: %w", err)
+		}
+		owned = true
+		defer func() {
+			if owned {
+				_ = tx.Rollback()
+			}
+		}()
+	}
 	var id int64
 	var err error
-	if tx != nil {
-		id, err = m.store.CreateVideoTx(ctx, tx, v)
-	} else {
-		id, err = m.store.CreateVideo(ctx, v)
-	}
+	id, err = m.store.CreateVideoTx(ctx, tx, v)
 	if err != nil {
 		return nil, fmt.Errorf("discovering video: %w", err)
+	}
+	outcome := FinalOutcomeNotYetEvaluated
+	if err := m.store.RecordRunVideoOutcomeTx(ctx, tx, runID, id, &outcome, nil, nil, nil); err != nil {
+		return nil, err
+	}
+	if owned {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("committing discovery transaction: %w", err)
+		}
+		owned = false
 	}
 	v.ID = id
 	return v, nil
@@ -122,6 +142,43 @@ func (m *Machine) TransitionVideoStateTx(ctx context.Context, tx *sql.Tx, videoI
 	from, to VideoProcessingState, opts ...TransitionOption) (*Video, error) {
 
 	return m.transitionVideoState(ctx, tx, videoID, from, to, opts...)
+}
+
+// TransitionRunVideoState atomically persists a lifecycle transition and its
+// production run-attributed disposition.
+func (m *Machine) TransitionRunVideoState(ctx context.Context, runID, videoID int64,
+	from, to VideoProcessingState, outcome VideoFinalOutcome, deferredReason, errorMessage *string) (*Video, error) {
+	tx, err := m.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin run disposition transaction: %w", err)
+	}
+	defer tx.Rollback()
+	v, err := m.TransitionRunVideoStateTx(ctx, tx, runID, videoID, from, to, outcome, deferredReason, errorMessage)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit run disposition: %w", err)
+	}
+	return v, nil
+}
+
+// TransitionRunVideoStateTx persists lifecycle and run-attributed disposition in tx.
+func (m *Machine) TransitionRunVideoStateTx(ctx context.Context, tx *sql.Tx, runID, videoID int64,
+	from, to VideoProcessingState, outcome VideoFinalOutcome, deferredReason, errorMessage *string) (*Video, error) {
+	if tx == nil {
+		return nil, errors.New("run disposition transaction is required")
+	}
+	v, err := m.transitionVideoState(ctx, tx, videoID, from, to,
+		WithFinalOutcome(outcome),
+		func(c *transitionConfig) { c.deferredReason = deferredReason; c.errorMessage = errorMessage })
+	if err != nil {
+		return nil, err
+	}
+	if err := m.store.RecordRunVideoOutcomeTx(ctx, tx, runID, videoID, &outcome, deferredReason, errorMessage, v.CompletedAt); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 func (m *Machine) transitionVideoState(ctx context.Context, tx *sql.Tx, videoID int64,

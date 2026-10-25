@@ -375,6 +375,13 @@ func TestCompleteRunRecomputesCounters(t *testing.T) {
 					t.Fatalf("transitioning %q -> %q: %v", tr.from, tr.to, err)
 				}
 			}
+			if err := recordTestRunVideoOutcome(t, m, runID, v.ID, FinalOutcomeAccepted, nil); err != nil {
+				t.Fatalf("recording accepted outcome: %v", err)
+			}
+		} else {
+			if err := recordTestRunVideoOutcome(t, m, runID, v.ID, FinalOutcomeNotYetEvaluated, nil); err != nil {
+				t.Fatalf("recording not-yet-evaluated outcome: %v", err)
+			}
 		}
 	}
 
@@ -419,6 +426,9 @@ func TestCompleteRunRecomputesExcludedCounter(t *testing.T) {
 			t.Fatalf("transitioning accepted %q -> %q: %v", tr.from, tr.to, err)
 		}
 	}
+	if err := recordTestRunVideoOutcome(t, m, runID, accepted.ID, FinalOutcomeAccepted, nil); err != nil {
+		t.Fatalf("recording accepted outcome: %v", err)
+	}
 
 	if _, err := m.TransitionVideoState(context.Background(), excluded.ID,
 		VideoStateNotYetEvaluated, VideoStateEvaluating); err != nil {
@@ -428,6 +438,9 @@ func TestCompleteRunRecomputesExcludedCounter(t *testing.T) {
 		VideoStateEvaluating, VideoStateEvaluated,
 		WithFinalOutcome(FinalOutcomeExcluded)); err != nil {
 		t.Fatalf("transitioning excluded to evaluated: %v", err)
+	}
+	if err := recordTestRunVideoOutcome(t, m, runID, excluded.ID, FinalOutcomeExcluded, nil); err != nil {
+		t.Fatalf("recording excluded outcome: %v", err)
 	}
 
 	run, err := m.CompleteRun(context.Background(), runID)
@@ -534,6 +547,9 @@ func TestFailRunRecomputesCounters(t *testing.T) {
 			t.Fatalf("transitioning accepted %q -> %q: %v", tr.from, tr.to, err)
 		}
 	}
+	if err := recordTestRunVideoOutcome(t, m, runID, accepted.ID, FinalOutcomeAccepted, nil); err != nil {
+		t.Fatalf("recording accepted outcome: %v", err)
+	}
 
 	if _, err := m.TransitionVideoState(context.Background(), failed.ID,
 		VideoStateNotYetEvaluated, VideoStateEvaluating); err != nil {
@@ -543,6 +559,10 @@ func TestFailRunRecomputesCounters(t *testing.T) {
 		VideoStateEvaluating, VideoStateFailed,
 		WithErrorMessage("api error")); err != nil {
 		t.Fatalf("transitioning failed to failed: %v", err)
+	}
+	errorMessage := "api error"
+	if err := recordTestRunVideoOutcome(t, m, runID, failed.ID, FinalOutcomeFailed, &errorMessage); err != nil {
+		t.Fatalf("recording failed outcome: %v", err)
 	}
 
 	run, err := m.FailRun(context.Background(), runID, "phase error")
@@ -561,6 +581,20 @@ func TestFailRunRecomputesCounters(t *testing.T) {
 	if run.VideosNotYetEvaluated != 0 {
 		t.Errorf("videos_not_yet_evaluated = %d, want 0", run.VideosNotYetEvaluated)
 	}
+}
+
+func recordTestRunVideoOutcome(t *testing.T, m *Machine, runID, videoID int64, outcome VideoFinalOutcome, errorMessage *string) error {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := m.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := m.store.RecordRunVideoOutcomeTx(ctx, tx, runID, videoID, &outcome, nil, errorMessage, nil); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func TestFailRunRecordsQuotaCost(t *testing.T) {

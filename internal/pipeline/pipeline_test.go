@@ -242,7 +242,7 @@ func TestPipeline_DeferredItemsCannotReplayEarlierRunDecisions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create run1 with a matched video and a deferred item.
-	run1 := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeScheduled, Status: state.RunStatusCompleted}
+	run1 := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeScheduled, Status: state.RunStatusRunning}
 	run1ID, err := stateStore.CreateRun(ctx, run1)
 	require.NoError(t, err)
 
@@ -273,6 +273,8 @@ func TestPipeline_DeferredItemsCannotReplayEarlierRunDecisions(t *testing.T) {
 		Status:    queue.DeferredStatusPending,
 		CreatedAt: time.Now().UTC(),
 	})
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE run SET status=? WHERE id=?`, string(state.RunStatusCompleted), run1ID)
 	require.NoError(t, err)
 
 	// Create run2 (scheduled) that will process the deferred item.
@@ -471,6 +473,32 @@ func TestPipeline_ActionExecutionUpdatesChannelCounters(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, totalRouted, "total_routed should increment for an accepted video")
 	assert.Equal(t, 1, totalRetained, "total_retained should increment for an accepted video in v1")
+}
+
+func TestDeferredDispositionRollsBackQueueOnOutcomeFailure(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	captureNativeTestRun(t, ctx, db, run)
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	video, err := machine.DiscoverVideo(ctx, runID, "deferred_atomic", "channel")
+	require.NoError(t, err)
+	for _, edge := range [][2]state.VideoProcessingState{{state.VideoStateNotYetEvaluated, state.VideoStateEvaluating}, {state.VideoStateEvaluating, state.VideoStateEvaluated}, {state.VideoStateEvaluated, state.VideoStateActed}} {
+		_, err = machine.TransitionVideoState(ctx, video.ID, edge[0], edge[1])
+		require.NoError(t, err)
+	}
+	_, err = db.ExecContext(ctx, `CREATE TRIGGER reject_deferred_outcome BEFORE INSERT ON run_video_outcome BEGIN SELECT RAISE(ABORT, 'injected outcome failure'); END;`)
+	require.NoError(t, err)
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast)
+	require.Error(t, p.deferRunVideo(ctx, runID, video.ID, "quota_exhausted"))
+	var queueCount int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM deferred_item WHERE video_id=? AND status='pending'`, video.ID).Scan(&queueCount))
+	assert.Zero(t, queueCount, "queue insert must roll back with failed disposition")
+	got, err := stateStore.GetVideo(ctx, video.ID)
+	require.NoError(t, err)
+	assert.Equal(t, state.VideoStateActed, got.ProcessingState, "lifecycle transition must roll back")
 }
 
 var _ = io.Discard

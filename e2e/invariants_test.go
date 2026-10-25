@@ -518,6 +518,14 @@ func TestINV2_QuotaDeferral(t *testing.T) {
 	require.NoError(t, env.ledger.SetDailyLimit(ctx, 1_000_000))
 	run2 := env.runProductionRun(t)
 	require.Equal(t, 0, run2.VideosDiscovered, "deferred-only run should discover no new videos")
+	var retriedID int64
+	require.NoError(t, env.db.QueryRowContext(ctx, `SELECT video_id FROM deferred_item WHERE run_id=? ORDER BY id LIMIT 1`, run.ID).Scan(&retriedID))
+	var originOutcome, receivingOutcome string
+	require.NoError(t, env.db.QueryRowContext(ctx, `SELECT final_outcome FROM run_video_outcome WHERE run_id=? AND video_id=?`, run.ID, retriedID).Scan(&originOutcome))
+	require.NoError(t, env.db.QueryRowContext(ctx, `SELECT final_outcome FROM run_video_outcome WHERE run_id=? AND video_id=?`, run2.ID, retriedID).Scan(&receivingOutcome))
+	assert.Equal(t, string(state.FinalOutcomeDeferred), originOutcome, "origin disposition must remain immutable")
+	assert.Equal(t, string(state.FinalOutcomeAccepted), receivingOutcome, "retry disposition must belong to receiving run")
+	assert.Equal(t, 1, run2.VideosAccepted, "receiving run counts retried accepted work")
 
 	var pendingDeferred int
 	row := env.db.QueryRowContext(ctx,

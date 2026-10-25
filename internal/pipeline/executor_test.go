@@ -19,6 +19,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
@@ -181,6 +182,59 @@ func TestExecutor_WithYouTubeBaseURLUsesOverrideURL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, state.FinalOutcomeAccepted, outcome)
 	assert.Equal(t, "/playlistItems", requestPath)
+}
+
+func TestExecutor_HTTPQuotaExceededDefersAndRetainsWork(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, ledger, cleanup := setupExecutorTest(t)
+	defer cleanup()
+	routeID := createRoute(t, ctx, db, "Jazz", 1)
+	createRouteAction(t, ctx, db, routeID, "PLjazz")
+	runID, videoID, _ := createRunAndVideo(t, ctx, db, stateStore)
+	decisionID := createRouteDecision(t, ctx, stateStore, videoID, runID, routeID, 1, state.RouteDecisionMatched)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"errors":[{"reason":"quotaExceeded"}]}}`)
+	}))
+	defer server.Close()
+	exec := NewExecutor(db, ledger, &fakeTokenSource{}, WithYouTubeBaseURL(server.URL))
+	outcome, err := exec.Execute(ctx, runID, videoID, []RouteMatch{{RouteDecisionID: decisionID, RouteID: routeID}})
+	require.NoError(t, err)
+	assert.Equal(t, state.FinalOutcomeDeferred, outcome)
+	assert.Equal(t, 1, calls)
+	var deferred, errors int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM deferred_item WHERE video_id=? AND status='pending'`, videoID).Scan(&deferred))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM error_entry WHERE video_id=? AND status='active'`, videoID).Scan(&errors))
+	assert.Zero(t, deferred, "executor reports deferral; pipeline commits queue and disposition together")
+	assert.Zero(t, errors)
+}
+
+func TestExecutor_HTTPActionFailureCreatesRetryableError(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, ledger, cleanup := setupExecutorTest(t)
+	defer cleanup()
+	routeID := createRoute(t, ctx, db, "Jazz", 1)
+	createRouteAction(t, ctx, db, routeID, "PLjazz")
+	runID, videoID, _ := createRunAndVideo(t, ctx, db, stateStore)
+	decisionID := createRouteDecision(t, ctx, stateStore, videoID, runID, routeID, 1, state.RouteDecisionMatched)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"errors":[{"reason":"backendError"}]}}`)
+	}))
+	defer server.Close()
+	exec := NewExecutor(db, ledger, &fakeTokenSource{}, WithYouTubeBaseURL(server.URL))
+	outcome, err := exec.Execute(ctx, runID, videoID, []RouteMatch{{RouteDecisionID: decisionID, RouteID: routeID}})
+	require.Error(t, err)
+	assert.Equal(t, state.FinalOutcomeFailed, outcome)
+	entries, err := queue.NewStore(db)
+	require.NoError(t, err)
+	active, err := entries.ListErrorEntries(ctx, queue.ErrorStatusActive)
+	require.NoError(t, err)
+	require.Len(t, active, 1)
+	assert.Equal(t, videoID, active[0].VideoID)
+	assert.Contains(t, active[0].Detail, "backendError")
 }
 
 func TestExecutor_FailedActionRecordsOutcome(t *testing.T) {

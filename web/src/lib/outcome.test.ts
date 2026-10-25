@@ -17,14 +17,16 @@ describe('deriveBadge', () => {
     expect(deriveBadge('completed', undefined, 'replay')).toEqual({ variant: 'not-evaluated', label: 'Outcome unavailable' })
   })
 
-  it('preserves production lifecycle precedence', () => {
-    expect(deriveBadge('completed', 'rejected', 'manual')).toEqual({ variant: 'accepted', label: 'Accepted' })
-    expect(deriveBadge('evaluated', 'accepted', 'scheduled')).toEqual({ variant: 'not-evaluated', label: 'Not evaluated' })
+  it('uses the requested production run outcome and preserves in-progress state', () => {
+    expect(deriveBadge('completed', 'deferred', 'manual')).toEqual({ variant: 'deferred', label: 'Deferred' })
+    expect(deriveBadge('completed', null)).toEqual({ variant: 'not-evaluated', label: 'Outcome unavailable' })
+    expect(deriveBadge('completed', 'accepted', 'manual')).toEqual({ variant: 'accepted', label: 'Accepted' })
+    expect(deriveBadge('evaluated', 'accepted', 'scheduled')).toEqual({ variant: 'accepted', label: 'Accepted' })
     expect(deriveBadge('evaluating', 'accepted', 'manual')).toEqual({ variant: 'in-progress', label: 'In progress' })
   })
 
-  it('labels acted videos as failed', () => {
-    expect(deriveBadge('acted', 'accepted')).toEqual({ variant: 'failed', label: 'Failed' })
+  it('uses the run-attributed outcome even when the mutable state differs', () => {
+    expect(deriveBadge('acted', 'accepted')).toEqual({ variant: 'accepted', label: 'Accepted' })
   })
 
   it('labels evaluated+rejected as rejected', () => {

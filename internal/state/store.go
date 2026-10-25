@@ -241,6 +241,74 @@ func (s *Store) CreateVideoTx(ctx context.Context, tx *sql.Tx, v *Video) (int64,
 	return s.createVideo(ctx, tx, v)
 }
 
+// RecordRunVideoOutcomeTx records a production run's captured disposition in
+// the caller's transaction. A NULL outcome explicitly means not captured.
+func (s *Store) RecordRunVideoOutcomeTx(ctx context.Context, tx *sql.Tx, runID, videoID int64, outcome *VideoFinalOutcome, deferredReason, errorMessage *string, completedAt *time.Time) error {
+	if runID <= 0 || videoID <= 0 {
+		return errors.New("recording run video outcome: run and video IDs are required")
+	}
+	var value any
+	if outcome != nil {
+		if !outcome.Valid() {
+			return fmt.Errorf("recording run video outcome: invalid outcome %q", *outcome)
+		}
+		value = *outcome
+	}
+	if (outcome != nil && *outcome == FinalOutcomeDeferred) != (deferredReason != nil && *deferredReason != "") {
+		return errors.New("recording run video outcome: deferred outcome requires only a nonempty deferred reason")
+	}
+	if (outcome != nil && *outcome == FinalOutcomeFailed) != (errorMessage != nil && *errorMessage != "") {
+		return errors.New("recording run video outcome: failed outcome requires only a nonempty error message")
+	}
+	var status string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM run WHERE id=? AND run_type IN ('manual','scheduled')`, runID).Scan(&status); err != nil {
+		return fmt.Errorf("validating production run %d: %w", runID, err)
+	}
+	if status != string(RunStatusRunning) && status != string(RunStatusInterrupted) {
+		return fmt.Errorf("recording outcome for terminal run %d", runID)
+	}
+	var oldOutcome, oldDeferred, oldError sql.NullString
+	var oldCompleted sql.NullTime
+	err := tx.QueryRowContext(ctx, `SELECT final_outcome,deferred_reason,error_message,completed_at
+		FROM run_video_outcome WHERE run_id=? AND video_id=?`, runID, videoID).Scan(&oldOutcome, &oldDeferred, &oldError, &oldCompleted)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("loading prior outcome for run %d video %d: %w", runID, videoID, err)
+	}
+	if err == nil {
+		newOutcome := sql.NullString{Valid: outcome != nil}
+		if outcome != nil {
+			newOutcome.String = string(*outcome)
+		}
+		newDeferred := sql.NullString{Valid: deferredReason != nil}
+		if deferredReason != nil {
+			newDeferred.String = *deferredReason
+		}
+		newError := sql.NullString{Valid: errorMessage != nil}
+		if errorMessage != nil {
+			newError.String = *errorMessage
+		}
+		newCompleted := sql.NullTime{Valid: completedAt != nil}
+		if completedAt != nil {
+			newCompleted.Time = *completedAt
+		}
+		if oldOutcome == newOutcome && oldDeferred == newDeferred && oldError == newError && oldCompleted == newCompleted {
+			return nil
+		}
+		if oldOutcome.Valid && oldOutcome.String != string(FinalOutcomeNotYetEvaluated) {
+			return fmt.Errorf("recording outcome for run %d video %d: conflicting terminal disposition", runID, videoID)
+		}
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO run_video_outcome(run_id,video_id,final_outcome,deferred_reason,error_message,completed_at,updated_at)
+		VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id,video_id) DO UPDATE SET
+		final_outcome=excluded.final_outcome,deferred_reason=excluded.deferred_reason,
+		error_message=excluded.error_message,completed_at=excluded.completed_at,updated_at=excluded.updated_at`,
+		runID, videoID, value, deferredReason, errorMessage, completedAt, formatRunTime(time.Now()))
+	if err != nil {
+		return fmt.Errorf("recording outcome for run %d video %d: %w", runID, videoID, err)
+	}
+	return nil
+}
+
 func (s *Store) createVideo(ctx context.Context, exec execer, v *Video) (int64, error) {
 	res, err := exec.ExecContext(ctx,
 		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id,
@@ -461,12 +529,16 @@ const runVideoInspection = `WITH requested_run AS (
                WHEN e.not_matched = 1 THEN 'rejected'
                WHEN e.excluded = 1 THEN 'excluded'
                ELSE 'not_yet_evaluated' END
-          ELSE v.final_outcome END AS final_outcome,
-        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE v.deferred_reason END AS deferred_reason,
-        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE v.error_message END AS error_message,
-        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE v.completed_at END AS completed_at
+          ELSE o.final_outcome END AS final_outcome,
+        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.deferred_reason END AS deferred_reason,
+        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.error_message END AS error_message,
+        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.completed_at END AS completed_at,
+        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN 1 ELSE o.final_outcome IS NOT NULL END AS outcome_known
  FROM video v CROSS JOIN requested_run r LEFT JOIN evidence e ON e.video_id = v.id
- WHERE v.discovered_in_run_id = r.id OR e.video_id IS NOT NULL
+ LEFT JOIN run_video_outcome o ON o.run_id = r.id AND o.video_id = v.id
+ WHERE v.discovered_in_run_id = r.id OR e.video_id IS NOT NULL OR o.video_id IS NOT NULL
+    OR EXISTS (SELECT 1 FROM deferred_item d WHERE d.video_id=v.id AND d.retry_run_id=r.id)
+    OR EXISTS (SELECT 1 FROM error_entry x WHERE x.video_id=v.id AND x.retry_run_id=r.id)
 ) `
 
 // ListRunVideos returns paginated videos inspected in a specific run, ordered
@@ -476,6 +548,11 @@ const runVideoInspection = `WITH requested_run AS (
 // set. An empty outcomeFilter returns every video in the run. It also returns
 // the total count of matching videos in the run for pagination metadata.
 func (s *Store) ListRunVideos(ctx context.Context, runID int64, limit, offset int, outcomeFilter VideoFinalOutcome) ([]Video, int64, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, 0, fmt.Errorf("beginning run %d video inspection: %w", runID, err)
+	}
+	defer tx.Rollback()
 	where := "1 = 1"
 	args := []any{runID}
 	if outcomeFilter != "" {
@@ -484,12 +561,12 @@ func (s *Store) ListRunVideos(ctx context.Context, runID int64, limit, offset in
 	}
 
 	var total int64
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		runVideoInspection+`SELECT COUNT(*) FROM inspection WHERE `+where+`;`, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting run %d videos: %w", runID, err)
 	}
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		runVideoInspection+`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
 		        processing_state, final_outcome, deferred_reason, error_message, completed_at
 		 FROM inspection WHERE `+where+` ORDER BY discovered_at DESC, id DESC LIMIT ? OFFSET ?;`,
@@ -682,12 +759,12 @@ func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE run SET
 		  videos_discovered = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ?),
-		  videos_accepted = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
-		  videos_rejected = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
-		  videos_excluded = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
-		  videos_deferred = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
-		  videos_failed = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?),
-		  videos_not_yet_evaluated = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ? AND final_outcome = ?)
+		  videos_accepted = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
+		  videos_rejected = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
+		  videos_excluded = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
+		  videos_deferred = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
+		  videos_failed = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
+		  videos_not_yet_evaluated = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?)
 		 WHERE id = ?;`,
 		runID, runID, FinalOutcomeAccepted,
 		runID, FinalOutcomeRejected,
@@ -772,6 +849,18 @@ func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int
 // ErrNotFound indicates that a requested entity does not exist.
 var ErrNotFound = errors.New("state: not found")
 
+func parseStoredTimestamp(value sql.NullString) (*time.Time, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999 -0700 MST"} {
+		if parsed, err := time.Parse(layout, value.String); err == nil {
+			return &parsed, nil
+		}
+	}
+	return nil, fmt.Errorf("parse stored timestamp %q", value.String)
+}
+
 func scanRun(sc interface {
 	Scan(dest ...any) error
 }) (*Run, error) {
@@ -786,9 +875,8 @@ func scanRun(sc interface {
 	if err != nil {
 		return nil, err
 	}
-	if completedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, completedAt.String)
-		r.CompletedAt = &t
+	if r.CompletedAt, err = parseStoredTimestamp(completedAt); err != nil {
+		return nil, err
 	}
 	if r.ActionAuthorityVersion != 0 && r.ActionAuthorityVersion != 1 {
 		return nil, fmt.Errorf("unsupported action authority version %d", r.ActionAuthorityVersion)
@@ -812,11 +900,15 @@ func scanVideo(sc interface {
 	Scan(dest ...any) error
 }) (*Video, error) {
 	v := &Video{}
-	var deferredReason, errorMessage, completedAt sql.NullString
+	var finalOutcome, deferredReason, errorMessage, completedAt sql.NullString
 	err := sc.Scan(&v.ID, &v.VideoID, &v.ChannelID, &v.DiscoveredAt, &v.DiscoveredInRunID,
-		&v.ProcessingState, &v.FinalOutcome, &deferredReason, &errorMessage, &completedAt)
+		&v.ProcessingState, &finalOutcome, &deferredReason, &errorMessage, &completedAt)
 	if err != nil {
 		return nil, err
+	}
+	if finalOutcome.Valid {
+		v.FinalOutcome = VideoFinalOutcome(finalOutcome.String)
+		v.FinalOutcomeKnown = true
 	}
 	if deferredReason.Valid {
 		v.DeferredReason = &deferredReason.String
@@ -824,9 +916,8 @@ func scanVideo(sc interface {
 	if errorMessage.Valid {
 		v.ErrorMessage = &errorMessage.String
 	}
-	if completedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, completedAt.String)
-		v.CompletedAt = &t
+	if v.CompletedAt, err = parseStoredTimestamp(completedAt); err != nil {
+		return nil, err
 	}
 	return v, nil
 }

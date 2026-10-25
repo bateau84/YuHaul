@@ -11,6 +11,8 @@ timestamp: 2026-10-25T00:00:00Z
 
 ### Experience Context
 
+**Launch-scope reconciliation (2026-10-25, user decision):** US-011/US-012 remain accepted future-target design. Their per-video comparison of replay/backtest results with an earlier production outcome from the same YuHaul is deferred from first-use launch, not rejected or completed. Comparison-dependent passages below are retained as future targets, not launch acceptance checks. The baseline is an earlier same-YuHaul production outcome when available, never the old cron application's corpus or outcomes; imported titles support duplicate detection, not production-outcome comparison. This deferral does not weaken mode-aware simulation inspection, hypothetical/non-executed action labeling, or the actual subscription → discovery → routing → YouTube playlist flow. It does not defer replay/backtest generally or establish any implementation as complete.
+
 **Problem Statement:**
 A person who subscribes to many YouTube channels (primarily for music discovery) cannot efficiently discover which new videos are worth watching. Manually checking subscriptions is time-consuming; the same song appears across many channels under slightly different titles; and without historical tracking, there is no way to know whether a subscription or routing rule is actually producing valuable content. The user needs a system that automates the repetitive parts of content discovery — finding new videos, matching them to playlists, detecting duplicates — while keeping the user in full control of policy decisions and providing enough evidence to understand and trust every automated action.
 
@@ -30,6 +32,8 @@ The user remembers a specific channel that should have matched but didn't. They 
 The user checks the Errors view. The error queue shows 1 item: authentication token expired (needs manual re-authentication). They also see the Deferred tab: 2 items deferred due to quota exhaustion. The deferred items will be eligible for the next scheduled or manual run once sufficient quota is available. The user re-authenticates, then removes the resolved auth error from the queue.
 
 **Scenario 5 — Backtest before committing a change (10 minutes):**
+**Status:** Future-target comparison illustration; comparison against earlier same-YuHaul production outcomes is deferred from first-use launch. The scenario text is retained.
+
 The user wants to add a new route for a niche genre. Before committing, they open Backtest, apply the proposed route configuration to 30 days of historical observations, and see: the new route would have caught 23 videos, 15 of which overlap with existing routes (already caught), 8 are new catches. They're satisfied and create the route.
 
 **Scenario 6 — Channel advisory review (3 minutes):**
@@ -64,7 +68,7 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 - **Analytics Dashboard** serves workflows 9 (statistics), 10 (temporal), and 15 (advisories)
 - **Settings** serves workflows 1 (account), 5 (duplicate threshold), 6 (schedule), and data import
 
-**No capability gaps identified.** All 32 ACs map to existing architecture endpoints and entity model.
+**Workflow-map qualification:** The original endpoint mapping is intended-design coverage, not proof of implemented capability. Earlier same-YuHaul production-outcome comparison in workflow 11 is a retained future target deferred from first-use launch; see the Simulation Inspection capability boundary below. No old-application comparison baseline is implied.
 
 ---
 
@@ -159,6 +163,8 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 - **Source:** AC 26
 
 **US-011: Backtest Proposed Configuration**
+**Status:** Accepted future target; comparison with earlier same-YuHaul production outcomes, including comparison-derived new/lost/net results, is deferred from first-use launch. Story text retained unchanged.
+
 - **Actor:** YuHaul administrator evaluating routing changes against history
 - **Context:** User wants to know what a configuration change would have caught or lost over the past 30 days
 - **Trigger:** User navigates to Backtest, modifies proposed routes, selects date range, clicks "Run Backtest"
@@ -167,6 +173,8 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 - **Source:** AC 27
 
 **US-012: Replay History with a Specific Configuration**
+**Status:** Accepted future target; per-video alongside-original comparison means an earlier same-YuHaul production outcome when available and is deferred from first-use launch. Distinct non-production replay labeling remains in scope. Story text retained unchanged.
+
 - **Actor:** YuHaul administrator re-evaluating history
 - **Context:** User wants to see what a historical configuration would have produced on the same observations
 - **Trigger:** User selects a configuration version and date range in Backtest > Replay mode
@@ -365,6 +373,8 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 ---
 
 #### SC-005: Backtest Before Adding a Route (Desktop, 10 minutes)
+
+**Status:** Retained future-target comparison scenario supporting US-011/US-012. Comparison-dependent results and checks are deferred from first-use launch; the historical baseline means earlier same-YuHaul production outcomes, not the old cron application. Scenario text retained unchanged.
 
 **Context:** The user wants to add a route for "Jazz Covers" but isn't sure if it would catch meaningful content given their current subscriptions.
 
@@ -636,7 +646,7 @@ For Deferred/Failed in simulations, visible adjacent explanation is respectively
 
 **Mode loading and continuity:** Decision Detail needs the requested run's type as well as its existing detail response; the existing run lookup supplies that context. A direct URL/new tab/refresh cannot depend on navigation-only state. Until mode is known, show `Loading run context…` without an interpreted badge or production action title. If mode lookup fails or is unsupported, show `Run context unavailable. Results cannot be interpreted safely.` with `Retry` and the existing `Back to run` link; retain the run/video location. Retry reloads context and only then presents mode-qualified results. Do not momentarily render a production badge while context loads. Normal route navigation moves focus to the new H1; background context/result refresh does not steal focus. Back returns to the same run; no simulation-to-production promotion or mutation control is added.
 
-**Capability boundary:** Source inspection confirms run mode is available from the run lookup and requested-run hypothetical `final_outcome` is available from list/detail. The inspected detail response has no separately identified original production outcome. US-012's alongside-original comparison remains a capability limitation to resolve with the API/architecture owner; do not derive an “original outcome” from `processing_state`, use the projected hypothetical outcome twice, or claim current production state is the actual outcome of an earlier run. This correction does not certify the broader comparison journey as complete.
+**Capability boundary:** Source inspection confirms run mode is available from the run lookup and requested-run hypothetical `final_outcome` is available from list/detail. The inspected detail response has no separately identified original production outcome. US-011/US-012's comparison with earlier same-YuHaul production outcomes remains an accepted future-target capability limitation for the API/architecture owner, explicitly deferred by the user from first-use launch rather than a launch blocker. Do not derive an “original outcome” from `processing_state`, use the projected hypothetical outcome twice, substitute old cron application data, or claim current production state is the actual outcome of an earlier run. This correction does not certify the broader comparison journey as complete; the simulation differentiation and inspection behavior in this section remain in scope.
 
 **Accessibility and representative browser checks (verification targets, not observed passes):**
 
@@ -684,6 +694,8 @@ For Deferred/Failed in simulations, visible adjacent explanation is respectively
 - **Components:** Tab selector, error row (video title, channel, error type, timestamp, retry button, remove button), error detail panel, deferred row (video title, channel, deferral reason, next-eligibility indicator, manual retry button, discard button), deferred detail panel
 
 **View: Backtest** — Compare proposed routing against historical observations, or replay/reprocess historical videos; user job: evaluate a configuration change before committing, or re-evaluate history with different settings.
+**Status qualification:** Comparison-specific regions/components below (actual-versus-proposed video comparison and comparison-derived new/lost/net cards) are retained future-target design, deferred from first-use launch with US-011/US-012. Requested-run hypothetical results and non-production labeling remain governed by Simulation Inspection above; the view description is not evidence that earlier production comparison is implemented.
+
 - **Regions:**
   - Mode selector region: "Hypothetical Backtest" tab, "Replay/Reprocess" tab
   - Configuration editor region (hypothetical): proposed route changes (draft, not saved)

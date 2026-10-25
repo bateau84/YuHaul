@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,6 +41,23 @@ const (
 // number of calls represented by that request (one for most methods; one per
 // batch for videos.list and channels.list).
 type CostRecorder func(ctx context.Context, op Operation, calls int) error
+
+// APIError describes an HTTP error returned by the YouTube API.
+type APIError struct {
+	Status int
+	Reason string
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("youtube API returned %d: %s", e.Status, e.Body)
+}
+
+// IsQuotaExceeded reports whether err represents YouTube's quotaExceeded reason.
+func IsQuotaExceeded(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Reason == "quotaExceeded"
+}
 
 // Client makes authenticated YouTube Data API v3 calls.
 type Client struct {
@@ -486,7 +504,7 @@ func (c *Client) post(ctx context.Context, path string, q url.Values, op Operati
 	}
 
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("youtube api %s returned %d: %s", path, resp.StatusCode, string(body))
+		return nil, youtubeAPIError(resp.StatusCode, body)
 	}
 
 	if c.recorder != nil {
@@ -525,7 +543,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, op Operatio
 	}
 
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("youtube api %s returned %d: %s", path, resp.StatusCode, string(body))
+		return nil, youtubeAPIError(resp.StatusCode, body)
 	}
 
 	if c.recorder != nil {
@@ -535,6 +553,22 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, op Operatio
 	}
 
 	return body, nil
+}
+
+func youtubeAPIError(status int, body []byte) error {
+	var payload struct {
+		Error struct {
+			Errors []struct {
+				Reason string `json:"reason"`
+			} `json:"errors"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &payload)
+	reason := ""
+	if len(payload.Error.Errors) > 0 {
+		reason = payload.Error.Errors[0].Reason
+	}
+	return &APIError{Status: status, Reason: reason, Body: string(body)}
 }
 
 func parseTime(s string) (time.Time, error) {

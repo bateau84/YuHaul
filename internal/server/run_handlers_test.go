@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -21,7 +22,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/state"
 )
 
-func setupRunVideoTest(t *testing.T) (*state.Store, *router.Store, *config.Service, func()) {
+func setupRunVideoTest(t *testing.T) (*sql.DB, *state.Store, *router.Store, *config.Service, func()) {
 	t.Helper()
 	db, stateStore, _, cleanup := setupServerTest(t)
 
@@ -30,7 +31,22 @@ func setupRunVideoTest(t *testing.T) (*state.Store, *router.Store, *config.Servi
 	versioner := config.NewService(routerStore, cfgStore)
 	routerStore.WithOnChange(versioner.Snapshot)
 
-	return stateStore, routerStore, versioner, cleanup
+	return db, stateStore, routerStore, versioner, cleanup
+}
+
+func recordRunVideoOutcomeForTest(t *testing.T, db *sql.DB, runID, videoID int64, outcome state.VideoFinalOutcome) {
+	t.Helper()
+	var deferredReason, errorMessage *string
+	if outcome == state.FinalOutcomeDeferred {
+		reason := "quota_exceeded"
+		deferredReason = &reason
+	}
+	if outcome == state.FinalOutcomeFailed {
+		message := "test failure"
+		errorMessage = &message
+	}
+	_, err := db.Exec(`INSERT INTO run_video_outcome (run_id, video_id, final_outcome, deferred_reason, error_message, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, runID, videoID, outcome, deferredReason, errorMessage, time.Now().UTC())
+	require.NoError(t, err)
 }
 
 func createRouteForRunVideoTests(t *testing.T, ctx context.Context, routerStore *router.Store) *router.Route {
@@ -102,7 +118,7 @@ func newRunVideoServer(stateStore *state.Store, routeStore RouteStore, cfgStore 
 
 func TestHandleListRunVideos(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	db, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
@@ -118,6 +134,7 @@ func TestHandleListRunVideos(t *testing.T) {
 	}
 	videoID, err := stateStore.CreateVideo(ctx, video)
 	require.NoError(t, err)
+	recordRunVideoOutcomeForTest(t, db, runID, videoID, state.FinalOutcomeAccepted)
 
 	decisionID, err := stateStore.CreateRouteDecision(ctx, &state.RouteDecision{
 		VideoID: videoID, RunID: runID, RouteID: route.ID,
@@ -160,7 +177,7 @@ func TestHandleListRunVideos(t *testing.T) {
 }
 
 func TestHandleListRunVideos_NotFound(t *testing.T) {
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -179,7 +196,7 @@ func TestHandleListRunVideos_NotFound(t *testing.T) {
 
 func TestHandleListRunVideos_Pagination(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
@@ -219,7 +236,7 @@ func TestHandleListRunVideos_Pagination(t *testing.T) {
 
 func TestHandleListRunVideos_OutcomeFilter(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	db, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
@@ -241,13 +258,22 @@ func TestHandleListRunVideos_OutcomeFilter(t *testing.T) {
 		{"v-not-yet-evaluated", state.FinalOutcomeNotYetEvaluated, state.VideoStateNotYetEvaluated},
 	}
 	for i, c := range categories {
-		_, err := stateStore.CreateVideo(ctx, &state.Video{
+		videoID, err := stateStore.CreateVideo(ctx, &state.Video{
 			VideoID: c.videoID, ChannelID: "c1",
 			DiscoveredAt:      time.Now().UTC().Add(time.Duration(i) * time.Second),
 			DiscoveredInRunID: runID, ProcessingState: c.processing, FinalOutcome: c.outcome,
 		})
 		require.NoError(t, err)
+		recordRunVideoOutcomeForTest(t, db, runID, videoID, c.outcome)
 	}
+	// A pre-ARS-006 legacy member has no captured run-local outcome. It stays
+	// visible without a filter and must not be inferred from mutable video state.
+	_, err = stateStore.CreateVideo(ctx, &state.Video{
+		VideoID: "v-legacy-null", ChannelID: "c1", DiscoveredAt: time.Now().UTC(),
+		DiscoveredInRunID: runID, ProcessingState: state.VideoStateCompleted,
+		FinalOutcome: state.FinalOutcomeAccepted,
+	})
+	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(),
@@ -271,8 +297,17 @@ func TestHandleListRunVideos_OutcomeFilter(t *testing.T) {
 	t.Run("no filter returns every outcome category", func(t *testing.T) {
 		resp, code := listVideos("")
 		require.Equal(t, http.StatusOK, code)
-		assert.Len(t, resp.Videos, len(categories))
-		assert.Equal(t, int64(len(categories)), resp.Pagination.Total)
+		assert.Len(t, resp.Videos, len(categories)+1)
+		assert.Equal(t, int64(len(categories)+1), resp.Pagination.Total)
+		var legacy *videoListItem
+		for i := range resp.Videos {
+			if resp.Videos[i].VideoID == "v-legacy-null" {
+				legacy = &resp.Videos[i]
+				break
+			}
+		}
+		require.NotNil(t, legacy)
+		assert.Nil(t, legacy.FinalOutcome)
 	})
 
 	for _, c := range categories {
@@ -281,7 +316,8 @@ func TestHandleListRunVideos_OutcomeFilter(t *testing.T) {
 			require.Equal(t, http.StatusOK, code)
 			require.Len(t, resp.Videos, 1)
 			assert.Equal(t, c.videoID, resp.Videos[0].VideoID)
-			assert.Equal(t, string(c.outcome), resp.Videos[0].FinalOutcome)
+			require.NotNil(t, resp.Videos[0].FinalOutcome)
+			assert.Equal(t, string(c.outcome), *resp.Videos[0].FinalOutcome)
 			// Pagination totals describe the filtered set, so a filtered
 			// empty page and its total stay consistent for the client.
 			assert.Equal(t, int64(1), resp.Pagination.Total)
@@ -292,12 +328,13 @@ func TestHandleListRunVideos_OutcomeFilter(t *testing.T) {
 	t.Run("outcome with no matches returns an empty page with a zero total", func(t *testing.T) {
 		emptyRunID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted})
 		require.NoError(t, err)
-		_, err = stateStore.CreateVideo(ctx, &state.Video{
+		videoID, err := stateStore.CreateVideo(ctx, &state.Video{
 			VideoID: "v2-accepted", ChannelID: "c1", DiscoveredAt: time.Now().UTC(),
 			DiscoveredInRunID: emptyRunID, ProcessingState: state.VideoStateCompleted,
 			FinalOutcome: state.FinalOutcomeAccepted,
 		})
 		require.NoError(t, err)
+		recordRunVideoOutcomeForTest(t, db, emptyRunID, videoID, state.FinalOutcomeAccepted)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(emptyRunID, 10)+"/videos?outcome=failed", nil)
 		rec := httptest.NewRecorder()
@@ -319,7 +356,7 @@ func TestHandleListRunVideos_OutcomeFilter(t *testing.T) {
 
 func TestHandleGetRunVideo(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	db, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
@@ -335,6 +372,7 @@ func TestHandleGetRunVideo(t *testing.T) {
 	}
 	videoID, err := stateStore.CreateVideo(ctx, video)
 	require.NoError(t, err)
+	recordRunVideoOutcomeForTest(t, db, runID, videoID, state.FinalOutcomeAccepted)
 
 	decisionID, err := stateStore.CreateRouteDecision(ctx, &state.RouteDecision{
 		VideoID: videoID, RunID: runID, RouteID: route.ID,
@@ -384,7 +422,7 @@ func TestHandleGetRunVideo(t *testing.T) {
 }
 
 func TestHandleGetRunVideo_RunNotFound(t *testing.T) {
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -403,7 +441,7 @@ func TestHandleGetRunVideo_RunNotFound(t *testing.T) {
 
 func TestHandleGetRunVideo_VideoNotFound(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
@@ -426,7 +464,7 @@ func TestHandleGetRunVideo_VideoNotFound(t *testing.T) {
 
 func TestHandleGetRunVideo_VideoNotInRun(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	run1 := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted}
@@ -480,7 +518,7 @@ func (s stubRouteIdentityStore) ListRouteIdentities(context.Context) (map[int64]
 // the run's immutable ConfigVersion snapshot, not from the current route row.
 func TestHandleRunVideos_SnapshotLabelAndIdentity(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
 
@@ -522,7 +560,7 @@ func TestHandleRunVideos_SnapshotLabelAndIdentity(t *testing.T) {
 // context), while identity stays the stable UUID.
 func TestHandleRunVideos_LegacyRunWithoutSnapshot(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
 
@@ -551,7 +589,7 @@ func TestHandleRunVideos_LegacyRunWithoutSnapshot(t *testing.T) {
 // and the stable UUID.
 func TestHandleRunVideos_CorruptSnapshotFallsBack(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
 
@@ -583,7 +621,7 @@ func TestHandleRunVideos_CorruptSnapshotFallsBack(t *testing.T) {
 // preservation).
 func TestHandleRunVideos_SoftDeletedRoute(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
 
@@ -610,7 +648,7 @@ func TestHandleRunVideos_SoftDeletedRoute(t *testing.T) {
 // evaluated label; nothing falls back to an integer or a current-name lookup.
 func TestHandleRunVideos_SnapshotOnlyRoute(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
 
@@ -658,7 +696,7 @@ func TestHandleRunVideos_SnapshotOnlyRoute(t *testing.T) {
 // merges them.
 func TestHandleRunVideos_DuplicateRouteNames(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 	first := createRouteForRunVideoTests(t, ctx, routerStore)
 
@@ -721,7 +759,7 @@ func TestHandleRunVideos_DuplicateRouteNames(t *testing.T) {
 // instead of emitting an integer or a name-only label (ARS-004 invariant 6).
 func TestHandleRunVideos_MissingIdentityMappingFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
 
@@ -753,7 +791,7 @@ func TestHandleRunVideos_MissingIdentityMappingFailsClosed(t *testing.T) {
 // unlabelled or integer-identified response.
 func TestHandleRunVideos_IdentityLookupErrorFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
 

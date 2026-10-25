@@ -69,6 +69,10 @@ func TestRetryGroupClaimRecoveryRequeueAndAcknowledge(t *testing.T) {
 		t.Fatalf("candidates = %v, %v", candidates, err)
 	}
 	claimDeferred(t, s, a, owner, true)
+	var admittedOutcome sql.NullString
+	if err := s.db.QueryRow(`SELECT final_outcome FROM run_video_outcome WHERE run_id=? AND video_id=?`, owner, video).Scan(&admittedOutcome); err != nil || admittedOutcome.Valid {
+		t.Fatalf("receiving-run admission outcome = %+v, %v; want SQL NULL", admittedOutcome, err)
+	}
 	for _, id := range []int64{a, b} {
 		item, err := s.GetDeferredItem(ctx, id)
 		if err != nil || item.RetryRunID == nil || *item.RetryRunID != owner || item.Status != DeferredStatusRetrying || item.RetryCount != 1 {
@@ -87,6 +91,9 @@ func TestRetryGroupClaimRecoveryRequeueAndAcknowledge(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE video SET processing_state = 'evaluated' WHERE id = ?`, video); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`UPDATE run SET status = 'interrupted' WHERE id = ?`, owner); err != nil {
+		t.Fatal(err)
+	}
 	// Distinct recovery membership exists before any new decision; same-owner
 	// resume retains its durable progress and does not add attempts.
 	reopened, err := NewStore(s.db)
@@ -98,6 +105,13 @@ func TestRetryGroupClaimRecoveryRequeueAndAcknowledge(t *testing.T) {
 		t.Fatalf("recovery = %v, %v", ids, err)
 	}
 	claimDeferred(t, reopened, b, owner, true)
+	if _, err := s.db.Exec(`UPDATE run_video_outcome SET final_outcome='accepted' WHERE run_id=? AND video_id=?`, owner, video); err != nil {
+		t.Fatal(err)
+	}
+	claimDeferred(t, reopened, b, owner, true)
+	if err := s.db.QueryRow(`SELECT final_outcome FROM run_video_outcome WHERE run_id=? AND video_id=?`, owner, video).Scan(&admittedOutcome); err != nil || !admittedOutcome.Valid || admittedOutcome.String != "accepted" {
+		t.Fatalf("same-owner resume reset run outcome = %+v, %v", admittedOutcome, err)
+	}
 	claimDeferred(t, s, a, contender, false)
 	if err := s.db.QueryRow(`SELECT processing_state FROM video WHERE id = ?`, video).Scan(&work); err != nil || work != "evaluated" {
 		t.Fatalf("resume reset progress: %s, %v", work, err)
@@ -135,6 +149,32 @@ func TestRetryGroupClaimRecoveryRequeueAndAcknowledge(t *testing.T) {
 		if err != nil || item.Status != want {
 			t.Fatalf("terminal = %+v, %v", item, err)
 		}
+	}
+}
+
+func TestRetryClaimOutcomeAdmissionFailureRollsBackClaim(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, owner := retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "admission-rollback")
+	item := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_retry_membership BEFORE INSERT ON run_video_outcome BEGIN SELECT RAISE(ABORT, 'injected membership failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		_, _, err := s.ClaimDeferredGroupTx(ctx, tx, item, owner, time.Now())
+		return err
+	})
+	if err == nil {
+		t.Fatal("claim succeeded despite outcome admission failure")
+	}
+	deferred, err := s.GetDeferredItem(ctx, item)
+	if err != nil || deferred.Status != DeferredStatusPending || deferred.RetryRunID != nil {
+		t.Fatalf("claim was not rolled back: %+v, %v", deferred, err)
+	}
+	var outcomes int
+	if err := s.db.QueryRow(`SELECT count(*) FROM run_video_outcome WHERE run_id=? AND video_id=?`, owner, video).Scan(&outcomes); err != nil || outcomes != 0 {
+		t.Fatalf("outcome rows after rollback = %d, %v", outcomes, err)
 	}
 }
 

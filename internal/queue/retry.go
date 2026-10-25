@@ -86,6 +86,14 @@ func (s *Store) claimRetryGroupTx(ctx context.Context, tx *sql.Tx, entryID, runI
 			return videoID, false, err
 		}
 	}
+	// Durable membership belongs to the receiving run, not the queue's
+	// originating run. Insert only after admission succeeds; the surrounding
+	// transaction also owns run creation and the claim, so rollback removes both.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO run_video_outcome(run_id,video_id,final_outcome,updated_at)
+		VALUES(?,?, NULL, ?) ON CONFLICT(run_id,video_id) DO NOTHING`,
+		runID, videoID, now.UTC().Format(time.RFC3339Nano)); err != nil {
+		return videoID, false, fmt.Errorf("record retry run %d membership for video %d: %w", runID, videoID, err)
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE deferred_item SET status = 'retrying', retry_run_id = ?, retry_count = retry_count + CASE WHEN status = 'retrying' AND retry_run_id = ? THEN 0 ELSE 1 END WHERE video_id = ? AND status IN ('pending','retrying')`, runID, runID, videoID); err != nil {
 		return videoID, false, err
 	}

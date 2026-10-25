@@ -131,7 +131,7 @@ export interface VideoOutcome {
   published_at?: string
   thumbnail_url?: string
   processing_state: VideoProcessingState
-  final_outcome: VideoFinalOutcome
+  final_outcome: VideoFinalOutcome | null
   deferred_reason?: string
   error_message?: string
 }
@@ -182,7 +182,7 @@ export interface RouteDecision {
 export interface DecisionDetail {
   video: VideoOutcome
   processing_state: VideoProcessingState
-  final_outcome: VideoFinalOutcome
+  final_outcome: VideoFinalOutcome | null
   route_decisions: RouteDecision[]
 }
 

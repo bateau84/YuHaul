@@ -155,12 +155,42 @@ func (s *Store) UpdateErrorEntryFailure(ctx context.Context, id int64, message s
 
 // CreateDeferredItem persists a new deferred work item and returns its ID.
 func (s *Store) CreateDeferredItem(ctx context.Context, d *DeferredItem) (int64, error) {
+	return s.createDeferredItem(ctx, s.db, d)
+}
+
+// CreateDeferredItemTx persists a deferred work item inside tx.
+func (s *Store) CreateDeferredItemTx(ctx context.Context, tx *sql.Tx, d *DeferredItem) (int64, error) {
+	if tx == nil {
+		return 0, errors.New("creating deferred item: transaction is required")
+	}
 	var retryAfter *string
 	if d.RetryAfter != nil {
 		rs := d.RetryAfter.UTC().Format(time.RFC3339)
 		retryAfter = &rs
 	}
-	res, err := s.db.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO deferred_item (video_id, run_id, deferral_reason, retry_after, retry_count, status, created_at)
+		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM deferred_item WHERE video_id = ? AND status IN ('pending','retrying'));`,
+		d.VideoID, d.RunID, d.Reason, retryAfter, d.RetryCount, d.Status, d.CreatedAt.UTC().Format(time.RFC3339), d.VideoID)
+	if err != nil {
+		return 0, fmt.Errorf("creating deferred item: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading deferred item id: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) createDeferredItem(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, d *DeferredItem) (int64, error) {
+	var retryAfter *string
+	if d.RetryAfter != nil {
+		rs := d.RetryAfter.UTC().Format(time.RFC3339)
+		retryAfter = &rs
+	}
+	res, err := exec.ExecContext(ctx,
 		`INSERT INTO deferred_item (video_id, run_id, deferral_reason, retry_after, retry_count, status, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
 		d.VideoID, d.RunID, d.Reason, retryAfter, d.RetryCount, d.Status, d.CreatedAt.UTC().Format(time.RFC3339))

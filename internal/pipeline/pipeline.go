@@ -609,17 +609,15 @@ func (p *Pipeline) routeVideos(ctx context.Context, runID int64, videos []*state
 			}
 			routed = append(routed, v)
 		} else if !notMatched && hasExclusionDecision(decisions) {
-			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
-				state.VideoStateEvaluating, state.VideoStateEvaluated,
-				state.WithFinalOutcome(state.FinalOutcomeExcluded)); err != nil {
+			if _, err := p.machine.TransitionRunVideoState(ctx, runID, v.ID,
+				state.VideoStateEvaluating, state.VideoStateEvaluated, state.FinalOutcomeExcluded, nil, nil); err != nil {
 				return nil, fmt.Errorf("mark video %s excluded: %w", v.VideoID, err)
 			}
 			p.broadcastVideo(runID, v, state.FinalOutcomeExcluded, false)
 		} else {
 			// No route matched and not excluded: mark rejected.
-			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
-				state.VideoStateEvaluating, state.VideoStateEvaluated,
-				state.WithFinalOutcome(state.FinalOutcomeRejected)); err != nil {
+			if _, err := p.machine.TransitionRunVideoState(ctx, runID, v.ID,
+				state.VideoStateEvaluating, state.VideoStateEvaluated, state.FinalOutcomeRejected, nil, nil); err != nil {
 				return nil, fmt.Errorf("mark video %s rejected: %w", v.VideoID, err)
 			}
 			p.broadcastVideo(runID, v, state.FinalOutcomeRejected, false)
@@ -718,9 +716,9 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 
 	outcome, err := p.executor.Execute(ctx, runID, v.ID, matched)
 	if err != nil {
-		if _, terr := p.machine.TransitionVideoState(ctx, v.ID,
-			state.VideoStateActed, state.VideoStateFailed,
-			state.WithErrorMessage(err.Error())); terr != nil {
+		message := err.Error()
+		if _, terr := p.machine.TransitionRunVideoState(ctx, runID, v.ID,
+			state.VideoStateActed, state.VideoStateFailed, state.FinalOutcomeFailed, nil, &message); terr != nil {
 			return state.FinalOutcomeFailed, fmt.Errorf("execute actions for video %d: %w", v.ID, terr)
 		}
 		return state.FinalOutcomeFailed, fmt.Errorf("execute actions for video %d: %w", v.ID, err)
@@ -735,20 +733,50 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 			return outcome, err
 		}
 	case state.FinalOutcomeDeferred:
-		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
-			state.VideoStateActed, state.VideoStateDeferred,
-			state.WithDeferredReason("quota_exhausted")); err != nil {
+		reason := "quota_exhausted"
+		if err := p.deferRunVideo(ctx, runID, v.ID, reason); err != nil {
 			return outcome, fmt.Errorf("transition video %d to deferred: %w", v.ID, err)
 		}
 	case state.FinalOutcomeFailed:
-		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
-			state.VideoStateActed, state.VideoStateFailed); err != nil {
+		message := "action execution failed"
+		if _, err := p.machine.TransitionRunVideoState(ctx, runID, v.ID,
+			state.VideoStateActed, state.VideoStateFailed, state.FinalOutcomeFailed, nil, &message); err != nil {
 			return outcome, fmt.Errorf("transition video %d to failed: %w", v.ID, err)
 		}
 	}
 
 	p.broadcastVideo(runID, v, outcome, len(matched) > 0)
 	return outcome, nil
+}
+
+func (p *Pipeline) deferRunVideo(ctx context.Context, runID, videoID int64, reason string) error {
+	qs := p.queueStore
+	if qs == nil {
+		var err error
+		qs, err = queue.NewStore(p.db)
+		if err != nil {
+			return err
+		}
+	}
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin deferred disposition transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := qs.CreateDeferredItemTx(ctx, tx, &queue.DeferredItem{
+		VideoID: videoID, RunID: runID, Reason: queue.DeferredReason(reason),
+		Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("record deferred item: %w", err)
+	}
+	if _, err := p.machine.TransitionRunVideoStateTx(ctx, tx, runID, videoID,
+		state.VideoStateActed, state.VideoStateDeferred, state.FinalOutcomeDeferred, &reason, nil); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit deferred disposition: %w", err)
+	}
+	return nil
 }
 
 func (p *Pipeline) markVideoAccepted(ctx context.Context, runID int64, v *state.Video) error {
@@ -766,6 +794,12 @@ func (p *Pipeline) markVideoAccepted(ctx context.Context, runID int64, v *state.
 		state.WithFinalOutcome(state.FinalOutcomeAccepted)); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("transition video %d to completed: %w", v.ID, err)
+	}
+	accepted := state.FinalOutcomeAccepted
+	completedAt := time.Now().UTC()
+	if err := p.stateStore.RecordRunVideoOutcomeTx(ctx, tx, runID, v.ID, &accepted, nil, nil, &completedAt); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("record accepted outcome for run %d video %d: %w", runID, v.ID, err)
 	}
 	if err := p.stateStore.IncrementChannelRoutedTx(ctx, tx, v.ChannelID); err != nil {
 		_ = tx.Rollback()

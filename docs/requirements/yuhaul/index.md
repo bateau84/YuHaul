@@ -8,6 +8,8 @@ For the user's own operational analytics, old activity should keep contributing 
 
 ## Source
 
+For first use, [BR-027 AC5](br-027-historical-backtesting.md)'s same-app production-versus-simulation comparison remains accepted future scope but is explicitly deferred from launch by the user's 2026-10-25 initial-use decision. No comparison with the former script or a broken version is required. Subscription-to-playlist obligations are unchanged, and simulation isolation remains mandatory. This is not an implementation-completion claim.
+
 - [Anchor](../../anchors/youtube-discovery-routing.md)
 - Change log: [log.md](log.md)
 
@@ -41,7 +43,7 @@ For the user's own operational analytics, old activity should keep contributing 
 | BR-024 | Trend Visualization | br-024-trend-visualization.md | MUST | Useful historical trends rendered graphically |
 | BR-025 | Configuration History for Statistics Interpretation | br-025-configuration-history-for-statistics-interpretation.md | MUST | Route/configuration history sufficient to interpret historical statistics |
 | BR-026 | Dry-Run Evaluation | br-026-dry-run-evaluation.md | MUST | Dry-run evaluates routes without mutating external state |
-| BR-027 | Historical Backtesting | br-027-historical-backtesting.md | MUST | Backtesting compares routing changes against retained observations without external mutation |
+| BR-027 | Historical Backtesting | br-027-historical-backtesting.md | MUST | Backtesting over retained observations remains isolated; AC5 same-app production-versus-simulation comparison is accepted future scope, deferred from first-use launch |
 | BR-028 | Historical Run Inspection | br-028-historical-run-inspection.md | MUST | User inspects historical runs and understands accepted/rejected/deferred/failed decisions |
 | BR-029 | Responsive Administration Interface | br-029-responsive-administration-interface.md | MUST | Administration usable on desktop and mobile |
 | BR-030 | Temporary Failure Work Preservation | br-030-temporary-failure-work-preservation.md | MUST | Temporary failures do not silently lose eligible work |

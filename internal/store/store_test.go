@@ -35,7 +35,7 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	err := db.QueryRowContext(context.Background(),
 		"SELECT version FROM schema_migrations LIMIT 1;").Scan(&version)
 	require.NoError(t, err)
-	require.Equal(t, 14, version)
+	require.Equal(t, 15, version)
 }
 
 func TestMigration011NormalizesLegacyRunTimestamps(t *testing.T) {
@@ -138,7 +138,7 @@ func TestMigration013UpgradeSeedsNullTimestampAndPreservesCorpus(t *testing.T) {
 
 	var version int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM schema_migrations LIMIT 1;`).Scan(&version))
-	require.Equal(t, 14, version)
+	require.Equal(t, 15, version)
 
 	// Exactly one singleton row, seeded NULL: no backfill, no sentinel date.
 	var rowCount, nullCount int

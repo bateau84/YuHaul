@@ -242,7 +242,7 @@ func TestMigration012UpgradePreservesDataAndBackfillsIdentities(t *testing.T) {
 
 	var version int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM schema_migrations LIMIT 1;`).Scan(&version))
-	require.Equal(t, 14, version)
+	require.Equal(t, 15, version)
 
 	assertPreserved(t, db, pre)
 	mapped := assertRegistry(t, db, expectedFixtureKeys)

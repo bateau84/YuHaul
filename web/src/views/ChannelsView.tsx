@@ -118,7 +118,7 @@ function ProvenanceBadge({ type, label }: { type: 'discovery' | 'relevance' | 'u
   )
 }
 
-function outcomeLabel(outcome?: string): string | null {
+function outcomeLabel(outcome?: string | null): string | null {
   switch (outcome) {
     case 'accepted':
       return 'Accepted'
@@ -137,7 +137,7 @@ function outcomeLabel(outcome?: string): string | null {
   }
 }
 
-function VideoProvenanceRow({ video, provenance }: { video: { video_id: string; title?: string; final_outcome?: string }; provenance?: VideoProvenance }) {
+function VideoProvenanceRow({ video, provenance }: { video: { video_id: string; title?: string; final_outcome?: string | null }; provenance?: VideoProvenance }) {
   const label = outcomeLabel(video.final_outcome)
   return (
     <li style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 0', borderBottom: '1px solid var(--color-border-default)' }}>

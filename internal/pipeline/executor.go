@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -171,7 +172,7 @@ func (e *Executor) Execute(ctx context.Context, runID, videoID int64, matches []
 	}
 	if !ok {
 		e.logger.WarnContext(ctx, "quota exhausted: deferring video actions", "run_id", runID, "video_id", videoID, "remaining", remaining)
-		return e.deferVideo(ctx, runID, videoID, "quota_exhausted")
+		return e.deferVideo()
 	}
 
 	// Execute actions one at a time, re-checking budget each iteration.
@@ -189,11 +190,18 @@ func (e *Executor) Execute(ctx context.Context, runID, videoID int64, matches []
 			return state.FinalOutcomeFailed, fmt.Errorf("quota check: %w", err)
 		}
 		if !ok {
-			return e.deferVideo(ctx, runID, videoID, "quota_exhausted")
+			return e.deferVideo()
 		}
 
 		outcome, err := e.executeAction(ctx, runID, videoID, videoIDText, action)
 		if err != nil {
+			if youtube.IsQuotaExceeded(err) {
+				e.logger.WarnContext(ctx, "youtube insertion quota exhausted; deferring video", "run_id", runID, "video_id", videoID)
+				return e.deferVideo()
+			}
+			if retainErr := e.retainActionFailure(ctx, runID, videoID, err); retainErr != nil {
+				return state.FinalOutcomeFailed, fmt.Errorf("%w; retain action failure: %v", err, retainErr)
+			}
 			return state.FinalOutcomeFailed, err
 		}
 		if outcome == state.ActionOutcomeDeferred {
@@ -208,6 +216,24 @@ func (e *Executor) Execute(ctx context.Context, runID, videoID int64, matches []
 		return state.FinalOutcomeAccepted, nil
 	}
 	return state.FinalOutcomeFailed, nil
+}
+
+func (e *Executor) retainActionFailure(ctx context.Context, runID, videoID int64, cause error) error {
+	qs, err := queue.NewStore(e.db)
+	if err != nil {
+		return err
+	}
+	category := queue.ErrorCategoryAPIError
+	var apiErr *youtube.APIError
+	if !errors.As(cause, &apiErr) {
+		category = queue.ErrorCategoryRuntime
+	}
+	_, err = qs.CreateErrorEntry(ctx, &queue.ErrorEntry{
+		VideoID: videoID, RunID: runID, Category: category,
+		Message: "playlist insertion failed", Detail: cause.Error(),
+		Status: queue.ErrorStatusActive, CreatedAt: time.Now().UTC(),
+	})
+	return err
 }
 
 type action struct {
@@ -316,12 +342,8 @@ func (e *Executor) youtubeClient(ctx context.Context, runID int64) (PlaylistInse
 	return e.factory(ctx, token, recorder), nil
 }
 
-func (e *Executor) deferVideo(ctx context.Context, runID, videoID int64, reason string) (state.VideoFinalOutcome, error) {
-	if _, err := e.db.ExecContext(ctx,
-		`INSERT INTO deferred_item (video_id, run_id, deferral_reason, status, created_at)
-		 SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM deferred_item WHERE video_id = ? AND status IN ('pending','retrying'));`,
-		videoID, runID, reason, "pending", time.Now().UTC(), videoID); err != nil {
-		return state.FinalOutcomeFailed, fmt.Errorf("record deferred item: %w", err)
-	}
+func (e *Executor) deferVideo() (state.VideoFinalOutcome, error) {
+	// Queue persistence is coordinated with lifecycle/outcome persistence by the
+	// pipeline, which owns the terminal run-local disposition transaction.
 	return state.FinalOutcomeDeferred, nil
 }

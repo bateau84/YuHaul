@@ -59,11 +59,14 @@ func TestListRouteMatchCounts_DistinctVideosProductionOnly(t *testing.T) {
 	dryRun := newRun(t, state.RunTypeDryRun)
 	replay := newRun(t, state.RunTypeReplay)
 	backtest := newRun(t, state.RunTypeBacktest)
+	productionDiscovery := newRun(t, state.RunTypeScheduled)
 
 	v1 := discover(t, scheduled, "v1")
 	v2 := discover(t, scheduled, "v2")
-	v3 := discover(t, dryRun, "v3")
-	v4 := discover(t, backtest, "v4")
+	// Discovery capture is production-only. Simulation decisions below still
+	// reference these videos to prove their run attribution is excluded.
+	v3 := discover(t, productionDiscovery, "v3")
+	v4 := discover(t, productionDiscovery, "v4")
 
 	// Production evidence: v1 matches in both production runs (counts once),
 	// v2 is a second distinct video (counts separately).

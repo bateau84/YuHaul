@@ -425,7 +425,7 @@ func TestProposalAction_RejectedProposalActionTypes(t *testing.T) {
 // executed_action row keeps the stored legacy value.
 func TestRunVideoDetail_EmitsPublicActionType(t *testing.T) {
 	ctx := context.Background()
-	stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
+	_, stateStore, routerStore, _, cleanup := setupRunVideoTest(t)
 	defer cleanup()
 
 	route := createRouteForRunVideoTests(t, ctx, routerStore)
