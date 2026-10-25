@@ -1,0 +1,174 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
+import { MemoryRouter, Routes, Route } from 'react-router-dom'
+import { RouteEditorView } from './RouteEditorView'
+import { ToastProvider } from '../components/ToastProvider'
+import * as mock from '../api/mock'
+import type { Route as RouteModel } from '../types'
+
+const ROUTE_A = '11111111-2222-4333-8444-555555555555'
+const ROUTE_B = 'aaaabbbb-cccc-4ddd-8eee-ffff00000000'
+const ROUTE_C = 'bbbbcccc-dddd-4eee-8fff-000011112222'
+
+const routeFixture = (overrides: Partial<RouteModel> = {}): RouteModel => ({
+  id: ROUTE_A,
+  name: 'Music Discovery',
+  description: 'Route music-related uploads to the discovery playlist.',
+  evaluation_order: 1,
+  is_final: false,
+  is_enabled: true,
+  condition_composition: 'AND',
+  conditions: [
+    { id: 101, route_id: ROUTE_A, condition_index: 0, field: 'title', operator: 'contains', value: 'music' },
+  ],
+  actions: [
+    { id: 201, route_id: ROUTE_A, action_type: 'add_to_playlist', target_playlist_id: 'PLmusic', action_index: 0 },
+  ],
+  exclusions: [],
+  created_at: '2026-08-01T10:00:00Z',
+  updated_at: '2026-09-08T10:00:00Z',
+  ...overrides,
+})
+
+function renderWithToast(ui: React.ReactElement) {
+  return render(<ToastProvider>{ui}</ToastProvider>)
+}
+
+function renderAt(path: string) {
+  return renderWithToast(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/routes" element={<div data-testid="routes-list">Routes list</div>} />
+        <Route path="/routes/new" element={<RouteEditorView />} />
+        <Route path="/routes/:id" element={<RouteEditorView />} />
+      </Routes>
+    </MemoryRouter>
+  )
+}
+
+describe('RouteEditorView', () => {
+  beforeEach(() => {
+    window.history.replaceState({}, '', '/')
+    vi.clearAllMocks()
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([
+      { playlist_id: 'PLmusic', playlist_name: 'Music Discovery' },
+      { playlist_id: 'PLambient', playlist_name: 'Ambient' },
+    ])
+  })
+
+  it('creates a new route with the next evaluation order and opens it for editing', async () => {
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([
+      routeFixture({ id: ROUTE_A, name: 'A', evaluation_order: 1 }),
+      routeFixture({ id: ROUTE_B, name: 'B', evaluation_order: 2 }),
+    ])
+    const createSpy = vi.spyOn(mock, 'createRoute').mockResolvedValueOnce(routeFixture({ id: ROUTE_C, name: 'New Test Route', evaluation_order: 3 }))
+    vi.spyOn(mock, 'getRoute').mockResolvedValueOnce(routeFixture({ id: ROUTE_C, name: 'New Test Route', evaluation_order: 3 }))
+
+    renderAt('/routes/new')
+
+    await waitFor(() => expect(screen.queryByText('Loading route...')).not.toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText(/Route name/i), { target: { value: 'New Test Route' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Add condition/i }))
+    fireEvent.change(screen.getByLabelText(/Condition 1 value/i), { target: { value: 'test' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Add playlist action/i }))
+    const playlistSelect = await waitFor(() => screen.getByLabelText('Playlist'))
+    fireEvent.change(playlistSelect, { target: { value: 'PLmusic' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalled())
+
+    const submitted = createSpy.mock.calls[0][0]
+    expect(submitted.name).toBe('New Test Route')
+    expect(submitted.evaluation_order).toBe(3)
+    expect(submitted.conditions).toHaveLength(1)
+    expect(submitted.actions).toHaveLength(1)
+    // The browser sends only the canonical public action type (ADR-007/ARS-001).
+    expect(submitted.actions[0].action_type).toBe('add_to_playlist')
+
+    await waitFor(() => expect(screen.getByText('Edit Route · New Test Route (bbbbcccc)')).toBeInTheDocument())
+  })
+
+  it('shows an error toast when route creation fails', async () => {
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([])
+    vi.spyOn(mock, 'createRoute').mockRejectedValueOnce(new Error('duplicate evaluation order'))
+
+    renderAt('/routes/new')
+
+    await waitFor(() => expect(screen.queryByText('Loading route...')).not.toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText(/Route name/i), { target: { value: 'Failing Route' } })
+    fireEvent.click(screen.getByRole('button', { name: /Add condition/i }))
+    fireEvent.change(screen.getByLabelText(/Condition 1 value/i), { target: { value: 'x' } })
+    fireEvent.click(screen.getByRole('button', { name: /Add playlist action/i }))
+    const playlistSelect = await waitFor(() => screen.getByLabelText('Playlist'))
+    fireEvent.change(playlistSelect, { target: { value: 'PLmusic' } })
+    fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
+
+    await waitFor(() => expect(document.querySelector('.toast')).toHaveTextContent(/duplicate evaluation order/i))
+    expect(screen.queryByTestId('routes-list')).not.toBeInTheDocument()
+  })
+
+  it('edits an existing route, calls update, and stays on the editor', async () => {
+    vi.spyOn(mock, 'getRoute').mockResolvedValueOnce(routeFixture())
+    const updateSpy = vi.spyOn(mock, 'updateRoute').mockResolvedValueOnce(routeFixture({ name: 'Updated Music' }))
+
+    renderAt(`/routes/${ROUTE_A}`)
+
+    await waitFor(() => expect(screen.getByDisplayValue('Music Discovery')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText(/Route name/i), { target: { value: 'Updated Music' } })
+    fireEvent.click(screen.getByRole('button', { name: /Save route/i }))
+
+    await waitFor(() => expect(updateSpy).toHaveBeenCalled())
+
+    const [routeId, submitted] = updateSpy.mock.calls[0]
+    expect(routeId).toBe(ROUTE_A)
+    expect(submitted.name).toBe('Updated Music')
+    // A reloaded route is re-submitted with the canonical public action type.
+    expect(submitted.actions[0].action_type).toBe('add_to_playlist')
+
+    expect(screen.queryByTestId('routes-list')).not.toBeInTheDocument()
+  })
+
+  it('deletes an existing route and calls the delete endpoint', async () => {
+    vi.spyOn(mock, 'getRoute').mockResolvedValueOnce(routeFixture())
+    const deleteSpy = vi.spyOn(mock, 'deleteRoute').mockResolvedValueOnce(undefined)
+
+    renderAt(`/routes/${ROUTE_A}`)
+
+    await waitFor(() => expect(screen.getByDisplayValue('Music Discovery')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /Delete/i }))
+
+    await waitFor(() => expect(screen.getByRole('alertdialog')).toBeInTheDocument())
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: /^Delete$/i }))
+
+    await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith(ROUTE_A))
+    await waitFor(() => expect(screen.getByTestId('routes-list')).toBeInTheDocument())
+  })
+
+  it('shows route not found for an unknown id', async () => {
+    vi.spyOn(mock, 'listRoutes').mockResolvedValueOnce([routeFixture()])
+    vi.spyOn(mock, 'getRoute').mockResolvedValueOnce(undefined)
+
+    renderAt('/routes/00000000-0000-4000-8000-000000000000')
+
+    await waitFor(() => expect(screen.queryByText('Loading route...')).not.toBeInTheDocument())
+    expect(screen.getByText('Route not found')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Back to Routes/i })).toBeInTheDocument()
+  })
+
+  it('shows a network error with retry', async () => {
+    vi.spyOn(mock, 'listRoutes').mockRejectedValueOnce(new Error('network error'))
+
+    renderAt(`/routes/${ROUTE_A}`)
+
+    await waitFor(() => expect(screen.queryByText('Loading route...')).not.toBeInTheDocument())
+    expect(screen.getByText('Failed to load route')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Retry/i })).toBeInTheDocument()
+  })
+})

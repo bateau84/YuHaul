@@ -32,18 +32,20 @@ const (
 )
 
 // ConditionOperator names the comparison operators supported in conditions.
+// The canonical vocabulary matches the accepted design spec: text fields use
+// contains, equals, starts_with, ends_with, matches_regex; duration_seconds
+// uses equals, greater_than, less_than, between.
 type ConditionOperator string
 
 const (
-	ConditionOperatorContains    ConditionOperator = "contains"
-	ConditionOperatorNotContains ConditionOperator = "not_contains"
-	ConditionOperatorEquals      ConditionOperator = "equals"
-	ConditionOperatorNotEquals   ConditionOperator = "not_equals"
-	ConditionOperatorGT          ConditionOperator = "gt"
-	ConditionOperatorGTE         ConditionOperator = "gte"
-	ConditionOperatorLT          ConditionOperator = "lt"
-	ConditionOperatorLTE         ConditionOperator = "lte"
-	ConditionOperatorInList      ConditionOperator = "in_list"
+	ConditionOperatorContains     ConditionOperator = "contains"
+	ConditionOperatorEquals       ConditionOperator = "equals"
+	ConditionOperatorStartsWith   ConditionOperator = "starts_with"
+	ConditionOperatorEndsWith     ConditionOperator = "ends_with"
+	ConditionOperatorMatchesRegex ConditionOperator = "matches_regex"
+	ConditionOperatorGreaterThan  ConditionOperator = "greater_than"
+	ConditionOperatorLessThan     ConditionOperator = "less_than"
+	ConditionOperatorBetween      ConditionOperator = "between"
 )
 
 // ExclusionType names the kinds of route-scoped exclusions.
@@ -60,7 +62,17 @@ const (
 
 // Route is a single ordered routing rule.
 type Route struct {
-	ID                   int64            `json:"id"`
+	// ID is the internal integer database key. It stays in storage and
+	// foreign keys (ADR-011/ARS-004) but is not a public identifier; the
+	// API layer must serialize PublicID instead.
+	ID int64 `json:"id"`
+	// PublicID is the stable public route identity: a canonical lowercase
+	// UUIDv4 from the route_identity registry (ADR-011/ARS-004). The store
+	// populates it on create, in ListRoutes, and on UUID lookups; it never
+	// changes across rename, reorder, enable/disable, or soft delete.
+	// json:"-" keeps this persistence model out of public JSON: the API
+	// layer serializes its own DTO with PublicID in the `id` field.
+	PublicID             string           `json:"-"`
 	Name                 string           `json:"name"`
 	Description          string           `json:"description"`
 	EvaluationOrder      int              `json:"evaluation_order"`
@@ -70,8 +82,10 @@ type Route struct {
 	Conditions           []RouteCondition `json:"conditions"`
 	Actions              []RouteAction    `json:"actions"`
 	Exclusions           []RouteExclusion `json:"exclusions"`
+	MatchCount           int64            `json:"match_count"`
 	CreatedAt            string           `json:"created_at"`
 	UpdatedAt            string           `json:"updated_at"`
+	DeletedAt            string           `json:"deleted_at,omitempty"`
 }
 
 // RouteCondition is one predicate within a route.

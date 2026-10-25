@@ -6,18 +6,38 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bateau84/YuHaul/internal/quota"
 )
 
 // Machine orchestrates valid state transitions for the three-tier outcome model.
 // It wraps a Store and enforces transition rules before persisting.
 type Machine struct {
-	store *Store
-	now   func() time.Time
+	store  *Store
+	ledger *quota.Ledger
+	now    func() time.Time
+}
+
+// MachineOption configures a Machine.
+type MachineOption func(*Machine)
+
+// WithLedger sets the quota ledger used to compute a run's quota_cost on
+// completion. When unset, runs complete with quota_cost = 0.
+func WithLedger(ledger *quota.Ledger) MachineOption {
+	return func(m *Machine) {
+		if ledger != nil {
+			m.ledger = ledger
+		}
+	}
 }
 
 // NewMachine constructs a state machine backed by store.
-func NewMachine(store *Store) *Machine {
-	return &Machine{store: store, now: time.Now}
+func NewMachine(store *Store, opts ...MachineOption) *Machine {
+	m := &Machine{store: store, now: time.Now}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // transition describes an allowed processing-state change.
@@ -50,6 +70,15 @@ var ErrInvalidTransition = errors.New("state: invalid processing-state transitio
 // It is intended to be called during the discovery phase before any downstream
 // processing begins.
 func (m *Machine) DiscoverVideo(ctx context.Context, runID int64, videoID, channelID string) (*Video, error) {
+	return m.discoverVideo(ctx, nil, runID, videoID, channelID)
+}
+
+// DiscoverVideoTx is the transaction-scoped variant of DiscoverVideo.
+func (m *Machine) DiscoverVideoTx(ctx context.Context, tx *sql.Tx, runID int64, videoID, channelID string) (*Video, error) {
+	return m.discoverVideo(ctx, tx, runID, videoID, channelID)
+}
+
+func (m *Machine) discoverVideo(ctx context.Context, tx *sql.Tx, runID int64, videoID, channelID string) (*Video, error) {
 	if videoID == "" {
 		return nil, errors.New("state: videoID is required")
 	}
@@ -65,9 +94,35 @@ func (m *Machine) DiscoverVideo(ctx context.Context, runID int64, videoID, chann
 		ProcessingState:   VideoStateNotYetEvaluated,
 		FinalOutcome:      FinalOutcomeNotYetEvaluated,
 	}
-	id, err := m.store.CreateVideo(ctx, v)
+	owned := false
+	if tx == nil {
+		var err error
+		tx, err = m.store.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("beginning discovery transaction: %w", err)
+		}
+		owned = true
+		defer func() {
+			if owned {
+				_ = tx.Rollback()
+			}
+		}()
+	}
+	var id int64
+	var err error
+	id, err = m.store.CreateVideoTx(ctx, tx, v)
 	if err != nil {
 		return nil, fmt.Errorf("discovering video: %w", err)
+	}
+	outcome := FinalOutcomeNotYetEvaluated
+	if err := m.store.RecordRunVideoOutcomeTx(ctx, tx, runID, id, &outcome, nil, nil, nil); err != nil {
+		return nil, err
+	}
+	if owned {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("committing discovery transaction: %w", err)
+		}
+		owned = false
 	}
 	v.ID = id
 	return v, nil
@@ -77,6 +132,56 @@ func (m *Machine) DiscoverVideo(ctx context.Context, runID int64, videoID, chann
 // known state to another. It validates the transition and maps the processing
 // state to a final outcome where appropriate.
 func (m *Machine) TransitionVideoState(ctx context.Context, videoID int64,
+	from, to VideoProcessingState, opts ...TransitionOption) (*Video, error) {
+
+	return m.transitionVideoState(ctx, nil, videoID, from, to, opts...)
+}
+
+// TransitionVideoStateTx is the transaction-scoped variant of TransitionVideoState.
+func (m *Machine) TransitionVideoStateTx(ctx context.Context, tx *sql.Tx, videoID int64,
+	from, to VideoProcessingState, opts ...TransitionOption) (*Video, error) {
+
+	return m.transitionVideoState(ctx, tx, videoID, from, to, opts...)
+}
+
+// TransitionRunVideoState atomically persists a lifecycle transition and its
+// production run-attributed disposition.
+func (m *Machine) TransitionRunVideoState(ctx context.Context, runID, videoID int64,
+	from, to VideoProcessingState, outcome VideoFinalOutcome, deferredReason, errorMessage *string) (*Video, error) {
+	tx, err := m.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin run disposition transaction: %w", err)
+	}
+	defer tx.Rollback()
+	v, err := m.TransitionRunVideoStateTx(ctx, tx, runID, videoID, from, to, outcome, deferredReason, errorMessage)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit run disposition: %w", err)
+	}
+	return v, nil
+}
+
+// TransitionRunVideoStateTx persists lifecycle and run-attributed disposition in tx.
+func (m *Machine) TransitionRunVideoStateTx(ctx context.Context, tx *sql.Tx, runID, videoID int64,
+	from, to VideoProcessingState, outcome VideoFinalOutcome, deferredReason, errorMessage *string) (*Video, error) {
+	if tx == nil {
+		return nil, errors.New("run disposition transaction is required")
+	}
+	v, err := m.transitionVideoState(ctx, tx, videoID, from, to,
+		WithFinalOutcome(outcome),
+		func(c *transitionConfig) { c.deferredReason = deferredReason; c.errorMessage = errorMessage })
+	if err != nil {
+		return nil, err
+	}
+	if err := m.store.RecordRunVideoOutcomeTx(ctx, tx, runID, videoID, &outcome, deferredReason, errorMessage, v.CompletedAt); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (m *Machine) transitionVideoState(ctx context.Context, tx *sql.Tx, videoID int64,
 	from, to VideoProcessingState, opts ...TransitionOption) (*Video, error) {
 
 	if !from.Valid() {
@@ -89,7 +194,13 @@ func (m *Machine) TransitionVideoState(ctx context.Context, videoID int64,
 		return nil, fmt.Errorf("%w: %q -> %q", ErrInvalidTransition, from, to)
 	}
 
-	v, err := m.store.GetVideo(ctx, videoID)
+	var v *Video
+	var err error
+	if tx != nil {
+		v, err = m.store.GetVideoTx(ctx, tx, videoID)
+	} else {
+		v, err = m.store.GetVideo(ctx, videoID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -107,10 +218,18 @@ func (m *Machine) TransitionVideoState(ctx context.Context, videoID int64,
 		outcome = cfg.outcome
 	}
 
-	if err := m.store.UpdateVideoState(ctx, videoID, to, outcome, cfg.deferredReason, cfg.errorMessage); err != nil {
+	if tx != nil {
+		err = m.store.UpdateVideoStateTx(ctx, tx, videoID, to, outcome, cfg.deferredReason, cfg.errorMessage)
+	} else {
+		err = m.store.UpdateVideoState(ctx, videoID, to, outcome, cfg.deferredReason, cfg.errorMessage)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("transitioning video %d: %w", videoID, err)
 	}
 
+	if tx != nil {
+		return m.store.GetVideoTx(ctx, tx, videoID)
+	}
 	return m.store.GetVideo(ctx, videoID)
 }
 
@@ -169,28 +288,74 @@ func WithErrorMessage(msg string) TransitionOption {
 
 // RecordRouteDecision persists a per-route decision and returns it.
 func (m *Machine) RecordRouteDecision(ctx context.Context, d *RouteDecision) (*RouteDecision, error) {
-	if d.VideoID == 0 {
-		return nil, errors.New("state: VideoID is required")
+	if err := validateRouteDecision(d); err != nil {
+		return nil, err
 	}
-	if d.RunID == 0 {
-		return nil, errors.New("state: RunID is required")
-	}
-	if d.RouteID == 0 {
-		return nil, errors.New("state: RouteID is required")
-	}
-	if !d.Decision.Valid() {
-		return nil, fmt.Errorf("state: invalid decision %q", d.Decision)
-	}
-	if d.Decision == RouteDecisionSkipped && d.SkipReason == nil {
-		return nil, errors.New("state: skipped decision requires a SkipReason")
-	}
-
 	id, err := m.store.CreateRouteDecision(ctx, d)
 	if err != nil {
 		return nil, fmt.Errorf("recording route decision: %w", err)
 	}
 	d.ID = id
 	return d, nil
+}
+
+func validateRouteDecision(d *RouteDecision) error {
+	if d.VideoID == 0 {
+		return errors.New("state: VideoID is required")
+	}
+	if d.RunID == 0 {
+		return errors.New("state: RunID is required")
+	}
+	if d.RouteID == 0 {
+		return errors.New("state: RouteID is required")
+	}
+	if !d.Decision.Valid() {
+		return fmt.Errorf("state: invalid decision %q", d.Decision)
+	}
+	if d.Decision == RouteDecisionSkipped && d.SkipReason == nil {
+		return errors.New("state: skipped decision requires a SkipReason")
+	}
+	return nil
+}
+
+// RecordRouteEvaluation atomically persists a decision and its condition evidence.
+// Recovery reuses an existing run/video/route decision without rewriting history.
+func (m *Machine) RecordRouteEvaluation(ctx context.Context, d *RouteDecision, audits []ConditionAudit) (*RouteDecision, error) {
+	if err := validateRouteDecision(d); err != nil {
+		return nil, err
+	}
+	tx, err := m.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin route evaluation: %w", err)
+	}
+	defer tx.Rollback()
+	existing, err := scanRouteDecision(tx.QueryRowContext(ctx,
+		`SELECT id, video_id, run_id, route_id, evaluation_order, decision, skip_reason, rejection_reason
+		 FROM route_decision WHERE video_id = ? AND run_id = ? AND route_id = ?`, d.VideoID, d.RunID, d.RouteID))
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("load route evaluation: %w", err)
+	}
+	recorded := *d
+	recorded.ID, err = createRouteDecision(ctx, tx, &recorded)
+	if err != nil {
+		return nil, err
+	}
+	for _, audit := range audits {
+		if audit.Field == "" || audit.Operator == "" {
+			return nil, errors.New("state: condition audit requires Field and Operator")
+		}
+		audit.RouteDecisionID = recorded.ID
+		if _, err := createConditionAudit(ctx, tx, &audit); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit route evaluation: %w", err)
+	}
+	return &recorded, nil
 }
 
 // RecordExecutedAction persists a per-action outcome.
@@ -245,7 +410,8 @@ func (m *Machine) RecordConditionAudit(ctx context.Context, a *ConditionAudit) (
 	return a, nil
 }
 
-// CompleteRun finalizes a run and recomputes its outcome counters.
+// CompleteRun finalizes a run, recomputes its outcome counters, and records
+// the quota cost from the ledger when one is configured.
 func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 	started := m.now().UTC()
 	run, err := m.store.GetRun(ctx, runID)
@@ -253,8 +419,40 @@ func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 		return nil, err
 	}
 
+	quotaCost, err := m.runQuotaCost(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
 	duration := started.Sub(run.StartedAt).Seconds()
-	if err := m.store.CompleteRun(ctx, runID, duration); err != nil {
+	// Completed is the publication barrier for HTTP pollers: finish all
+	// finalization writes before exposing it, as for historical runs.
+	if err := m.store.RecomputeRunCounters(ctx, runID); err != nil {
+		return nil, err
+	}
+	if err := m.store.CompleteRun(ctx, runID, duration, quotaCost); err != nil {
+		return nil, err
+	}
+	return m.store.GetRun(ctx, runID)
+}
+
+// FailRun marks a run as failed, recomputes its outcome counters, and records
+// the quota cost from the ledger when one is configured. The reason explains
+// why the run did not reach a normal terminal state.
+func (m *Machine) FailRun(ctx context.Context, runID int64, reason string) (*Run, error) {
+	started := m.now().UTC()
+	run, err := m.store.GetRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	quotaCost, err := m.runQuotaCost(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := started.Sub(run.StartedAt).Seconds()
+	if err := m.store.FailRun(ctx, runID, reason, duration, quotaCost); err != nil {
 		return nil, err
 	}
 	if err := m.store.RecomputeRunCounters(ctx, runID); err != nil {
@@ -272,14 +470,35 @@ func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run,
 		return nil, err
 	}
 
-	duration := started.Sub(run.StartedAt).Seconds()
-	if err := m.store.CompleteRun(ctx, runID, duration); err != nil {
+	quotaCost, err := m.runQuotaCost(ctx, runID)
+	if err != nil {
 		return nil, err
 	}
+
+	duration := started.Sub(run.StartedAt).Seconds()
+	// Publish completed status only after decision-derived counts are final;
+	// HTTP pollers may observe completion before this method returns.
 	if err := m.store.RecomputeRunCountersFromDecisions(ctx, runID); err != nil {
 		return nil, err
 	}
+	if err := m.store.CompleteRun(ctx, runID, duration, quotaCost); err != nil {
+		return nil, err
+	}
 	return m.store.GetRun(ctx, runID)
+}
+
+// runQuotaCost returns the quota units consumed on behalf of runID. When no
+// ledger is configured it returns 0 so tests and offline tools are not forced
+// to provide one.
+func (m *Machine) runQuotaCost(ctx context.Context, runID int64) (int, error) {
+	if m.ledger == nil {
+		return 0, nil
+	}
+	cost, err := m.ledger.ConsumedByRun(ctx, runID)
+	if err != nil {
+		return 0, fmt.Errorf("computing quota cost for run %d: %w", runID, err)
+	}
+	return cost, nil
 }
 
 // txer is satisfied by *sql.DB and *sql.Tx so we can share scanning helpers.

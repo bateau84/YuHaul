@@ -11,14 +11,13 @@ export type ConditionField =
 
 export type ConditionOperator =
   | 'contains'
-  | 'not_contains'
   | 'equals'
-  | 'not_equals'
-  | 'gt'
-  | 'gte'
-  | 'lt'
-  | 'lte'
-  | 'in_list'
+  | 'starts_with'
+  | 'ends_with'
+  | 'matches_regex'
+  | 'greater_than'
+  | 'less_than'
+  | 'between'
 
 export type ExclusionType =
   | 'channel'
@@ -30,30 +29,37 @@ export type ExclusionType =
 
 export interface RouteCondition {
   id?: number
-  route_id?: number
+  route_id?: string
   condition_index: number
   field: ConditionField
   operator: ConditionOperator
   value: string
 }
 
+// Public API action type (ADR-007 / ARS-001). The internal persistence and
+// execution key is translated at the server API boundary; the browser only
+// ever sees and sends this canonical value.
+export type RouteActionType = 'add_to_playlist'
+
 export interface RouteAction {
   id?: number
-  route_id?: number
-  action_type: 'playlist_insert'
+  route_id?: string
+  action_type: RouteActionType
   target_playlist_id: string
   action_index: number
 }
 
 export interface RouteExclusion {
   id?: number
-  route_id?: number
+  route_id?: string
   exclusion_type: ExclusionType
   exclusion_value: string
 }
 
 export interface Route {
-  id: number
+  // Public route identity is a canonical UUIDv4 string (ADR-011 / ARS-004).
+  // Display names are labels and may repeat; never key or look up routes by name.
+  id: string
   name: string
   description: string
   evaluation_order: number
@@ -63,6 +69,7 @@ export interface Route {
   conditions: RouteCondition[]
   actions: RouteAction[]
   exclusions: RouteExclusion[]
+  match_count?: number
   created_at: string
   updated_at: string
 }
@@ -86,6 +93,7 @@ export interface Run {
   videos_discovered: number
   videos_accepted: number
   videos_rejected: number
+  videos_excluded: number
   videos_deferred: number
   videos_failed: number
   videos_not_yet_evaluated: number
@@ -108,6 +116,7 @@ export type VideoProcessingState =
 export type VideoFinalOutcome =
   | 'accepted'
   | 'rejected'
+  | 'excluded'
   | 'deferred'
   | 'failed'
   | 'not_yet_evaluated'
@@ -122,7 +131,7 @@ export interface VideoOutcome {
   published_at?: string
   thumbnail_url?: string
   processing_state: VideoProcessingState
-  final_outcome: VideoFinalOutcome
+  final_outcome: VideoFinalOutcome | null
   deferred_reason?: string
   error_message?: string
 }
@@ -150,15 +159,17 @@ export interface ConditionAudit {
 
 export interface ActionOutcome {
   id: number
-  action_type: string
+  action_type: RouteActionType
   target_playlist_id: string
   outcome: 'succeeded' | 'failed' | 'deferred' | 'not_attempted'
   error_message?: string
 }
 
 export interface RouteDecision {
-  id: number
-  route_id: number
+  // Route identity in a decision is the route UUID (ARS-004); the decision
+  // row id mirrors it because each route is evaluated at most once per video.
+  id: string
+  route_id: string
   route_name: string
   evaluation_order: number
   decision: RouteDecisionType
@@ -171,7 +182,7 @@ export interface RouteDecision {
 export interface DecisionDetail {
   video: VideoOutcome
   processing_state: VideoProcessingState
-  final_outcome: VideoFinalOutcome
+  final_outcome: VideoFinalOutcome | null
   route_decisions: RouteDecision[]
 }
 
@@ -218,13 +229,21 @@ export interface RetentionProvenanceBreakdown {
   yuhaul_routed: number
 }
 
+// One route identity matched by a channel's videos in production runs
+// (ARS-001). `name` is a label that may repeat; key and group by `route_id`.
+export interface MatchedRoute {
+  route_id: string
+  name: string
+  match_count: number
+}
+
 export interface ChannelDetail extends ChannelStats {
   subscription_date?: string
   duplicate_provenance: DuplicateProvenanceBreakdown
   retention_signals: RetentionProvenanceBreakdown
   recent_videos: VideoOutcome[]
   recent_video_provenance?: VideoProvenance[]
-  matched_routes: string[]
+  matched_routes: MatchedRoute[]
 }
 
 export type AdvisoryType =
@@ -266,7 +285,7 @@ export interface TrendBucket {
 
 export interface RouteMatchRate {
   bucket: string
-  route_id: number
+  route_id: string
   route_name: string
   evaluated: number
   matched: number
@@ -301,6 +320,60 @@ export interface RetentionPlaylist {
   is_active: boolean
 }
 
+// Corpus import (ARS-002): direct SQLite upload, in-process job status, and
+// terminal summary. Job status is process-local and not durable history; the
+// source contract has no date field, so no preview field carries one.
+export type CorpusImportJobStatus =
+  | 'queued'
+  | 'running'
+  | 'cancel_requested'
+  | 'cancelled'
+  | 'completed'
+  | 'failed'
+
+export interface CorpusImportPreview {
+  source_row_count: number
+  already_present_count: number
+  sample_titles: string[]
+}
+
+export interface CorpusImportStart {
+  import_id: string
+  status: 'queued'
+}
+
+export interface CorpusImportStatus {
+  import_id: string
+  status: CorpusImportJobStatus
+  total: number
+  processed: number
+  inserted: number
+  skipped: number
+  errors: number
+  error_counts_by_reason: Record<string, number>
+  rate_per_second: number | null
+  estimated_seconds_remaining: number | null
+  // Actual destination COUNT(*) after the final committed transaction, present
+  // on terminal states (null on `failed` when it cannot be read). Never derive
+  // it from inserted + skipped.
+  total_corpus_size?: number | null
+}
+
+// Durable corpus import metadata (ARS-002 GET /api/corpus/import/metadata).
+// Independent of process-local job status and readable after a restart.
+// `last_successful_corpus_import_at` is the canonical RFC 3339 Nano UTC
+// timestamp of the most recent successful import, or null when no reliable
+// completion timestamp is recorded (e.g. a database predating import
+// tracking). Null is not proof that no import ever occurred.
+export interface CorpusImportMetadata {
+  last_successful_corpus_import_at: string | null
+}
+
+export interface Playlist {
+  playlist_id: string
+  playlist_name: string
+}
+
 export interface ErrorEntry {
   id: number
   video_id: number
@@ -333,4 +406,36 @@ export interface Toast {
   id: string
   type: ToastType
   message: string
+}
+
+export interface ConfigDiffResult {
+  from_id: number
+  to_id: number
+  settings_changed: Record<string, { old: string; new: string }>
+  routes_added: Route[]
+  routes_removed: Route[]
+  routes_changed: ConfigRouteChange[]
+}
+
+export interface ConfigRouteChange {
+  // Route identity in a config diff is the route UUID (ARS-004).
+  id: string
+  old: Route
+  new: Route
+  changes: ConfigFieldChange[]
+}
+
+export interface ConfigFieldChange {
+  field: string
+  old: string
+  new: string
+}
+
+export interface BacktestComparison {
+  baseline_run_ids: number[]
+  baseline_accepted: number
+  proposed_accepted: number
+  new_catches: number
+  lost_catches: number
+  net_change: number
 }

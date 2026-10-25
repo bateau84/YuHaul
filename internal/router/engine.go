@@ -3,6 +3,8 @@ package router
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -11,12 +13,59 @@ import (
 
 // Engine evaluates videos against ordered routes and records decisions.
 type Engine struct {
-	store *Store
+	store  *Store
+	logger *slog.Logger
+}
+
+// ExpectedEvaluation is non-recording evidence, independent of persisted rows.
+type ExpectedEvaluation struct {
+	Decision state.RouteDecision
+	Audits   []state.ConditionAudit
+}
+
+// ExpectedEvaluations uses the normal predicates without recovery or writes.
+func (e *Engine) ExpectedEvaluations(runID, videoID int64, vc VideoContext, routes []Route) []ExpectedEvaluation {
+	allExcluded, enabled := true, false
+	for _, r := range routes {
+		if r.IsEnabled {
+			enabled = true
+			allExcluded = allExcluded && Excluded(r, vc) != nil
+		}
+	}
+	var out []ExpectedEvaluation
+	final := false
+	for _, r := range routes {
+		if enabled && allExcluded && !r.IsEnabled {
+			continue
+		}
+		var d state.RouteDecision
+		var audits []state.ConditionAudit
+		matched := false
+		if enabled && allExcluded {
+			d = state.RouteDecision{EvaluationOrder: r.EvaluationOrder, Decision: state.RouteDecisionSkipped, SkipReason: skipPtr(state.SkipReasonExclusion)}
+		} else if final {
+			d = state.RouteDecision{EvaluationOrder: r.EvaluationOrder, Decision: state.RouteDecisionSkipped, SkipReason: skipPtr(state.SkipReasonFinalRouteMatched)}
+		} else {
+			d, audits, matched = e.evaluateRoute(r, vc)
+		}
+		d.RunID, d.VideoID, d.RouteID = runID, videoID, r.ID
+		out = append(out, ExpectedEvaluation{d, audits})
+		final = final || (matched && r.IsFinal)
+	}
+	return out
 }
 
 // NewEngine returns a router engine backed by store.
 func NewEngine(store *Store) *Engine {
-	return &Engine{store: store}
+	return &Engine{store: store, logger: slog.Default()}
+}
+
+// WithLogger sets the structured logger used by the engine.
+func (e *Engine) WithLogger(l *slog.Logger) *Engine {
+	if l != nil {
+		e.logger = l
+	}
+	return e
 }
 
 // Routes returns the active route set loaded from the route store. It is
@@ -65,18 +114,13 @@ func (e *Engine) EvaluateWithRoutes(ctx context.Context, runID int64, videoID in
 		decision.RunID = runID
 		decision.RouteID = route.ID
 
-		recorded, err := machine.RecordRouteDecision(ctx, &decision)
+		recorded, err := machine.RecordRouteEvaluation(ctx, &decision, audits)
 		if err != nil {
 			return nil, fmt.Errorf("router: record decision for route %d: %w", route.ID, err)
 		}
 
-		for i := range audits {
-			audits[i].RouteDecisionID = recorded.ID
-			if _, err := machine.RecordConditionAudit(ctx, &audits[i]); err != nil {
-				return nil, fmt.Errorf("router: record audit: %w", err)
-			}
-		}
-
+		// A recovered decision is authoritative even if metadata has changed.
+		matched = recorded.Decision == state.RouteDecisionMatched
 		if matched {
 			result.MatchedRoutes = append(result.MatchedRoutes, route.ID)
 			if route.IsFinal {
@@ -99,7 +143,7 @@ func (e *Engine) evaluateRoute(route Route, vc VideoContext) (state.RouteDecisio
 		}, nil, false
 	}
 
-	if reason := excluded(route, vc); reason != nil {
+	if reason := Excluded(route, vc); reason != nil {
 		return state.RouteDecision{
 			EvaluationOrder: order,
 			Decision:        state.RouteDecisionSkipped,
@@ -110,7 +154,7 @@ func (e *Engine) evaluateRoute(route Route, vc VideoContext) (state.RouteDecisio
 	audits := make([]state.ConditionAudit, 0, len(route.Conditions))
 	conditionResults := make([]bool, 0, len(route.Conditions))
 	for _, cond := range route.Conditions {
-		matched, actual := evaluateCondition(cond, vc)
+		matched, actual := e.evaluateCondition(route.ID, cond, vc)
 		audits = append(audits, state.ConditionAudit{
 			ConditionIndex: cond.ConditionIndex,
 			Field:          string(cond.Field),
@@ -138,7 +182,9 @@ func (e *Engine) evaluateRoute(route Route, vc VideoContext) (state.RouteDecisio
 	}, audits, false
 }
 
-func excluded(route Route, vc VideoContext) *state.SkipReason {
+// Excluded returns the exclusion skip reason if the video matches any of the
+// route's exclusion rules, or nil if it does not.
+func Excluded(route Route, vc VideoContext) *state.SkipReason {
 	for _, ex := range route.Exclusions {
 		switch ex.ExclusionType {
 		case ExclusionTypeChannel:
@@ -176,29 +222,40 @@ func excluded(route Route, vc VideoContext) *state.SkipReason {
 	return nil
 }
 
-func evaluateCondition(c RouteCondition, vc VideoContext) (bool, string) {
+func (e *Engine) evaluateCondition(routeID int64, c RouteCondition, vc VideoContext) (bool, string) {
 	actual := conditionValue(c.Field, vc)
 	switch c.Operator {
 	case ConditionOperatorContains:
 		return strings.Contains(strings.ToLower(actual), strings.ToLower(c.Value)), actual
-	case ConditionOperatorNotContains:
-		return !strings.Contains(strings.ToLower(actual), strings.ToLower(c.Value)), actual
 	case ConditionOperatorEquals:
-		return strings.EqualFold(actual, c.Value), actual
-	case ConditionOperatorNotEquals:
-		return !strings.EqualFold(actual, c.Value), actual
-	case ConditionOperatorInList:
-		parts := strings.Split(c.Value, ",")
-		for _, p := range parts {
-			if strings.EqualFold(strings.TrimSpace(p), actual) {
-				return true, actual
-			}
+		if c.Field == ConditionFieldDurationSeconds {
+			return compareNumericEquality(actual, c.Value), actual
 		}
-		return false, actual
-	case ConditionOperatorGT, ConditionOperatorGTE, ConditionOperatorLT, ConditionOperatorLTE:
+		return strings.EqualFold(actual, c.Value), actual
+	case ConditionOperatorStartsWith:
+		return strings.HasPrefix(strings.ToLower(actual), strings.ToLower(c.Value)), actual
+	case ConditionOperatorEndsWith:
+		return strings.HasSuffix(strings.ToLower(actual), strings.ToLower(c.Value)), actual
+	case ConditionOperatorMatchesRegex:
+		// Invalid patterns are treated as non-matches; the audit still records
+		// the actual value and matched=false.
+		matched, _ := regexp.MatchString(c.Value, actual)
+		return matched, actual
+	case ConditionOperatorGreaterThan, ConditionOperatorLessThan:
 		return compareNumeric(c.Operator, actual, c.Value), actual
+	case ConditionOperatorBetween:
+		return compareBetween(actual, c.Value), actual
+	default:
+		// Stored drifted operators (dev-era data) evaluate as non-matching but
+		// are now loud instead of silently non-matching.
+		e.logger.WarnContext(context.Background(), "unknown condition operator",
+			"route_id", routeID,
+			"condition_index", c.ConditionIndex,
+			"operator", string(c.Operator),
+			"field", string(c.Field),
+		)
+		return false, actual
 	}
-	return false, actual
 }
 
 func conditionValue(field ConditionField, vc VideoContext) string {
@@ -226,16 +283,38 @@ func compareNumeric(op ConditionOperator, actual, expected string) bool {
 		return false
 	}
 	switch op {
-	case ConditionOperatorGT:
+	case ConditionOperatorGreaterThan:
 		return a > b
-	case ConditionOperatorGTE:
-		return a >= b
-	case ConditionOperatorLT:
+	case ConditionOperatorLessThan:
 		return a < b
-	case ConditionOperatorLTE:
-		return a <= b
 	}
 	return false
+}
+
+func compareNumericEquality(actual, expected string) bool {
+	a, err1 := strconv.ParseFloat(actual, 64)
+	b, err2 := strconv.ParseFloat(expected, 64)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return a == b
+}
+
+func compareBetween(actual, expected string) bool {
+	a, err := strconv.ParseFloat(actual, 64)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(expected, ",")
+	if len(parts) != 2 {
+		return false
+	}
+	min, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	max, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return a >= min && a <= max
 }
 
 func composeResults(composition string, results []bool) bool {

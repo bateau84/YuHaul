@@ -47,6 +47,7 @@ const (
 
 // ErrorEntry is a single inspectable failure record in the error queue.
 type ErrorEntry struct {
+	RetryRunID      *int64
 	ID              int64
 	VideoID         int64
 	ExternalVideoID string
@@ -62,6 +63,7 @@ type ErrorEntry struct {
 
 // DeferredItem is a single unit of work held for later processing.
 type DeferredItem struct {
+	RetryRunID      *int64
 	ID              int64
 	VideoID         int64
 	ExternalVideoID string

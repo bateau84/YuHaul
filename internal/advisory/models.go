@@ -28,10 +28,10 @@ const (
 // Advisory is a recommendation generated from channel statistics.
 type Advisory struct {
 	ID               int64          `json:"id"`
-	ChannelID        int64          `json:"channel_id"`
-	ChannelIDText    string         `json:"channel_id_text"`
+	ChannelID        int64          `json:"-"`
+	ChannelIDText    string         `json:"channel_id"`
 	ChannelName      string         `json:"channel_name"`
-	Type             AdvisoryType   `json:"type"`
+	Type             AdvisoryType   `json:"advisory_type"`
 	Status           AdvisoryStatus `json:"status"`
 	GeneratedAt      time.Time      `json:"generated_at"`
 	IgnoredUntil     *time.Time     `json:"ignored_until,omitempty"`

@@ -67,6 +67,7 @@ type playlistInsertion struct {
 type mockYouTubeServer struct {
 	server        *httptest.Server
 	mu            sync.Mutex
+	requests      int
 	insertions    []playlistInsertion
 	subscriptions []string
 	channels      []mockChannel
@@ -74,8 +75,16 @@ type mockYouTubeServer struct {
 }
 
 func newMockYouTubeServer(channels []mockChannel, videos []mockVideo) *mockYouTubeServer {
+	// The mock subscribes the account to exactly the channels the test passed,
+	// so discovery fetches the channels under test instead of a hard-coded
+	// subscription list that only happens to work because handleChannels
+	// returns every channel regardless of the requested IDs.
+	subscriptions := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		subscriptions = append(subscriptions, ch.ID)
+	}
 	m := &mockYouTubeServer{
-		subscriptions: []string{"UC1"},
+		subscriptions: subscriptions,
 		channels:      channels,
 		videos:        videos,
 	}
@@ -84,12 +93,23 @@ func newMockYouTubeServer(channels []mockChannel, videos []mockVideo) *mockYouTu
 	mux.HandleFunc("/channels", m.handleChannels)
 	mux.HandleFunc("/playlistItems", m.handlePlaylistItems)
 	mux.HandleFunc("/videos", m.handleVideos)
-	m.server = httptest.NewServer(mux)
+	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		m.requests++
+		m.mu.Unlock()
+		mux.ServeHTTP(w, r)
+	}))
 	return m
 }
 
 func (m *mockYouTubeServer) URL() string { return m.server.URL }
 func (m *mockYouTubeServer) Close()      { m.server.Close() }
+
+func (m *mockYouTubeServer) Requests() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.requests
+}
 
 func (m *mockYouTubeServer) Insertions() []playlistInsertion {
 	m.mu.Lock()
@@ -251,6 +271,7 @@ type testEnv struct {
 	stateStore  *state.Store
 	machine     *state.Machine
 	pipeline    *pipeline.Pipeline
+	broadcast   *pipeline.Broadcaster
 	ledger      *quota.Ledger
 	server      *mockYouTubeServer
 	routerStore *router.Store
@@ -276,9 +297,8 @@ func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv
 
 	stateStore, err := state.NewStore(db)
 	require.NoError(t, err)
-	machine := state.NewMachine(stateStore)
-
 	ledger := quota.New(db, quota.WithDefaultLimit(1_000_000))
+	machine := state.NewMachine(stateStore, state.WithLedger(ledger))
 
 	mock := newMockYouTubeServer(channels, videos)
 	t.Cleanup(mock.Close)
@@ -341,6 +361,7 @@ func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv
 		stateStore:  stateStore,
 		machine:     machine,
 		pipeline:    p,
+		broadcast:   broadcast,
 		ledger:      ledger,
 		server:      mock,
 		routerStore: routerStore,
@@ -390,6 +411,7 @@ func (env *testEnv) runProductionRun(t *testing.T) *state.Run {
 	loaded, err := env.stateStore.GetRun(ctx, run.ID)
 	require.NoError(t, err)
 	require.Equal(t, state.RunStatusCompleted, loaded.Status, "run %d did not complete: %v", run.ID, loaded.InterruptReason)
+	assert.Greater(t, loaded.QuotaCost, 0, "run %d should record a positive quota cost", run.ID)
 	return loaded
 }
 
@@ -496,6 +518,14 @@ func TestINV2_QuotaDeferral(t *testing.T) {
 	require.NoError(t, env.ledger.SetDailyLimit(ctx, 1_000_000))
 	run2 := env.runProductionRun(t)
 	require.Equal(t, 0, run2.VideosDiscovered, "deferred-only run should discover no new videos")
+	var retriedID int64
+	require.NoError(t, env.db.QueryRowContext(ctx, `SELECT video_id FROM deferred_item WHERE run_id=? ORDER BY id LIMIT 1`, run.ID).Scan(&retriedID))
+	var originOutcome, receivingOutcome string
+	require.NoError(t, env.db.QueryRowContext(ctx, `SELECT final_outcome FROM run_video_outcome WHERE run_id=? AND video_id=?`, run.ID, retriedID).Scan(&originOutcome))
+	require.NoError(t, env.db.QueryRowContext(ctx, `SELECT final_outcome FROM run_video_outcome WHERE run_id=? AND video_id=?`, run2.ID, retriedID).Scan(&receivingOutcome))
+	assert.Equal(t, string(state.FinalOutcomeDeferred), originOutcome, "origin disposition must remain immutable")
+	assert.Equal(t, string(state.FinalOutcomeAccepted), receivingOutcome, "retry disposition must belong to receiving run")
+	assert.Equal(t, 1, run2.VideosAccepted, "receiving run counts retried accepted work")
 
 	var pendingDeferred int
 	row := env.db.QueryRowContext(ctx,
@@ -744,12 +774,12 @@ func TestINV8_ModeIsolation(t *testing.T) {
 	require.Equal(t, state.RunStatusCompleted, rpLoaded.Status)
 
 	// Backtest with a stricter proposed config.
-	bt, err := env.pipeline.Backtest(ctx, config.Snapshot{
+	bt, err := env.pipeline.Backtest(ctx, &config.ProposalSnapshot{
 		DuplicateThreshold: 0.5,
 		DuplicateBehavior:  "skip",
-		Routes: []config.SnapshotRoute{
+		Routes: []config.ProposalRoute{
 			{
-				ID:                   99,
+				ID:                   "9f4d3f2c-1c3a-4d9e-9e1d-7b6f5e4d3c2b",
 				Name:                 "Classical",
 				EvaluationOrder:      1,
 				IsEnabled:            true,

@@ -12,16 +12,24 @@ import type {
   TrendBucket,
   RouteMatchRate,
   ConfigVersion,
+  ConfigDiffResult,
+  ConfigRouteChange,
+  BacktestComparison,
   Settings,
   ErrorEntry,
   DeferredItem,
   Advisory,
   RetentionPlaylist,
+  Playlist,
+  CorpusImportPreview,
+  CorpusImportStart,
+  CorpusImportStatus,
+  CorpusImportMetadata,
 } from '../types'
 
 let mockRoutes: Route[] = [
   {
-    id: 1,
+    id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
     name: 'Music Discovery',
     description: 'Route music-related uploads to the discovery playlist.',
     evaluation_order: 1,
@@ -29,16 +37,17 @@ let mockRoutes: Route[] = [
     is_enabled: true,
     condition_composition: 'AND',
     conditions: [
-      { id: 101, route_id: 1, condition_index: 0, field: 'title', operator: 'contains', value: 'music' },
-      { id: 102, route_id: 1, condition_index: 1, field: 'duration_seconds', operator: 'gt', value: '180' },
+      { id: 101, route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', condition_index: 0, field: 'title', operator: 'contains', value: 'music' },
+      { id: 102, route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', condition_index: 1, field: 'duration_seconds', operator: 'greater_than', value: '180' },
     ],
-    actions: [{ id: 201, route_id: 1, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', action_index: 0 }],
-    exclusions: [{ id: 301, route_id: 1, exclusion_type: 'channel', exclusion_value: 'UCexcluded' }],
+    actions: [{ id: 201, route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', action_type: 'add_to_playlist', target_playlist_id: 'PLmusic', action_index: 0 }],
+    exclusions: [{ id: 301, route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', exclusion_type: 'channel', exclusion_value: 'UCexcluded' }],
+    match_count: 2,
     created_at: '2026-08-01T10:00:00Z',
     updated_at: '2026-09-08T10:00:00Z',
   },
   {
-    id: 2,
+    id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
     name: 'Ambient',
     description: 'Long-form ambient and atmospheric content.',
     evaluation_order: 2,
@@ -46,11 +55,12 @@ let mockRoutes: Route[] = [
     is_enabled: false,
     condition_composition: 'OR',
     conditions: [
-      { id: 103, route_id: 2, condition_index: 0, field: 'title', operator: 'contains', value: 'ambient' },
-      { id: 104, route_id: 2, condition_index: 1, field: 'duration_seconds', operator: 'gt', value: '600' },
+      { id: 103, route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', condition_index: 0, field: 'title', operator: 'contains', value: 'ambient' },
+      { id: 104, route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', condition_index: 1, field: 'duration_seconds', operator: 'greater_than', value: '600' },
     ],
-    actions: [{ id: 202, route_id: 2, action_type: 'playlist_insert', target_playlist_id: 'PLambient', action_index: 0 }],
+    actions: [{ id: 202, route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', action_type: 'add_to_playlist', target_playlist_id: 'PLambient', action_index: 0 }],
     exclusions: [],
+    match_count: 0,
     created_at: '2026-08-02T10:00:00Z',
     updated_at: '2026-09-08T10:00:00Z',
   },
@@ -66,7 +76,8 @@ let mockRuns: Run[] = [
     config_version_id: 1,
     videos_discovered: 42,
     videos_accepted: 3,
-    videos_rejected: 27,
+    videos_rejected: 23,
+    videos_excluded: 4,
     videos_deferred: 12,
     videos_failed: 0,
     videos_not_yet_evaluated: 0,
@@ -82,7 +93,8 @@ let mockRuns: Run[] = [
     config_version_id: 1,
     videos_discovered: 12,
     videos_accepted: 1,
-    videos_rejected: 8,
+    videos_rejected: 6,
+    videos_excluded: 2,
     videos_deferred: 3,
     videos_failed: 0,
     videos_not_yet_evaluated: 0,
@@ -134,20 +146,20 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     final_outcome: 'accepted',
     route_decisions: [
       {
-        id: 5001,
-        route_id: 1,
+        id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
+        route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
         route_name: 'Music Discovery',
         evaluation_order: 1,
         decision: 'matched',
         condition_audits: [
           { id: 6001, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Late Night Jazz Mix', matched: true },
-          { id: 6002, condition_index: 1, field: 'duration_seconds', operator: 'gt', expected_value: '180', actual_value: '184', matched: true },
+          { id: 6002, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', expected_value: '180', actual_value: '184', matched: true },
         ],
-        actions: [{ id: 7001, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', outcome: 'succeeded' }],
+        actions: [{ id: 7001, action_type: 'add_to_playlist', target_playlist_id: 'PLmusic', outcome: 'succeeded' }],
       },
       {
-        id: 5002,
-        route_id: 2,
+        id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
+        route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
         route_name: 'Ambient',
         evaluation_order: 2,
         decision: 'skipped',
@@ -163,21 +175,21 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     final_outcome: 'rejected',
     route_decisions: [
       {
-        id: 5011,
-        route_id: 1,
+        id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
+        route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
         route_name: 'Music Discovery',
         evaluation_order: 1,
         decision: 'not_matched',
         rejection_reason: 'title does not contain "music"',
         condition_audits: [
           { id: 6011, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Ambient Study Session', matched: false },
-          { id: 6012, condition_index: 1, field: 'duration_seconds', operator: 'gt', expected_value: '180', actual_value: '620', matched: true },
+          { id: 6012, condition_index: 1, field: 'duration_seconds', operator: 'greater_than', expected_value: '180', actual_value: '620', matched: true },
         ],
         actions: [],
       },
       {
-        id: 5012,
-        route_id: 2,
+        id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
+        route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
         route_name: 'Ambient',
         evaluation_order: 2,
         decision: 'skipped',
@@ -193,15 +205,15 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     final_outcome: 'deferred',
     route_decisions: [
       {
-        id: 5021,
-        route_id: 1,
+        id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
+        route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
         route_name: 'Music Discovery',
         evaluation_order: 1,
         decision: 'matched',
         condition_audits: [
           { id: 6021, condition_index: 0, field: 'title', operator: 'contains', expected_value: 'music', actual_value: 'Pop Hit 2026', matched: false },
         ],
-        actions: [{ id: 7021, action_type: 'playlist_insert', target_playlist_id: 'PLmusic', outcome: 'deferred' }],
+        actions: [{ id: 7021, action_type: 'add_to_playlist', target_playlist_id: 'PLmusic', outcome: 'deferred' }],
       },
     ],
   },
@@ -223,7 +235,7 @@ const mockChannels: ChannelDetail[] = [
     recent_video_provenance: [
       { video_id: 'dQw4w9WgXcQ', title: 'Late Night Jazz Mix', duplicate_credit: 'discovery', retention_source: 'user_driven' },
     ],
-    matched_routes: ['Music Discovery'],
+    matched_routes: [{ route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce', name: 'Music Discovery', match_count: 2 }],
     advisories: [
       {
         id: 1,
@@ -257,7 +269,7 @@ const mockChannels: ChannelDetail[] = [
     recent_video_provenance: [
       { video_id: 'abc123', title: 'Ambient Study Session', duplicate_credit: 'relevance', retention_source: 'user_driven' },
     ],
-    matched_routes: ['Ambient'],
+    matched_routes: [{ route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51', name: 'Ambient', match_count: 1 }],
     advisories: [
       {
         id: 2,
@@ -289,7 +301,7 @@ const mockTrends: TrendBucket[] = Array.from({ length: 14 }).map((_, i) => ({
 const mockRouteMatchRates: RouteMatchRate[] = Array.from({ length: 14 }).flatMap((_, i) => [
   {
     bucket: `2026-08-${String(26 + i).padStart(2, '0')}T00:00:00Z`,
-    route_id: 1,
+    route_id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
     route_name: 'Music Discovery',
     evaluated: 8 + i,
     matched: 1 + (i % 3),
@@ -297,7 +309,7 @@ const mockRouteMatchRates: RouteMatchRate[] = Array.from({ length: 14 }).flatMap
   },
   {
     bucket: `2026-08-${String(26 + i).padStart(2, '0')}T00:00:00Z`,
-    route_id: 2,
+    route_id: '4c7c3b7e-f09e-4bf4-9b55-aec0cf479b51',
     route_name: 'Ambient',
     evaluated: 4 + i,
     matched: i % 4 === 0 ? 1 : 0,
@@ -318,7 +330,7 @@ let mockSettings: Settings = {
   schedule: '0 6 * * *',
   quota_limit: 10000,
   duplicate_threshold: 0.5,
-  duplicate_behavior: 'skip',
+  duplicate_behavior: 'continue',
   account_connected: true,
   account_email: 'user@example.com',
 }
@@ -357,10 +369,27 @@ let mockRetentionPlaylists: RetentionPlaylist[] = [
   { id: 1, playlist_id: 'PLrotation', playlist_name: 'Rotation', designated_at: '2026-08-01T10:00:00Z', is_active: true },
 ]
 
+let mockPlaylists: Playlist[] = [
+  { playlist_id: 'PLmusic', playlist_name: 'Music Discovery' },
+  { playlist_id: 'PLambient', playlist_name: 'Ambient' },
+]
+
 let nextId = 10000
 
 function uid(): number {
   return nextId++
+}
+
+// Mock counterpart of the server-assigned UUIDv4 route identity (ARS-004).
+function mockUuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    const v = c === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
 }
 
 function delay(ms = 300): Promise<void> {
@@ -389,7 +418,7 @@ export async function listRoutes(): Promise<Route[]> {
   return [...mockRoutes].sort((a, b) => a.evaluation_order - b.evaluation_order)
 }
 
-export async function getRoute(id: number): Promise<Route | undefined> {
+export async function getRoute(id: string): Promise<Route | undefined> {
   await delay()
   return mockRoutes.find((r) => r.id === id)
 }
@@ -397,12 +426,12 @@ export async function getRoute(id: number): Promise<Route | undefined> {
 export async function createRoute(route: Omit<Route, 'id' | 'created_at' | 'updated_at'>): Promise<Route> {
   await delay()
   const now = new Date().toISOString()
-  const created: Route = { ...route, id: uid(), created_at: now, updated_at: now }
+  const created: Route = { ...route, id: mockUuid(), match_count: 0, created_at: now, updated_at: now }
   mockRoutes.push(created)
   return created
 }
 
-export async function updateRoute(id: number, route: Omit<Route, 'id' | 'created_at' | 'updated_at'>): Promise<Route> {
+export async function updateRoute(id: string, route: Omit<Route, 'id' | 'created_at' | 'updated_at'>): Promise<Route> {
   await delay()
   const idx = mockRoutes.findIndex((r) => r.id === id)
   if (idx === -1) throw new Error('route not found')
@@ -411,12 +440,12 @@ export async function updateRoute(id: number, route: Omit<Route, 'id' | 'created
   return mockRoutes[idx]
 }
 
-export async function deleteRoute(id: number): Promise<void> {
+export async function deleteRoute(id: string): Promise<void> {
   await delay()
   mockRoutes = mockRoutes.filter((r) => r.id !== id)
 }
 
-export async function reorderRoutes(ids: number[]): Promise<void> {
+export async function reorderRoutes(ids: string[]): Promise<void> {
   await delay()
   const map = new Map(mockRoutes.map((r) => [r.id, r]))
   mockRoutes = ids.map((id, i) => {
@@ -425,6 +454,11 @@ export async function reorderRoutes(ids: number[]): Promise<void> {
     r.evaluation_order = i + 1
     return r
   })
+}
+
+export async function listPlaylists(): Promise<Playlist[]> {
+  await delay()
+  return [...mockPlaylists]
 }
 
 export async function listRuns(): Promise<Run[]> {
@@ -459,6 +493,7 @@ export async function startRun(): Promise<{ run_id: number; status: string }> {
     videos_discovered: 0,
     videos_accepted: 0,
     videos_rejected: 0,
+    videos_excluded: 0,
     videos_deferred: 0,
     videos_failed: 0,
     videos_not_yet_evaluated: 0,
@@ -481,6 +516,7 @@ export async function startDryRun(_draft?: { routes: Route[]; duplicate_threshol
     videos_discovered: 0,
     videos_accepted: 0,
     videos_rejected: 0,
+    videos_excluded: 0,
     videos_deferred: 0,
     videos_failed: 0,
     videos_not_yet_evaluated: 0,
@@ -495,8 +531,43 @@ export async function startReplay(_configVersionId?: number): Promise<{ run_id: 
   return startDryRun()
 }
 
-export async function startBacktest(_proposed: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string }> {
-  return startDryRun()
+export async function startBacktest(proposed: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string; comparison: BacktestComparison }> {
+  await delay()
+  const id = uid()
+  // Simulate a completed backtest against the mock historical runs.
+  const baselineAccepted = mockRuns
+    .filter((r) => r.run_type === 'scheduled' || r.run_type === 'manual')
+    .reduce((sum, r) => sum + r.videos_accepted, 0)
+  const proposedAccepted = baselineAccepted + Math.floor(proposed.routes.length * 1.5)
+  const newCatches = Math.max(0, proposedAccepted - baselineAccepted)
+  const lostCatches = 0
+  const comparison: BacktestComparison = {
+    baseline_run_ids: mockRuns.map((r) => r.id),
+    baseline_accepted: baselineAccepted,
+    proposed_accepted: proposedAccepted,
+    new_catches: newCatches,
+    lost_catches: lostCatches,
+    net_change: newCatches - lostCatches,
+  }
+  const run: Run = {
+    id,
+    started_at: new Date().toISOString(),
+    completed_at: new Date().toISOString(),
+    run_type: 'backtest',
+    status: 'completed',
+    config_version_id: 1,
+    videos_discovered: 42,
+    videos_accepted: proposedAccepted,
+    videos_rejected: 23,
+    videos_excluded: 4,
+    videos_deferred: 0,
+    videos_failed: 0,
+    videos_not_yet_evaluated: 0,
+    quota_cost: 0,
+    duration_seconds: 120,
+  }
+  mockRuns.unshift(run)
+  return { run_id: id, status: 'completed', comparison }
 }
 
 export async function listChannels(): Promise<ChannelStats[]> {
@@ -592,6 +663,59 @@ export async function getConfigVersion(id: number): Promise<ConfigVersion | unde
   return mockConfigVersions.find((v) => v.id === id)
 }
 
+export async function diffConfigVersion(id: number, compareTo?: number): Promise<ConfigDiffResult> {
+  await delay()
+  const to = mockConfigVersions.find((v) => v.id === id)
+  if (!to) throw new Error('config version not found')
+  const fromId = compareTo ?? (id > 1 ? id - 1 : id)
+  const from = mockConfigVersions.find((v) => v.id === fromId) ?? to
+  const toRouteIds = new Set(to.snapshot.routes.map((r) => r.id))
+  const fromRouteIds = new Set(from.snapshot.routes.map((r) => r.id))
+  const routesAdded = to.snapshot.routes.filter((r) => !fromRouteIds.has(r.id))
+  const routesRemoved = from.snapshot.routes.filter((r) => !toRouteIds.has(r.id))
+  const routesChanged: ConfigRouteChange[] = []
+  for (const newRoute of to.snapshot.routes) {
+    const oldRoute = from.snapshot.routes.find((r) => r.id === newRoute.id)
+    if (!oldRoute || oldRoute.name === newRoute.name) continue
+    const changes: { field: string; old: string; new: string }[] = []
+    if (oldRoute.name !== newRoute.name) changes.push({ field: 'name', old: oldRoute.name, new: newRoute.name })
+    if (oldRoute.is_enabled !== newRoute.is_enabled) {
+      changes.push({ field: 'is_enabled', old: String(oldRoute.is_enabled), new: String(newRoute.is_enabled) })
+    }
+    routesChanged.push({ id: newRoute.id, old: oldRoute, new: newRoute, changes })
+  }
+  const settingsChanged: Record<string, { old: string; new: string }> = {}
+  if (from.snapshot.duplicate_threshold !== to.snapshot.duplicate_threshold) {
+    settingsChanged.duplicate_threshold = {
+      old: String(from.snapshot.duplicate_threshold),
+      new: String(to.snapshot.duplicate_threshold),
+    }
+  }
+  return {
+    from_id: from.id,
+    to_id: to.id,
+    settings_changed: settingsChanged,
+    routes_added: routesAdded,
+    routes_removed: routesRemoved,
+    routes_changed: routesChanged,
+  }
+}
+
+export async function restoreConfigVersion(id: number, description?: string): Promise<ConfigVersion> {
+  await delay()
+  const source = mockConfigVersions.find((v) => v.id === id)
+  if (!source) throw new Error('config version not found')
+  const restored: ConfigVersion = {
+    id: uid(),
+    created_at: new Date().toISOString(),
+    snapshot: JSON.parse(JSON.stringify(source.snapshot)),
+    change_description: description ?? `Restored from version ${id}`,
+  }
+  mockConfigVersions.push(restored)
+  mockRoutes = restored.snapshot.routes.map((r) => JSON.parse(JSON.stringify(r)))
+  return restored
+}
+
 export async function getSettings(): Promise<Settings> {
   await delay()
   return { ...mockSettings }
@@ -636,9 +760,48 @@ export async function deleteRetentionPlaylist(id: number): Promise<void> {
   mockRetentionPlaylists = mockRetentionPlaylists.filter((p) => p.id !== id)
 }
 
+// Corpus import (ARS-002). These exist only for the test fetch shim in
+// src/test/setup.ts; the real client calls the contract paths directly and
+// never falls back to mock data. Tests configure them with vi.spyOn; the
+// defaults fail loudly when a flow is exercised without configuration, except
+// getLatestCorpusImport, whose honest default is "no import state" (404), and
+// getCorpusImportMetadata, whose honest default is "no recorded timestamp"
+// (null), never a fabricated date.
+export async function previewCorpusImport(_file: File): Promise<CorpusImportPreview> {
+  throw new Error('corpus import preview is not configured in the mock layer')
+}
+
+export async function startCorpusImport(_file: File): Promise<CorpusImportStart> {
+  throw new Error('corpus import start is not configured in the mock layer')
+}
+
+export async function getCorpusImportStatus(_importId: string): Promise<CorpusImportStatus | undefined> {
+  throw new Error('corpus import status is not configured in the mock layer')
+}
+
+export async function getLatestCorpusImport(): Promise<CorpusImportStatus | null> {
+  return null
+}
+
+// Honest default: no recorded completion timestamp (fresh or legacy database),
+// mirroring getLatestCorpusImport's "no import state" default. It never
+// fabricates a date; tests that assert recency configure it with vi.spyOn.
+export async function getCorpusImportMetadata(): Promise<CorpusImportMetadata> {
+  return { last_successful_corpus_import_at: null }
+}
+
+export async function cancelCorpusImport(_importId: string): Promise<CorpusImportStatus | undefined> {
+  throw new Error('corpus import cancel is not configured in the mock layer')
+}
+
 export async function listAdvisories(): Promise<Advisory[]> {
   await delay()
   return mockChannels.flatMap((c) => c.advisories ?? [])
+}
+
+export async function listChannelAdvisories(channelId: string): Promise<Advisory[]> {
+  await delay()
+  return mockChannels.find((c) => c.channel_id === channelId)?.advisories ?? []
 }
 
 export async function dismissAdvisory(id: number): Promise<void> {

@@ -21,9 +21,23 @@ type RetryHandler interface {
 
 // Service orchestrates error and deferred queue operations.
 type Service struct {
-	store   *Store
-	handler RetryHandler
-	logger  *slog.Logger
+	store       *Store
+	handler     RetryHandler
+	logger      *slog.Logger
+	coordinator RetryCoordinator
+}
+
+// RetryCoordinator atomically creates a receiving run and claims the video
+// group, then persists its disposition before acknowledging queue work.
+type RetryCoordinator interface {
+	RetryQueueEntry(context.Context, int64, bool) error
+}
+
+// WithRetryCoordinator delegates ownership and disposition to the production
+// pipeline instead of the legacy video-only callback protocol.
+func (s *Service) WithRetryCoordinator(c RetryCoordinator) *Service {
+	s.coordinator = c
+	return s
 }
 
 // NewService returns a queue service backed by store. handler may be nil if
@@ -67,10 +81,15 @@ func (s *Service) DismissError(ctx context.Context, id int64) (*ErrorEntry, erro
 	return s.store.GetErrorEntry(ctx, id)
 }
 
-// RetryError marks an error entry as retrying, increments its retry counter,
-// and invokes the configured retry handler. On handler success the entry is
-// resolved; on failure it is returned to active with the handler's error.
+// RetryError delegates the complete lifecycle to the coordinator when wired.
+// Legacy callers without one use the video-only handler/status protocol.
 func (s *Service) RetryError(ctx context.Context, id int64) (*ErrorEntry, error) {
+	if s.coordinator != nil {
+		if err := s.coordinator.RetryQueueEntry(ctx, id, true); err != nil {
+			return nil, err
+		}
+		return s.store.GetErrorEntry(ctx, id)
+	}
 	entry, err := s.store.GetErrorEntry(ctx, id)
 	if err != nil {
 		return nil, err
@@ -117,10 +136,15 @@ func (s *Service) ListAllDeferred(ctx context.Context) ([]DeferredItem, error) {
 	return s.store.ListDeferredItems(ctx, "")
 }
 
-// RetryDeferred marks a deferred item as retrying, increments its retry
-// counter, and invokes the configured retry handler. On handler success the
-// item is completed; on failure it is returned to pending.
+// RetryDeferred delegates the complete lifecycle to the coordinator when wired.
+// Legacy callers without one use the video-only handler/status protocol.
 func (s *Service) RetryDeferred(ctx context.Context, id int64) (*DeferredItem, error) {
+	if s.coordinator != nil {
+		if err := s.coordinator.RetryQueueEntry(ctx, id, false); err != nil {
+			return nil, err
+		}
+		return s.store.GetDeferredItem(ctx, id)
+	}
 	item, err := s.store.GetDeferredItem(ctx, id)
 	if err != nil {
 		return nil, err

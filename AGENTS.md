@@ -1,3 +1,9 @@
+## Go navigation
+
+Prefer `gopls` for semantic Go code lookup: definitions, references, implementations, symbols, and type information.
+
+Use `rg`/`grep` only for literal text search or when `gopls` cannot answer the query.
+
 ## Documentation
 
 Repository documentation follows the Open Knowledge Format (OKF) and is indexed

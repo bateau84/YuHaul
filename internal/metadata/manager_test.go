@@ -270,3 +270,166 @@ func TestManager_GetDisplayMetadata_NotFound(t *testing.T) {
 	_, err := mgr.GetDisplayMetadata(ctx, "missing")
 	require.True(t, errors.Is(err, metadata.ErrNotFound))
 }
+
+func TestManager_CleanupExpired(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	s := openTestDB(t)
+	mgr, _ := newManager(t, s, &fakeFetcher{}, now)
+
+	// Record older than the default 30-day TTL.
+	require.NoError(t, s.Upsert(ctx, sampleMetadata("old", "Old Title", now.Add(-40*24*time.Hour), now.Add(-10*24*time.Hour))))
+	// Record well within the TTL.
+	require.NoError(t, s.Upsert(ctx, sampleMetadata("fresh", "Fresh Title", now.Add(-24*time.Hour), now.Add(29*24*time.Hour))))
+
+	deleted, err := mgr.CleanupExpired(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+
+	_, err = s.Get(ctx, "old")
+	require.True(t, errors.Is(err, metadata.ErrNotFound))
+
+	fresh, err := s.Get(ctx, "fresh")
+	require.NoError(t, err)
+	require.NotNil(t, fresh.Title)
+}
+
+func TestManager_CleanupExpired_Idempotent(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	s := openTestDB(t)
+	mgr, _ := newManager(t, s, &fakeFetcher{}, now)
+
+	require.NoError(t, s.Upsert(ctx, sampleMetadata("old", "Old Title", now.Add(-40*24*time.Hour), now.Add(-10*24*time.Hour))))
+
+	deleted, err := mgr.CleanupExpired(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+
+	deleted, err = mgr.CleanupExpired(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, deleted)
+}
+
+func TestManager_CleanupExpired_CustomTTL(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	s := openTestDB(t)
+	fetcher := &fakeFetcher{}
+	ledger := quota.New(s.DB(), quota.WithDefaultLimit(10000))
+	mgr := metadata.NewManager(s, fetcher, ledger,
+		metadata.WithNow(func() time.Time { return now }),
+		metadata.WithTTL(7*24*time.Hour),
+	)
+
+	// 10 days old is beyond the 7-day TTL.
+	require.NoError(t, s.Upsert(ctx, sampleMetadata("old", "Old Title", now.Add(-10*24*time.Hour), now.Add(20*24*time.Hour))))
+	// 5 days old is within the 7-day TTL.
+	require.NoError(t, s.Upsert(ctx, sampleMetadata("fresh", "Fresh Title", now.Add(-5*24*time.Hour), now.Add(2*24*time.Hour))))
+
+	deleted, err := mgr.CleanupExpired(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+
+	_, err = s.Get(ctx, "old")
+	require.True(t, errors.Is(err, metadata.ErrNotFound))
+
+	fresh, err := s.Get(ctx, "fresh")
+	require.NoError(t, err)
+	require.NotNil(t, fresh.Title)
+}
+
+func TestManager_GetDisplayTitle_DegradesToFingerprint(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	s := openTestDB(t)
+	mgr, _ := newManager(t, s, &fakeFetcher{}, now)
+
+	// Insert a Store B fingerprint for the video.
+	_, err := s.DB().ExecContext(ctx, `
+		INSERT INTO title_fingerprint (video_id, fingerprint, fingerprint_tokens, source, first_seen_at)
+		VALUES (?, ?, ?, ?, ?);`, "v1", "daft punk lucky", "daft punk lucky", "api_discovery", now)
+	require.NoError(t, err)
+
+	// Active metadata returns the raw title.
+	require.NoError(t, s.Upsert(ctx, sampleMetadata("v1", "Get Lucky", now.Add(-24*time.Hour), now.Add(29*24*time.Hour))))
+	title, err := mgr.GetDisplayTitle(ctx, "v1")
+	require.NoError(t, err)
+	require.Equal(t, "Get Lucky", title)
+
+	// Expired metadata degrades to the fingerprint hash.
+	expired := sampleMetadata("v1", "Get Lucky", now.Add(-40*24*time.Hour), now.Add(-10*24*time.Hour))
+	expired.IsActive = false
+	expired.Title = nil
+	expired.ExpiredAt = ptrTime(now.Add(-5 * 24 * time.Hour))
+	require.NoError(t, s.Upsert(ctx, expired))
+
+	title, err = mgr.GetDisplayTitle(ctx, "v1")
+	require.NoError(t, err)
+	require.Equal(t, "daft punk lucky", title)
+}
+
+func TestManager_GetDisplayTitle_MissingMetadataAndFingerprint(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	s := openTestDB(t)
+	mgr, _ := newManager(t, s, &fakeFetcher{}, now)
+
+	title, err := mgr.GetDisplayTitle(ctx, "missing")
+	require.NoError(t, err)
+	require.Equal(t, "[metadata expired]", title)
+}
+
+// TestManager_INV9_Compliance verifies the metadata TTL guarantees required by
+// INV-9: expired records are deleted, non-expired records survive, titles fall
+// back to the permanent fingerprint, and cleanup can safely be run repeatedly.
+func TestManager_INV9_Compliance(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	s := openTestDB(t)
+	mgr, _ := newManager(t, s, &fakeFetcher{}, now)
+
+	// Seed Store B fingerprints so degraded titles have a stable fallback.
+	_, err := s.DB().ExecContext(ctx, `
+		INSERT INTO title_fingerprint (video_id, fingerprint, fingerprint_tokens, source, first_seen_at)
+		VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
+		"expired", "expired fingerprint", "expired fingerprint", "api_discovery", now,
+		"fresh", "fresh fingerprint", "fresh fingerprint", "api_discovery", now,
+	)
+	require.NoError(t, err)
+
+	// Expired record: fetched well beyond the 30-day TTL.
+	require.NoError(t, s.Upsert(ctx, sampleMetadata("expired", "Expired Title", now.Add(-40*24*time.Hour), now.Add(-10*24*time.Hour))))
+	// Fresh record: fetched within the TTL and not yet expired.
+	require.NoError(t, s.Upsert(ctx, sampleMetadata("fresh", "Fresh Title", now.Add(-24*time.Hour), now.Add(29*24*time.Hour))))
+
+	deleted, err := mgr.CleanupExpired(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted, "expired record should be cleaned")
+
+	// Expired record must no longer exist in Store A.
+	_, err = s.Get(ctx, "expired")
+	require.True(t, errors.Is(err, metadata.ErrNotFound), "expired metadata should be removed")
+
+	// Non-expired record must remain intact.
+	fresh, err := s.Get(ctx, "fresh")
+	require.NoError(t, err)
+	require.NotNil(t, fresh.Title)
+	require.Equal(t, "Fresh Title", *fresh.Title)
+
+	// Display title for the cleaned expired record degrades to fingerprint.
+	title, err := mgr.GetDisplayTitle(ctx, "expired")
+	require.NoError(t, err)
+	require.Equal(t, "expired fingerprint", title)
+
+	// Cleanup must be idempotent: a second run finds nothing and does not error.
+	deleted, err = mgr.CleanupExpired(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, deleted, "repeated cleanup should be a no-op")
+}

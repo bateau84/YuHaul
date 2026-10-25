@@ -2,16 +2,39 @@ import { describe, expect, it } from 'vitest'
 import { deriveBadge, deriveRouteDecision, deriveActionOutcome, formatDuration } from './outcome'
 
 describe('deriveBadge', () => {
+  it.each(['backtest', 'replay', 'dry_run'] as const)('uses requested-run outcomes for %s', (mode) => {
+    expect(deriveBadge('evaluated', 'accepted', mode)).toEqual({ variant: 'accepted', label: 'Hypothetical accepted' })
+    expect(deriveBadge('completed', 'rejected', mode)).toEqual({ variant: 'rejected', label: 'Hypothetical rejected' })
+    expect(deriveBadge('completed', 'excluded', mode)).toEqual({ variant: 'excluded', label: 'Hypothetical excluded' })
+    expect(deriveBadge('completed', 'not_yet_evaluated', mode)).toEqual({ variant: 'not-evaluated', label: 'Not evaluated' })
+  })
   it('labels completed videos as accepted', () => {
     expect(deriveBadge('completed', 'accepted')).toEqual({ variant: 'accepted', label: 'Accepted' })
   })
 
-  it('labels acted videos as failed', () => {
-    expect(deriveBadge('acted', 'accepted')).toEqual({ variant: 'failed', label: 'Failed' })
+  it('does not infer simulation outcomes from production state when the projection is missing', () => {
+    expect(deriveBadge('completed', null, 'backtest')).toEqual({ variant: 'not-evaluated', label: 'Outcome unavailable' })
+    expect(deriveBadge('completed', undefined, 'replay')).toEqual({ variant: 'not-evaluated', label: 'Outcome unavailable' })
+  })
+
+  it('uses the requested production run outcome and preserves in-progress state', () => {
+    expect(deriveBadge('completed', 'deferred', 'manual')).toEqual({ variant: 'deferred', label: 'Deferred' })
+    expect(deriveBadge('completed', null)).toEqual({ variant: 'not-evaluated', label: 'Outcome unavailable' })
+    expect(deriveBadge('completed', 'accepted', 'manual')).toEqual({ variant: 'accepted', label: 'Accepted' })
+    expect(deriveBadge('evaluated', 'accepted', 'scheduled')).toEqual({ variant: 'accepted', label: 'Accepted' })
+    expect(deriveBadge('evaluating', 'accepted', 'manual')).toEqual({ variant: 'in-progress', label: 'In progress' })
+  })
+
+  it('uses the run-attributed outcome even when the mutable state differs', () => {
+    expect(deriveBadge('acted', 'accepted')).toEqual({ variant: 'accepted', label: 'Accepted' })
   })
 
   it('labels evaluated+rejected as rejected', () => {
     expect(deriveBadge('evaluated', 'rejected')).toEqual({ variant: 'rejected', label: 'Rejected' })
+  })
+
+  it('labels evaluated+excluded as excluded, distinct from rejected and not evaluated', () => {
+    expect(deriveBadge('evaluated', 'excluded')).toEqual({ variant: 'excluded', label: 'Excluded' })
   })
 
   it('labels deferred as deferred', () => {

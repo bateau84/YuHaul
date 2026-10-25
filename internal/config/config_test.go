@@ -40,6 +40,52 @@ func setupConfigTest(t *testing.T) (*sql.DB, *state.Store, *router.Store, *Store
 	return db, stateStore, routerStore, configStore, versioner, cleanup
 }
 
+func TestService_ActiveVersionID_IgnoresProposalHistory(t *testing.T) {
+	ctx := context.Background()
+	_, _, routes, history, svc, cleanup := setupConfigTest(t)
+	defer cleanup()
+	_, err := routes.CreateRoute(ctx, &router.Route{
+		Name: "Saved", EvaluationOrder: 1, IsEnabled: true, ConditionComposition: "AND",
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.SetDuplicateThreshold(ctx, .99))
+	activeID, err := svc.ActiveVersionID(ctx)
+	require.NoError(t, err)
+	saved, err := history.Get(ctx, *activeID)
+	require.NoError(t, err)
+	proposal := saved.Snapshot
+	proposal.DuplicateThreshold = .5
+	proposal.Routes = append([]SnapshotRoute(nil), saved.Snapshot.Routes...)
+	proposal.Routes[0].Name = "Proposal"
+	proposalID, err := history.Create(ctx, proposal, "arbitrary description, not an activation marker")
+	require.NoError(t, err)
+	// A fresh service simulates upgrade/restart with already contaminated history.
+	svc = NewService(routes, history)
+	selected, err := svc.ActiveVersionID(ctx)
+	require.NoError(t, err)
+	require.Equal(t, activeID, selected)
+	// Restoring history creates another immutable snapshot, not a saved-setting edit.
+	_, err = svc.Restore(ctx, proposalID, "historical copy")
+	require.NoError(t, err)
+	selected, err = svc.ActiveVersionID(ctx)
+	require.NoError(t, err)
+	require.Equal(t, activeID, selected)
+	unchanged, err := history.Get(ctx, proposalID)
+	require.NoError(t, err)
+	require.Equal(t, proposal, unchanged.Snapshot)
+	// Saved values without a matching history entry must still be captured.
+	require.NoError(t, history.SetSetting(ctx, "duplicate_threshold", "0.8"))
+	selected, err = svc.ActiveVersionID(ctx)
+	require.NoError(t, err)
+	current, err := history.Get(ctx, *selected)
+	require.NoError(t, err)
+	require.Equal(t, .8, current.Snapshot.DuplicateThreshold)
+	require.Equal(t, saved.Snapshot.Routes, current.Snapshot.Routes)
+	again, err := svc.ActiveVersionID(ctx)
+	require.NoError(t, err)
+	require.Equal(t, selected, again)
+}
+
 func TestStore_CreateAndGetRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	_, _, _, cfgStore, _, cleanup := setupConfigTest(t)
@@ -159,7 +205,7 @@ func TestService_ActiveVersionID_CreatesInitialSnapshot(t *testing.T) {
 
 	cv, err := versioner.Get(ctx, *id)
 	require.NoError(t, err)
-	assert.Equal(t, "initial configuration", cv.ChangeDescription)
+	assert.Equal(t, "effective configuration at run initiation", cv.ChangeDescription)
 	assert.Empty(t, cv.Snapshot.Routes)
 }
 
@@ -211,6 +257,31 @@ func TestService_Diff_DetectsRouteChanges(t *testing.T) {
 	assert.Equal(t, "Blues", result.RoutesAdded[0].Name)
 }
 
+func TestService_Diff_EmptyArraysSerializeAsEmpty(t *testing.T) {
+	ctx := context.Background()
+	_, _, _, _, versioner, cleanup := setupConfigTest(t)
+	defer cleanup()
+
+	id, err := versioner.snapshot(ctx, "empty")
+	require.NoError(t, err)
+
+	result, err := versioner.Diff(ctx, id, id)
+	require.NoError(t, err)
+
+	require.NotNil(t, result.RoutesAdded)
+	require.NotNil(t, result.RoutesRemoved)
+	require.NotNil(t, result.RoutesChanged)
+	assert.Empty(t, result.RoutesAdded)
+	assert.Empty(t, result.RoutesRemoved)
+	assert.Empty(t, result.RoutesChanged)
+
+	data, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"routes_added":[]`)
+	assert.Contains(t, string(data), `"routes_removed":[]`)
+	assert.Contains(t, string(data), `"routes_changed":[]`)
+}
+
 func TestService_Restore_CreatesNewVersionFromHistoricalSnapshot(t *testing.T) {
 	ctx := context.Background()
 	_, _, routerStore, _, versioner, cleanup := setupConfigTest(t)
@@ -260,14 +331,14 @@ func TestService_SetDuplicateThreshold_ClampsAndSnapshots(t *testing.T) {
 	require.Len(t, versions, 1)
 }
 
-func TestService_DuplicateBehavior_DefaultsToSkip(t *testing.T) {
+func TestService_DuplicateBehavior_FixedContinuation(t *testing.T) {
 	ctx := context.Background()
 	_, _, _, _, versioner, cleanup := setupConfigTest(t)
 	defer cleanup()
 
 	b, err := versioner.DuplicateBehavior(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, "skip", b)
+	assert.Equal(t, "continue", b)
 }
 
 func TestRouterStore_OnChange_SnapshotAfterMutations(t *testing.T) {

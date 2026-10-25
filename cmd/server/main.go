@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -23,9 +25,11 @@ import (
 	"github.com/bateau84/YuHaul/internal/advisory"
 	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/corpusimport"
 	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
+	"github.com/bateau84/YuHaul/internal/migration"
 	"github.com/bateau84/YuHaul/internal/pipeline"
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/quota"
@@ -51,6 +55,8 @@ type appConfig struct {
 	OAuthClientSecret string
 	OAuthRedirectURL  string
 	EncryptionKey     string
+
+	YouTubeBaseURL string
 }
 
 func main() {
@@ -95,16 +101,16 @@ func main() {
 		authSvc = auth.NewDisabledService()
 	}
 
+	ledger := quota.New(db, quota.WithLogger(logger), quota.WithDefaultLimit(cfg.DailyQuota))
+
 	stateStore, err := state.NewStore(db)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to open state store", "error", err)
 		os.Exit(1)
 	}
-	machine := state.NewMachine(stateStore)
+	machine := state.NewMachine(stateStore, state.WithLedger(ledger))
 
-	ledger := quota.New(db, quota.WithLogger(logger), quota.WithDefaultLimit(cfg.DailyQuota))
-
-	routerStore := router.NewStore(db)
+	routerStore := router.NewStore(db).WithLogger(logger)
 	configStore := config.NewStore(db)
 	configSvc := config.NewService(routerStore, configStore)
 	routerStore.WithOnChange(configSvc.Snapshot)
@@ -112,14 +118,14 @@ func main() {
 	metadataStore := metadata.NewStore(db)
 	meta := metadata.NewManager(
 		metadataStore,
-		&metadataFetcher{auth: authSvc},
+		&metadataFetcher{auth: authSvc, baseURL: cfg.YouTubeBaseURL},
 		ledger,
 		metadata.WithLogger(logger),
 	)
 
 	detector := duplicate.NewDetector(db, duplicate.WithLogger(logger))
-	discoveryEngine := discovery.NewEngine(authSvc, machine, ledger, db, discovery.WithLogger(logger))
-	executor := pipeline.NewExecutor(db, ledger, authSvc, pipeline.WithExecutorLogger(logger))
+	discoveryEngine := discovery.NewEngine(authSvc, machine, ledger, db, discovery.WithLogger(logger), discovery.WithBaseURL(cfg.YouTubeBaseURL))
+	executor := pipeline.NewExecutor(db, ledger, authSvc, pipeline.WithExecutorLogger(logger), pipeline.WithYouTubeBaseURL(cfg.YouTubeBaseURL))
 	broadcast := pipeline.NewBroadcaster()
 
 	queueStore, err := queue.NewStore(db)
@@ -130,9 +136,18 @@ func main() {
 	queueSvc := queue.NewService(queueStore, nil).WithLogger(logger)
 
 	statsStore := stats.NewStore(db)
-	statsSvc := stats.NewService(statsStore, configStore, ledger)
 	advisoryStore := advisory.NewStore(db)
+	statsSvc := stats.NewService(statsStore, configStore, ledger).WithAdvisories(advisoryStore)
 	advisorySvc := advisory.NewService(advisoryStore, statsSvc, configStore)
+
+	// Corpus import (ARS-002/ADR-009): process-local job manager over the
+	// private staging area and the real bounded importer, plus its HTTP
+	// handler registered on the real API below.
+	importManager, importHandler, err := newCorpusImport(db, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to configure corpus import", "error", err)
+		os.Exit(1)
+	}
 
 	pl := pipeline.NewPipeline(
 		db,
@@ -152,6 +167,7 @@ func main() {
 		pipeline.WithConfigStore(configStore),
 		pipeline.WithAdvisoryGenerator(advisorySvc),
 	)
+	queueSvc.WithRetryCoordinator(pl)
 
 	schedulerStore, err := scheduler.NewStore(db)
 	if err != nil {
@@ -176,7 +192,11 @@ func main() {
 		server.WithQueueHandler(queueSvc),
 		server.WithRouteStore(routerStore),
 		server.WithRunStore(stateStore),
+		server.WithRunVideoStore(stateStore),
+		server.WithConfigVersionStore(configStore),
 		server.WithOverviewProvider(overview),
+		server.WithPlaylistProvider(&playlistProvider{auth: authSvc, baseURL: cfg.YouTubeBaseURL, ledger: ledger}),
+		server.WithCorpusImportHandler(importHandler),
 	)
 
 	sch := scheduler.NewScheduler(schedulerStore, pl, stateStore, scheduler.WithLogger(logger))
@@ -216,6 +236,40 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.ErrorContext(ctx, "graceful shutdown failed", "error", err)
 	}
+	// Cancel an active corpus import at its transaction boundary and wait for
+	// its staged source to be removed before the deferred db.Close runs
+	// (ARS-002 invariant 10, ADR-009). The import gets its own deadline so a
+	// slow HTTP drain cannot starve this wait; if it still cannot finish, the
+	// error is logged and the process exits without claiming a clean stop.
+	importCtx, cancelImport := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelImport()
+	if err := importManager.Shutdown(importCtx); err != nil {
+		logger.ErrorContext(ctx, "corpus import shutdown failed", "error", err)
+	}
+}
+
+// newCorpusImport builds the process-local corpus import manager and its HTTP
+// handler (ARS-002). The upload cap defaults to 500 MiB and is overridable via
+// YUHAUL_CORPUS_UPLOAD_MAX_BYTES; an invalid override fails server
+// configuration instead of silently weakening the cap. Staged uploads live
+// under the container's temp directory (not the /data volume) so raw source
+// files never reach the durable store or its backups; abandoned staging files
+// from an unclean exit are removed at manager construction.
+func newCorpusImport(dest *sql.DB, logger *slog.Logger) (*corpusimport.Manager, *corpusimport.Handler, error) {
+	maxUploadBytes, err := migration.MaxUploadBytesFromEnv()
+	if err != nil {
+		return nil, nil, err
+	}
+	manager, err := corpusimport.NewManager(
+		dest,
+		filepath.Join(os.TempDir(), "yuhaul-corpus-import-staging"),
+		maxUploadBytes,
+		corpusimport.WithLogger(logger),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return manager, corpusimport.NewHandler(manager, logger), nil
 }
 
 // stripPrefix is like http.StripPrefix but guarantees a leading slash on the
@@ -255,6 +309,7 @@ func loadConfig() appConfig {
 	cfg.OAuthClientSecret = envDefault("YUHAUL_OAUTH_CLIENT_SECRET", "")
 	cfg.OAuthRedirectURL = envDefault("YUHAUL_OAUTH_REDIRECT_URL", "")
 	cfg.EncryptionKey = envDefault("YUHAUL_ENCRYPTION_KEY", "")
+	cfg.YouTubeBaseURL = envDefault("YUHAUL_YOUTUBE_BASE_URL", "")
 
 	return cfg
 }
@@ -451,21 +506,79 @@ func (a *advisoryChannelAdapter) ListDuplicateProvenance(ctx context.Context, ch
 	return out, nil
 }
 
+// playlistProvider adapts the YouTube API client to the server's
+// PlaylistProvider interface used by GET /api/playlists.
+type playlistProvider struct {
+	auth    *auth.Service
+	baseURL string
+	ledger  *quota.Ledger
+}
+
+// ListPlaylists returns the authenticated user's complete playlist collection.
+// It follows each playlists.list nextPageToken and preserves upstream page and
+// item order. Per-page quota is charged by the client's recorder (one
+// playlists_list unit per successful page) rather than one post-hoc unit, so a
+// failure on a later page keeps the earlier pages' ledger entries while this
+// method returns an error and no partial collection (ADR-005, ARS-001).
+//
+// Quota accounting limit: a failed page is not charged to the ledger. The
+// YouTube Data API does not report whether a failed request consumed quota, so
+// recording a cost here would fabricate consumption. Failed-attempt accounting
+// remains open in proposed OC-001 and is deliberately not implied here.
+func (p *playlistProvider) ListPlaylists(ctx context.Context) ([]server.Playlist, error) {
+	token, err := p.auth.ActiveToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("playlist provider: not authenticated: %w", err)
+	}
+	opts := []youtube.Option{}
+	if p.ledger != nil {
+		recorder := func(ctx context.Context, op youtube.Operation, calls int) error {
+			return p.ledger.RecordCalls(ctx, sql.NullInt64{}, quota.Operation(op), calls)
+		}
+		opts = append(opts, youtube.WithRecorder(recorder))
+	}
+	if p.baseURL != "" {
+		opts = append(opts, youtube.WithBaseURL(p.baseURL))
+	}
+	client := youtube.NewClient(ctx, token, opts...)
+
+	out := []server.Playlist{}
+	pageToken := ""
+	for {
+		page, next, err := client.ListPlaylists(ctx, pageToken)
+		if err != nil {
+			return nil, fmt.Errorf("playlist provider: list playlists: %w", err)
+		}
+		for _, pl := range page {
+			out = append(out, server.Playlist{PlaylistID: pl.ID, PlaylistName: pl.Title})
+		}
+		if next == "" {
+			return out, nil
+		}
+		pageToken = next
+	}
+}
+
 // metadataFetcher adapts the YouTube API client to the metadata.Fetcher
 // interface used by the metadata lifecycle manager.
 type metadataFetcher struct {
-	auth *auth.Service
+	auth    *auth.Service
+	baseURL string
 }
 
 func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) ([]metadata.TransientMetadata, error) {
 	if len(videoIDs) == 0 {
-		return nil, nil
+		return []metadata.TransientMetadata{}, nil
 	}
 	token, err := f.auth.ActiveToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("metadata fetcher: no active token: %w", err)
 	}
-	client := youtube.NewClient(ctx, token)
+	opts := []youtube.Option{}
+	if f.baseURL != "" {
+		opts = append(opts, youtube.WithBaseURL(f.baseURL))
+	}
+	client := youtube.NewClient(ctx, token, opts...)
 	details, err := client.GetVideos(ctx, videoIDs)
 	if err != nil {
 		return nil, fmt.Errorf("metadata fetcher: get videos: %w", err)

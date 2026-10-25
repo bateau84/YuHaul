@@ -6,7 +6,8 @@ const originalFetch = globalThis.fetch
 
 function parsePath(url: string): { path: string; search: URLSearchParams } {
   const stripped = url.replace(/^https?:\/\/[^/]+/, '')
-  const [path, query] = stripped.split('?')
+  const [rawPath, query] = stripped.split('?')
+  const path = rawPath.length > 1 && rawPath.endsWith('/') ? rawPath.slice(0, -1) : rawPath
   return { path, search: new URLSearchParams(query ?? '') }
 }
 
@@ -96,9 +97,16 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     const created = await mock.createRoute(routeFromBody(String(init?.body)))
     return jsonResponse(created, 201)
   }
-  const routeMatch = path.match(/^\/api\/routes\/(\d+)$/)
+  // Reorder must be matched before the single-route pattern below, whose UUID
+  // segment would otherwise also match the literal "reorder".
+  if (path === '/api/routes/reorder' && method === 'PUT') {
+    const body = JSON.parse(String(init?.body)) as { route_ids: string[] }
+    await mock.reorderRoutes(body.route_ids)
+    return jsonResponse({ ok: true })
+  }
+  const routeMatch = path.match(/^\/api\/routes\/([^/]+)$/)
   if (routeMatch) {
-    const id = Number(routeMatch[1])
+    const id = decodeURIComponent(routeMatch[1])
     if (method === 'GET') {
       const route = await mock.getRoute(id)
       if (!route) return jsonResponse({ error: 'not found' }, 404)
@@ -113,10 +121,8 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
       return new Response(null, { status: 204 })
     }
   }
-  if (path === '/api/routes/reorder' && method === 'POST') {
-    const body = JSON.parse(String(init?.body)) as { ids: number[] }
-    await mock.reorderRoutes(body.ids)
-    return jsonResponse({ ok: true })
+  if (path === '/api/playlists' && method === 'GET') {
+    return jsonResponse({ playlists: await mock.listPlaylists() })
   }
 
   // Queue
@@ -132,7 +138,7 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return jsonResponse(item)
   }
   if (path === '/api/deferred' && method === 'GET') {
-    return jsonResponse({ items: await mock.listDeferred(search.get('include') ?? 'pending') })
+    return jsonResponse({ deferred: await mock.listDeferred(search.get('include') ?? 'pending') })
   }
   const deferredMatch = path.match(/^\/api\/deferred\/(\d+)\/(retry|discard)$/)
   if (deferredMatch && method === 'POST') {
@@ -172,6 +178,60 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return new Response(null, { status: 204 })
   }
 
+  // Corpus import (ARS-002). The backend is not implemented yet; component
+  // tests configure these through ../api/mock. Preview must be matched before
+  // the status-by-id pattern below, whose segment would match "preview".
+  if (path === '/api/corpus/import/preview' && method === 'POST') {
+    const file = (init?.body as FormData | undefined)?.get('file')
+    if (!(file instanceof File)) return jsonResponse({ error: 'multipart field "file" is required' }, 400)
+    return jsonResponse(await mock.previewCorpusImport(file))
+  }
+  if (path === '/api/corpus/import' && method === 'POST') {
+    const file = (init?.body as FormData | undefined)?.get('file')
+    if (!(file instanceof File)) return jsonResponse({ error: 'multipart field "file" is required' }, 400)
+    return jsonResponse(await mock.startCorpusImport(file), 202)
+  }
+  if (path === '/api/corpus/import' && method === 'GET') {
+    const state = await mock.getLatestCorpusImport()
+    if (!state) return jsonResponse({ error: 'no import state available' }, 404)
+    return jsonResponse(state)
+  }
+  // Reserved literal route (ARS-002): matched before the status-by-id pattern
+  // below, whose segment would otherwise treat "metadata" as an import id.
+  if (path === '/api/corpus/import/metadata' && method === 'GET') {
+    return jsonResponse(await mock.getCorpusImportMetadata())
+  }
+  const importStatusMatch = path.match(/^\/api\/corpus\/import\/([^/]+)$/)
+  if (importStatusMatch && method === 'GET') {
+    const state = await mock.getCorpusImportStatus(decodeURIComponent(importStatusMatch[1]))
+    if (!state) return jsonResponse({ error: 'import not found' }, 404)
+    return jsonResponse(state)
+  }
+  const importCancelMatch = path.match(/^\/api\/corpus\/import\/([^/]+)\/cancel$/)
+  if (importCancelMatch && method === 'POST') {
+    const state = await mock.cancelCorpusImport(decodeURIComponent(importCancelMatch[1]))
+    if (!state) return jsonResponse({ error: 'import not found' }, 404)
+    return jsonResponse(state, 202)
+  }
+
+  // Advisories
+  if (path === '/api/analytics/advisories' && method === 'GET') {
+    return jsonResponse({ advisories: await mock.listAdvisories() })
+  }
+  const channelAdvisoryMatch = path.match(/^\/api\/analytics\/channels\/([^/]+)\/advisories$/)
+  if (channelAdvisoryMatch && method === 'GET') {
+    return jsonResponse({ advisories: await mock.listChannelAdvisories(decodeURIComponent(channelAdvisoryMatch[1])) })
+  }
+  const advisoryActionMatch = path.match(/^\/api\/analytics\/advisories\/(\d+)\/(dismiss|ignore|act)$/)
+  if (advisoryActionMatch && method === 'POST') {
+    const id = Number(advisoryActionMatch[1])
+    const action = advisoryActionMatch[2]
+    if (action === 'dismiss') await mock.dismissAdvisory(id)
+    else if (action === 'ignore') await mock.ignoreAdvisory(id)
+    else await mock.actOnAdvisory(id, 'Reviewed channel on YouTube')
+    return new Response(null, { status: 204 })
+  }
+
   // Account
   if (path === '/api/account/status' && method === 'GET') {
     return jsonResponse(await mock.getAccountStatus())
@@ -186,7 +246,7 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return jsonResponse({ auth_url: 'https://accounts.google.com/oauth/mock', state: 'mock-state' })
   }
 
-  // Config versions (mock-backed in client.ts but wired endpoints may be added)
+  // Config versions
   if (path === '/api/config/versions' && method === 'GET') {
     return jsonResponse({ versions: await mock.listConfigVersions() })
   }
@@ -195,6 +255,18 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     const version = await mock.getConfigVersion(Number(versionMatch[1]))
     if (!version) return jsonResponse({ error: 'not found' }, 404)
     return jsonResponse(version)
+  }
+  const versionDiffMatch = path.match(/^\/api\/config\/versions\/(\d+)\/diff$/)
+  if (versionDiffMatch && method === 'GET') {
+    const id = Number(versionDiffMatch[1])
+    const compareTo = search.get('compare_to')
+    return jsonResponse(await mock.diffConfigVersion(id, compareTo ? Number(compareTo) : undefined))
+  }
+  const versionRestoreMatch = path.match(/^\/api\/config\/versions\/(\d+)\/restore$/)
+  if (versionRestoreMatch && method === 'POST') {
+    const id = Number(versionRestoreMatch[1])
+    const body = init?.body ? JSON.parse(String(init.body)) : {}
+    return jsonResponse(await mock.restoreConfigVersion(id, body.description), 201)
   }
 
   return jsonResponse({ error: 'not implemented in test mock' }, 501)

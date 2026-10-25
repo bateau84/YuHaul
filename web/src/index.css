@@ -4,6 +4,8 @@
   --color-status-accepted-bg: #dcfce7;
   --color-status-rejected: #dc2626;
   --color-status-rejected-bg: #fee2e2;
+  --color-status-excluded: #7c3aed;
+  --color-status-excluded-bg: #ede9fe;
   --color-status-deferred: #ca8a04;
   --color-status-deferred-bg: #fef9c3;
   --color-status-failed: #dc2626;
@@ -220,6 +222,7 @@ a {
 
 .badge--accepted { background: var(--color-status-accepted-bg); color: var(--color-status-accepted); }
 .badge--rejected { background: var(--color-status-rejected-bg); color: var(--color-status-rejected); }
+.badge--excluded { background: var(--color-status-excluded-bg); color: var(--color-status-excluded); }
 .badge--deferred { background: var(--color-status-deferred-bg); color: var(--color-status-deferred); }
 .badge--failed { background: var(--color-status-failed-bg); color: var(--color-status-failed); }
 .badge--not-evaluated { background: var(--color-status-not-evaluated-bg); color: var(--color-status-not-evaluated); }
@@ -556,4 +559,89 @@ a {
 .metadata-list dd {
   margin: 0;
   font-size: 0.875rem;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  padding: 16px;
+}
+
+.modal {
+  background: var(--color-surface-primary);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  max-width: 420px;
+  width: 100%;
+  padding: 24px;
+}
+
+.modal-title {
+  font-size: 1.25rem;
+  margin: 0 0 12px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.char-count {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-top: 4px;
+}
+
+/* Short UUID suffix that disambiguates same-named routes (design amendment). */
+.route-short-id {
+  font-family: monospace;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+/* Route list drag-to-reorder (ADR-008): the grip starts the drag, the dragged
+   row fades back, and the hovered row shows the prospective drop position. */
+.drag-handle {
+  cursor: grab;
+}
+
+.route-row--dragging td {
+  opacity: 0.45;
+}
+
+.drag-handle:active,
+.route-row--dragging .drag-handle {
+  cursor: grabbing;
+}
+
+.route-row--drop-target td {
+  box-shadow: inset 0 2px 0 0 var(--color-interactive-primary);
+}
+
+.duplicate-handling-explanation {
+  color: var(--color-text-primary);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.recorded-duplicate-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

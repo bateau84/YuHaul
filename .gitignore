@@ -1,2 +1,10 @@
 docs/ephemeral-reports
 docs/ephemeral-workflows
+
+# Operator-provisioned secret material stays out of the repository
+# (OAuth client secret, bcrypt htpasswd records, TLS private keys).
+k8s/secret.yaml
+*.htpasswd
+
+# Root release-tool dependencies (independent from the SPA).
+/node_modules/

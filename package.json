@@ -1,0 +1,21 @@
+{
+  "name": "yuhaul-release-tooling",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.10.0 <25"
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none scripts/*.test.mjs",
+    "release": "node scripts/release.mjs",
+    "check-pr-title": "node scripts/check-pr-title.mjs"
+  },
+  "devDependencies": {
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "@semantic-release/github": "12.0.10",
+    "@semantic-release/release-notes-generator": "14.1.0",
+    "conventional-changelog-conventionalcommits": "9.3.1",
+    "conventional-commits-parser": "6.4.0",
+    "semantic-release": "25.0.9"
+  }
+}

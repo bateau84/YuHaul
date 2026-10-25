@@ -3,8 +3,12 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,13 +16,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/youtube"
 )
 
 func setupPipelineTest(t *testing.T) (*sql.DB, *state.Store, *state.Machine, *Broadcaster, func()) {
@@ -42,16 +49,28 @@ func setupPipelineTest(t *testing.T) (*sql.DB, *state.Store, *state.Machine, *Br
 	return db, stateStore, machine, broadcast, cleanup
 }
 
+// Capture before creating a native recovery fixture, never promote a resumed run.
+func captureNativeTestRun(t *testing.T, ctx context.Context, db *sql.DB, run *state.Run) {
+	t.Helper()
+	id, err := config.NewService(router.NewStore(db), config.NewStore(db)).ActiveVersionID(ctx)
+	require.NoError(t, err)
+	run.ConfigVersionID = id
+	run.ActionAuthorityVersion = 1
+}
+
 func TestPipeline_StartRun(t *testing.T) {
 	ctx := context.Background()
-	_, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
 	defer cleanup()
 
 	p := &Pipeline{
-		stateStore: stateStore,
-		machine:    machine,
-		broadcast:  broadcast,
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:          db,
+		configStore: config.NewStore(db),
+		versioner:   config.NewService(router.NewStore(db), config.NewStore(db)),
+		stateStore:  stateStore,
+		machine:     machine,
+		broadcast:   broadcast,
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// In a fresh database the first run is ID 1, so subscribe before creating it.
@@ -105,11 +124,13 @@ func TestPipeline_StartRun_LinksConfigVersion(t *testing.T) {
 	require.NoError(t, err)
 
 	p := &Pipeline{
-		stateStore: stateStore,
-		machine:    machine,
-		broadcast:  broadcast,
-		versioner:  versioner,
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		stateStore:  stateStore,
+		machine:     machine,
+		broadcast:   broadcast,
+		versioner:   versioner,
+		configStore: cfgStore,
+		db:          db,
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	run, err := p.StartRun(ctx, state.RunTypeManual)
@@ -148,6 +169,7 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 
 	// Create an interrupted run with a video and a matched route decision.
 	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeScheduled, Status: state.RunStatusInterrupted}
+	captureNativeTestRun(t, ctx, db, run)
 	runID, err := stateStore.CreateRun(ctx, run)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx,
@@ -180,6 +202,7 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 	require.NoError(t, err)
 
 	p := NewPipeline(db, machine, stateStore, nil, nil, nil, exec, ledger, nil, nil, broadcast,
+		WithConfigStore(config.NewStore(db)),
 		WithQueueStore(queueStore),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
@@ -199,7 +222,7 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 	assert.Equal(t, "PLresume", inserter.calls[0].PlaylistID)
 }
 
-func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
+func TestPipeline_DeferredItemsCannotReplayEarlierRunDecisions(t *testing.T) {
 	ctx := context.Background()
 	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
 	defer cleanup()
@@ -219,7 +242,7 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create run1 with a matched video and a deferred item.
-	run1 := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeScheduled, Status: state.RunStatusCompleted}
+	run1 := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeScheduled, Status: state.RunStatusRunning}
 	run1ID, err := stateStore.CreateRun(ctx, run1)
 	require.NoError(t, err)
 
@@ -251,9 +274,12 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	})
 	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE run SET status=? WHERE id=?`, string(state.RunStatusCompleted), run1ID)
+	require.NoError(t, err)
 
 	// Create run2 (scheduled) that will process the deferred item.
 	run2 := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeScheduled, Status: state.RunStatusRunning}
+	captureNativeTestRun(t, ctx, db, run2)
 	run2ID, err := stateStore.CreateRun(ctx, run2)
 	require.NoError(t, err)
 
@@ -261,8 +287,13 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 	ledger := quota.New(db)
 	exec := newTestExecutor(t, db, ledger, inserter)
 
-	p := NewPipeline(db, machine, stateStore, nil, nil, nil, exec, ledger, nil, nil, broadcast,
+	// Provide a discovery engine that returns empty results so the run can
+	// reach completion after deferred items are processed.
+	disc := newNoOpDiscoveryEngine(t, machine, ledger, db)
+
+	p := NewPipeline(db, machine, stateStore, disc, nil, nil, exec, ledger, nil, nil, broadcast,
 		WithQueueStore(queueStore),
+		WithConfigStore(config.NewStore(db)),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
 
@@ -272,19 +303,202 @@ func TestPipeline_DeferredItemsProcessedBeforeDiscovery(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
 
-	// The deferred item should be completed and the action executed.
+	// No receiving-run evaluation exists. Retain pending work rather than
+	// replaying the earlier run's match or acknowledging an empty match set.
 	items, err := queueStore.ListDeferredItems(ctx, "")
 	require.NoError(t, err)
 	require.Len(t, items, 1)
-	assert.Equal(t, queue.DeferredStatusCompleted, items[0].Status)
+	assert.Equal(t, queue.DeferredStatusPending, items[0].Status)
 
 	actions, err := stateStore.GetExecutedActionsForVideo(ctx, video.ID)
 	require.NoError(t, err)
-	require.Len(t, actions, 1)
-	assert.Equal(t, state.ActionOutcomeSucceeded, actions[0].Outcome)
+	require.Empty(t, actions)
+	assert.Empty(t, inserter.calls)
+}
 
-	assert.Len(t, inserter.calls, 1)
-	assert.Equal(t, "PLdefer", inserter.calls[0].PlaylistID)
+func TestPipeline_FailRunSetsFailedStatus(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+
+	p.failRun(ctx, runID, "discovery phase failed", fmt.Errorf("no active token"))
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.NotNil(t, loaded.InterruptReason)
+	assert.Equal(t, "no active token", *loaded.InterruptReason)
+}
+
+func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	captureNativeTestRun(t, ctx, db, run)
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	// Leave discovery nil so phaseDiscovery panics with a nil pointer dereference.
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithConfigStore(config.NewStore(db)),
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+
+	sub := broadcast.Subscribe(runID)
+	defer broadcast.Unsubscribe(runID, sub)
+
+	p.Execute(ctx, runID)
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.NotNil(t, loaded.InterruptReason)
+	assert.Contains(t, *loaded.InterruptReason, "panic:")
+
+	var errorEvent *Event
+	for {
+		select {
+		case ev := <-sub:
+			if ev.Type == EventRunError {
+				errorEvent = &ev
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for error event")
+		}
+		if errorEvent != nil {
+			break
+		}
+	}
+	require.NotNil(t, errorEvent)
+}
+
+func newNoOpDiscoveryEngine(t *testing.T, machine *state.Machine, ledger *quota.Ledger, db *sql.DB) *discovery.Engine {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+	}))
+	t.Cleanup(server.Close)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	factory := func(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
+		return youtube.NewClient(ctx, token,
+			youtube.WithBaseURL(server.URL),
+			youtube.WithRecorder(recorder),
+			youtube.WithLogger(logger),
+		)
+	}
+	return discovery.NewEngine(&fakeTokenSource{}, machine, ledger, db,
+		discovery.WithClientFactory(factory),
+		discovery.WithLogger(logger),
+	)
+}
+
+func TestPipeline_ActionExecutionUpdatesChannelCounters(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	// Set up a route with an action.
+	routerStore := router.NewStore(db)
+	routeID, err := routerStore.CreateRoute(ctx, &router.Route{
+		Name:                 "CounterRoute",
+		EvaluationOrder:      1,
+		IsEnabled:            true,
+		ConditionComposition: "AND",
+	})
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO route_action (route_id, action_type, target_playlist_id, action_index)
+		 VALUES (?, 'playlist_insert', 'PLcounters', 0);`, routeID)
+	require.NoError(t, err)
+
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	captureNativeTestRun(t, ctx, db, run)
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+
+	video, err := machine.DiscoverVideo(ctx, runID, "counter_vid", "counter_ch")
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO channel (channel_id, channel_name, first_discovered_at, last_discovered_at, total_discovered, total_routed, total_retained)
+		 VALUES (?, 'Counter Channel', ?, ?, 1, 0, 0);`,
+		"counter_ch", time.Now().UTC(), time.Now().UTC())
+	require.NoError(t, err)
+
+	_, err = machine.RecordRouteDecision(ctx, &state.RouteDecision{
+		VideoID:         video.ID,
+		RunID:           runID,
+		RouteID:         routeID,
+		EvaluationOrder: 1,
+		Decision:        state.RouteDecisionMatched,
+	})
+	require.NoError(t, err)
+
+	_, err = machine.TransitionVideoState(ctx, video.ID,
+		state.VideoStateNotYetEvaluated, state.VideoStateEvaluating)
+	require.NoError(t, err)
+	_, err = machine.TransitionVideoState(ctx, video.ID,
+		state.VideoStateEvaluating, state.VideoStateEvaluated)
+	require.NoError(t, err)
+
+	inserter := &recordingInserter{}
+	ledger := quota.New(db)
+	exec := newTestExecutor(t, db, ledger, inserter)
+
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, exec, ledger, nil, nil, broadcast,
+		WithConfigStore(config.NewStore(db)),
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+
+	outcome, err := p.executeVideoActions(ctx, runID, video)
+	require.NoError(t, err)
+	assert.Equal(t, state.FinalOutcomeAccepted, outcome)
+	require.Len(t, inserter.calls, 1)
+
+	var totalRouted, totalRetained int
+	err = db.QueryRowContext(ctx,
+		`SELECT total_routed, total_retained FROM channel WHERE channel_id = ?;`, "counter_ch").Scan(&totalRouted, &totalRetained)
+	require.NoError(t, err)
+	assert.Equal(t, 1, totalRouted, "total_routed should increment for an accepted video")
+	assert.Equal(t, 1, totalRetained, "total_retained should increment for an accepted video in v1")
+}
+
+func TestDeferredDispositionRollsBackQueueOnOutcomeFailure(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	captureNativeTestRun(t, ctx, db, run)
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	video, err := machine.DiscoverVideo(ctx, runID, "deferred_atomic", "channel")
+	require.NoError(t, err)
+	for _, edge := range [][2]state.VideoProcessingState{{state.VideoStateNotYetEvaluated, state.VideoStateEvaluating}, {state.VideoStateEvaluating, state.VideoStateEvaluated}, {state.VideoStateEvaluated, state.VideoStateActed}} {
+		_, err = machine.TransitionVideoState(ctx, video.ID, edge[0], edge[1])
+		require.NoError(t, err)
+	}
+	_, err = db.ExecContext(ctx, `CREATE TRIGGER reject_deferred_outcome BEFORE INSERT ON run_video_outcome BEGIN SELECT RAISE(ABORT, 'injected outcome failure'); END;`)
+	require.NoError(t, err)
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast)
+	require.Error(t, p.deferRunVideo(ctx, runID, video.ID, "quota_exhausted"))
+	var queueCount int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM deferred_item WHERE video_id=? AND status='pending'`, video.ID).Scan(&queueCount))
+	assert.Zero(t, queueCount, "queue insert must roll back with failed disposition")
+	got, err := stateStore.GetVideo(ctx, video.ID)
+	require.NoError(t, err)
+	assert.Equal(t, state.VideoStateActed, got.ProcessingState, "lifecycle transition must roll back")
 }
 
 var _ = io.Discard

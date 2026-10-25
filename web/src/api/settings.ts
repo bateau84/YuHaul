@@ -1,9 +1,9 @@
-import type { ConfigVersion, Settings } from '../types'
+import type { ConfigVersion, ConfigDiffResult, Settings } from '../types'
 import { api } from './core'
 
 export async function listConfigVersions(): Promise<ConfigVersion[]> {
   const data = await api<{ versions: ConfigVersion[] }>('/api/config/versions')
-  return data.versions
+  return data.versions ?? []
 }
 
 export async function getConfigVersion(id: number): Promise<ConfigVersion | undefined> {
@@ -15,6 +15,18 @@ export async function getConfigVersion(id: number): Promise<ConfigVersion | unde
     }
     throw err
   }
+}
+
+export async function diffConfigVersion(id: number, compareTo?: number): Promise<ConfigDiffResult> {
+  const params = compareTo !== undefined ? `?compare_to=${compareTo}` : ''
+  return api<ConfigDiffResult>(`/api/config/versions/${id}/diff${params}`)
+}
+
+export async function restoreConfigVersion(id: number, description?: string): Promise<ConfigVersion> {
+  return api<ConfigVersion>(`/api/config/versions/${id}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ description: description ?? `Restored from version ${id}` }),
+  })
 }
 
 export async function getSettings(): Promise<Settings> {

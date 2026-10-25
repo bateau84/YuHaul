@@ -94,6 +94,58 @@ func TestRecordCalls(t *testing.T) {
 	}
 }
 
+func TestConsumedByRun(t *testing.T) {
+	ctx := context.Background()
+	l, db := newTestLedger(t)
+
+	runID := seedRun(t, db)
+	otherRunID := seedRun(t, db)
+
+	if err := l.Record(ctx, sql.NullInt64{Int64: runID, Valid: true}, OpVideosList); err != nil {
+		t.Fatalf("record run video list: %v", err)
+	}
+	if err := l.Record(ctx, sql.NullInt64{Int64: runID, Valid: true}, OpPlaylistItemsInsert); err != nil {
+		t.Fatalf("record run playlist insert: %v", err)
+	}
+	if err := l.Record(ctx, sql.NullInt64{Int64: otherRunID, Valid: true}, OpSearchList); err != nil {
+		t.Fatalf("record other run search: %v", err)
+	}
+
+	consumed, err := l.ConsumedByRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("consumed by run: %v", err)
+	}
+	want := 1 + 50
+	if consumed != want {
+		t.Errorf("consumed by run = %d, want %d", consumed, want)
+	}
+
+	consumed, err = l.ConsumedByRun(ctx, 12345)
+	if err != nil {
+		t.Fatalf("consumed by missing run: %v", err)
+	}
+	if consumed != 0 {
+		t.Errorf("consumed by missing run = %d, want 0", consumed)
+	}
+}
+
+// seedRun inserts a minimal run row so that quota_ledger FK constraints are
+// satisfied in quota-package tests.
+func seedRun(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	res, err := db.ExecContext(context.Background(),
+		`INSERT INTO run (started_at, run_type, status) VALUES (?, ?, ?);`,
+		time.Now().UTC(), "manual", "running")
+	if err != nil {
+		t.Fatalf("creating run: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("reading run id: %v", err)
+	}
+	return id
+}
+
 func TestBudgetAndCanAfford(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newTestLedger(t)

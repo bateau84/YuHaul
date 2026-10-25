@@ -1,0 +1,21 @@
+# Redirect-only sink Service (ADR-010 / ARS-003).
+#
+# The HTTP (web) Ingress for yuhaul.bateau.cloud targets this Service instead of
+# the YuHaul Service. It must remain WITHOUT endpoints: no Deployment, Pod, or
+# other workload may use the label `app: yuhaul-http-sink`. Its only purpose is
+# to make a missing/broken redirect Middleware fail as an unavailable sink
+# response rather than accidentally falling through to the YuHaul backend.
+# Never add a selector-matching workload to this label.
+apiVersion: v1
+kind: Service
+metadata:
+  name: yuhaul-http-sink
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: yuhaul-http-sink
+  ports:
+    - name: sink
+      port: 80
+      targetPort: 8080

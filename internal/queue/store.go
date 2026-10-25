@@ -48,14 +48,14 @@ func (s *Store) ListErrorEntries(ctx context.Context, status ErrorStatus) ([]Err
 	if status == "" {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT e.id, e.video_id, v.video_id, e.run_id, e.error_category, e.error_message,
-			        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count
+			        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id
 			 FROM error_entry e
 			 JOIN video v ON v.id = e.video_id
 			 ORDER BY e.created_at DESC;`)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT e.id, e.video_id, v.video_id, e.run_id, e.error_category, e.error_message,
-			        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count
+			        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id
 			 FROM error_entry e
 			 JOIN video v ON v.id = e.video_id
 			 WHERE e.status = ?
@@ -73,7 +73,7 @@ func (s *Store) ListErrorEntries(ctx context.Context, status ErrorStatus) ([]Err
 func (s *Store) GetErrorEntry(ctx context.Context, id int64) (*ErrorEntry, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT e.id, e.video_id, v.video_id, e.run_id, e.error_category, e.error_message,
-		        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count
+		        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id
 		 FROM error_entry e
 		 JOIN video v ON v.id = e.video_id
 		 WHERE e.id = ?;`, id)
@@ -155,12 +155,42 @@ func (s *Store) UpdateErrorEntryFailure(ctx context.Context, id int64, message s
 
 // CreateDeferredItem persists a new deferred work item and returns its ID.
 func (s *Store) CreateDeferredItem(ctx context.Context, d *DeferredItem) (int64, error) {
+	return s.createDeferredItem(ctx, s.db, d)
+}
+
+// CreateDeferredItemTx persists a deferred work item inside tx.
+func (s *Store) CreateDeferredItemTx(ctx context.Context, tx *sql.Tx, d *DeferredItem) (int64, error) {
+	if tx == nil {
+		return 0, errors.New("creating deferred item: transaction is required")
+	}
 	var retryAfter *string
 	if d.RetryAfter != nil {
 		rs := d.RetryAfter.UTC().Format(time.RFC3339)
 		retryAfter = &rs
 	}
-	res, err := s.db.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO deferred_item (video_id, run_id, deferral_reason, retry_after, retry_count, status, created_at)
+		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM deferred_item WHERE video_id = ? AND status IN ('pending','retrying'));`,
+		d.VideoID, d.RunID, d.Reason, retryAfter, d.RetryCount, d.Status, d.CreatedAt.UTC().Format(time.RFC3339), d.VideoID)
+	if err != nil {
+		return 0, fmt.Errorf("creating deferred item: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading deferred item id: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) createDeferredItem(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, d *DeferredItem) (int64, error) {
+	var retryAfter *string
+	if d.RetryAfter != nil {
+		rs := d.RetryAfter.UTC().Format(time.RFC3339)
+		retryAfter = &rs
+	}
+	res, err := exec.ExecContext(ctx,
 		`INSERT INTO deferred_item (video_id, run_id, deferral_reason, retry_after, retry_count, status, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
 		d.VideoID, d.RunID, d.Reason, retryAfter, d.RetryCount, d.Status, d.CreatedAt.UTC().Format(time.RFC3339))
@@ -183,14 +213,14 @@ func (s *Store) ListDeferredItems(ctx context.Context, status DeferredStatus) ([
 	if status == "" {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after,
-			        d.retry_count, d.status, d.created_at
+			        d.retry_count, d.status, d.created_at, d.retry_run_id
 			 FROM deferred_item d
 			 JOIN video v ON v.id = d.video_id
 			 ORDER BY d.created_at ASC;`)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after,
-			        d.retry_count, d.status, d.created_at
+			        d.retry_count, d.status, d.created_at, d.retry_run_id
 			 FROM deferred_item d
 			 JOIN video v ON v.id = d.video_id
 			 WHERE d.status = ?
@@ -208,7 +238,7 @@ func (s *Store) ListDeferredItems(ctx context.Context, status DeferredStatus) ([
 func (s *Store) GetDeferredItem(ctx context.Context, id int64) (*DeferredItem, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after,
-		        d.retry_count, d.status, d.created_at
+		        d.retry_count, d.status, d.created_at, d.retry_run_id
 		 FROM deferred_item d
 		 JOIN video v ON v.id = d.video_id
 		 WHERE d.id = ?;`, id)
@@ -295,7 +325,7 @@ func scanErrorEntry(sc interface{ Scan(dest ...any) error }) (*ErrorEntry, error
 	e := &ErrorEntry{}
 	var detail, resolvedAt sql.NullString
 	err := sc.Scan(&e.ID, &e.VideoID, &e.ExternalVideoID, &e.RunID, &e.Category, &e.Message,
-		&detail, &e.Status, &e.CreatedAt, &resolvedAt, &e.RetryCount)
+		&detail, &e.Status, &e.CreatedAt, &resolvedAt, &e.RetryCount, &e.RetryRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +340,7 @@ func scanErrorEntry(sc interface{ Scan(dest ...any) error }) (*ErrorEntry, error
 }
 
 func scanErrorEntries(rows *sql.Rows) ([]ErrorEntry, error) {
-	var out []ErrorEntry
+	out := make([]ErrorEntry, 0)
 	for rows.Next() {
 		e, err := scanErrorEntry(rows)
 		if err != nil {
@@ -328,7 +358,7 @@ func scanDeferredItem(sc interface{ Scan(dest ...any) error }) (*DeferredItem, e
 	d := &DeferredItem{}
 	var retryAfter sql.NullString
 	err := sc.Scan(&d.ID, &d.VideoID, &d.ExternalVideoID, &d.RunID, &d.Reason, &retryAfter,
-		&d.RetryCount, &d.Status, &d.CreatedAt)
+		&d.RetryCount, &d.Status, &d.CreatedAt, &d.RetryRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +370,7 @@ func scanDeferredItem(sc interface{ Scan(dest ...any) error }) (*DeferredItem, e
 }
 
 func scanDeferredItems(rows *sql.Rows) ([]DeferredItem, error) {
-	var out []DeferredItem
+	out := make([]DeferredItem, 0)
 	for rows.Next() {
 		d, err := scanDeferredItem(rows)
 		if err != nil {

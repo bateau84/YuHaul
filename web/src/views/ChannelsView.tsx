@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Check, AlertTriangle, TrendingDown, Copy, ExternalLink, Star, Pin, Sparkles, Repeat } from 'lucide-react'
 import * as api from '../api/client'
+import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
+import { shortRouteId } from '../lib/route'
 import type { ChannelStats, ChannelDetail, Advisory, VideoProvenance } from '../types'
 
 const advisoryLabels: Record<Advisory['advisory_type'], string> = {
@@ -116,11 +118,32 @@ function ProvenanceBadge({ type, label }: { type: 'discovery' | 'relevance' | 'u
   )
 }
 
-function VideoProvenanceRow({ video, provenance }: { video: { video_id: string; title?: string }; provenance?: VideoProvenance }) {
+function outcomeLabel(outcome?: string | null): string | null {
+  switch (outcome) {
+    case 'accepted':
+      return 'Accepted'
+    case 'rejected':
+      return 'Rejected'
+    case 'excluded':
+      return 'Excluded'
+    case 'deferred':
+      return 'Deferred'
+    case 'failed':
+      return 'Failed'
+    case 'not_yet_evaluated':
+      return 'Not evaluated'
+    default:
+      return null
+  }
+}
+
+function VideoProvenanceRow({ video, provenance }: { video: { video_id: string; title?: string; final_outcome?: string | null }; provenance?: VideoProvenance }) {
+  const label = outcomeLabel(video.final_outcome)
   return (
     <li style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 0', borderBottom: '1px solid var(--color-border-default)' }}>
       <span>{video.title ?? video.video_id}</span>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {label && <span className={`badge badge--${video.final_outcome === 'accepted' ? 'accepted' : video.final_outcome === 'failed' ? 'failed' : 'deferred'}`}>{label}</span>}
         {provenance?.duplicate_credit === 'discovery' && <ProvenanceBadge type="discovery" label="First discovered" />}
         {provenance?.duplicate_credit === 'relevance' && <ProvenanceBadge type="relevance" label="Also published elsewhere" />}
         {provenance?.retention_source === 'user_driven' && <ProvenanceBadge type="user_driven" label="User-added" />}
@@ -139,13 +162,21 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
   const [refresh, setRefresh] = useState(0)
 
   useEffect(() => {
-    api.getChannel(channelId).then((c) => setChannel(c ?? null))
+    let cancelled = false
+    api.getChannel(channelId).then((c) => {
+      if (!cancelled) setChannel(c ?? null)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [channelId, refresh])
 
   if (!channel) return <div className="empty-state">Loading channel...</div>
 
-  const dup = channel.duplicate_provenance
-  const ret = channel.retention_signals
+  const channelAdvisories = channel.advisories ?? []
+
+  const dup = channel.duplicate_provenance ?? { discovery_credit: 0, relevance_credit: 0 }
+  const ret = channel.retention_signals ?? { user_driven: 0, yuhaul_routed: 0 }
   const totalDuplicates = dup.discovery_credit + dup.relevance_credit
   const totalRetention = ret.user_driven + ret.yuhaul_routed
 
@@ -220,14 +251,19 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
         </div>
       </div>
 
-      {channel.matched_routes.length > 0 && (
+      {(channel.matched_routes ?? []).length > 0 && (
         <>
           <h2 className="section-title">Matched routes</h2>
           <div className="card" style={{ marginBottom: 16 }}>
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
               {channel.matched_routes.map((r) => (
-                <li key={r} style={{ padding: '6px 0' }}>
-                  {r}
+                // Keyed by route UUID: same-named routes stay distinct rows.
+                <li key={r.route_id} style={{ padding: '6px 0' }}>
+                  {r.name} <span className="route-short-id">({shortRouteId(r.route_id)})</span>
+                  <span style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+                    {' '}
+                    — {r.match_count} match{r.match_count === 1 ? '' : 'es'}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -235,12 +271,12 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
         </>
       )}
 
-      {channel.recent_videos.length > 0 && (
+      {(channel.recent_videos ?? []).length > 0 && (
         <>
           <h2 className="section-title">Recent videos</h2>
           <div className="card" style={{ marginBottom: 16 }}>
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-              {channel.recent_videos.map((v) => (
+              {(channel.recent_videos ?? []).map((v) => (
                 <VideoProvenanceRow
                   key={v.video_id}
                   video={v}
@@ -253,10 +289,10 @@ function ChannelDetailView({ channelId, onBack }: { channelId: string; onBack: (
       )}
 
       <h2 className="section-title">Advisories</h2>
-      {(channel.advisories?.length ?? 0) === 0 ? (
+      {channelAdvisories.length === 0 ? (
         <div className="card empty-state">No advisories for this channel.</div>
       ) : (
-        channel.advisories!.map((a) => <AdvisoryCard key={a.id} advisory={a} onChange={() => setRefresh((n) => n + 1)} />)
+        channelAdvisories.map((a) => <AdvisoryCard key={a.id} advisory={a} onChange={() => setRefresh((n) => n + 1)} />)
       )}
     </>
   )
@@ -267,13 +303,58 @@ export function ChannelsView() {
   const navigate = useNavigate()
   const [channels, setChannels] = useState<ChannelStats[]>([])
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  const retryButtonRef = useRef<HTMLButtonElement>(null)
+  const firstRowRef = useRef<HTMLTableRowElement>(null)
+  const recoveredRef = useRef(false)
+  const { addToast } = useToast()
 
   useEffect(() => {
-    api.listChannels().then((c) => {
-      setChannels(c)
-      setLoading(false)
-    })
+    let cancelled = false
+    api.listChannels()
+      .then((c) => {
+        if (cancelled) return
+        setChannels(c)
+        setFetchError(false)
+        setLoading(false)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setFetchError(true)
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
+
+  // Focus the Retry button whenever the view settles into the fetch-error
+  // state: on first entry and again after a failed retry re-enables it.
+  useEffect(() => {
+    if (fetchError && !retrying) retryButtonRef.current?.focus()
+  }, [fetchError, retrying])
+
+  // After a successful retry, move focus to the first channel row.
+  useEffect(() => {
+    if (!recoveredRef.current || loading || fetchError) return
+    recoveredRef.current = false
+    firstRowRef.current?.focus()
+  })
+
+  async function handleRetry() {
+    setRetrying(true)
+    try {
+      const c = await api.listChannels()
+      setChannels(c)
+      setFetchError(false)
+      recoveredRef.current = true
+    } catch {
+      addToast('Retry failed. Please try again.', 'error')
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   if (channelId) {
     return <ChannelDetailView channelId={channelId} onBack={() => navigate('/analytics/channels')} />
@@ -286,7 +367,14 @@ export function ChannelsView() {
       <div className="page-header">
         <h1 className="page-title">Channel Analysis</h1>
       </div>
-      {channels.length === 0 ? (
+      {fetchError ? (
+        <FetchErrorRegion
+          ref={retryButtonRef}
+          message="Failed to load channels. Check your connection and try again."
+          onRetry={handleRetry}
+          retrying={retrying}
+        />
+      ) : channels.length === 0 ? (
         <div className="card empty-state">No channel data yet.</div>
       ) : (
         <div className="card">
@@ -301,13 +389,13 @@ export function ChannelsView() {
               </tr>
             </thead>
             <tbody>
-              {channels.map((c) => (
-                <tr key={c.channel_id}>
+              {channels.map((c, i) => (
+                <tr key={c.channel_id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
                   <td data-label="Channel">
                     <Link to={`/analytics/channels/${c.channel_id}`}>{c.channel_name}</Link>
-                    {c.advisories && c.advisories.length > 0 && (
+                    {(c.advisories ?? []).length > 0 && (
                       <span style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-                        {c.advisories.map((a) => (
+                        {(c.advisories ?? []).map((a) => (
                           <AdvisoryBadge key={a.id} advisory={a} />
                         ))}
                       </span>

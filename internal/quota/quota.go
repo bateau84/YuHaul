@@ -30,6 +30,7 @@ const (
 	OpPlaylistItemsList   Operation = "playlist_items_list"
 	OpVideosList          Operation = "videos_list"
 	OpPlaylistItemsInsert Operation = "playlist_items_insert"
+	OpPlaylistsList       Operation = "playlists_list"
 	OpSearchList          Operation = "search_list"
 )
 
@@ -40,6 +41,7 @@ var unitCosts = map[Operation]int{
 	OpPlaylistItemsList:   1,
 	OpVideosList:          1,
 	OpPlaylistItemsInsert: 50,
+	OpPlaylistsList:       1,
 	OpSearchList:          100,
 }
 
@@ -157,6 +159,19 @@ func (l *Ledger) ConsumedOn(ctx context.Context, date string) (int, error) {
 	).Scan(&consumed)
 	if err != nil {
 		return 0, fmt.Errorf("quota: sum consumption for %s: %w", date, err)
+	}
+	return int(consumed.Int64), nil
+}
+
+// ConsumedByRun returns the total units consumed on behalf of runID across all
+// bucket dates. Runs that pre-date per-run attribution report 0.
+func (l *Ledger) ConsumedByRun(ctx context.Context, runID int64) (int, error) {
+	var consumed sql.NullInt64
+	err := l.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(units_consumed), 0) FROM quota_ledger WHERE run_id = ?`, runID,
+	).Scan(&consumed)
+	if err != nil {
+		return 0, fmt.Errorf("quota: sum consumption for run %d: %w", runID, err)
 	}
 	return int(consumed.Int64), nil
 }

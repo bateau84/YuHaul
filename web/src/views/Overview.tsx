@@ -4,16 +4,19 @@ import { Play, FlaskConical, AlertCircle } from 'lucide-react'
 import * as api from '../api/client'
 import { useToast } from '../hooks/useToast'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import type { Overview as OverviewData } from '../api/overview'
 
 export function Overview() {
   const [overview, setOverview] = useState<OverviewData | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [retryKey, setRetryKey] = useState(0)
+  const [fetchError, setFetchError] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const [confirmRun, setConfirmRun] = useState(false)
   const [confirmDry, setConfirmDry] = useState(false)
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const retryButtonRef = useRef<HTMLButtonElement>(null)
+  const recoveredRef = useRef(false)
   const { addToast } = useToast()
 
   useEffect(() => {
@@ -22,27 +25,49 @@ export function Overview() {
       .then((o) => {
         if (cancelled) return
         setOverview(o)
+        setFetchError(false)
         setLoading(false)
       })
-      .catch((err) => {
+      .catch(() => {
         if (cancelled) return
-        setError(err instanceof Error ? err.message : 'Failed to load overview')
+        setFetchError(true)
         setLoading(false)
       })
     return () => {
       cancelled = true
     }
-  }, [retryKey])
+  }, [])
 
-  function retry() {
-    setLoading(true)
-    setError(null)
-    setRetryKey((k) => k + 1)
-  }
+  // Focus the Retry button whenever the view settles into the fetch-error
+  // state: on first entry and again after a failed retry re-enables it.
+  useEffect(() => {
+    if (fetchError && !retrying) retryButtonRef.current?.focus()
+  }, [fetchError, retrying])
+
+  // After a successful retry, move focus to the view heading.
+  useEffect(() => {
+    if (!recoveredRef.current || loading || fetchError) return
+    recoveredRef.current = false
+    headingRef.current?.focus()
+  })
 
   useEffect(() => {
     headingRef.current?.focus()
   }, [])
+
+  async function handleRetry() {
+    setRetrying(true)
+    try {
+      const o = await api.getOverview()
+      setOverview(o)
+      setFetchError(false)
+      recoveredRef.current = true
+    } catch {
+      addToast('Retry failed. Please try again.', 'error')
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   async function startRun() {
     setConfirmRun(false)
@@ -65,34 +90,45 @@ export function Overview() {
   }
 
   if (loading) return <div className="empty-state">Loading overview...</div>
-  if (error) {
-    return (
-      <div className="card" role="alert">
-        <h2 className="section-title">Error loading overview</h2>
-        <p>{error}</p>
-        <button className="button button--primary" onClick={retry}>Retry</button>
+
+  const header = (
+    <div className="page-header">
+      <h1 className="page-title" ref={headingRef} tabIndex={-1}>
+        Overview
+      </h1>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="button button--primary" onClick={() => setConfirmRun(true)} disabled={fetchError}>
+          <Play size={16} aria-hidden="true" /> Run Now
+        </button>
+        <button className="button" onClick={() => setConfirmDry(true)} disabled={fetchError}>
+          <FlaskConical size={16} aria-hidden="true" /> Dry Run
+        </button>
       </div>
+    </div>
+  )
+
+  // Fetch-error replaces the dashboard body; the toolbar stays visible but
+  // disabled until a retry succeeds.
+  if (fetchError) {
+    return (
+      <>
+        {header}
+        <FetchErrorRegion
+          ref={retryButtonRef}
+          message="Failed to load overview. Check your connection and try again."
+          onRetry={handleRetry}
+          retrying={retrying}
+        />
+      </>
     )
   }
+
   if (!overview) return null
 
   const run = overview.last_run
   return (
     <>
-      <div className="page-header">
-        <h1 className="page-title" ref={headingRef} tabIndex={-1}>
-          Overview
-        </h1>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="button button--primary" onClick={() => setConfirmRun(true)}>
-            <Play size={16} aria-hidden="true" /> Run Now
-          </button>
-          <button className="button" onClick={() => setConfirmDry(true)}>
-            <FlaskConical size={16} aria-hidden="true" /> Dry Run
-          </button>
-        </div>
-      </div>
-
+      {header}
       <div className="card-grid">
         <div className="card">
           <div className="metric-value">{run?.videos_discovered ?? 0}</div>

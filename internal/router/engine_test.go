@@ -137,7 +137,7 @@ func TestEngine_ANDCompositionRequiresAll(t *testing.T) {
 		ConditionComposition: string(CompositionAll),
 		Conditions: []RouteCondition{
 			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: ConditionOperatorContains, Value: "jazz"},
-			{ConditionIndex: 1, Field: ConditionFieldDurationSeconds, Operator: ConditionOperatorGT, Value: "180"},
+			{ConditionIndex: 1, Field: ConditionFieldDurationSeconds, Operator: ConditionOperatorGreaterThan, Value: "180"},
 		},
 	})
 	require.NoError(t, err)
@@ -545,26 +545,283 @@ func TestStore_ReorderRoutes(t *testing.T) {
 	assert.Equal(t, 2, routes[1].EvaluationOrder)
 }
 
-func TestEngine_NotEqualsAndInList(t *testing.T) {
+func TestStore_DeleteHighestThenCreate(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	id1, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "First", EvaluationOrder: 1, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+	id2, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "Second", EvaluationOrder: 2, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+
+	// Deleting the highest-id route sets its evaluation_order sentinel to -id2.
+	require.NoError(t, routerStore.DeleteRoute(ctx, id2))
+
+	// Creating a new route must not collide with the deleted sentinel.
+	id3, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "Third", EvaluationOrder: 3, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+
+	routes, err := routerStore.ListRoutes(ctx)
+	require.NoError(t, err)
+	require.Len(t, routes, 2)
+	assert.Equal(t, id1, routes[0].ID)
+	assert.Equal(t, id3, routes[1].ID)
+}
+
+func TestStore_DeleteMiddleThenReorder(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	id1, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "First", EvaluationOrder: 1, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+	id2, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "Second", EvaluationOrder: 2, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+	id3, err := routerStore.CreateRoute(ctx, &Route{
+		Name: "Third", EvaluationOrder: 3, IsEnabled: true, ConditionComposition: string(CompositionAll),
+	})
+	require.NoError(t, err)
+
+	// Soft-delete the middle route; its sentinel is -id2.
+	require.NoError(t, routerStore.DeleteRoute(ctx, id2))
+
+	// Reordering the remaining active routes must not collide with -id2.
+	require.NoError(t, routerStore.ReorderRoutes(ctx, []int64{id3, id1}))
+
+	routes, err := routerStore.ListRoutes(ctx)
+	require.NoError(t, err)
+	require.Len(t, routes, 2)
+	assert.Equal(t, id3, routes[0].ID)
+	assert.Equal(t, 1, routes[0].EvaluationOrder)
+	assert.Equal(t, id1, routes[1].ID)
+	assert.Equal(t, 2, routes[1].EvaluationOrder)
+}
+
+func TestEngine_CanonicalOperators(t *testing.T) {
+	ctx := context.Background()
+	stateStore, routerStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// starts_with
+	_, err := routerStore.CreateRoute(ctx, &Route{
+		Name:                 "starts_with",
+		EvaluationOrder:      1,
+		IsEnabled:            true,
+		ConditionComposition: string(CompositionAll),
+		Conditions: []RouteCondition{
+			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: ConditionOperatorStartsWith, Value: "live"},
+		},
+	})
+	require.NoError(t, err)
+
+	// ends_with
+	_, err = routerStore.CreateRoute(ctx, &Route{
+		Name:                 "ends_with",
+		EvaluationOrder:      2,
+		IsEnabled:            true,
+		ConditionComposition: string(CompositionAll),
+		Conditions: []RouteCondition{
+			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: ConditionOperatorEndsWith, Value: "mix"},
+		},
+	})
+	require.NoError(t, err)
+
+	// matches_regex (case-insensitive via (?i))
+	_, err = routerStore.CreateRoute(ctx, &Route{
+		Name:                 "matches_regex",
+		EvaluationOrder:      3,
+		IsEnabled:            true,
+		ConditionComposition: string(CompositionAll),
+		Conditions: []RouteCondition{
+			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: ConditionOperatorMatchesRegex, Value: "(?i)jazz"},
+		},
+	})
+	require.NoError(t, err)
+
+	// between (inclusive)
+	_, err = routerStore.CreateRoute(ctx, &Route{
+		Name:                 "between",
+		EvaluationOrder:      4,
+		IsEnabled:            true,
+		ConditionComposition: string(CompositionAll),
+		Conditions: []RouteCondition{
+			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: ConditionOperatorContains, Value: "boundary"},
+			{ConditionIndex: 1, Field: ConditionFieldDurationSeconds, Operator: ConditionOperatorBetween, Value: "120,300"},
+		},
+	})
+	require.NoError(t, err)
+
+	// less_than
+	_, err = routerStore.CreateRoute(ctx, &Route{
+		Name:                 "less_than",
+		EvaluationOrder:      5,
+		IsEnabled:            true,
+		ConditionComposition: string(CompositionAll),
+		Conditions: []RouteCondition{
+			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: ConditionOperatorContains, Value: "short"},
+			{ConditionIndex: 1, Field: ConditionFieldDurationSeconds, Operator: ConditionOperatorLessThan, Value: "600"},
+		},
+	})
+	require.NoError(t, err)
+
+	// starts_with matches.
+	result := evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "live performance", nil)
+	require.Len(t, result.MatchedRoutes, 1)
+
+	// ends_with matches.
+	result = evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "weekly mix", nil)
+	require.Len(t, result.MatchedRoutes, 1)
+
+	// matches_regex matches case-insensitively.
+	result = evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "JAZZ compilation", nil)
+	require.Len(t, result.MatchedRoutes, 1)
+
+	// between inclusive bounds match.
+	result = evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "boundary lower", intPtr(120))
+	require.Len(t, result.MatchedRoutes, 1)
+	result = evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "boundary upper", intPtr(300))
+	require.Len(t, result.MatchedRoutes, 1)
+
+	// between outside range does not match (title intentionally avoids route 5's "short" trigger).
+	result = evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "boundary outside range", intPtr(119))
+	assert.Empty(t, result.MatchedRoutes)
+
+	// less_than matches.
+	result = evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "short clip", intPtr(599))
+	require.Len(t, result.MatchedRoutes, 1)
+
+	// less_than strict inequality does not match at boundary.
+	result = evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "short boundary", intPtr(600))
+	assert.Empty(t, result.MatchedRoutes)
+}
+
+func TestStore_SoftDeletePreservesDecisionEvidence(t *testing.T) {
+	ctx := context.Background()
+	stateStore, routerStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create a route with a condition and action.
+	routeID, err := routerStore.CreateRoute(ctx, &Route{
+		Name:                 "Preserve me",
+		EvaluationOrder:      1,
+		IsEnabled:            true,
+		IsFinal:              true,
+		ConditionComposition: string(CompositionAll),
+		Conditions: []RouteCondition{
+			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: ConditionOperatorContains, Value: "music"},
+		},
+		Actions: []RouteAction{
+			{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PLmusic"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Run an evaluation to produce decision evidence.
+	runID, videoID, _ := createRunAndVideo(t, ctx, stateStore)
+	engine := NewEngine(routerStore)
+	machine := state.NewMachine(stateStore)
+	result, err := engine.Evaluate(ctx, runID, videoID, VideoContext{
+		VideoID:   "v1",
+		ChannelID: "ch1",
+		Title:     "music video",
+	}, machine)
+	require.NoError(t, err)
+	require.Len(t, result.MatchedRoutes, 1)
+
+	// Capture pre-delete run counters.
+	runBefore, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+
+	// Capture evidence IDs for later existence checks.
+	decisions, err := stateStore.GetRouteDecisionsForVideo(ctx, videoID)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	decisionID := decisions[0].ID
+
+	audits, err := stateStore.GetConditionAuditsForDecision(ctx, decisionID)
+	require.NoError(t, err)
+	require.Len(t, audits, 1)
+	auditID := audits[0].ID
+
+	// Soft-delete the route.
+	require.NoError(t, routerStore.DeleteRoute(ctx, routeID))
+
+	// Deleted route is no longer visible to management or evaluation queries.
+	_, err = routerStore.GetRoute(ctx, routeID)
+	require.ErrorIs(t, err, ErrRouteNotFound)
+
+	active, err := routerStore.LoadActiveRoutes(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, active)
+
+	// Historical evidence rows survive the soft delete.
+	db := routerStore.DB()
+	var exists bool
+	err = db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM route_decision WHERE id = ?)`, decisionID).Scan(&exists)
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	err = db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM condition_audit WHERE id = ?)`, auditID).Scan(&exists)
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	// Run counters are unchanged after deletion.
+	runAfter, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, runBefore.VideosAccepted, runAfter.VideosAccepted)
+	assert.Equal(t, runBefore.VideosRejected, runAfter.VideosRejected)
+	assert.Equal(t, runBefore.VideosExcluded, runAfter.VideosExcluded)
+}
+
+func TestEngine_InvalidRegexDoesNotPanic(t *testing.T) {
 	ctx := context.Background()
 	stateStore, routerStore, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := routerStore.CreateRoute(ctx, &Route{
-		Name:                 "Exclude channels",
+		Name:                 "Invalid regex",
 		EvaluationOrder:      1,
 		IsEnabled:            true,
 		ConditionComposition: string(CompositionAll),
 		Conditions: []RouteCondition{
-			{ConditionIndex: 0, Field: ConditionFieldChannelID, Operator: ConditionOperatorInList, Value: "ch1, ch2, ch3"},
-			{ConditionIndex: 1, Field: ConditionFieldTitle, Operator: ConditionOperatorNotEquals, Value: "blocked"},
+			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: ConditionOperatorMatchesRegex, Value: "(unclosed"},
 		},
 	})
 	require.NoError(t, err)
 
-	result := evaluateWithVideo(t, ctx, stateStore, routerStore, "ch2", "allowed", nil)
-	require.Len(t, result.MatchedRoutes, 1)
+	result := evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "any title", nil)
+	assert.Empty(t, result.MatchedRoutes)
+}
 
-	result = evaluateWithVideo(t, ctx, stateStore, routerStore, "ch2", "blocked", nil)
+func TestEngine_UnknownOperatorLogsWarningAndReturnsFalse(t *testing.T) {
+	ctx := context.Background()
+	stateStore, routerStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	_, err := routerStore.CreateRoute(ctx, &Route{
+		Name:                 "Drifted operator",
+		EvaluationOrder:      1,
+		IsEnabled:            true,
+		ConditionComposition: string(CompositionAll),
+		Conditions: []RouteCondition{
+			{ConditionIndex: 0, Field: ConditionFieldTitle, Operator: "gt", Value: "100"},
+		},
+	})
+	require.NoError(t, err)
+
+	result := evaluateWithVideo(t, ctx, stateStore, routerStore, "ch1", "any title", nil)
 	assert.Empty(t, result.MatchedRoutes)
 }

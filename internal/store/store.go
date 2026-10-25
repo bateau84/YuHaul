@@ -24,8 +24,14 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Open opens the SQLite database at path, applies any pending migrations, and
-// returns a *sql.DB configured with foreign keys, WAL mode, and a busy timeout.
+// Open opens the SQLite database at path, applies any pending migrations,
+// completes the route identity backfill, and returns a *sql.DB configured
+// with foreign keys, WAL mode, and a busy timeout.
+//
+// The route identity backfill (migration 012 / ARS-004) runs here so it
+// finishes before any caller can start workers or serve requests:
+// cmd/server calls Open before scheduler.Start and ListenAndServe, and both
+// the migration and backfill errors abort startup.
 //
 // The caller is responsible for closing the returned database.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
@@ -43,6 +49,11 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	if err := ApplyMigrations(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: apply migrations: %w", err)
+	}
+
+	if err := BackfillRouteIdentities(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: backfill route identities: %w", err)
 	}
 
 	return db, nil

@@ -28,6 +28,7 @@ type VideoFinalOutcome string
 const (
 	FinalOutcomeAccepted        VideoFinalOutcome = "accepted"
 	FinalOutcomeRejected        VideoFinalOutcome = "rejected"
+	FinalOutcomeExcluded        VideoFinalOutcome = "excluded"
 	FinalOutcomeDeferred        VideoFinalOutcome = "deferred"
 	FinalOutcomeFailed          VideoFinalOutcome = "failed"
 	FinalOutcomeNotYetEvaluated VideoFinalOutcome = "not_yet_evaluated"
@@ -80,6 +81,7 @@ const (
 	RunStatusRunning     RunStatus = "running"
 	RunStatusCompleted   RunStatus = "completed"
 	RunStatusInterrupted RunStatus = "interrupted"
+	RunStatusFailed      RunStatus = "failed"
 )
 
 // Run is a single execution of the processing pipeline.
@@ -93,6 +95,7 @@ type Run struct {
 	VideosDiscovered      int        `json:"videos_discovered"`
 	VideosAccepted        int        `json:"videos_accepted"`
 	VideosRejected        int        `json:"videos_rejected"`
+	VideosExcluded        int        `json:"videos_excluded"`
 	VideosDeferred        int        `json:"videos_deferred"`
 	VideosFailed          int        `json:"videos_failed"`
 	VideosNotYetEvaluated int        `json:"videos_not_yet_evaluated"`
@@ -100,6 +103,9 @@ type Run struct {
 	DurationSeconds       *float64   `json:"duration_seconds"`
 	InterruptReason       *string    `json:"interrupt_reason"`
 	CurrentPhase          *string    `json:"current_phase"`
+
+	// ActionAuthorityVersion is write-once producer evidence; zero is legacy/unknown.
+	ActionAuthorityVersion int `json:"-"`
 }
 
 // Video represents a discovered video and its processing state.
@@ -111,6 +117,7 @@ type Video struct {
 	DiscoveredInRunID int64
 	ProcessingState   VideoProcessingState
 	FinalOutcome      VideoFinalOutcome
+	FinalOutcomeKnown bool
 	DeferredReason    *string
 	ErrorMessage      *string
 	CompletedAt       *time.Time
@@ -167,8 +174,8 @@ func (s VideoProcessingState) Valid() bool {
 // Valid returns true if o is a known final outcome.
 func (o VideoFinalOutcome) Valid() bool {
 	switch o {
-	case FinalOutcomeAccepted, FinalOutcomeRejected, FinalOutcomeDeferred,
-		FinalOutcomeFailed, FinalOutcomeNotYetEvaluated:
+	case FinalOutcomeAccepted, FinalOutcomeRejected, FinalOutcomeExcluded,
+		FinalOutcomeDeferred, FinalOutcomeFailed, FinalOutcomeNotYetEvaluated:
 		return true
 	}
 	return false

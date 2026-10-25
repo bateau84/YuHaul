@@ -16,11 +16,12 @@ CREATE TABLE IF NOT EXISTS run (
     started_at TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     completed_at TIMESTAMP,
     run_type TEXT NOT NULL CHECK(run_type IN ('scheduled', 'manual', 'dry_run', 'replay', 'backtest')),
-    status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'interrupted')),
+    status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'interrupted', 'failed')),
     config_version_id INTEGER REFERENCES config_version(id) ON DELETE SET NULL,
     videos_discovered INTEGER NOT NULL DEFAULT 0,
     videos_accepted INTEGER NOT NULL DEFAULT 0,
     videos_rejected INTEGER NOT NULL DEFAULT 0,
+    videos_excluded INTEGER NOT NULL DEFAULT 0,
     videos_deferred INTEGER NOT NULL DEFAULT 0,
     videos_failed INTEGER NOT NULL DEFAULT 0,
     videos_not_yet_evaluated INTEGER NOT NULL DEFAULT 0,
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS video (
     processing_state TEXT NOT NULL CHECK(processing_state IN (
         'discovered', 'evaluating', 'evaluated', 'acted', 'completed', 'deferred', 'failed', 'not_yet_evaluated'
     )),
-    final_outcome TEXT CHECK(final_outcome IN ('accepted', 'rejected', 'deferred', 'failed', 'not_yet_evaluated')),
+    final_outcome TEXT CHECK(final_outcome IN ('accepted', 'rejected', 'excluded', 'deferred', 'failed', 'not_yet_evaluated')),
     deferred_reason TEXT,
     error_message TEXT,
     completed_at TIMESTAMP

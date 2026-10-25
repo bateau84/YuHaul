@@ -42,6 +42,7 @@ type Engine struct {
 	db        *sql.DB
 	logger    *slog.Logger
 	batchSize int
+	baseURL   string
 }
 
 // Option configures an Engine.
@@ -64,6 +65,14 @@ func WithClientFactory(f ClientFactory) Option {
 	}
 }
 
+// WithBaseURL overrides the default production YouTube Data API base URL for
+// this engine. Empty value keeps the production default.
+func WithBaseURL(u string) Option {
+	return func(e *Engine) {
+		e.baseURL = u
+	}
+}
+
 // WithBatchSize sets the maximum number of video IDs requested per videos.list
 // call. YouTube allows up to 50; the default is 50.
 func WithBatchSize(n int) Option {
@@ -78,7 +87,6 @@ func WithBatchSize(n int) Option {
 func NewEngine(auth TokenProvider, machine *state.Machine, ledger *quota.Ledger, db *sql.DB, opts ...Option) *Engine {
 	e := &Engine{
 		auth:      auth,
-		factory:   defaultClientFactory,
 		machine:   machine,
 		ledger:    ledger,
 		db:        db,
@@ -88,11 +96,18 @@ func NewEngine(auth TokenProvider, machine *state.Machine, ledger *quota.Ledger,
 	for _, opt := range opts {
 		opt(e)
 	}
+	if e.factory == nil {
+		e.factory = e.defaultClientFactory
+	}
 	return e
 }
 
-func defaultClientFactory(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
-	return youtube.NewClient(ctx, token, youtube.WithRecorder(recorder))
+func (e *Engine) defaultClientFactory(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
+	opts := []youtube.Option{youtube.WithRecorder(recorder)}
+	if e.baseURL != "" {
+		opts = append(opts, youtube.WithBaseURL(e.baseURL))
+	}
+	return youtube.NewClient(ctx, token, opts...)
 }
 
 // Result summarizes a discovery run.
@@ -210,13 +225,14 @@ func (e *Engine) fetchChannels(ctx context.Context, client *youtube.Client, chan
 // discoveredVideo captures the data known about a video before metadata
 // pre-fetch. The metadata field is populated when videos.list succeeds.
 type discoveredVideo struct {
-	VideoID      string
-	ChannelID    string
-	ChannelName  string
-	Title        string
-	PublishedAt  time.Time
-	ThumbnailURL string
-	Metadata     *youtube.VideoDetail
+	VideoID             string
+	ChannelID           string
+	ChannelName         string
+	Title               string
+	PublishedAt         time.Time
+	ThumbnailURL        string
+	Metadata            *youtube.VideoDetail
+	EnumerationComplete bool
 }
 
 func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, channels []youtube.Channel, result *Result) ([]*discoveredVideo, error) {
@@ -232,6 +248,7 @@ func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, cha
 		}
 
 		var pageToken string
+		complete := false
 		for {
 			if err := e.requireBudget(ctx, quota.OpPlaylistItemsList, 1); err != nil {
 				e.logger.WarnContext(ctx, "discovery: insufficient quota for playlist items",
@@ -266,7 +283,16 @@ func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, cha
 
 			pageToken = next
 			if pageToken == "" {
+				complete = true
 				break
+			}
+		}
+		// A run-time timestamp is a safe watermark only after the uploads
+		// playlist was fully enumerated. Otherwise older unseen pages could
+		// be filtered forever on the next run.
+		for _, v := range out {
+			if v.ChannelID == ch.ID {
+				v.EnumerationComplete = complete
 			}
 		}
 	}
@@ -306,7 +332,13 @@ func (e *Engine) prefetchMetadata(ctx context.Context, client *youtube.Client, v
 
 func (e *Engine) persist(ctx context.Context, runID int64, runStart time.Time, videos []*discoveredVideo) error {
 	for _, v := range videos {
-		if _, err := e.machine.DiscoverVideo(ctx, runID, v.VideoID, v.ChannelID); err != nil {
+		tx, err := e.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("discovery: begin transaction: %w", err)
+		}
+
+		if _, err := e.machine.DiscoverVideoTx(ctx, tx, runID, v.VideoID, v.ChannelID); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("discovery: persist video %s: %w", v.VideoID, err)
 		}
 
@@ -326,14 +358,21 @@ func (e *Engine) persist(ctx context.Context, runID int64, runStart time.Time, v
 			thumbnail = v.Metadata.ThumbnailURL
 		}
 
-		if _, err := duplicate.SaveFingerprint(ctx, e.db, v.VideoID, v.ChannelID, "api_discovery", title, false, nil); err != nil {
+		if _, err := duplicate.SaveFingerprint(ctx, tx, v.VideoID, v.ChannelID, "api_discovery", title, false, nil); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("discovery: save fingerprint for %s: %w", v.VideoID, err)
 		}
-		if err := e.upsertTransientMetadata(ctx, v.VideoID, title, channelName, description, duration, thumbnail, publishedAt, runStart); err != nil {
+		if err := e.upsertTransientMetadata(ctx, tx, v.VideoID, title, channelName, description, duration, thumbnail, publishedAt, runStart); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("discovery: save metadata for %s: %w", v.VideoID, err)
 		}
-		if err := e.upsertChannel(ctx, v.ChannelID, channelName, runStart); err != nil {
+		if err := e.upsertChannel(ctx, tx, v.ChannelID, channelName, runStart, v.EnumerationComplete); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("discovery: update channel %s: %w", v.ChannelID, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("discovery: commit video %s: %w", v.VideoID, err)
 		}
 	}
 	return nil
@@ -379,11 +418,11 @@ func (e *Engine) videoExists(ctx context.Context, videoID string) (bool, error) 
 	return true, nil
 }
 
-func (e *Engine) upsertTransientMetadata(ctx context.Context, videoID, title, channelName, description string,
+func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoID, title, channelName, description string,
 	duration int, thumbnailURL string, publishedAt, fetchedAt time.Time) error {
 
 	expiresAt := fetchedAt.Add(30 * 24 * time.Hour)
-	_, err := e.db.ExecContext(ctx,
+	_, err := tx.ExecContext(ctx,
 		`INSERT INTO transient_metadata
 		 (video_id, title, channel_name, description, published_at, duration_seconds,
 		  thumbnail_url, fetched_at, refreshed_at, expires_at, is_active)
@@ -405,15 +444,19 @@ func (e *Engine) upsertTransientMetadata(ctx context.Context, videoID, title, ch
 	return err
 }
 
-func (e *Engine) upsertChannel(ctx context.Context, channelID, channelName string, discoveredAt time.Time) error {
-	_, err := e.db.ExecContext(ctx,
+func (e *Engine) upsertChannel(ctx context.Context, tx *sql.Tx, channelID, channelName string, discoveredAt time.Time, enumerationComplete bool) error {
+	var watermark any
+	if enumerationComplete {
+		watermark = discoveredAt.UTC()
+	}
+	_, err := tx.ExecContext(ctx,
 		`INSERT INTO channel (channel_id, channel_name, first_discovered_at, last_discovered_at, total_discovered)
 		 VALUES (?, ?, ?, ?, 1)
 		 ON CONFLICT(channel_id) DO UPDATE SET
 		  channel_name = COALESCE(excluded.channel_name, channel.channel_name),
-		  last_discovered_at = excluded.last_discovered_at,
+		  last_discovered_at = COALESCE(excluded.last_discovered_at, channel.last_discovered_at),
 		  total_discovered = channel.total_discovered + 1;`,
-		channelID, channelName, discoveredAt.UTC(), discoveredAt.UTC(),
+		channelID, channelName, discoveredAt.UTC(), watermark,
 	)
 	return err
 }

@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -55,11 +57,11 @@ type fakePipeline struct {
 	run              *state.Run
 	execute          int64
 	dryRun           *state.Run
-	draft            *config.Snapshot
+	draft            *config.ProposalSnapshot
 	replay           *state.Run
 	replayConfigID   *int64
 	backtest         *state.Run
-	backtestProposed config.Snapshot
+	backtestProposed config.ProposalSnapshot
 	done             chan struct{}
 }
 
@@ -77,7 +79,7 @@ func (f *fakePipeline) Execute(ctx context.Context, runID int64) {
 	close(f.done)
 }
 
-func (f *fakePipeline) DryRun(ctx context.Context, draft *config.Snapshot) (*state.Run, error) {
+func (f *fakePipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error) {
 	f.draft = draft
 	if f.dryRun == nil {
 		f.dryRun = f.run
@@ -103,8 +105,10 @@ func (f *fakePipeline) ExecuteReplay(ctx context.Context, runID int64) {
 	close(f.done)
 }
 
-func (f *fakePipeline) Backtest(ctx context.Context, proposed config.Snapshot) (*state.Run, error) {
-	f.backtestProposed = proposed
+func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error) {
+	if proposed != nil {
+		f.backtestProposed = *proposed
+	}
 	if f.backtest == nil {
 		f.backtest = f.run
 	}
@@ -146,6 +150,23 @@ func TestHandleListRuns(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"runs":`)
+}
+
+func TestHandleListRuns_Empty(t *testing.T) {
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithServerLogger(logger), WithRunStore(stateStore))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"runs":[]`)
+	assert.NotContains(t, body, `"runs":null`)
 }
 
 func TestHandleGetRun(t *testing.T) {
@@ -699,46 +720,173 @@ func TestHandleListRoutes(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"name":"Music"`)
 }
 
+func TestHandleListRoutes_Empty(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"routes":[]`)
+	assert.NotContains(t, body, `"routes":null`)
+}
+
+func TestHandleListRoutes_MatchCount(t *testing.T) {
+	ctx := context.Background()
+	db, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	stateStore, err := state.NewStore(db)
+	require.NoError(t, err)
+	machine := state.NewMachine(stateStore)
+
+	_, err = routerStore.CreateRoute(ctx, &router.Route{
+		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
+		ConditionComposition: "AND",
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "music"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+	})
+	require.NoError(t, err)
+
+	_, err = routerStore.CreateRoute(ctx, &router.Route{
+		Name: "Ambient", EvaluationOrder: 2, IsEnabled: true,
+		ConditionComposition: "AND",
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "ambient"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL2"}},
+	})
+	require.NoError(t, err)
+
+	run := &state.Run{RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	runID, err := stateStore.CreateRun(ctx, run)
+	require.NoError(t, err)
+	video, err := machine.DiscoverVideo(ctx, runID, "v1", "ch1")
+	require.NoError(t, err)
+
+	engine := router.NewEngine(routerStore)
+	_, err = engine.Evaluate(ctx, runID, video.ID, router.VideoContext{VideoID: "v1", ChannelID: "ch1", Title: "music video"}, machine)
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var listed struct {
+		Routes []routeAPI `json:"routes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listed))
+	require.Len(t, listed.Routes, 2)
+	assert.Equal(t, "Music", listed.Routes[0].Name)
+	assert.Regexp(t, canonicalUUIDPattern, listed.Routes[0].ID)
+	require.NotNil(t, listed.Routes[0].MatchCount)
+	assert.Equal(t, int64(1), *listed.Routes[0].MatchCount)
+	assert.Equal(t, "Ambient", listed.Routes[1].Name)
+	require.NotNil(t, listed.Routes[1].MatchCount)
+	assert.Equal(t, int64(0), *listed.Routes[1].MatchCount,
+		"a route with no matched production evidence carries an explicit zero")
+}
+
+// failingCountStore lets the route-list handler observe an aggregation
+// failure without touching the route rows themselves.
+type failingCountStore struct {
+	*router.Store
+}
+
+func (failingCountStore) ListRouteMatchCounts(context.Context) (map[int64]int64, error) {
+	return nil, errors.New("aggregate unavailable")
+}
+
+// ADR-006 / ARS-001: a failed count aggregation fails the whole list request
+// and never surfaces as a zero count or a partial route list.
+func TestHandleListRoutes_MatchCountFailureFailsList(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	_, err := routerStore.CreateRoute(ctx, &router.Route{
+		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
+		ConditionComposition: "AND",
+		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "music"}},
+		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
+	})
+	require.NoError(t, err)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(failingCountStore{routerStore}))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"error":"failed to list routes"`)
+	assert.NotContains(t, body, `"routes"`)
+	assert.NotContains(t, body, "match_count")
+}
+
 func TestHandleGetRoute(t *testing.T) {
 	ctx := context.Background()
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	id, err := routerStore.CreateRoute(ctx, &router.Route{
-		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
-		ConditionComposition: "AND",
-		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
-		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
-		Exclusions:           []router.RouteExclusion{},
-	})
-	require.NoError(t, err)
+	route := createRouteFixture(t, ctx, routerStore, "Music", 1)
 
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
-	req := httptest.NewRequest(http.MethodGet, "/api/routes/"+strconv.FormatInt(id, 10), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/routes/"+route.PublicID, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"name":"Music"`)
+	assert.Contains(t, rec.Body.String(), fmt.Sprintf(`"id":%q`, route.PublicID))
 }
 
+// ARS-004: a malformed path ID (including the former integer alias) is 400;
+// a valid but unknown UUID preserves the route 404.
 func TestHandleGetRoute_NotFound(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+
 	req := httptest.NewRequest(http.MethodGet, "/api/routes/999", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
+	req = httptest.NewRequest(http.MethodGet, "/api/routes/3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandleGetRoute_EmptyChildren(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	route := createRouteFixture(t, ctx, routerStore, "Music", 1)
+
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes/"+route.PublicID, nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"exclusions":[]`)
+	assert.NotContains(t, body, `"exclusions":null`)
 }
 
 func TestHandleCreateRoute(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	body := `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"playlist_insert","target_playlist_id":"PL1"}],"exclusions":[]}`
+	body := `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}],"exclusions":[]}`
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
 	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -746,19 +894,42 @@ func TestHandleCreateRoute(t *testing.T) {
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"name":"Music"`)
+	assert.Regexp(t, canonicalUUIDPattern, decodeRouteAPI(t, rec).ID,
+		"POST assigns a server-generated UUID as the route id")
 }
 
 func TestHandleCreateRoute_Validation(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	body := `{"evaluation_order":1,"is_enabled":true,"condition_composition":"AND"}`
-	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
-	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing name",
+			body: `{"evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}]}`,
+		},
+		{
+			name: "empty conditions",
+			body: `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}]}`,
+		},
+		{
+			name: "empty actions",
+			body: `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[]}`,
+		},
+	}
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+			req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
 }
 
 func TestHandleUpdateRoute(t *testing.T) {
@@ -766,32 +937,27 @@ func TestHandleUpdateRoute(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	id, err := routerStore.CreateRoute(ctx, &router.Route{
-		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
-		ConditionComposition: "AND",
-		Conditions:           []router.RouteCondition{{ConditionIndex: 0, Field: router.ConditionFieldTitle, Operator: router.ConditionOperatorContains, Value: "jazz"}},
-		Actions:              []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PL1"}},
-		Exclusions:           []router.RouteExclusion{},
-	})
-	require.NoError(t, err)
+	route := createRouteFixture(t, ctx, routerStore, "Music", 1)
 
-	body := `{"name":"Updated","evaluation_order":2,"is_enabled":false,"condition_composition":"OR","conditions":[],"actions":[],"exclusions":[]}`
+	body := `{"name":"Updated","evaluation_order":2,"is_enabled":false,"condition_composition":"OR","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}],"exclusions":[]}`
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
-	req := httptest.NewRequest(http.MethodPut, "/api/routes/"+strconv.FormatInt(id, 10), strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/routes/"+route.PublicID, strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"name":"Updated"`)
+	assert.Equal(t, route.PublicID, decodeRouteAPI(t, rec).ID,
+		"PUT preserves the route UUID")
 }
 
 func TestHandleUpdateRoute_NotFound(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	body := `{"name":"Updated","evaluation_order":2,"is_enabled":false,"condition_composition":"OR","conditions":[],"actions":[],"exclusions":[]}`
+	body := `{"name":"Updated","evaluation_order":2,"is_enabled":false,"condition_composition":"OR","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}],"exclusions":[]}`
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
-	req := httptest.NewRequest(http.MethodPut, "/api/routes/999", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/routes/3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -803,18 +969,23 @@ func TestHandleDeleteRoute(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	id, err := routerStore.CreateRoute(ctx, &router.Route{
-		Name: "Music", EvaluationOrder: 1, IsEnabled: true,
-		ConditionComposition: "AND",
-	})
-	require.NoError(t, err)
+	route := createRouteFixture(t, ctx, routerStore, "Music", 1)
 
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
-	req := httptest.NewRequest(http.MethodDelete, "/api/routes/"+strconv.FormatInt(id, 10), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/routes/"+route.PublicID, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	// Soft deletion keeps the identity mapping and the historical name row,
+	// but the route stops being served (ADR-003 / ARS-004).
+	_, err := routerStore.ResolveRouteID(ctx, route.PublicID)
+	assert.NoError(t, err, "the deleted route keeps its UUID mapping")
+	getReq := httptest.NewRequest(http.MethodGet, "/api/routes/"+route.PublicID, nil)
+	getRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getRec, getReq)
+	assert.Equal(t, http.StatusNotFound, getRec.Code)
 }
 
 func TestHandleDeleteRoute_NotFound(t *testing.T) {
@@ -822,10 +993,15 @@ func TestHandleDeleteRoute_NotFound(t *testing.T) {
 	defer cleanup()
 
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+
 	req := httptest.NewRequest(http.MethodDelete, "/api/routes/999", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
+	req = httptest.NewRequest(http.MethodDelete, "/api/routes/3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
@@ -834,12 +1010,10 @@ func TestHandleReorderRoutes(t *testing.T) {
 	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
-	id1, err := routerStore.CreateRoute(ctx, &router.Route{Name: "A", EvaluationOrder: 1, IsEnabled: true, ConditionComposition: "AND"})
-	require.NoError(t, err)
-	id2, err := routerStore.CreateRoute(ctx, &router.Route{Name: "B", EvaluationOrder: 2, IsEnabled: true, ConditionComposition: "AND"})
-	require.NoError(t, err)
+	a := createRouteFixture(t, ctx, routerStore, "A", 1)
+	b := createRouteFixture(t, ctx, routerStore, "B", 2)
 
-	body := fmt.Sprintf(`{"route_ids":[%d,%d]}`, id2, id1)
+	body := fmt.Sprintf(`{"route_ids":[%q,%q]}`, b.PublicID, a.PublicID)
 	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
 	req := httptest.NewRequest(http.MethodPut, "/api/routes/reorder", strings.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -850,8 +1024,119 @@ func TestHandleReorderRoutes(t *testing.T) {
 	routes, err := routerStore.ListRoutes(ctx)
 	require.NoError(t, err)
 	require.Len(t, routes, 2)
-	assert.Equal(t, id2, routes[0].ID)
-	assert.Equal(t, id1, routes[1].ID)
+	assert.Equal(t, b.PublicID, routes[0].PublicID)
+	assert.Equal(t, a.PublicID, routes[1].PublicID)
+}
+
+func TestHandleCreateRoute_InvalidOperator(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	body := `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"gt","value":"100"}],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}]}`
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "operator \\\"gt\\\" is not valid for field \\\"title\\\"")
+}
+
+func TestHandleCreateRoute_InvalidBetween(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	body := `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"duration_seconds","operator":"between","value":"100"}],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}]}`
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "between value must be")
+}
+
+func TestHandleCreateRoute_InvalidEvaluationOrder(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	body := `{"name":"Music","evaluation_order":0,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}]}`
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "evaluation_order must be at least 1")
+}
+
+func TestHandleCreateRoute_NonNumericNumericValue(t *testing.T) {
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	body := `{"name":"Music","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"condition_index":0,"field":"duration_seconds","operator":"greater_than","value":"abc"}],"actions":[{"action_index":0,"action_type":"add_to_playlist","target_playlist_id":"PL1"}]}`
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "value must be a number")
+}
+
+func TestHandleGetRouteStats_Removed(t *testing.T) {
+	ctx := context.Background()
+	_, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	defer cleanup()
+
+	route := createRouteFixture(t, ctx, routerStore, "Music", 1)
+
+	// ADR-006 / ARS-001: the per-route stats endpoint is not part of the
+	// supported API surface. GET /api/routes/{id} matches a single path
+	// segment, so the old stats path must now 404.
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRouteStore(routerStore))
+	req := httptest.NewRequest(http.MethodGet, "/api/routes/"+route.PublicID+"/stats", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "match_count")
+}
+
+type fakePlaylistProvider struct {
+	playlists []Playlist
+	err       error
+}
+
+func (f *fakePlaylistProvider) ListPlaylists(context.Context) ([]Playlist, error) {
+	return f.playlists, f.err
+}
+
+func TestHandleListPlaylists(t *testing.T) {
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(),
+		WithPlaylistProvider(&fakePlaylistProvider{
+			playlists: []Playlist{{PlaylistID: "PLx", PlaylistName: "My List"}},
+		}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/playlists", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"playlist_id":"PLx"`)
+	assert.Contains(t, body, `"playlist_name":"My List"`)
+}
+
+func TestHandleListPlaylists_NotConfigured(t *testing.T) {
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/playlists", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not authenticated")
 }
 
 func TestAnalyticsRoutesReachable(t *testing.T) {
@@ -943,7 +1228,7 @@ func TestHandleSettingsRoot(t *testing.T) {
 			assert.Contains(t, body, `"schedule":"0 6 * * *"`)
 			assert.Contains(t, body, `"quota_limit":1234`)
 			assert.Contains(t, body, `"duplicate_threshold":0.5`)
-			assert.Contains(t, body, `"duplicate_behavior":"skip"`)
+			assert.Contains(t, body, `"duplicate_behavior":"continue"`)
 			assert.Contains(t, body, `"account_connected":false`)
 		})
 	}
@@ -1003,7 +1288,7 @@ func TestHandleUpdateSettingsRoot(t *testing.T) {
 			assert.Contains(t, resp, `"schedule":"0 7 * * *"`)
 			assert.Contains(t, resp, `"quota_limit":2000`)
 			assert.Contains(t, resp, `"duplicate_threshold":0.75`)
-			assert.Contains(t, resp, `"duplicate_behavior":"flag"`)
+			assert.Contains(t, resp, `"duplicate_behavior":"continue"`)
 		})
 	}
 

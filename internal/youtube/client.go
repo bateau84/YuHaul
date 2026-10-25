@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,12 +34,30 @@ const (
 	OpPlaylistItemsList   Operation = "playlist_items_list"
 	OpVideosList          Operation = "videos_list"
 	OpPlaylistItemsInsert Operation = "playlist_items_insert"
+	OpPlaylistsList       Operation = "playlists_list"
 )
 
 // CostRecorder is invoked after each API call with the operation type and the
 // number of calls represented by that request (one for most methods; one per
 // batch for videos.list and channels.list).
 type CostRecorder func(ctx context.Context, op Operation, calls int) error
+
+// APIError describes an HTTP error returned by the YouTube API.
+type APIError struct {
+	Status int
+	Reason string
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("youtube API returned %d: %s", e.Status, e.Body)
+}
+
+// IsQuotaExceeded reports whether err represents YouTube's quotaExceeded reason.
+func IsQuotaExceeded(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Reason == "quotaExceeded"
+}
 
 // Client makes authenticated YouTube Data API v3 calls.
 type Client struct {
@@ -51,8 +70,9 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-// WithBaseURL overrides the default production YouTube Data API base URL.
-// It is used by tests.
+// WithBaseURL overrides the default production YouTube Data API base URL. It is
+// used by tests and by the YUHAUL_YOUTUBE_BASE_URL runtime seam so Product
+// Acceptance can point the assembled binary at a fake YouTube endpoint.
 func WithBaseURL(u string) Option {
 	return func(c *Client) {
 		c.baseURL = strings.TrimRight(u, "/")
@@ -149,6 +169,54 @@ type subscriptionItem struct {
 			ChannelID string `json:"channelId"`
 		} `json:"resourceId"`
 	} `json:"snippet"`
+}
+
+// Playlist represents a YouTube playlist owned by the authenticated user.
+type Playlist struct {
+	ID    string
+	Title string
+}
+
+// ListPlaylists retrieves the authenticated user's playlists one page at a
+// time. Pass nextPageToken from the previous response to continue paging.
+func (c *Client) ListPlaylists(ctx context.Context, nextPageToken string) ([]Playlist, string, error) {
+	q := url.Values{}
+	q.Set("part", "snippet")
+	q.Set("mine", "true")
+	q.Set("maxResults", "50")
+	if nextPageToken != "" {
+		q.Set("pageToken", nextPageToken)
+	}
+
+	body, err := c.get(ctx, "/playlists", q, OpPlaylistsList, 1)
+	if err != nil {
+		return nil, "", fmt.Errorf("list playlists: %w", err)
+	}
+
+	var raw struct {
+		Items         []playlistListItem `json:"items"`
+		NextPageToken string             `json:"nextPageToken"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, "", fmt.Errorf("decode playlists: %w", err)
+	}
+
+	out := make([]Playlist, 0, len(raw.Items))
+	for _, it := range raw.Items {
+		if it.ID == "" {
+			continue
+		}
+		out = append(out, Playlist{
+			ID:    it.ID,
+			Title: it.Snippet.Title,
+		})
+	}
+	return out, raw.NextPageToken, nil
+}
+
+type playlistListItem struct {
+	ID      string  `json:"id"`
+	Snippet snippet `json:"snippet"`
 }
 
 // Channel represents metadata about a YouTube channel, including the cached
@@ -436,7 +504,7 @@ func (c *Client) post(ctx context.Context, path string, q url.Values, op Operati
 	}
 
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("youtube api %s returned %d: %s", path, resp.StatusCode, string(body))
+		return nil, youtubeAPIError(resp.StatusCode, body)
 	}
 
 	if c.recorder != nil {
@@ -475,7 +543,7 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, op Operatio
 	}
 
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("youtube api %s returned %d: %s", path, resp.StatusCode, string(body))
+		return nil, youtubeAPIError(resp.StatusCode, body)
 	}
 
 	if c.recorder != nil {
@@ -485,6 +553,22 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, op Operatio
 	}
 
 	return body, nil
+}
+
+func youtubeAPIError(status int, body []byte) error {
+	var payload struct {
+		Error struct {
+			Errors []struct {
+				Reason string `json:"reason"`
+			} `json:"errors"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &payload)
+	reason := ""
+	if len(payload.Error.Errors) > 0 {
+		reason = payload.Error.Errors[0].Reason
+	}
+	return &APIError{Status: status, Reason: reason, Body: string(body)}
 }
 
 func parseTime(s string) (time.Time, error) {
