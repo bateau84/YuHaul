@@ -2,11 +2,10 @@ package metadata
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
+	"strings"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/quota"
@@ -148,7 +147,7 @@ func (m *Manager) RefreshActiveNearExpiry(ctx context.Context) (int, error) {
 }
 
 // RefreshOnDemand re-fetches metadata for a single video and restores display.
-// It records quota cost in the ledger.
+// The provider adapter records actual calls in the ledger.
 func (m *Manager) RefreshOnDemand(ctx context.Context, videoID string) error {
 	cost := quota.OpVideosList.UnitCost()
 	ok, _, err := m.ledger.CanAfford(ctx, cost)
@@ -156,7 +155,7 @@ func (m *Manager) RefreshOnDemand(ctx context.Context, videoID string) error {
 		return fmt.Errorf("metadata: check quota for on-demand refresh: %w", err)
 	}
 	if !ok {
-		m.logger.WarnContext(ctx, "on-demand metadata refresh deferred: quota exhausted", "video_id", videoID)
+		m.logger.WarnContext(ctx, "on-demand metadata refresh deferred: quota exhausted")
 		return nil
 	}
 
@@ -173,11 +172,90 @@ func (m *Manager) RefreshOnDemand(ctx context.Context, videoID string) error {
 		return err
 	}
 
-	runID := sql.NullInt64{Valid: false}
-	if err := m.ledger.Record(ctx, runID, quota.OpVideosList); err != nil {
-		return fmt.Errorf("metadata: record on-demand refresh quota: %w", err)
-	}
 	return nil
+}
+
+// ReadLocalDisplay performs a local-only, bounded metadata read for run members.
+func (m *Manager) ReadLocalDisplay(ctx context.Context, ids []string) (map[string]LocalDisplay, error) {
+	if len(ids) > 100 {
+		return nil, fmt.Errorf("metadata: local display batch exceeds 100 IDs")
+	}
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	rows, err := m.store.readLocalDisplayRows(ctx, unique)
+	if err != nil {
+		return nil, err
+	}
+	// One cutoff is captured only after the database result set has been fully consumed.
+	cutoff := m.now().UTC()
+	out := make(map[string]LocalDisplay, len(unique))
+	for _, id := range unique {
+		out[id] = LocalDisplay{Attribution: "current_local_not_necessarily_evaluated", TitleAvailability: "unknown", ChannelNameAvailability: "unknown", DurationAvailability: "unknown"}
+	}
+	for _, row := range rows {
+		fetched, fetchedOK := parseLocalTime(row.FetchedAt)
+		expires, expiresOK := parseLocalTime(row.ExpiresAt)
+		_, expiredOK := parseLocalTime(row.ExpiredAt)
+		expiredMarkerPresent := row.ExpiredAt != nil
+		knownExpired := expiredOK || (expiresOK && !expires.After(cutoff))
+		eligibleTime := fetchedOK && expiresOK && fetched.After(time.Time{}) && !fetched.After(cutoff) && expires.After(fetched)
+		eligible := row.IsActive && !expiredMarkerPresent && !knownExpired && eligibleTime
+		item := LocalDisplay{Attribution: "current_local_not_necessarily_evaluated", TitleAvailability: "unknown", ChannelNameAvailability: "unknown", DurationAvailability: "unknown"}
+		if eligible {
+			item.SourceFetchedAt = &fetched
+		}
+		projectString := func(value *string) (*string, string) {
+			if knownExpired {
+				return nil, "known_expired"
+			}
+			if value == nil || strings.TrimSpace(*value) == "" {
+				return nil, "unknown"
+			}
+			if !eligible {
+				return nil, "withheld"
+			}
+			return value, "current_local"
+		}
+		item.Title, item.TitleAvailability = projectString(row.Title)
+		item.ChannelName, item.ChannelNameAvailability = projectString(row.ChannelName)
+		if knownExpired {
+			item.DurationAvailability = "known_expired"
+		} else if row.DurationSeconds != nil {
+			if !eligible {
+				item.DurationAvailability = "withheld"
+			} else {
+				item.DurationSeconds = row.DurationSeconds
+				item.DurationAvailability = "current_local"
+			}
+		}
+		out[row.VideoID] = item
+	}
+	return out, nil
+}
+
+func parseLocalTime(value any) (time.Time, bool) {
+	switch v := value.(type) {
+	case time.Time:
+		if v.IsZero() {
+			return time.Time{}, false
+		}
+		return v.UTC(), true
+	case string:
+		for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05"} {
+			if parsed, err := time.Parse(layout, v); err == nil && !parsed.IsZero() {
+				return parsed.UTC(), true
+			}
+		}
+	case []byte:
+		return parseLocalTime(string(v))
+	}
+	return time.Time{}, false
 }
 
 // GetDisplayMetadata returns active metadata for a video. If the record has
@@ -259,8 +337,7 @@ func (m *Manager) refreshCandidates(ctx context.Context, src candidateSource, wi
 			ids[j] = c.VideoID
 		}
 
-		calls := int(math.Ceil(float64(len(ids)) / float64(m.batchSize)))
-		cost := calls * quota.OpVideosList.UnitCost()
+		cost := quota.OpVideosList.UnitCost()
 		ok, _, err := m.ledger.CanAfford(ctx, cost)
 		if err != nil {
 			return refreshed, fmt.Errorf("metadata: check quota for refresh: %w", err)
@@ -278,11 +355,6 @@ func (m *Manager) refreshCandidates(ctx context.Context, src candidateSource, wi
 
 		if err := m.store.Refresh(ctx, fresh, m.ttl, now); err != nil {
 			return refreshed, err
-		}
-
-		runID := sql.NullInt64{Valid: false}
-		if err := m.ledger.RecordCalls(ctx, runID, quota.OpVideosList, calls); err != nil {
-			return refreshed, fmt.Errorf("metadata: record refresh quota: %w", err)
 		}
 
 		refreshed += len(fresh)
