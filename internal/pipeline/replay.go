@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/router"
@@ -101,16 +102,15 @@ func (p *Pipeline) executeHistorical(ctx context.Context, runID int64, runType s
 
 	defer func() {
 		if r := recover(); r != nil {
-			logger.ErrorContext(ctx, fmt.Sprintf("%s panic", label), "recover", r)
-			_ = p.stateStore.InterruptRun(ctx, runID, fmt.Sprintf("panic: %v", r))
-			p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: fmt.Sprintf("panic: %v", r)}))
-			p.completeHistoricalRun(ctx, runID)
+			logger.ErrorContext(ctx, fmt.Sprintf("%s panic", label), "diagnostic", diag.Encode(diag.PanicCause(), "unknown", "unknown"))
+			p.failHistoricalRun(ctx, runID, fmt.Sprintf("%s panic", label), diag.PanicCause())
 		}
 	}()
 
 	run, err := p.stateStore.GetRun(ctx, runID)
 	if err != nil {
-		logger.ErrorContext(ctx, fmt.Sprintf("load %s failed", label), "error", err)
+		logger.ErrorContext(ctx, fmt.Sprintf("load %s failed", label), "diagnostic", diag.Encode(err, "unknown", "load_run"))
+		p.failHistoricalRun(ctx, runID, fmt.Sprintf("load %s failed", label), err)
 		return
 	}
 
@@ -125,6 +125,11 @@ func (p *Pipeline) executeHistorical(ctx context.Context, runID int64, runType s
 		p.failHistoricalRun(ctx, runID, fmt.Sprintf("list %s videos failed", label), err)
 		return
 	}
+	// Until date-range semantics are settled, replay/backtest select all
+	// retained observations. Capture the selector's established set before
+	// evaluation so a later failure keeps the known selection and an empty
+	// corpus is stored as zero, not unknown (ARD-001).
+	p.captureSelectedCount(ctx, runID, len(videos))
 
 	p.setPhase(ctx, runID, PhaseRouting)
 	p.broadcastPhase(runID, PhaseRouting)
@@ -150,7 +155,7 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 		fetched, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
 		if err != nil {
 			p.logger.DebugContext(ctx, fmt.Sprintf("%s using degraded metadata", label),
-				"video_id", v.VideoID, "error", err)
+				"diagnostic", diag.Encode(err, "unknown", "load_metadata"))
 		} else {
 			meta = fetched
 		}
@@ -182,7 +187,7 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 	}
 
 	if _, err := p.router.EvaluateWithRoutes(ctx, runID, v.ID, vc, p.machine, routes); err != nil {
-		return fmt.Errorf("evaluate video %s: %w", v.VideoID, err)
+		return diag.At(fmt.Errorf("evaluate video %s: %w", v.VideoID, err), "routing", "evaluate_video")
 	}
 
 	decisions, err := p.stateStore.GetRouteDecisionsForVideoInRun(ctx, v.ID, runID)
@@ -217,9 +222,14 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 func (p *Pipeline) completeHistoricalRun(ctx context.Context, runID int64) {
 	run, err := p.machine.CompleteHistoricalRun(ctx, runID)
 	if err != nil {
-		p.logger.ErrorContext(ctx, "complete historical run failed", "run_id", runID, "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
-		run, _ = p.stateStore.GetRun(ctx, runID)
+		p.logger.ErrorContext(ctx, "complete historical run failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+		finalizeCtx, cancel := historicalFinalizationContext(ctx)
+		defer cancel()
+		run, err = p.machine.CompleteHistoricalRun(finalizeCtx, runID)
+		if err != nil {
+			p.failHistoricalRun(finalizeCtx, runID, "run completion failed", err)
+			return
+		}
 	}
 	if run == nil {
 		return
@@ -239,9 +249,33 @@ func (p *Pipeline) completeHistoricalRun(ctx context.Context, runID int64) {
 	}))
 }
 
+// failHistoricalRun finalizes a dry-run/replay/backtest run whose evaluation
+// did not reach a normal terminal state. Per the accepted run-status rule
+// (System Architecture §Run Recovery / ADR-002) the run ends terminal `failed`
+// — never interrupted-then-completed — and only falls back to the resumable
+// `interrupted` state when failure finalization itself cannot be persisted.
 func (p *Pipeline) failHistoricalRun(ctx context.Context, runID int64, message string, err error) {
-	p.logger.ErrorContext(ctx, message, "run_id", runID, "error", err)
-	_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
-	p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
-	p.completeHistoricalRun(ctx, runID)
+	p.logger.ErrorContext(ctx, "historical run failed", "run_id", runID, "diagnostic", diag.Reason(err, message))
+	// Persisted reason, logs and SSE payload all carry only classified facts
+	// (ARD-001); the raw chain stays in process memory for control flow only.
+	reason := diag.Reason(err, message)
+	finalizeCtx, cancel := historicalFinalizationContext(ctx)
+	defer cancel()
+	if _, ferr := p.machine.FailHistoricalRun(finalizeCtx, runID, reason); ferr != nil {
+		p.logger.ErrorContext(ctx, "fail historical run failed", "run_id", runID, "diagnostic", diag.Encode(ferr, "unknown", "finalize_run"))
+		// The failed-status attempt may have exhausted its deadline. Give the
+		// resumable fallback its own bounded bookkeeping window.
+		interruptCtx, interruptCancel := historicalFinalizationContext(ctx)
+		defer interruptCancel()
+		if interruptErr := p.stateStore.InterruptRun(interruptCtx, runID, reason); interruptErr != nil {
+			p.logger.ErrorContext(ctx, "interrupt historical run fallback failed", "run_id", runID, "diagnostic", diag.Encode(interruptErr, "unknown", "finalize_run"))
+		}
+	}
+	p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: reason}))
+}
+
+// Historical finalization must survive cancellation of the execution request.
+// Keep bookkeeping bounded while retaining context values for diagnostics.
+func historicalFinalizationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }

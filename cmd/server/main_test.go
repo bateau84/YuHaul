@@ -202,6 +202,45 @@ func newTestPlaylistProvider(t *testing.T, baseURL string) (*playlistProvider, *
 	return &playlistProvider{auth: authSvc, baseURL: baseURL, ledger: quota.New(db)}, db
 }
 
+func TestStandaloneReadsObserveRejectedAuthorization(t *testing.T) {
+	for _, kind := range []string{"playlists", "metadata"} {
+		t.Run(kind, func(t *testing.T) {
+			calls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":401,"message":"unauthorized"}}`))
+			}))
+			defer upstream.Close()
+			provider, db := newTestPlaylistProvider(t, upstream.URL)
+			fetcher := &metadataFetcher{auth: provider.auth, baseURL: upstream.URL, ledger: provider.ledger}
+			read := func() error {
+				if kind == "playlists" {
+					_, err := provider.ListPlaylists(context.Background())
+					return err
+				}
+				_, err := fetcher.FetchMetadata(context.Background(), []string{"v1"})
+				return err
+			}
+			if err := read(); err == nil {
+				t.Fatal("rejected read succeeded")
+			}
+			if err := read(); err == nil {
+				t.Fatal("read after rejection succeeded")
+			}
+			if calls != 1 {
+				t.Fatalf("upstream calls = %d, want 1 (no replay or stale credential reuse)", calls)
+			}
+			if kind == "playlists" {
+				_, count, _ := playlistsListQuota(t, db)
+				if count != 1 {
+					t.Fatalf("playlist quota calls = %d, want 1", count)
+				}
+			}
+		})
+	}
+}
+
 // newFakeYouTubePlaylists serves playlists.list pages keyed by pageToken (the
 // empty string is the first request). nextTokens maps a page token to the
 // nextPageToken returned after that page. An unknown page token yields a 4xx,
@@ -337,9 +376,9 @@ func TestHandleListPlaylists_LaterPageFailureNoPartialList(t *testing.T) {
 		t.Fatalf("partial playlist list leaked on later-page failure: %s", body)
 	}
 
-	// The successful first page's quota entry is retained.
-	if units, calls, rows := playlistsListQuota(t, db); units != 1 || calls != 1 || rows != 1 {
-		t.Fatalf("quota ledger = %d units, %d calls, %d rows; want 1/1/1 retained from the successful first page", units, calls, rows)
+	// Both requests reached the provider, including the failed second page.
+	if units, calls, rows := playlistsListQuota(t, db); units != 2 || calls != 2 || rows != 2 {
+		t.Fatalf("quota ledger = %d units, %d calls, %d rows; want 2/2/2 for both pages", units, calls, rows)
 	}
 }
 

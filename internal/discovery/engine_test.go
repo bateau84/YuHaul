@@ -1,17 +1,21 @@
 package discovery
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
@@ -28,6 +32,191 @@ func openTestDB(t *testing.T) *sql.DB {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func TestRunBound401NotifiesExactCredentialAndCountsAttempt(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	key := []byte("01234567890123456789012345678901")
+	store, err := auth.NewSQLiteTokenStore(db, key)
+	require.NoError(t, err)
+	refreshCalls := 0
+	oauthClient := &http.Client{Transport: discoveryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		refreshCalls++
+		return discoveryResponse(http.StatusOK, `{"access_token":"fresh","token_type":"Bearer","expires_in":3600}`), nil
+	})}
+	service, err := auth.NewService(&auth.ServiceConfig{ClientID: "client", ClientSecret: "secret", RedirectURL: "http://localhost/callback", EncryptionKey: string(key), HTTPClient: oauthClient}, store, auth.NewInMemoryStateStore())
+	require.NoError(t, err)
+	require.NoError(t, store.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "stale", RefreshToken: "refresh", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour), Scopes: auth.DefaultScopes()}))
+	binding, err := service.Bind(ctx)
+	require.NoError(t, err)
+	dataCalls := 0
+	data := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dataCalls++
+		if dataCalls == 1 {
+			require.Equal(t, "Bearer stale", r.Header.Get("Authorization"))
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = fmt.Fprint(w, `{}`)
+			return
+		}
+		require.Equal(t, "Bearer fresh", r.Header.Get("Authorization"))
+		_, _ = fmt.Fprint(w, `{"items":[]}`)
+	}))
+	defer data.Close()
+	stateStore, err := state.NewStore(db)
+	require.NoError(t, err)
+	runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	ledger := quota.New(db)
+	engine := NewEngine(service, state.NewMachine(stateStore), ledger, db, WithBaseURL(data.URL))
+	initial, err := store.Load(ctx)
+	require.NoError(t, err)
+	_, err = engine.RunBound(ctx, runID, binding)
+	require.Error(t, err)
+	before, err := store.Load(ctx)
+	require.NoError(t, err)
+	require.False(t, before.AccessRejected)
+	require.Equal(t, initial.CredentialRevision+1, before.CredentialRevision)
+	// Rejection advances credentials once; the next bound request uses them safely.
+	_, err = engine.RunBound(ctx, runID, binding)
+	require.NoError(t, err)
+	after, err := store.Load(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before.CredentialRevision, after.CredentialRevision)
+	require.Equal(t, 1, refreshCalls)
+	require.Equal(t, 2, dataCalls)
+	calls, err := ledger.ConsumedByRun(ctx, runID)
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+}
+
+func TestRunBound403RenewsOnlyForSingleAuthErrorReason(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		body        string
+		wantRenewal int
+	}{
+		{name: "typed authError", body: `{"error":{"errors":[{"reason":"authError"}]}}`, wantRenewal: 1},
+		{name: "generic forbidden", body: `{"error":{"errors":[{"reason":"forbidden"}]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openTestDB(t)
+			key := []byte("01234567890123456789012345678901")
+			tokenStore, err := auth.NewSQLiteTokenStore(db, key)
+			require.NoError(t, err)
+			refreshCalls := 0
+			oauthClient := &http.Client{Transport: discoveryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				refreshCalls++
+				return discoveryResponse(http.StatusOK, `{"access_token":"fresh","token_type":"Bearer","expires_in":3600}`), nil
+			})}
+			service, err := auth.NewService(&auth.ServiceConfig{ClientID: "client", ClientSecret: "secret", RedirectURL: "http://localhost/callback", EncryptionKey: string(key), HTTPClient: oauthClient}, tokenStore, auth.NewInMemoryStateStore())
+			require.NoError(t, err)
+			require.NoError(t, tokenStore.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "stale", RefreshToken: "refresh", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour), Scopes: auth.DefaultScopes()}))
+			binding, err := service.Bind(ctx)
+			require.NoError(t, err)
+			dataCalls := 0
+			data := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				dataCalls++
+				if dataCalls == 1 {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = io.WriteString(w, tc.body)
+					return
+				}
+				wantToken := "Bearer stale"
+				if tc.wantRenewal == 1 {
+					wantToken = "Bearer fresh"
+				}
+				require.Equal(t, wantToken, r.Header.Get("Authorization"))
+				_, _ = io.WriteString(w, `{"items":[]}`)
+			}))
+			defer data.Close()
+			stateStore, err := state.NewStore(db)
+			require.NoError(t, err)
+			runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+			require.NoError(t, err)
+			engine := NewEngine(service, state.NewMachine(stateStore), quota.New(db), db, WithBaseURL(data.URL))
+			_, err = engine.RunBound(ctx, runID, binding)
+			require.Error(t, err)
+			_, err = engine.RunBound(ctx, runID, binding)
+			require.NoError(t, err, "the second request should succeed regardless of the first response reason")
+			require.Equal(t, tc.wantRenewal, refreshCalls)
+			require.Equal(t, 2, dataCalls)
+		})
+	}
+}
+
+func TestRunBound401OAuthFailureKeepsAPIErrorAndAccountsRead(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	key := []byte("01234567890123456789012345678901")
+	tokenStore, err := auth.NewSQLiteTokenStore(db, key)
+	require.NoError(t, err)
+	refreshCalls := 0
+	oauthClient := &http.Client{Transport: discoveryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		refreshCalls++
+		return discoveryResponse(http.StatusServiceUnavailable, `oauth failure body must not leak`), nil
+	})}
+	service, err := auth.NewService(&auth.ServiceConfig{ClientID: "client", ClientSecret: "secret", RedirectURL: "http://localhost/callback", EncryptionKey: string(key), HTTPClient: oauthClient}, tokenStore, auth.NewInMemoryStateStore())
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "stale", RefreshToken: "refresh", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour), Scopes: auth.DefaultScopes()}))
+	binding, err := service.Bind(ctx)
+	require.NoError(t, err)
+	dataCalls := 0
+	data := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dataCalls++
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"errors":[{"reason":"authError"}]}}`)
+	}))
+	defer data.Close()
+	stateStore, err := state.NewStore(db)
+	require.NoError(t, err)
+	runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	ledger := quota.New(db)
+	engine := NewEngine(service, state.NewMachine(stateStore), ledger, db, WithBaseURL(data.URL))
+	_, err = engine.RunBound(ctx, runID, binding)
+	var apiErr *youtube.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, http.StatusUnauthorized, apiErr.Status)
+	require.Equal(t, "authError", apiErr.Reason)
+	require.NotContains(t, err.Error(), "OAuth")
+	require.NotContains(t, err.Error(), "oauth failure body")
+	require.Equal(t, 1, refreshCalls)
+	require.Equal(t, 1, dataCalls)
+	calls, err := ledger.ConsumedByRun(ctx, runID)
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+}
+
+type closeTrackingTransport struct {
+	base   http.RoundTripper
+	closed *bool
+}
+
+func (t closeTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err == nil && resp != nil && resp.Body != nil {
+		resp.Body = &trackedReadCloser{ReadCloser: resp.Body, closed: t.closed}
+	}
+	return resp, err
+}
+
+type trackedReadCloser struct {
+	io.ReadCloser
+	closed *bool
+}
+
+func (r *trackedReadCloser) Close() error {
+	*r.closed = true
+	return r.ReadCloser.Close()
+}
+
+type discoveryRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f discoveryRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func discoveryResponse(status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: &http.Request{}}
 }
 
 func newTestEngine(t *testing.T, baseURL string, limit int) (*Engine, *state.Store, *quota.Ledger, *sql.DB) {
@@ -388,4 +577,42 @@ func TestDiscoveryRespectsQuotaBudget(t *testing.T) {
 	_, err = eng.Run(ctx, runID)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "insufficient quota")
+}
+
+func TestRunBoundAdmittedNoResponseRecordsAttempt(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	key := []byte("01234567890123456789012345678901")
+	tokenStore, err := auth.NewSQLiteTokenStore(db, key)
+	require.NoError(t, err)
+	service, err := auth.NewService(&auth.ServiceConfig{ClientID: "client", ClientSecret: "secret", RedirectURL: "http://localhost/callback", EncryptionKey: string(key)}, tokenStore, auth.NewInMemoryStateStore())
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "valid", RefreshToken: "refresh", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour), Scopes: auth.DefaultScopes()}))
+	binding, err := service.Bind(ctx)
+	require.NoError(t, err)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer server.Close()
+	st, err := state.NewStore(db)
+	require.NoError(t, err)
+	runID, err := st.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	ledger := quota.New(db)
+	engine := NewEngine(service, state.NewMachine(st), ledger, db, WithBaseURL(server.URL))
+	_, err = engine.RunBound(ctx, runID, binding)
+	require.Error(t, err)
+	require.EqualValues(t, 1, calls.Load())
+	var count int
+	var category string
+	var status sql.NullInt64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*), min(outcome_category), min(http_status) FROM quota_ledger WHERE run_id = ?`, runID).Scan(&count, &category, &status))
+	require.Equal(t, 1, count)
+	require.Equal(t, "transient", category)
+	require.False(t, status.Valid)
 }

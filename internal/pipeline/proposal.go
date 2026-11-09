@@ -24,6 +24,10 @@ import (
 	"github.com/bateau84/YuHaul/internal/state"
 )
 
+// ErrInvalidProposal marks a proposal rejected by input validation before any
+// state is written. Its messages contain only route indexes, never input text.
+var ErrInvalidProposal = errors.New("invalid proposal configuration")
+
 // validateProposalRouteIDs enforces the ADR-012 §1 input rules on a proposal
 // configuration: every routes[].id must be a canonical UUIDv4 (uppercase hex
 // accepted, canonical lowercase returned) and no UUID may repeat within one
@@ -34,10 +38,10 @@ func validateProposalRouteIDs(proposal *config.ProposalSnapshot) error {
 	for i := range proposal.Routes {
 		canonical, ok := router.ParsePublicRouteID(proposal.Routes[i].ID)
 		if !ok {
-			return fmt.Errorf("route %d: invalid route id", i)
+			return fmt.Errorf("%w: route %d: invalid route id", ErrInvalidProposal, i)
 		}
 		if first, dup := seen[canonical]; dup {
-			return fmt.Errorf("route %d: duplicate route id (already used by route %d)", i, first)
+			return fmt.Errorf("%w: route %d: duplicate route id (already used by route %d)", ErrInvalidProposal, i, first)
 		}
 		seen[canonical] = i
 		proposal.Routes[i].ID = canonical
@@ -83,6 +87,29 @@ func (p *Pipeline) ingestProposalRun(ctx context.Context, description string,
 
 func (p *Pipeline) tryIngestProposalRun(ctx context.Context, description string,
 	proposal *config.ProposalSnapshot, run *state.Run) error {
+
+	// Validate before copying and serializing: the decoded presence flags do not
+	// survive JSON serialization, where absent values would become zero values.
+	for i, route := range proposal.Routes {
+		if !route.HasRequiredFields() {
+			return fmt.Errorf("%w: route %d: missing required route field", ErrInvalidProposal, i)
+		}
+		for _, condition := range route.Conditions {
+			if !condition.HasRequiredFields() {
+				return fmt.Errorf("%w: route %d: missing required condition field", ErrInvalidProposal, i)
+			}
+		}
+		for _, action := range route.Actions {
+			if !action.HasRequiredFields() {
+				return fmt.Errorf("%w: route %d: missing required action field", ErrInvalidProposal, i)
+			}
+		}
+		for _, exclusion := range route.Exclusions {
+			if !exclusion.HasType() || !exclusion.HasValue() {
+				return fmt.Errorf("%w: route %d: missing required exclusion field", ErrInvalidProposal, i)
+			}
+		}
+	}
 
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {

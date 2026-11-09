@@ -6,7 +6,12 @@
 //  3. ExecutedAction — per-action outcome for a route decision.
 package state
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/bateau84/YuHaul/internal/diag"
+)
 
 // VideoProcessingState is the overall lifecycle state of a video within a run.
 type VideoProcessingState string
@@ -99,13 +104,55 @@ type Run struct {
 	VideosDeferred        int        `json:"videos_deferred"`
 	VideosFailed          int        `json:"videos_failed"`
 	VideosNotYetEvaluated int        `json:"videos_not_yet_evaluated"`
-	QuotaCost             int        `json:"quota_cost"`
-	DurationSeconds       *float64   `json:"duration_seconds"`
-	InterruptReason       *string    `json:"interrupt_reason"`
-	CurrentPhase          *string    `json:"current_phase"`
+	// VideosSelected is the input count captured when the run's selector
+	// established its input set. NULL means selection was never captured
+	// (unknown, including all pre-migration runs); 0 means selection
+	// completed and found no inputs (ARD-001).
+	VideosSelected *int `json:"videos_selected"`
+	// VideosEvaluated is the number of distinct videos with persisted
+	// route-decision evidence for this run, derived at read time. It is not
+	// a stored counter and does not change videos_discovered (ARD-001).
+	VideosEvaluated int      `json:"videos_evaluated"`
+	QuotaCost       int      `json:"quota_cost"`
+	DurationSeconds *float64 `json:"duration_seconds"`
+	// InterruptReason is the internal run recovery reason. Its public JSON
+	// projection vettes the stored text (see MarshalJSON): unsafe legacy free
+	// text is withheld and flagged unavailable instead of serialized raw
+	// (ARD-001 failure diagnostic boundary).
+	InterruptReason *string `json:"interrupt_reason"`
+	CurrentPhase    *string `json:"current_phase"`
 
 	// ActionAuthorityVersion is write-once producer evidence; zero is legacy/unknown.
 	ActionAuthorityVersion int `json:"-"`
+}
+
+// MarshalJSON projects Run for public serialization. Admitted canonical and
+// exact legacy reasons are normalized to v1. Rejected historical prose is
+// withheld; generic unknown_error summaries retain safe phase/operation but
+// set failure_reason_unavailable because the cause detail is not known
+// (ARD-001).
+func (r Run) MarshalJSON() ([]byte, error) {
+	type alias Run
+	out := struct {
+		*alias
+		InterruptReason          *string `json:"interrupt_reason"`
+		FailureReasonUnavailable bool    `json:"failure_reason_unavailable,omitempty"`
+		CurrentPhase             *string `json:"current_phase"`
+	}{alias: (*alias)(&r)}
+	if r.InterruptReason != nil {
+		if value, unavailable := diag.AdmitErrorText(*r.InterruptReason); value != "" {
+			out.InterruptReason = &value
+			out.FailureReasonUnavailable = unavailable
+		} else {
+			out.FailureReasonUnavailable = unavailable
+		}
+	}
+	if r.CurrentPhase != nil {
+		if phase, ok := diag.AdmitPhase(*r.CurrentPhase); ok {
+			out.CurrentPhase = &phase
+		}
+	}
+	return json.Marshal(out)
 }
 
 // Video represents a discovered video and its processing state.
@@ -133,6 +180,11 @@ type RouteDecision struct {
 	Decision        RouteDecisionType
 	SkipReason      *SkipReason
 	RejectionReason *string
+	// ExclusionIndex identifies the zero-based occurrence in the run's immutable
+	// configuration snapshot. Nil means this decision has no captured reference.
+	ExclusionIndex *int
+	// ExclusionSemanticsVersion identifies the interpretation of that occurrence.
+	ExclusionSemanticsVersion *int
 }
 
 // ExecutedAction records the outcome of executing one action.
@@ -144,8 +196,20 @@ type ExecutedAction struct {
 	ActionType       string
 	TargetPlaylistID string
 	Outcome          ActionOutcome
-	ErrorMessage     *string
-	ExecutedAt       *time.Time
+	// OutcomeReason explains an existing Outcome without adding a new
+	// outcome category (for example already_completed for an idempotent
+	// no-attempt). It is NULL when no reason was captured.
+	OutcomeReason *string
+	ErrorMessage  *string
+	ExecutedAt    *time.Time
+}
+
+// UnresolvedMutation is a run-owned projection of a persisted playlist send
+// guard. Its presence means application is unknown; it is not an attempt.
+type UnresolvedMutation struct {
+	ActionType       string
+	TargetPlaylistID string
+	PreparedAt       time.Time
 }
 
 // ConditionAudit records the evaluation of one condition within a route decision.

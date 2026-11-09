@@ -12,10 +12,14 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/diag"
+	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/pipeline"
+	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 )
@@ -84,6 +88,7 @@ type RunVideoStore interface {
 	GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.RouteDecision, error)
 	GetConditionAuditsForDecision(ctx context.Context, decisionID int64) ([]state.ConditionAudit, error)
 	GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.ExecutedAction, error)
+	ListUnresolvedMutations(ctx context.Context, runID int64, videoIDs []int64) (map[int64][]state.UnresolvedMutation, error)
 }
 
 // ConfigVersionStore is the subset of config.Store used by the run handlers.
@@ -128,20 +133,111 @@ type Playlist struct {
 
 // Server serves the YuHaul REST API and SSE endpoints.
 type Server struct {
-	pipeline            Pipeline
-	broadcast           *pipeline.Broadcaster
-	configHandler       ConfigHandler
-	analyticsHandler    AnalyticsHandler
-	advisoryHandler     AnalyticsHandler
-	queueHandler        QueueHandler
-	routeStore          RouteStore
-	runStore            RunStore
-	runVideoStore       RunVideoStore
+	pipeline         Pipeline
+	broadcast        *pipeline.Broadcaster
+	configHandler    ConfigHandler
+	analyticsHandler AnalyticsHandler
+	advisoryHandler  AnalyticsHandler
+	queueHandler     QueueHandler
+	routeStore       RouteStore
+	runStore         RunStore
+	runVideoStore    RunVideoStore
+	metadataReader   interface {
+		ReadLocalDisplay(context.Context, []string) (map[string]metadata.LocalDisplay, error)
+	}
 	configVersionStore  ConfigVersionStore
 	overviewProvider    OverviewProvider
 	playlistProvider    PlaylistProvider
 	corpusImportHandler CorpusImportHandler
 	logger              *slog.Logger
+
+	// runBase parents every manual production run (ADR-007 §3.4). Cancelling
+	// it interrupts the runs; WaitRuns waits for them to stop.
+	runBase context.Context
+	runMu   sync.Mutex
+	runWG   sync.WaitGroup
+	closing bool
+}
+
+// WithRunContext derives manual production runs from ctx so process shutdown
+// interrupts them. The default is context.Background().
+func WithRunContext(ctx context.Context) Option {
+	return func(s *Server) {
+		if ctx != nil {
+			s.runBase = ctx
+		}
+	}
+}
+
+// trackRun registers one manual run goroutine. It reports false once shutdown
+// has begun (the run context is cancelled or WaitRuns has started), so no new
+// run starts during shutdown.
+func (s *Server) trackRun() bool {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if s.closing || s.runBase.Err() != nil {
+		return false
+	}
+	s.runWG.Add(1)
+	return true
+}
+
+// WaitRuns stops accepting manual runs and waits until the active ones return
+// or ctx ends.
+func (s *Server) WaitRuns(ctx context.Context) error {
+	s.runMu.Lock()
+	s.closing = true
+	s.runMu.Unlock()
+	done := make(chan struct{})
+	go func() { s.runWG.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// RetryCoordinator wraps inner so a queue retry joins the shutdown lifecycle
+// of manual runs (ADR-007 §3.4). The retry runs on a context derived from the
+// run context, not from the request: a client disconnect does not stop it,
+// while process shutdown interrupts it and WaitRuns waits for it. Once
+// shutdown has begun, a new retry is refused with queue.ErrShuttingDown.
+func (s *Server) RetryCoordinator(inner queue.RetryCoordinator) queue.RetryCoordinator {
+	return trackedRetries{s: s, inner: inner}
+}
+
+type trackedRetries struct {
+	s     *Server
+	inner queue.RetryCoordinator
+}
+
+func (t trackedRetries) RetryQueueEntry(_ context.Context, id int64, errorQueue bool) error {
+	if !t.s.trackRun() {
+		return queue.ErrShuttingDown
+	}
+	defer t.s.runWG.Done()
+	ctx, cancel := context.WithTimeout(t.s.runBase, 30*time.Minute)
+	defer cancel()
+	err := t.inner.RetryQueueEntry(ctx, id, errorQueue)
+	if err != nil && t.s.runBase.Err() != nil {
+		// Shutdown cancelled the retry (possibly before it created its run).
+		// Report the same refusal as a retry that arrives during the drain, not
+		// a server failure; any run it created is already `interrupted`.
+		return queue.ErrShuttingDown
+	}
+	return err
+}
+
+// WithMetadataReader enables best-effort current/local Store A display context.
+func WithMetadataReader(reader interface {
+	ReadLocalDisplay(context.Context, []string) (map[string]metadata.LocalDisplay, error)
+}) Option {
+	return func(s *Server) {
+		if reader != nil {
+			s.metadataReader = reader
+		}
+	}
 }
 
 // Option configures a Server.
@@ -275,6 +371,7 @@ func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Optio
 		playlistProvider:    noopPlaylistProvider{},
 		corpusImportHandler: noopCorpusImportHandler{},
 		logger:              slog.Default(),
+		runBase:             context.Background(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -350,6 +447,9 @@ func (noopRunVideoStore) GetConditionAuditsForDecision(context.Context, int64) (
 	return nil, errors.New("run video store not configured")
 }
 func (noopRunVideoStore) GetExecutedActionsForVideoInRun(context.Context, int64, int64) ([]state.ExecutedAction, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) ListUnresolvedMutations(context.Context, int64, []int64) (map[int64][]state.UnresolvedMutation, error) {
 	return nil, errors.New("run video store not configured")
 }
 
@@ -490,9 +590,18 @@ func stripPrefix(prefix string, h http.Handler) http.Handler {
 }
 
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
+	if !s.trackRun() {
+		writeError(w, http.StatusServiceUnavailable, "server is shutting down")
+		return
+	}
 	run, err := s.pipeline.StartRun(r.Context(), state.RunTypeManual)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to start run", "error", err)
+		s.runWG.Done()
+		if errors.Is(err, pipeline.ErrStartupRecoveryActive) {
+			writeError(w, http.StatusServiceUnavailable, pipeline.ErrStartupRecoveryActive.Error())
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "failed to start run", "diagnostic", diag.Encode(err, "unknown", "start_run"))
 		writeError(w, http.StatusInternalServerError, "failed to start run")
 		return
 	}
@@ -500,7 +609,8 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	// Execute the pipeline asynchronously so the HTTP response returns
 	// immediately with the run ID.
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer s.runWG.Done()
+		ctx, cancel := context.WithTimeout(s.runBase, 30*time.Minute)
 		defer cancel()
 		s.pipeline.Execute(ctx, run.ID)
 	}()
@@ -516,7 +626,7 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		DraftConfiguration *proposalRequest `json:"draft_configuration"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
-		s.logger.ErrorContext(r.Context(), "failed to decode dry-run body", "error", err)
+		s.logger.ErrorContext(r.Context(), "failed to decode dry-run body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -541,7 +651,13 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 
 	run, err := s.pipeline.DryRun(r.Context(), draft)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to start dry-run", "error", err)
+		if errors.Is(err, pipeline.ErrInvalidProposal) {
+			// Fixed classification only: the error text is never logged or returned.
+			s.logger.WarnContext(r.Context(), "rejected invalid dry-run proposal", "class", "invalid_proposal", "operation", "start_run")
+			writeError(w, http.StatusBadRequest, "invalid proposal configuration")
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "failed to start dry-run", "diagnostic", diag.Encode(err, "unknown", "start_run"))
 		writeError(w, http.StatusInternalServerError, "failed to start dry-run")
 		return
 	}
@@ -574,7 +690,7 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 			ConfigVersionID *int64 `json:"config_version_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
-			s.logger.ErrorContext(r.Context(), "failed to decode replay body", "error", err)
+			s.logger.ErrorContext(r.Context(), "failed to decode replay body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
@@ -583,7 +699,7 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 
 	run, err := s.pipeline.Replay(r.Context(), cfgID)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to start replay", "error", err)
+		s.logger.ErrorContext(r.Context(), "failed to start replay", "diagnostic", diag.Encode(err, "unknown", "start_run"))
 		if errors.Is(err, state.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "config version not found")
 			return
@@ -610,7 +726,7 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 		ProposedConfiguration *proposalRequest `json:"proposed_configuration"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to decode backtest body", "error", err)
+		s.logger.ErrorContext(r.Context(), "failed to decode backtest body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -639,7 +755,13 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 
 	run, err := s.pipeline.Backtest(r.Context(), proposed)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to start backtest", "error", err)
+		if errors.Is(err, pipeline.ErrInvalidProposal) {
+			// Fixed classification only: the error text is never logged or returned.
+			s.logger.WarnContext(r.Context(), "rejected invalid backtest proposal", "class", "invalid_proposal", "operation", "start_run")
+			writeError(w, http.StatusBadRequest, "invalid proposal configuration")
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "failed to start backtest", "diagnostic", diag.Encode(err, "unknown", "start_run"))
 		writeError(w, http.StatusInternalServerError, "failed to start backtest")
 		return
 	}
@@ -660,7 +782,7 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	runs, err := s.runStore.ListRuns(r.Context())
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "list runs failed", "error", err)
+		s.logger.ErrorContext(r.Context(), "list runs failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to list runs")
 		return
 	}
@@ -683,7 +805,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
-		s.logger.ErrorContext(r.Context(), "get run failed", "error", err, "id", id)
+		s.logger.ErrorContext(r.Context(), "get run failed", "run_id", id, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load run")
 		return
 	}
@@ -693,7 +815,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	overview, err := s.overviewProvider.Overview(r.Context())
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "overview failed", "error", err)
+		s.logger.ErrorContext(r.Context(), "overview failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load overview")
 		return
 	}
@@ -746,7 +868,7 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := writeSSE(w, ev); err != nil {
-				s.logger.DebugContext(r.Context(), "sse write failed", "error", err)
+				s.logger.DebugContext(r.Context(), "sse write failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 				return
 			}
 			flusher.Flush()

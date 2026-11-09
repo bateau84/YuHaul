@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/duplicate"
@@ -39,6 +41,22 @@ import (
 )
 
 // ---------- fixtures ----------
+
+type localOAuthTransport struct {
+	target string
+	base   http.RoundTripper
+}
+
+func (t localOAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	target, err := url.Parse(t.target)
+	if err != nil {
+		return nil, err
+	}
+	copy := req.Clone(req.Context())
+	copy.URL.Scheme, copy.URL.Host = target.Scheme, target.Host
+	copy.Host = target.Host
+	return t.base.RoundTrip(copy)
+}
 
 type mockVideo struct {
 	ID              string
@@ -65,13 +83,24 @@ type playlistInsertion struct {
 // mockYouTubeServer serves deterministic YouTube Data API v3 responses and
 // records playlist insertions so tests can assert on real pipeline output.
 type mockYouTubeServer struct {
-	server        *httptest.Server
-	mu            sync.Mutex
-	requests      int
-	insertions    []playlistInsertion
-	subscriptions []string
-	channels      []mockChannel
-	videos        []mockVideo
+	server               *httptest.Server
+	mu                   sync.Mutex
+	requests             int
+	insertions           []playlistInsertion
+	subscriptions        []string
+	channels             []mockChannel
+	videos               []mockVideo
+	expectedBearer       string
+	unauthorizedRequests int
+
+	// Failure-injection knobs let composition tests exercise real
+	// provider-error paths through the same base-URL seam (ARD-001
+	// diagnostic boundary). Zero/empty means normal provider behavior.
+	subscriptionsFailStatus int
+	subscriptionsFailBody   string
+	insertFailTarget        string
+	insertFailStatus        int
+	insertFailBody          string
 }
 
 func newMockYouTubeServer(channels []mockChannel, videos []mockVideo) *mockYouTubeServer {
@@ -96,6 +125,9 @@ func newMockYouTubeServer(channels []mockChannel, videos []mockVideo) *mockYouTu
 	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		m.requests++
+		if m.expectedBearer != "" && r.Header.Get("Authorization") != "Bearer "+m.expectedBearer {
+			m.unauthorizedRequests++
+		}
 		m.mu.Unlock()
 		mux.ServeHTTP(w, r)
 	}))
@@ -109,6 +141,21 @@ func (m *mockYouTubeServer) Requests() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.requests
+}
+
+func (m *mockYouTubeServer) expectBearer(t *testing.T, token string) {
+	t.Helper()
+	m.mu.Lock()
+	m.expectedBearer = token
+	m.mu.Unlock()
+}
+
+func (m *mockYouTubeServer) assertBearerRequests(t *testing.T) {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	require.Greater(t, m.requests, 0, "expected provider requests")
+	require.Zero(t, m.unauthorizedRequests, "all provider requests must carry the synthetic bearer")
 }
 
 func (m *mockYouTubeServer) Insertions() []playlistInsertion {
@@ -131,7 +178,56 @@ func (m *mockYouTubeServer) recordInsertion(playlistID, videoID string) {
 	m.insertions = append(m.insertions, playlistInsertion{PlaylistID: playlistID, VideoID: videoID})
 }
 
+// FailSubscriptions makes every /subscriptions request fail with the given
+// HTTP status and raw JSON body, standing in for a real provider outage before
+// any selector runs.
+func (m *mockYouTubeServer) FailSubscriptions(status int, body string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.subscriptionsFailStatus = status
+	m.subscriptionsFailBody = body
+}
+
+// FailPlaylistInsert makes playlist inserts targeting one playlist ID fail
+// with the given HTTP status and raw body, standing in for a real provider
+// failure (including quotaExceeded) at action-attempt time. Inserts for other
+// targets keep succeeding.
+func (m *mockYouTubeServer) FailPlaylistInsert(playlistID string, status int, body string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.insertFailTarget = playlistID
+	m.insertFailStatus = status
+	m.insertFailBody = body
+}
+
+// ClearFailures restores normal provider behavior on every endpoint.
+func (m *mockYouTubeServer) ClearFailures() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.subscriptionsFailStatus = 0
+	m.subscriptionsFailBody = ""
+	m.insertFailTarget = ""
+	m.insertFailStatus = 0
+	m.insertFailBody = ""
+}
+
+// writeProviderFailure responds with a raw YouTube-style JSON error body so
+// composition tests can prove payload text never crosses the diagnostic
+// boundary (ARD-001).
+func writeProviderFailure(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body)
+}
+
 func (m *mockYouTubeServer) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	status, body := m.subscriptionsFailStatus, m.subscriptionsFailBody
+	m.mu.Unlock()
+	if status != 0 {
+		writeProviderFailure(w, status, body)
+		return
+	}
 	items := make([]map[string]any, len(m.subscriptions))
 	for i, ch := range m.subscriptions {
 		items[i] = map[string]any{
@@ -175,8 +271,18 @@ func (m *mockYouTubeServer) handlePlaylistItems(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		m.mu.Lock()
+		failTarget, failStatus, failBody := m.insertFailTarget, m.insertFailStatus, m.insertFailBody
+		m.mu.Unlock()
+		if failTarget != "" && failTarget == body.Snippet.PlaylistID {
+			writeProviderFailure(w, failStatus, failBody)
+			return
+		}
 		m.recordInsertion(body.Snippet.PlaylistID, body.Snippet.ResourceID.VideoID)
-		writeJSON(w, map[string]any{"id": "inserted-item"})
+		writeJSON(w, map[string]any{"id": "inserted-item", "snippet": map[string]any{
+			"playlistId": body.Snippet.PlaylistID,
+			"resourceId": map[string]any{"videoId": body.Snippet.ResourceID.VideoID},
+		}})
 		return
 	}
 
@@ -268,6 +374,7 @@ func (f *fakeMetadataFetcher) FetchMetadata(ctx context.Context, videoIDs []stri
 
 type testEnv struct {
 	db          *sql.DB
+	dbPath      string
 	stateStore  *state.Store
 	machine     *state.Machine
 	pipeline    *pipeline.Pipeline
@@ -282,6 +389,15 @@ type testEnv struct {
 }
 
 func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv {
+	return setupEnvWithCompositionAdapters(t, channels, videos, false)
+}
+
+// setupDiagnosticCompositionEnv additionally uses provider-backed metadata.
+func setupDiagnosticCompositionEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv {
+	return setupEnvWithCompositionAdapters(t, channels, videos, true)
+}
+
+func setupEnvWithCompositionAdapters(t *testing.T, channels []mockChannel, videos []mockVideo, productionAdapters bool) *testEnv {
 	t.Helper()
 	ctx := context.Background()
 
@@ -304,22 +420,30 @@ func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv
 	t.Cleanup(mock.Close)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	discoveryFactory := func(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
-		return youtube.NewClient(ctx, token,
-			youtube.WithBaseURL(mock.URL()),
-			youtube.WithHTTPClient(mock.server.Client()),
-			youtube.WithRecorder(recorder),
-			youtube.WithLogger(logger),
-		)
-	}
-	disc := discovery.NewEngine(&fakeTokenSource{}, machine, ledger, db,
-		discovery.WithClientFactory(discoveryFactory),
+	key := []byte("01234567890123456789012345678901")
+	tokenStore, err := auth.NewSQLiteTokenStore(db, key)
+	require.NoError(t, err)
+	// Reject any unexpected OAuth request rather than reaching a live provider.
+	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unexpected OAuth request", http.StatusBadRequest)
+	}))
+	t.Cleanup(oauthServer.Close)
+	authSvc, err := auth.NewService(&auth.ServiceConfig{ClientID: "test-client", ClientSecret: "test-secret", RedirectURL: "http://localhost/callback", EncryptionKey: string(key), HTTPClient: &http.Client{Transport: localOAuthTransport{target: oauthServer.URL, base: guardTransport(t, oauthServer.Client().Transport)}}}, tokenStore, auth.NewInMemoryStateStore())
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	require.NoError(t, tokenStore.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "diagnostic-synthetic-token", TokenType: "Bearer", Expiry: now.Add(time.Hour), ConnectedAt: now, UpdatedAt: now}))
+	mock.expectBearer(t, "diagnostic-synthetic-token")
+	disc := discovery.NewEngine(authSvc, machine, ledger, db,
+		discovery.WithBaseURL(mock.URL()),
 		discovery.WithLogger(logger),
 	)
 
 	metaStore := metadata.NewStore(db)
-	meta := metadata.NewManager(metaStore, &fakeMetadataFetcher{}, ledger,
+	var fetcher metadata.Fetcher = &fakeMetadataFetcher{}
+	if productionAdapters {
+		fetcher = &compositionMetadataFetcher{auth: authSvc, baseURL: mock.URL(), transport: guardTransport(t, mock.server.Client().Transport)}
+	}
+	meta := metadata.NewManager(metaStore, fetcher, ledger,
 		metadata.WithLogger(logger),
 	)
 
@@ -335,21 +459,13 @@ func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv
 
 	routerEngine := router.NewEngine(routerStore)
 
-	execFactory := func(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) pipeline.PlaylistInserter {
-		return youtube.NewClient(ctx, token,
-			youtube.WithBaseURL(mock.URL()),
-			youtube.WithHTTPClient(mock.server.Client()),
-			youtube.WithRecorder(recorder),
-			youtube.WithLogger(logger),
-		)
-	}
-	executor := pipeline.NewExecutor(db, ledger, &fakeTokenSource{},
+	executor := pipeline.NewExecutor(db, ledger, authSvc,
 		pipeline.WithExecutorLogger(logger),
-		pipeline.WithYouTubeFactory(execFactory),
+		pipeline.WithYouTubeBaseURL(mock.URL()),
 	)
 
 	broadcast := pipeline.NewBroadcaster()
-	p := pipeline.NewPipeline(db, machine, stateStore, disc, detector, routerEngine, executor, ledger, meta, nil, broadcast,
+	p := pipeline.NewPipeline(db, machine, stateStore, disc, detector, routerEngine, executor, ledger, meta, authSvc, broadcast,
 		pipeline.WithLogger(logger),
 		pipeline.WithVersioner(configSvc),
 		pipeline.WithQueueStore(queueStore),
@@ -358,6 +474,7 @@ func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv
 
 	return &testEnv{
 		db:          db,
+		dbPath:      path,
 		stateStore:  stateStore,
 		machine:     machine,
 		pipeline:    p,
@@ -370,6 +487,40 @@ func setupEnv(t *testing.T, channels []mockChannel, videos []mockVideo) *testEnv
 		metaStore:   metaStore,
 		meta:        meta,
 	}
+}
+
+// compositionMetadataFetcher mirrors cmd/server's production adapter: obtains
+// the active token from auth.Service, then fetches details through YouTube's
+// real client. Only the HTTP destination/client is controlled by this harness.
+type compositionMetadataFetcher struct {
+	auth interface {
+		ActiveToken(context.Context) (*oauth2.Token, error)
+	}
+	baseURL   string
+	transport http.RoundTripper
+}
+
+func (f *compositionMetadataFetcher) FetchMetadata(ctx context.Context, ids []string) ([]metadata.TransientMetadata, error) {
+	if len(ids) == 0 {
+		return []metadata.TransientMetadata{}, nil
+	}
+	token, err := f.auth.ActiveToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	httpClient := oauth2.NewClient(ctx, oauth2.StaticTokenSource(token))
+	httpClient.Transport = &oauth2.Transport{Source: oauth2.StaticTokenSource(token), Base: f.transport}
+	client := youtube.NewClient(ctx, token, youtube.WithBaseURL(f.baseURL), youtube.WithHTTPClient(httpClient))
+	details, err := client.GetVideos(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]metadata.TransientMetadata, 0, len(details))
+	for _, d := range details {
+		title, channel, desc, duration, thumb, published := d.Title, d.ChannelTitle, d.Description, d.DurationSeconds, d.ThumbnailURL, d.PublishedAt
+		out = append(out, metadata.TransientMetadata{VideoID: d.ID, Title: &title, ChannelName: &channel, Description: &desc, DurationSeconds: &duration, ThumbnailURL: &thumb, PublishedAt: &published})
+	}
+	return out, nil
 }
 
 func (env *testEnv) createRoute(t *testing.T, name, value, playlistID string) int64 {

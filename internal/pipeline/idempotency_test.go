@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/duplicate"
@@ -61,6 +62,15 @@ type mockYouTubeServer struct {
 	subscriptions []string
 	channels      []mockChannel
 	videos        []mockVideo
+	// Test hooks for simulating process loss around a provider mutation.
+	// beforeInsert runs after the request is received and before it is applied;
+	// afterInsert runs after it is applied and before the response is written.
+	beforeInsert func()
+	afterInsert  func()
+	// insertDecision sees every playlist POST before it is applied. A non-zero
+	// status makes the server answer with that status and body and record no
+	// insertion (a provider failure).
+	insertDecision func(playlistID, videoID string) (int, string)
 }
 
 type playlistInsertion struct {
@@ -172,8 +182,22 @@ func (m *mockYouTubeServer) handlePlaylistItems(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if m.insertDecision != nil {
+			if status, payload := m.insertDecision(body.Snippet.PlaylistID, body.Snippet.ResourceID.VideoID); status != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, payload)
+				return
+			}
+		}
+		if m.beforeInsert != nil {
+			m.beforeInsert()
+		}
 		m.recordInsertion(body.Snippet.PlaylistID, body.Snippet.ResourceID.VideoID)
-		writeJSON(w, map[string]any{"id": "inserted-item"})
+		if m.afterInsert != nil {
+			m.afterInsert()
+		}
+		writeJSON(w, map[string]any{"id": "inserted-item", "snippet": body.Snippet})
 		return
 	}
 
@@ -282,8 +306,15 @@ func setupIdempotencyTest(t *testing.T, videos []mockVideo) *idempotencyTestEnv 
 			youtube.WithLogger(logger),
 		)
 	}
-	disc := discovery.NewEngine(&fakeTokenSource{}, machine, ledger, db,
+	key := []byte("01234567890123456789012345678901")
+	tokens, err := auth.NewSQLiteTokenStore(db, key)
+	require.NoError(t, err)
+	require.NoError(t, tokens.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "local-test", RefreshToken: "local-refresh", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour), Scopes: auth.DefaultScopes()}))
+	authService, err := auth.NewService(&auth.ServiceConfig{ClientID: "test", ClientSecret: "test", RedirectURL: "http://localhost/callback", EncryptionKey: string(key)}, tokens, auth.NewInMemoryStateStore())
+	require.NoError(t, err)
+	disc := discovery.NewEngine(authService, machine, ledger, db,
 		discovery.WithClientFactory(discoveryFactory),
+		discovery.WithBaseURL(mock.URL()),
 		discovery.WithLogger(logger),
 	)
 
@@ -323,21 +354,13 @@ func setupIdempotencyTest(t *testing.T, videos []mockVideo) *idempotencyTestEnv 
 
 	routerEngine := router.NewEngine(routerStore)
 
-	execFactory := func(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) PlaylistInserter {
-		return youtube.NewClient(ctx, token,
-			youtube.WithBaseURL(mock.URL()),
-			youtube.WithHTTPClient(mock.server.Client()),
-			youtube.WithRecorder(recorder),
-			youtube.WithLogger(logger),
-		)
-	}
-	executor := NewExecutor(db, ledger, &fakeTokenSource{},
+	executor := NewExecutor(db, ledger, authService,
 		WithExecutorLogger(logger),
-		WithYouTubeFactory(execFactory),
+		WithYouTubeBaseURL(mock.URL()),
 	)
 
 	broadcast := NewBroadcaster()
-	p := NewPipeline(db, machine, stateStore, disc, detector, routerEngine, executor, ledger, meta, nil, broadcast,
+	p := NewPipeline(db, machine, stateStore, disc, detector, routerEngine, executor, ledger, meta, authService, broadcast,
 		WithVersioner(versioner),
 		WithConfigStore(cfgStore),
 		WithLogger(logger),

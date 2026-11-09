@@ -10,11 +10,14 @@ package discovery
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/state"
@@ -57,8 +60,8 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
-// WithClientFactory replaces the default YouTube client factory. Tests use this
-// to point the client at a mock server.
+// WithClientFactory replaces the legacy Run client factory. RunBound always
+// constructs its own fenced client and ignores this option.
 func WithClientFactory(f ClientFactory) Option {
 	return func(e *Engine) {
 		e.factory = f
@@ -135,6 +138,10 @@ func (e *Engine) Run(ctx context.Context, runID int64) (*Result, error) {
 		return e.ledger.RecordCalls(ctx, sql.NullInt64{Int64: runID, Valid: true}, quota.Operation(op), calls)
 	}
 	client := e.factory(ctx, token, recorder)
+	return e.runWithClient(ctx, runID, client)
+}
+
+func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube.Client) (*Result, error) {
 
 	result := &Result{}
 	runStart := time.Now().UTC()
@@ -173,6 +180,53 @@ func (e *Engine) Run(ctx context.Context, runID int64) (*Result, error) {
 	return result, nil
 }
 
+// RunBound performs production discovery using the caller's invocation binding.
+// The binding is shared with subsequent production calls and is never renewed
+// into a different authorization identity.
+func (e *Engine) RunBound(ctx context.Context, runID int64, binding auth.AuthorizationBinding) (*Result, error) {
+	resolver, ok := e.auth.(interface {
+		Resolve(context.Context, auth.AuthorizationBinding) (*oauth2.Token, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("discovery: authorization resolver unavailable")
+	}
+	resolve := func(ctx context.Context) (*oauth2.Token, error) { return resolver.Resolve(ctx, binding) }
+	{
+		dispatcher, dispatchOK := e.auth.(interface {
+			DispatchWithQuota(context.Context, auth.AuthorizationBinding, *http.Request, http.RoundTripper, *quota.Ledger, quota.Operation) (*http.Response, auth.AdmissionReceipt, *quota.Hold, error)
+			ObserveAccessRejection(context.Context, auth.AuthorizationBinding, auth.AdmissionReceipt) error
+		})
+		if !dispatchOK {
+			return nil, fmt.Errorf("discovery: authorization dispatcher unavailable")
+		}
+		opts := []youtube.Option{
+			youtube.WithQuotaReads(),
+			youtube.WithRequestDispatcher(func(ctx context.Context, req *http.Request, transport http.RoundTripper) (*http.Response, youtube.RequestAdmission, error) {
+				op, ok := youtube.ReadOperation(ctx)
+				if !ok {
+					return nil, youtube.RequestAdmission{}, fmt.Errorf("discovery: youtube read operation unavailable")
+				}
+				resp, receipt, hold, err := dispatcher.DispatchWithQuota(ctx, binding, req, transport, e.ledger, quota.Operation(op))
+				admission := youtube.RequestAdmission{AuthorizationID: receipt.AuthorizationID, CredentialRevision: receipt.CredentialRevision, AdmittedAt: receipt.AdmittedAt}
+				if hold != nil {
+					admission.Finalize = func(ctx context.Context, category string, status int) error {
+						return hold.Finalize(ctx, sql.NullInt64{Int64: runID, Valid: true}, quota.OutcomeCategory(category), sql.NullInt64{Int64: int64(status), Valid: status != 0})
+					}
+				}
+				return resp, admission, err
+			}),
+			youtube.WithRejectionObserver(func(ctx context.Context, admission youtube.RequestAdmission) error {
+				return dispatcher.ObserveAccessRejection(ctx, binding, auth.AdmissionReceipt{AuthorizationID: admission.AuthorizationID, CredentialRevision: admission.CredentialRevision, AdmittedAt: admission.AdmittedAt})
+			}),
+		}
+		if e.baseURL != "" {
+			opts = append(opts, youtube.WithBaseURL(e.baseURL))
+		}
+		client := youtube.NewAuthorizedClient(ctx, resolve, opts...)
+		return e.runWithClient(ctx, runID, client)
+	}
+}
+
 func (e *Engine) fetchSubscriptions(ctx context.Context, client *youtube.Client, result *Result) ([]string, error) {
 	if err := e.requireBudget(ctx, quota.OpSubscriptionsList, 1); err != nil {
 		return nil, err
@@ -183,6 +237,9 @@ func (e *Engine) fetchSubscriptions(ctx context.Context, client *youtube.Client,
 	for {
 		resp, err := client.ListSubscriptions(ctx, pageToken)
 		if err != nil {
+			if pageToken != "" && errors.Is(err, auth.ErrQuotaRefused) {
+				break
+			}
 			return nil, fmt.Errorf("discovery: list subscriptions: %w", err)
 		}
 		for _, s := range resp.Items {
@@ -195,7 +252,7 @@ func (e *Engine) fetchSubscriptions(ctx context.Context, client *youtube.Client,
 			break
 		}
 		if err := e.requireBudget(ctx, quota.OpSubscriptionsList, 1); err != nil {
-			e.logger.WarnContext(ctx, "discovery: insufficient quota for next subscriptions page", "error", err)
+			e.logger.WarnContext(ctx, "discovery: insufficient quota for next subscriptions page", "diagnostic", diag.Encode(err, "discovery", "subscriptions_list"))
 			break
 		}
 	}
@@ -239,7 +296,7 @@ func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, cha
 	var out []*discoveredVideo
 	for _, ch := range channels {
 		if ch.UploadsPlaylistID == "" {
-			e.logger.DebugContext(ctx, "discovery: channel has no uploads playlist", "channel_id", ch.ID)
+			e.logger.DebugContext(ctx, "discovery: channel has no uploads playlist")
 			continue
 		}
 		watermark, err := e.channelWatermark(ctx, ch.ID)
@@ -252,11 +309,14 @@ func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, cha
 		for {
 			if err := e.requireBudget(ctx, quota.OpPlaylistItemsList, 1); err != nil {
 				e.logger.WarnContext(ctx, "discovery: insufficient quota for playlist items",
-					"channel_id", ch.ID, "error", err)
+					"diagnostic", diag.Encode(err, "discovery", "playlist_items_list"))
 				break
 			}
 			items, next, err := client.ListPlaylistItems(ctx, ch.UploadsPlaylistID, pageToken)
 			if err != nil {
+				if errors.Is(err, auth.ErrQuotaRefused) {
+					break
+				}
 				return nil, fmt.Errorf("discovery: list playlist items for %s: %w", ch.ID, err)
 			}
 
@@ -311,11 +371,14 @@ func (e *Engine) prefetchMetadata(ctx context.Context, client *youtube.Client, v
 			end = len(ids)
 		}
 		if err := e.requireBudget(ctx, quota.OpVideosList, 1); err != nil {
-			e.logger.WarnContext(ctx, "discovery: insufficient quota for metadata fetch", "error", err)
+			e.logger.WarnContext(ctx, "discovery: insufficient quota for metadata fetch", "diagnostic", diag.Encode(err, "discovery", "videos_list"))
 			break
 		}
 		batch, err := client.GetVideos(ctx, ids[i:end])
 		if err != nil {
+			if errors.Is(err, auth.ErrQuotaRefused) {
+				break
+			}
 			return fmt.Errorf("discovery: get videos metadata: %w", err)
 		}
 		for _, d := range batch {

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bateau84/YuHaul/internal/diag"
 )
 
 // Store persists and queries the error and deferred queues.
@@ -25,6 +27,8 @@ func NewStore(db *sql.DB) (*Store, error) {
 
 // CreateErrorEntry persists a new error queue entry and returns its ID.
 func (s *Store) CreateErrorEntry(ctx context.Context, e *ErrorEntry) (int64, error) {
+	e.Message = diag.GuardErrorText(e.Message)
+	e.Detail = diag.GuardErrorText(e.Detail)
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO error_entry (video_id, run_id, error_category, error_message, error_detail, status, created_at, retry_count)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
@@ -139,6 +143,7 @@ func (s *Store) SetErrorEntryRetrying(ctx context.Context, id int64) error {
 
 // UpdateErrorEntryFailure re-records an active failure after a retry attempt.
 func (s *Store) UpdateErrorEntryFailure(ctx context.Context, id int64, message string) error {
+	message = diag.GuardErrorText(message)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE error_entry
 		 SET status = ?, error_message = ?, resolved_at = NULL
@@ -155,6 +160,9 @@ func (s *Store) UpdateErrorEntryFailure(ctx context.Context, id int64, message s
 
 // CreateDeferredItem persists a new deferred work item and returns its ID.
 func (s *Store) CreateDeferredItem(ctx context.Context, d *DeferredItem) (int64, error) {
+	if !d.Reason.Valid() {
+		return 0, errors.New("creating deferred item: invalid reason")
+	}
 	return s.createDeferredItem(ctx, s.db, d)
 }
 
@@ -162,6 +170,9 @@ func (s *Store) CreateDeferredItem(ctx context.Context, d *DeferredItem) (int64,
 func (s *Store) CreateDeferredItemTx(ctx context.Context, tx *sql.Tx, d *DeferredItem) (int64, error) {
 	if tx == nil {
 		return 0, errors.New("creating deferred item: transaction is required")
+	}
+	if !d.Reason.Valid() {
+		return 0, errors.New("creating deferred item: invalid reason")
 	}
 	var retryAfter *string
 	if d.RetryAfter != nil {

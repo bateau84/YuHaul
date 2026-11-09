@@ -47,9 +47,13 @@ type RouteStats struct {
 	VideosSkipped     int            `json:"videos_skipped"`
 	RejectionByReason map[string]int `json:"rejection_by_reason"`
 	SkipBreakdown     map[string]int `json:"skip_breakdown"`
-	ActionsExecuted   int            `json:"actions_executed"`
-	ActionsSucceeded  int            `json:"actions_succeeded"`
-	ActionsFailed     int            `json:"actions_failed"`
+	// ActionsExecuted counts actual external action attempts: succeeded rows
+	// plus the producer's attempted-and-failed rows. Deferred and
+	// not_attempted dispositions (quota deferral, idempotency suppression,
+	// skipped-after-failure, simulation) never count (BR-020).
+	ActionsExecuted  int `json:"actions_executed"`
+	ActionsSucceeded int `json:"actions_succeeded"`
+	ActionsFailed    int `json:"actions_failed"`
 }
 
 // ChannelStats are materialized counters for a channel.

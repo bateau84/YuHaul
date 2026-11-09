@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 )
@@ -275,11 +276,17 @@ func (s *Store) enrichRouteStats(ctx context.Context, runID, routeKey int64, rs 
 		return fmt.Errorf("iterate route skip: %w", err)
 	}
 
-	// Action outcomes for matched decisions.
+	// Action outcomes for matched decisions. ActionsExecuted counts actual
+	// external attempts only: succeeded and failed rows (the producer writes
+	// failed only after an attempted request). Deferred and not_attempted
+	// dispositions — quota deferrals, idempotency suppressions, skipped
+	// actions, and simulation evidence — are never external attempts and do
+	// not count, even on historical simulation rows that carry a stale
+	// executed_at timestamp (BR-020, run-route-statistics, ARD-001).
 	rows3, err := s.db.QueryContext(ctx,
 		`SELECT COALESCE(SUM(CASE WHEN ea.outcome = 'succeeded' THEN 1 ELSE 0 END), 0),
 		        COALESCE(SUM(CASE WHEN ea.outcome = 'failed' THEN 1 ELSE 0 END), 0),
-		        COUNT(ea.id)
+		        COALESCE(SUM(CASE WHEN ea.outcome IN ('succeeded', 'failed') THEN 1 ELSE 0 END), 0)
 		 FROM route_decision rd
 		 LEFT JOIN executed_action ea ON ea.route_decision_id = rd.id
 		 WHERE rd.run_id = ? AND rd.route_id = ? AND rd.decision = 'matched';`, runID, routeKey)
@@ -1040,6 +1047,7 @@ func (s *Store) GetRouteMatchRates(ctx context.Context, from, to time.Time, gran
 		 JOIN route r ON r.id = rd.route_id
 		 JOIN run ON run.id = rd.run_id
 		 WHERE run.started_at >= ? AND run.started_at < ? AND run.status = 'completed'
+		   AND run.run_type IN ('scheduled', 'manual')
 		 ORDER BY run.started_at, r.evaluation_order;`,
 		from.UTC().Format(state.RunTimestampLayout), to.UTC().Format(state.RunTimestampLayout))
 	if err != nil {
@@ -1179,7 +1187,7 @@ func (s *Store) runRouteContext(ctx context.Context, runID int64) (map[int64]str
 		// and decision evidence fill in rather than failing run inspection
 		// or fabricating a label or an order.
 		slog.WarnContext(ctx, "run configuration snapshot unavailable; using current route names",
-			"run_id", runID, "error", err)
+			"run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		return nil, nil, nil
 	}
 	labels := make(map[int64]string, len(snapshot.Routes))

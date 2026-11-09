@@ -40,6 +40,7 @@ func setupReplayPipeline(t *testing.T) (*replayDeps, func()) {
 		meta:        metaMgr,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	p.router.WithRunRoutesValidator(p.ValidateRunRoutes)
 
 	return &replayDeps{
 		db:          db,
@@ -129,6 +130,9 @@ func TestReplay_EvaluatesRetainedVideosWithoutMutations(t *testing.T) {
 	loaded, err := deps.stateStore.GetRun(ctx, run.ID)
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
+	require.NotNil(t, loaded.VideosSelected, "the retained selector's input set is captured")
+	assert.Equal(t, 1, *loaded.VideosSelected)
+	assert.Equal(t, 1, loaded.VideosEvaluated, "evaluated counts decision evidence, distinct from selected")
 	assert.Equal(t, 1, loaded.VideosDiscovered)
 	assert.Equal(t, 1, loaded.VideosAccepted)
 	assert.Equal(t, 0, loaded.VideosRejected)
@@ -195,6 +199,9 @@ func TestReplay_UsesAllRetainedVideosNotJustPending(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, loaded.VideosDiscovered)
 	assert.Equal(t, 2, loaded.VideosAccepted)
+	require.NotNil(t, loaded.VideosSelected)
+	assert.Equal(t, 2, *loaded.VideosSelected,
+		"replay selects all retained observations, not only the pending ones")
 }
 
 func TestReplay_DoesNotChangeDuplicateReferenceCorpus(t *testing.T) {
@@ -315,6 +322,8 @@ func TestBacktest_UsesProposedConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, loaded.VideosDiscovered)
 	assert.Equal(t, 1, loaded.VideosAccepted)
+	require.NotNil(t, loaded.VideosSelected)
+	assert.Equal(t, 1, *loaded.VideosSelected, "the backtest selects all retained observations")
 }
 
 // ADR-007: previously stored configuration snapshots keep the internal action

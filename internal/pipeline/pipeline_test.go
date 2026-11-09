@@ -81,6 +81,13 @@ func TestPipeline_StartRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), run.ID)
 	assert.Equal(t, state.RunStatusRunning, run.Status)
+	var safetyVersion int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT mutation_safety_version FROM run WHERE id=?`, run.ID).Scan(&safetyVersion))
+	require.Equal(t, 1, safetyVersion)
+	scheduled, err := p.StartRun(ctx, state.RunTypeScheduled)
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT mutation_safety_version FROM run WHERE id=?`, scheduled.ID).Scan(&safetyVersion))
+	require.Equal(t, 1, safetyVersion)
 
 	select {
 	case ev := <-sub:
@@ -212,6 +219,9 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 	loaded, err := stateStore.GetRun(ctx, runID)
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
+	require.NotNil(t, loaded.VideosSelected,
+		"the run-owned input set captured before interruption must survive the resume")
+	assert.Equal(t, 1, *loaded.VideosSelected)
 
 	actions, err := stateStore.GetExecutedActionsForVideo(ctx, video.ID)
 	require.NoError(t, err)
@@ -302,6 +312,9 @@ func TestPipeline_DeferredItemsCannotReplayEarlierRunDecisions(t *testing.T) {
 	loaded, err := stateStore.GetRun(ctx, run2ID)
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
+	require.NotNil(t, loaded.VideosSelected,
+		"a run whose selector completed with no run-owned inputs stores zero, not unknown")
+	assert.Equal(t, 0, *loaded.VideosSelected)
 
 	// No receiving-run evaluation exists. Retain pending work rather than
 	// replaying the earlier run's match or acknowledging an empty match set.
@@ -335,7 +348,7 @@ func TestPipeline_FailRunSetsFailedStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusFailed, loaded.Status)
 	require.NotNil(t, loaded.InterruptReason)
-	assert.Equal(t, "no active token", *loaded.InterruptReason)
+	assert.Equal(t, "diag:v1 phase=discovery operation=discover code=unknown_error", *loaded.InterruptReason)
 }
 
 func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {
@@ -363,7 +376,9 @@ func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusFailed, loaded.Status)
 	require.NotNil(t, loaded.InterruptReason)
-	assert.Contains(t, *loaded.InterruptReason, "panic:")
+	assert.Equal(t, "diag:v1 phase=unknown operation=unknown code=panic", *loaded.InterruptReason)
+	assert.Nil(t, loaded.VideosSelected,
+		"a panic before the selector ran must keep the count unknown, not zero")
 
 	var errorEvent *Event
 	for {

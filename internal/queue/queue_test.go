@@ -1,18 +1,26 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/store/storetest"
 )
+
+func TestAuthorizationPendingDeferredReasonIsValid(t *testing.T) {
+	if !DeferredReasonAuthorizationPending.Valid() {
+		t.Fatal("authorization_pending must be accepted by queue writers and readers")
+	}
+}
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -69,8 +77,8 @@ func TestCreateAndListErrorEntries(t *testing.T) {
 		VideoID:    vidID,
 		RunID:      runID,
 		Category:   ErrorCategoryAPIError,
-		Message:    "temporary api failure",
-		Detail:     `{"status":503}`,
+		Message:    "TOKEN_SENTINEL_plain_ascii_7341",
+		Detail:     "VIDEO_SENTINEL_plain_ascii_8129",
 		Status:     ErrorStatusActive,
 		CreatedAt:  time.Now().UTC(),
 		RetryCount: 0,
@@ -92,8 +100,8 @@ func TestCreateAndListErrorEntries(t *testing.T) {
 	if active[0].ExternalVideoID != "yt-error-1" {
 		t.Errorf("external video id = %q, want yt-error-1", active[0].ExternalVideoID)
 	}
-	if active[0].Detail != `{"status":503}` {
-		t.Errorf("detail = %q, want JSON detail", active[0].Detail)
+	if active[0].Message != "diag:v1 phase=unknown operation=unknown code=unknown_error" || active[0].Detail != active[0].Message {
+		t.Errorf("unsafe message/detail were not replaced: message=%q detail=%q", active[0].Message, active[0].Detail)
 	}
 }
 
@@ -326,8 +334,9 @@ func TestServiceRetryErrorReRecordsOnFailure(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	})
 
-	handler := &mockRetryHandler{errors: map[int64]error{vidID: errors.New("still broken")}}
-	svc := NewService(store, handler)
+	handler := &mockRetryHandler{errors: map[int64]error{vidID: errors.New("TOKEN_SENTINEL_plain_ascii_7341")}}
+	var logOutput bytes.Buffer
+	svc := NewService(store, handler).WithLogger(slog.New(slog.NewTextHandler(&logOutput, nil)))
 
 	entry, err := svc.RetryError(context.Background(), id)
 	if err != nil {
@@ -336,8 +345,11 @@ func TestServiceRetryErrorReRecordsOnFailure(t *testing.T) {
 	if entry.Status != ErrorStatusActive {
 		t.Errorf("status = %q, want active", entry.Status)
 	}
-	if !strings.Contains(entry.Message, "still broken") {
-		t.Errorf("message = %q, want to contain 'still broken'", entry.Message)
+	if entry.Message != "diag:v1 phase=unknown operation=retry code=unknown_error" {
+		t.Errorf("message = %q, want generic safe failure summary", entry.Message)
+	}
+	if bytes.Contains(logOutput.Bytes(), []byte("TOKEN_SENTINEL_plain_ascii_7341")) {
+		t.Fatalf("marker-free error leaked to queue logs: %s", logOutput.String())
 	}
 	if entry.RetryCount != 1 {
 		t.Errorf("retry_count = %d, want 1", entry.RetryCount)
@@ -426,7 +438,16 @@ func TestErrorHandlerListAndDismiss(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET status = %d, want 200", resp.StatusCode)
 	}
+	var payload struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode GET response: %v", err)
+	}
 	_ = resp.Body.Close()
+	if len(payload.Errors) != 1 || payload.Errors[0]["id"] != float64(id) || payload.Errors[0]["video_id"] != float64(vidID) || payload.Errors[0]["error_category"] != string(ErrorCategoryAPIError) || payload.Errors[0]["error_message"] != "diag:v1 phase=unknown operation=unknown code=unknown_error" {
+		t.Fatalf("GET response does not match frontend queue contract: %#v", payload.Errors)
+	}
 
 	// Dismiss the error.
 	req, _ := http.NewRequest("POST", server.URL+fmt.Sprintf("/%d/dismiss", id), nil)
@@ -438,6 +459,121 @@ func TestErrorHandlerListAndDismiss(t *testing.T) {
 		t.Fatalf("POST dismiss status = %d, want 200", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
+}
+
+func TestRetryConflictResponseUsesSafeDiagnostic(t *testing.T) {
+	store := newTestStore(t)
+	runID := seedRun(t, store.db)
+	videoID := seedVideo(t, store.db, runID, "yt-conflict")
+	id, err := store.CreateErrorEntry(context.Background(), &ErrorEntry{
+		VideoID: videoID, RunID: runID, Category: ErrorCategoryRuntime,
+		Message: "diag:v1 phase=unknown operation=unknown code=unknown_error",
+		Status:  ErrorStatusActive, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DismissErrorEntry(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewService(store, nil).ErrorHandler())
+	defer server.Close()
+	resp, err := http.Post(fmt.Sprintf("%s/%d/retry", server.URL, id), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusConflict)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := body["error"], "diag:v1 phase=unknown operation=retry code=unknown_error"; got != want {
+		t.Fatalf("conflict error=%q want %q", got, want)
+	}
+	const secret = "TOKEN_SENTINEL_plain_ascii_7341"
+	if got := queueFailureMessage(fmt.Errorf("%s: %w", secret, ErrInvalidState), "retry"); got == "" || bytes.Contains([]byte(got), []byte(secret)) {
+		t.Fatalf("queue failure summary leaked marker-free secret: %q", got)
+	}
+}
+
+func TestDeferredQueueWithholdsInvalidLegacyReason(t *testing.T) {
+	store := newTestStore(t)
+	store.db.SetMaxOpenConns(1)
+	runID := seedRun(t, store.db)
+	videoID := seedVideo(t, store.db, runID, "yt-legacy-deferred")
+	id, err := store.CreateDeferredItem(context.Background(), &DeferredItem{
+		VideoID: videoID, RunID: runID, Reason: DeferredReasonQuotaExhausted,
+		Status: DeferredStatusPending, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "VIDEO_SENTINEL_plain_ascii_8129"
+	conn, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `UPDATE deferred_item SET deferral_reason=? WHERE id=?`, secret, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := store.ListDeferredItems(context.Background(), ""); err != nil {
+		t.Fatalf("reading legacy invalid queue row: %v", err)
+	} else if len(items) != 1 {
+		t.Fatalf("legacy deferred rows=%d want 1", len(items))
+	}
+	server := httptest.NewServer(NewService(store, nil).DeferredHandler())
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/?include=all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusOK)
+	}
+	var body struct {
+		Deferred []map[string]any `json:"deferred"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Deferred) != 1 {
+		t.Fatalf("deferred items=%d want 1", len(body.Deferred))
+	}
+	item := body.Deferred[0]
+	if _, leaked := item["Reason"]; leaked {
+		t.Fatalf("invalid legacy reason serialized: %#v", item)
+	}
+	if item["deferred_reason_unavailable"] != true {
+		t.Fatalf("missing unavailable flag: %#v", item)
+	}
+	if item["Status"] != string(DeferredStatusPending) {
+		t.Fatalf("status changed: %#v", item)
+	}
+	if bytes.Contains(mustJSON(t, item), []byte(secret)) {
+		t.Fatal("legacy reason leaked")
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestDeferredHandlerListAndDiscard(t *testing.T) {

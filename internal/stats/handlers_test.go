@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -38,6 +39,28 @@ func TestHandler_RunStats(t *testing.T) {
 	body := rec.Body.String()
 	assert.Contains(t, body, "run_id")
 	assert.Contains(t, body, "videos_discovered")
+}
+
+func TestHandler_RunStatsLogOmitsRawSQLiteScanError(t *testing.T) {
+	ctx := context.Background()
+	db, _, service, cleanup := setupStatsTest(t)
+	defer cleanup()
+	runID := seedRun(t, ctx, db)
+	const secret = "plainASCIISecretValue9081"
+	_, err := db.ExecContext(ctx, `UPDATE run SET videos_discovered=? WHERE id=?`, secret, runID)
+	require.NoError(t, err)
+
+	var logOutput bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logOutput, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	handler := NewHandler(service, nil).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(runID, 10)+"/stats", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Contains(t, logOutput.String(), "diag:v1 phase=unknown operation=inspect_run code=unknown_error")
+	require.NotContains(t, logOutput.String(), secret)
 }
 
 func TestHandler_ListChannels(t *testing.T) {
@@ -317,6 +340,44 @@ func TestHandler_RouteMatchRates(t *testing.T) {
 	require.Len(t, payload.Routes, 1)
 	assert.Regexp(t, canonicalUUIDv4, payload.Routes[0].RouteID)
 	assert.Equal(t, routePublicID(t, ctx, db, routeID), payload.Routes[0].RouteID)
+}
+
+func TestHandler_RouteMatchRatesExcludeSimulationButKeepRunEvidence(t *testing.T) {
+	ctx := context.Background()
+	db, _, service, cleanup := setupStatsTest(t)
+	defer cleanup()
+
+	productionRun := seedRun(t, ctx, db)
+	routeID := seedRoute(t, ctx, db, "Music", 1)
+	for _, runID := range []int64{productionRun} {
+		videoID := seedVideo(t, ctx, db, "prod-video", "UC1", runID)
+		seedDecision(t, ctx, db, videoID, runID, routeID, "matched")
+	}
+	for i, runType := range []string{"dry_run", "backtest", "replay"} {
+		runID := seedRunOfType(t, ctx, db, runType)
+		videoID := seedVideo(t, ctx, db, "sim-video-"+strconv.Itoa(i), "UC1", runID)
+		seedDecision(t, ctx, db, videoID, runID, routeID, "matched")
+		// Simulation decision evidence remains available through its requested-run API.
+		runStats, err := service.RouteStats(ctx, runID)
+		require.NoError(t, err)
+		require.Len(t, runStats, 1)
+		assert.Equal(t, 1, runStats[0].VideosMatched)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := NewHandler(service, logger).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/route-match-rates", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload struct {
+		Routes []RouteMatchRate `json:"routes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Len(t, payload.Routes, 1)
+	assert.Equal(t, 1, payload.Routes[0].Evaluated)
+	assert.Equal(t, 1, payload.Routes[0].Matched)
+	assert.Equal(t, float64(1), payload.Routes[0].MatchRate)
 }
 
 func TestHandler_Trends_RangeFilterExcludesOutOfRangeRuns(t *testing.T) {

@@ -108,9 +108,7 @@ func (d *Detector) WithThreshold(threshold float64) *Detector {
 func (d *Detector) Detect(ctx context.Context, videoID string, title string) (*Match, error) {
 	fp := Normalize(title)
 	if len(fp.Tokens) == 0 {
-		d.logger.DebugContext(ctx, "no fingerprint tokens; skipping duplicate detection",
-			slog.String("video_id", videoID),
-		)
+		d.logger.DebugContext(ctx, "no fingerprint tokens; skipping duplicate detection")
 		return nil, nil
 	}
 
@@ -122,11 +120,7 @@ func (d *Detector) Detect(ctx context.Context, videoID string, title string) (*M
 	}
 	if exact != nil {
 		exact.ThresholdUsed = d.threshold
-		d.logger.DebugContext(ctx, "exact duplicate detected",
-			slog.String("video_id", videoID),
-			slog.Int64("matched_fingerprint_id", exact.FingerprintID),
-			slog.String("matched_video_id", exact.VideoID),
-		)
+		d.logger.DebugContext(ctx, "exact duplicate detected", slog.Int64("matched_fingerprint_id", exact.FingerprintID))
 		return exact, nil
 	}
 
@@ -138,7 +132,6 @@ func (d *Detector) Detect(ctx context.Context, videoID string, title string) (*M
 	if match != nil {
 		match.ThresholdUsed = d.threshold
 		d.logger.DebugContext(ctx, "fuzzy duplicate detected",
-			slog.String("video_id", videoID),
 			slog.Int64("matched_fingerprint_id", match.FingerprintID),
 			slog.Float64("similarity", match.Similarity),
 			slog.Float64("threshold", d.threshold),

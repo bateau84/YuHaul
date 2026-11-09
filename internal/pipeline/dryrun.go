@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/router"
@@ -63,42 +64,45 @@ func (p *Pipeline) ExecuteDryRun(ctx context.Context, runID int64) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			logger.ErrorContext(ctx, "dry-run panic", "recover", r)
-			_ = p.stateStore.InterruptRun(ctx, runID, fmt.Sprintf("panic: %v", r))
-			p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: fmt.Sprintf("panic: %v", r)}))
-			p.completeRun(ctx, runID)
+			logger.ErrorContext(ctx, "dry-run panic", "diagnostic", diag.Encode(diag.PanicCause(), "unknown", "unknown"))
+			p.failHistoricalRun(ctx, runID, "dry-run panic", diag.PanicCause())
 		}
 	}()
 
 	run, err := p.stateStore.GetRun(ctx, runID)
 	if err != nil {
-		logger.ErrorContext(ctx, "load dry-run failed", "error", err)
+		logger.ErrorContext(ctx, "load dry-run failed", "diagnostic", diag.Encode(err, "unknown", "load_run"))
+		p.failHistoricalRun(ctx, runID, "load dry-run failed", err)
 		return
 	}
 
 	routes, err := p.dryRunRoutes(ctx, run)
 	if err != nil {
-		p.failRun(ctx, runID, "load dry-run routes failed", err)
+		p.failHistoricalRun(ctx, runID, "load dry-run routes failed", err)
 		return
 	}
 
 	videos, err := p.stateStore.ListPendingVideos(ctx)
 	if err != nil {
-		p.failRun(ctx, runID, "list pending videos failed", err)
+		p.failHistoricalRun(ctx, runID, "list pending videos failed", err)
 		return
 	}
+	// The pending selector establishes the dry-run's input set here. Capture
+	// it before evaluation so a later failure keeps the known selection and
+	// an empty selection is stored as zero, not unknown (ARD-001).
+	p.captureSelectedCount(ctx, runID, len(videos))
 
 	p.setPhase(ctx, runID, PhaseRouting)
 	p.broadcastPhase(runID, PhaseRouting)
 
 	detector, err := p.detectorForRun(ctx, runID)
 	if err != nil {
-		p.failRun(ctx, runID, "load duplicate configuration failed", err)
+		p.failHistoricalRun(ctx, runID, "load duplicate configuration failed", err)
 		return
 	}
 	for _, v := range videos {
 		if err := p.dryRunVideo(ctx, runID, &v, routes, detector); err != nil {
-			p.failRun(ctx, runID, "dry-run video failed", err)
+			p.failHistoricalRun(ctx, runID, "dry-run video failed", err)
 			return
 		}
 	}
@@ -109,17 +113,17 @@ func (p *Pipeline) ExecuteDryRun(ctx context.Context, runID int64) {
 }
 
 func (p *Pipeline) dryRunRoutes(ctx context.Context, run *state.Run) ([]router.Route, error) {
-	if run.ConfigVersionID != nil && p.configStore != nil {
-		cv, err := p.configStore.Get(ctx, *run.ConfigVersionID)
-		if err != nil {
-			return nil, fmt.Errorf("load config version %d: %w", *run.ConfigVersionID, err)
-		}
-		return routesFromSnapshot(cv.Snapshot), nil
+	if run.ConfigVersionID == nil || p.configStore == nil {
+		return nil, fmt.Errorf("run %d missing captured configuration", run.ID)
 	}
-	if p.router == nil {
-		return nil, fmt.Errorf("no router available for dry-run")
+	cv, err := p.configStore.Get(ctx, *run.ConfigVersionID)
+	if err != nil {
+		return nil, fmt.Errorf("load config version %d: %w", *run.ConfigVersionID, err)
 	}
-	return p.router.Routes(ctx)
+	if err := validateSnapshotRoutes(cv.Snapshot); err != nil {
+		return nil, err
+	}
+	return routesFromSnapshot(cv.Snapshot), nil
 }
 
 func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video, routes []router.Route, detector *duplicate.Detector) error {
@@ -127,7 +131,7 @@ func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video,
 	if p.meta != nil {
 		fetched, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
 		if err != nil {
-			p.logger.DebugContext(ctx, "dry-run using degraded metadata", "video_id", v.VideoID, "error", err)
+			p.logger.DebugContext(ctx, "dry-run using degraded metadata", "diagnostic", diag.Encode(err, "routing", "load_metadata"))
 		} else {
 			meta = fetched
 		}
@@ -155,7 +159,7 @@ func (p *Pipeline) dryRunVideo(ctx context.Context, runID int64, v *state.Video,
 	}
 
 	if _, err := p.router.EvaluateWithRoutes(ctx, runID, v.ID, vc, p.machine, routes); err != nil {
-		return fmt.Errorf("evaluate video %s: %w", v.VideoID, err)
+		return diag.At(fmt.Errorf("evaluate video %s: %w", v.VideoID, err), "routing", "evaluate_video")
 	}
 
 	decisions, err := p.stateStore.GetRouteDecisionsForVideoInRun(ctx, v.ID, runID)
@@ -231,6 +235,37 @@ func (p *Pipeline) dryRunActionExists(ctx context.Context, runID, videoID int64,
 		return false, nil
 	}
 	return false, err
+}
+
+// validateSnapshotRoutes prevents malformed fields from acquiring matching
+// semantics when converted to router's non-nullable representation.
+func validateSnapshotRoutes(snap config.Snapshot) error {
+	seen := make(map[int64]bool)
+	for _, r := range snap.Routes {
+		if !r.HasRequiredFields() {
+			return fmt.Errorf("snapshot route %d has missing route field", r.ID)
+		}
+		if r.ID <= 0 || seen[r.ID] {
+			return fmt.Errorf("invalid snapshot route %d", r.ID)
+		}
+		seen[r.ID] = true
+		for _, c := range r.Conditions {
+			if !c.HasRequiredFields() {
+				return fmt.Errorf("snapshot route %d has missing condition field", r.ID)
+			}
+		}
+		for _, a := range r.Actions {
+			if !a.HasRequiredFields() {
+				return fmt.Errorf("snapshot route %d has missing action field", r.ID)
+			}
+		}
+		for _, ex := range r.Exclusions {
+			if !ex.HasType() || !ex.HasValue() {
+				return fmt.Errorf("snapshot route %d has missing exclusion field", r.ID)
+			}
+		}
+	}
+	return nil
 }
 
 func routesFromSnapshot(snap config.Snapshot) []router.Route {

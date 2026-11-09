@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -63,6 +64,7 @@ type fakePipeline struct {
 	backtest         *state.Run
 	backtestProposed config.ProposalSnapshot
 	done             chan struct{}
+	proposalErr      error
 }
 
 func newFakePipeline(run *state.Run) *fakePipeline {
@@ -80,6 +82,9 @@ func (f *fakePipeline) Execute(ctx context.Context, runID int64) {
 }
 
 func (f *fakePipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error) {
+	if f.proposalErr != nil {
+		return nil, f.proposalErr
+	}
 	f.draft = draft
 	if f.dryRun == nil {
 		f.dryRun = f.run
@@ -106,6 +111,9 @@ func (f *fakePipeline) ExecuteReplay(ctx context.Context, runID int64) {
 }
 
 func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error) {
+	if f.proposalErr != nil {
+		return nil, f.proposalErr
+	}
 	if proposed != nil {
 		f.backtestProposed = *proposed
 	}
@@ -255,7 +263,8 @@ func TestHandleQueueEndpointsMounted(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"errors":`)
-	assert.Contains(t, rec.Body.String(), `"test error"`)
+	assert.Contains(t, rec.Body.String(), `"diag:v1 phase=unknown operation=unknown code=unknown_error"`)
+	assert.Contains(t, rec.Body.String(), `"error_message_unavailable":true`)
 }
 
 func TestHandleStartRun(t *testing.T) {
@@ -737,7 +746,7 @@ func TestHandleListRoutes_Empty(t *testing.T) {
 
 func TestHandleListRoutes_MatchCount(t *testing.T) {
 	ctx := context.Background()
-	db, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	db, routerStore, versioner, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
 	stateStore, err := state.NewStore(db)
@@ -760,13 +769,18 @@ func TestHandleListRoutes_MatchCount(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	run := &state.Run{RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	versionID, err := versioner.ActiveVersionID(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, versionID)
+	run := &state.Run{RunType: state.RunTypeManual, Status: state.RunStatusRunning, ConfigVersionID: versionID}
 	runID, err := stateStore.CreateRun(ctx, run)
 	require.NoError(t, err)
 	video, err := machine.DiscoverVideo(ctx, runID, "v1", "ch1")
 	require.NoError(t, err)
 
 	engine := router.NewEngine(routerStore)
+	pipeline.NewPipeline(db, machine, stateStore, nil, nil, engine, nil, nil, nil, nil, nil,
+		pipeline.WithConfigStore(config.NewStore(db)), pipeline.WithVersioner(versioner))
 	_, err = engine.Evaluate(ctx, runID, video.ID, router.VideoContext{VideoID: "v1", ChannelID: "ch1", Title: "music video"}, machine)
 	require.NoError(t, err)
 
@@ -1362,7 +1376,32 @@ func TestHandleQueueErrorsNewPath(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, rec.Code)
 			assert.Contains(t, rec.Body.String(), `"errors":`)
-			assert.Contains(t, rec.Body.String(), `"test error"`)
+			assert.Contains(t, rec.Body.String(), `"diag:v1 phase=unknown operation=unknown code=unknown_error"`)
+			assert.Contains(t, rec.Body.String(), `"error_message_unavailable":true`)
+		})
+	}
+}
+
+func TestProposalValidationErrorIsBadRequest(t *testing.T) {
+	const secret = "SECRET-RAW-INPUT"
+	for _, tc := range []struct{ name, path, body string }{
+		{"dry-run", "/api/runs/dry-run", `{"draft_configuration":{"duplicate_threshold":0.5,"routes":[]}}`},
+		{"backtest", "/api/backtest", `{"proposed_configuration":{"duplicate_threshold":0.5,"routes":[]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			fp := &fakePipeline{proposalErr: fmt.Errorf("%w: route 0: missing required route field %s", pipeline.ErrInvalidProposal, secret)}
+			srv := NewServer(fp, pipeline.NewBroadcaster(), WithServerLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.JSONEq(t, `{"error":"invalid proposal configuration"}`, rec.Body.String())
+			assert.Contains(t, logs.String(), "invalid_proposal")
+			assert.NotContains(t, logs.String(), secret)
+			assert.NotContains(t, logs.String(), "unknown_error")
+			assert.NotContains(t, rec.Body.String(), secret)
 		})
 	}
 }
