@@ -159,9 +159,9 @@ export function ErrorsView() {
                   <tbody>
                     {errors.map((e, i) => (
                       <tr key={e.id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
-                        <td data-label="Video">{e.video_title ?? e.video_id}</td>
+                        <td data-label="Video">{e.video_title ?? e.external_video_id ?? e.video_id}</td>
                         <td data-label="Category">{e.error_category}</td>
-                        <td data-label="Reason">{e.error_message}</td>
+                        <td data-label="Reason">{e.error_message || (e.error_message_unavailable ? 'Reason unavailable' : 'No reason provided')}</td>
                         <td data-label="Actions">
                           <div style={{ display: 'flex', gap: 8 }}>
                             <button className="button" onClick={() => retryError(e.id)}>

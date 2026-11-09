@@ -50,7 +50,7 @@ export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFina
 
 const skipReasonLabels: Record<SkipReason, string> = {
   final_route_matched: 'A prior final route already matched this video',
-  exclusion: 'This video matched a route-scoped exclusion rule',
+  exclusion: 'Route exclusion recorded; specific rule and compared input unavailable.',
   disabled: 'This route is currently disabled',
 }
 
@@ -63,7 +63,11 @@ export function deriveRouteDecision(decision: RouteDecisionType, skipReason?: Sk
     case 'deferred':
       return { variant: 'deferred', label: 'Deferred' }
     case 'skipped':
-      return { variant: 'not-evaluated', label: 'Skipped', reason: skipReason ? skipReasonLabels[skipReason] : undefined }
+      return {
+        variant: 'not-evaluated',
+        label: skipReason === 'exclusion' ? 'Skipped — excluded from this route.' : 'Skipped',
+        reason: skipReason ? skipReasonLabels[skipReason] : undefined,
+      }
     default:
       return { variant: 'not-evaluated', label: decision }
   }
@@ -82,6 +86,30 @@ export function deriveActionOutcome(outcome: string): { variant: BadgeVariant; l
     default:
       return { variant: 'not-evaluated', label: outcome }
   }
+}
+
+export function actionOutcomeLabel(outcome: string, reason?: string): { variant: BadgeVariant; label: string } {
+  if (outcome === 'not_attempted' && reason === 'mutation_application_uncertain') return { variant: 'not-evaluated', label: 'Not attempted — unresolved playlist action' }
+  if (reason === 'mutation_application_uncertain') return { variant: 'failed', label: 'Playlist outcome unknown' }
+  if (reason === 'authorization_pending') return { variant: 'deferred', label: 'Waiting for YouTube access' }
+  return deriveActionOutcome(outcome)
+}
+
+// Explanatory outcome-reason vocabulary written by the action executor
+// (ARD-001). `outcome_reason` explains a recorded outcome — it is never an
+// outcome category. Unknown values are server-vetted safe text and render
+// verbatim rather than being guessed at. `already_completed` is explicitly
+// run-scoped: the prior success is not a success in this run.
+const outcomeReasonLabels: Record<string, string> = {
+  authorization_pending: 'Not attempted in this run. YouTube access was unavailable; the work was retained.',
+  mutation_application_uncertain: 'YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.',
+  already_completed: 'Not attempted in this run — already completed by an earlier run',
+  quota_exhausted: 'Not attempted — the daily quota was exhausted before this action could run',
+  prior_action_failed: 'Not attempted in this run — an earlier action on this video failed',
+}
+
+export function actionOutcomeReasonLabel(reason: string): string {
+  return outcomeReasonLabels[reason] ?? reason
 }
 
 export function formatDuration(seconds?: number): string {

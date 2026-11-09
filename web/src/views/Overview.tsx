@@ -1,11 +1,29 @@
 import { useEffect, useState, useRef } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Play, FlaskConical, AlertCircle } from 'lucide-react'
 import * as api from '../api/client'
 import { useToast } from '../hooks/useToast'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import type { Overview as OverviewData } from '../api/overview'
+import { ApiError } from '../api/core'
+
+const RUN_POLL_INTERVAL_MS = 5000
+
+function phaseLabel(phase?: string): string | undefined {
+  switch (phase) {
+    case 'discovery': return 'Discovering videos'
+    case 'exclusion': return 'Checking exclusions'
+    case 'duplicate_detection': return 'Checking duplicates'
+    case 'routing': return 'Evaluating routes'
+    case 'action_execution': return 'Processing playlist actions'
+    default: return undefined
+  }
+}
+
+function statusLabel(status: string): string {
+  return status.charAt(0).toUpperCase() + status.slice(1)
+}
 
 export function Overview() {
   const [overview, setOverview] = useState<OverviewData | null>(null)
@@ -18,6 +36,13 @@ export function Overview() {
   const retryButtonRef = useRef<HTMLButtonElement>(null)
   const recoveredRef = useRef(false)
   const { addToast } = useToast()
+  const navigate = useNavigate()
+  const [startingRun, setStartingRun] = useState(false)
+  const startingRunRef = useRef(false)
+  const [startUncertain, setStartUncertain] = useState(false)
+  const [statusStale, setStatusStale] = useState(false)
+  const [statusCheckedAt, setStatusCheckedAt] = useState<Date | null>(null)
+  const overviewRefreshInFlightRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -25,6 +50,8 @@ export function Overview() {
       .then((o) => {
         if (cancelled) return
         setOverview(o)
+        setStatusCheckedAt(new Date())
+        setStatusStale(false)
         setFetchError(false)
         setLoading(false)
       })
@@ -37,6 +64,36 @@ export function Overview() {
       cancelled = true
     }
   }, [])
+
+  const lastRunStatus = overview?.last_run?.status
+  useEffect(() => {
+    if (lastRunStatus !== 'running') return
+    let disposed = false
+    const refresh = async () => {
+      if (overviewRefreshInFlightRef.current) return
+      overviewRefreshInFlightRef.current = true
+      try {
+        const next = await api.getOverview()
+        if (disposed) return
+        setOverview(next)
+        setStatusCheckedAt(new Date())
+        setStatusStale(false)
+        if (next.last_run?.status !== 'running') setStartUncertain(false)
+      } catch {
+        if (!disposed) setStatusStale(true)
+      } finally {
+        overviewRefreshInFlightRef.current = false
+      }
+    }
+    const timer = window.setInterval(refresh, RUN_POLL_INTERVAL_MS)
+    const onVisible = () => { if (document.visibilityState === 'visible') void refresh() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [lastRunStatus])
 
   // Focus the Retry button whenever the view settles into the fetch-error
   // state: on first entry and again after a failed retry re-enables it.
@@ -60,6 +117,8 @@ export function Overview() {
     try {
       const o = await api.getOverview()
       setOverview(o)
+      setStatusCheckedAt(new Date())
+      setStatusStale(false)
       setFetchError(false)
       recoveredRef.current = true
     } catch {
@@ -70,12 +129,20 @@ export function Overview() {
   }
 
   async function startRun() {
+    if (startingRunRef.current) return
+    startingRunRef.current = true
     setConfirmRun(false)
+    setStartingRun(true)
     try {
       const res = await api.startRun()
-      addToast(`Run ${res.run_id} started`, 'success')
+      setStartUncertain(false)
+      navigate(`/runs/${res.run_id}`)
     } catch (err) {
-      addToast(err instanceof Error ? err.message : 'Failed to start run', 'error')
+      if (err instanceof ApiError) addToast(err.message, 'error')
+      else setStartUncertain(true)
+    } finally {
+      startingRunRef.current = false
+      setStartingRun(false)
     }
   }
 
@@ -97,7 +164,7 @@ export function Overview() {
         Overview
       </h1>
       <div style={{ display: 'flex', gap: 8 }}>
-        <button className="button button--primary" onClick={() => setConfirmRun(true)} disabled={fetchError}>
+        <button className="button button--primary" onClick={() => setConfirmRun(true)} disabled={fetchError || startingRun || Boolean(overview?.last_run?.status === 'running') || startUncertain}>
           <Play size={16} aria-hidden="true" /> Run Now
         </button>
         <button className="button" onClick={() => setConfirmDry(true)} disabled={fetchError}>
@@ -126,9 +193,38 @@ export function Overview() {
   if (!overview) return null
 
   const run = overview.last_run
+  const activeRun = run?.status === 'running' ? run : null
   return (
     <>
       {header}
+      {(run || startUncertain || startingRun) && (
+        <section className="card" role="region" aria-label="Latest run" aria-live="off" style={{ marginBottom: 16 }}>
+          {startingRun ? (
+            <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Starting run…</strong></p>
+          ) : null}
+          {activeRun && (
+            <>
+              <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Run {activeRun.id} — {statusStale ? 'Last known status: Running' : 'Running'}{phaseLabel(activeRun.current_phase) ? ` — ${statusStale ? 'Last known phase' : 'Current phase'}: ${phaseLabel(activeRun.current_phase)}` : ` — ${statusStale ? 'last known' : 'current'} phase unavailable.`}</strong></p>
+              <p style={{ margin: '8px 0' }}><Link to={`/runs/${activeRun.id}`}>View run</Link></p>
+              {statusStale
+                ? <p role="alert" aria-live="assertive" style={{ margin: 0 }}>Could not refresh run status; this run may still be processing.</p>
+                : <p style={{ margin: 0 }}>Status checked at {statusCheckedAt?.toLocaleTimeString() ?? 'unknown'}.</p>}
+            </>
+          )}
+          {run && !activeRun && (
+            <>
+              <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Run {run.id} — {run.run_type} — {statusLabel(run.status)}</strong></p>
+              <p style={{ margin: '8px 0' }}><Link to={`/runs/${run.id}`}>View run</Link></p>
+            </>
+          )}
+          {startUncertain && (
+            <>
+              <p role="status" aria-live="polite">Could not confirm whether the run started. Check Runs before starting another run.</p>
+              <Link to="/runs">View runs</Link>
+            </>
+          )}
+        </section>
+      )}
       <div className="card-grid">
         <div className="card">
           <div className="metric-value">{run?.videos_discovered ?? 0}</div>
@@ -150,6 +246,7 @@ export function Overview() {
 
       <div className="card" style={{ marginBottom: 16 }}>
         <h2 className="section-title">Quota today</h2>
+        <p>YouTube API quota used today—not run progress or playlist additions.</p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
           <div style={{ flex: 1, height: 12, background: 'var(--color-surface-elevated)', borderRadius: 9999, overflow: 'hidden' }}>
             <div

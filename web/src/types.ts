@@ -81,7 +81,9 @@ export type RunType =
   | 'replay'
   | 'backtest'
 
-export type RunStatus = 'running' | 'completed' | 'interrupted'
+// The persisted run lifecycle (System Architecture §Run Recovery / ADR-002):
+// `failed` is a terminal state distinct from the resumable `interrupted`.
+export type RunStatus = 'running' | 'completed' | 'failed' | 'interrupted'
 
 export interface Run {
   id: number
@@ -91,6 +93,15 @@ export interface Run {
   status: RunStatus
   config_version_id?: number
   videos_discovered: number
+  // videos_selected mirrors the persisted selected_video_count: null (or an
+  // absent field from a pre-diagnostics server) means the selection was never
+  // captured and is unknown; 0 means selection completed with no inputs.
+  // Unknown must never be presented as zero (ARD-001 / BR-020).
+  videos_selected?: number | null
+  // videos_evaluated counts distinct videos with persisted route-decision
+  // evidence for this run (ARD-001). It is decision evidence, not proof that
+  // every selected video finished evaluation.
+  videos_evaluated?: number
   videos_accepted: number
   videos_rejected: number
   videos_excluded: number
@@ -99,7 +110,12 @@ export interface Run {
   videos_not_yet_evaluated: number
   quota_cost: number
   duration_seconds?: number
-  interrupt_reason?: string
+  // Always present in server JSON: null when no reason was recorded. Rendered
+  // only when non-null — the server has already vetted it for safety.
+  interrupt_reason?: string | null
+  // Set by the server when a stored interrupt/failure reason existed but was
+  // withheld by safe-diagnostic vetting; the raw text is never sent (ARD-001).
+  failure_reason_unavailable?: boolean
   current_phase?: string
 }
 
@@ -133,7 +149,35 @@ export interface VideoOutcome {
   processing_state: VideoProcessingState
   final_outcome: VideoFinalOutcome | null
   deferred_reason?: string
+  deferred_reason_unavailable?: boolean
   error_message?: string
+  // Set when a stored error message exists but was withheld by safe-diagnostic
+  // vetting; the raw text is never sent (ARD-001).
+  error_message_unavailable?: boolean
+  current_local_metadata?: CurrentLocalMetadata | null
+  metadata_context_status?: 'available' | 'context_read_failed' | string
+  unresolved_mutations?: UnresolvedMutation[]
+  route_decisions?: RouteDecisionSummary[]
+}
+
+export interface UnresolvedMutation {
+  action_type: RouteActionType
+  target_playlist_id: string
+  prepared_at?: string
+  application_state: 'unknown'
+}
+
+export type MetadataAvailability = 'current_local' | 'known_expired' | 'withheld' | 'unknown'
+
+export interface CurrentLocalMetadata {
+  attribution: 'current_local_not_necessarily_evaluated' | string
+  source_fetched_at?: string | null
+  title?: string | null
+  title_availability: MetadataAvailability
+  channel_name?: string | null
+  channel_name_availability: MetadataAvailability
+  duration_seconds?: number | null
+  duration_availability: MetadataAvailability
 }
 
 export type RouteDecisionType =
@@ -162,19 +206,50 @@ export interface ActionOutcome {
   action_type: RouteActionType
   target_playlist_id: string
   outcome: 'succeeded' | 'failed' | 'deferred' | 'not_attempted'
+  // Optional explanatory evidence for a recorded outcome — for example the
+  // already_completed idempotency suppression. It is not an outcome category;
+  // the server has vetted it for safe display (ARD-001).
+  outcome_reason?: string
+  outcome_reason_unavailable?: boolean
   error_message?: string
+  // Set when a stored error message exists but was withheld by
+  // safe-diagnostic vetting; the raw text is never sent (ARD-001).
+  error_message_unavailable?: boolean
+  // Present only when a YouTube action was actually attempted. A quota
+  // deferral, simulation, or idempotency suppression has no attempt
+  // timestamp (ARD-001).
+  executed_at?: string
 }
 
-export interface RouteDecision {
+export interface CausalExclusion {
+  status: string
+  config_version_id: number | null
+  exclusion_index: number | null
+  semantics_version: number | null
+  exclusion_type: string | null
+  field: string | null
+  comparison: string | null
+  configured_value: string | null
+  configured_value_status: string
+  matched: boolean | null
+  compared_input_status: string
+}
+
+export interface RouteDecisionSummary {
   // Route identity in a decision is the route UUID (ARS-004); the decision
   // row id mirrors it because each route is evaluated at most once per video.
   id: string
   route_id: string
   route_name: string
+  route_name_source?: string
+  causal_exclusion?: CausalExclusion | null
   evaluation_order: number
   decision: RouteDecisionType
   skip_reason?: SkipReason
   rejection_reason?: string
+}
+
+export interface RouteDecision extends RouteDecisionSummary {
   condition_audits: ConditionAudit[]
   actions: ActionOutcome[]
 }
@@ -382,6 +457,8 @@ export interface ErrorEntry {
   run_id: number
   error_category: 'api_error' | 'authorization' | 'runtime'
   error_message: string
+  error_message_unavailable?: boolean
+  external_video_id?: string
   status: 'active' | 'retrying' | 'dismissed' | 'resolved'
   created_at: string
   retry_count: number
@@ -394,6 +471,7 @@ export interface DeferredItem {
   channel_name?: string
   run_id: number
   deferral_reason: string
+  deferred_reason_unavailable?: boolean
   retry_after?: string
   status: 'pending' | 'retrying' | 'completed' | 'discarded'
   created_at: string

@@ -6,7 +6,10 @@ COPY web/package.json web/package-lock.json* ./
 RUN npm ci
 
 COPY web/ ./
-RUN npm run build
+# Vite compiles import.meta.env.VITE_USE_MOCK into the bundle at build time;
+# runtime container env cannot change it. The shipped image must use the real
+# API/SSE clients, while local development keeps the mock default.
+RUN VITE_USE_MOCK=false npm run build
 
 # Go build stage
 FROM golang:1.26-alpine AS builder

@@ -90,7 +90,3 @@ export {
   ignoreAdvisory,
   actOnAdvisory,
 } from './advisory'
-
-// The following operations do not yet have backend endpoints and remain
-// mock-backed.
-export { subscribeRunSSE } from './mock'

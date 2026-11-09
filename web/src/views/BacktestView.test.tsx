@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { BacktestView } from './BacktestView'
 import { ToastProvider } from '../components/ToastProvider'
 import * as mock from '../api/mock'
-import type { Route } from '../types'
+import type { Route, Run } from '../types'
 
 function renderWithProviders(ui: React.ReactElement) {
   return render(
@@ -12,6 +12,27 @@ function renderWithProviders(ui: React.ReactElement) {
       <ToastProvider>{ui}</ToastProvider>
     </MemoryRouter>
   )
+}
+
+// Minimal persisted run record for status-read assertions. Counts are zero:
+// this task's surface is lifecycle truthfulness, and the counts are owned by
+// Run Detail (Task 2.1).
+function runFixture(overrides: Partial<Run>): Run {
+  return {
+    id: 42,
+    started_at: '2026-01-01T00:00:00Z',
+    run_type: 'backtest',
+    status: 'running',
+    videos_discovered: 0,
+    videos_accepted: 0,
+    videos_rejected: 0,
+    videos_excluded: 0,
+    videos_deferred: 0,
+    videos_failed: 0,
+    videos_not_yet_evaluated: 0,
+    quota_cost: 0,
+    ...overrides,
+  }
 }
 
 function routeFixture(overrides: Partial<Route>): Route {
@@ -43,18 +64,150 @@ describe('BacktestView', () => {
     vi.restoreAllMocks()
   })
 
-  it('supports config-based hypothetical backtest with comparison results', async () => {
+  it('shows the requested run as active from persisted state, not as completed from the start', async () => {
     renderWithProviders(<BacktestView />)
 
     await waitFor(() => expect(screen.getByRole('heading', { name: /Backtest & Replay/i })).toBeInTheDocument())
     await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
 
+    // The mock server acks the start as completed; the view must still wait
+    // for the persisted run record before claiming any result.
+    vi.spyOn(mock, 'startBacktest').mockResolvedValue({ run_id: 42, status: 'completed' })
+    vi.spyOn(mock, 'getRun').mockResolvedValue(
+      runFixture({ id: 42, run_type: 'backtest', status: 'running' })
+    )
+
     fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
 
-    await waitFor(() => expect(screen.getByText(/Comparison results/i)).toBeInTheDocument())
-    expect(screen.getByText('Historical accepted')).toBeInTheDocument()
-    expect(screen.getByText('Proposed accepted')).toBeInTheDocument()
-    expect(screen.getByText('New catches')).toBeInTheDocument()
+    // The run id stays available and links to Run Detail while it is running.
+    await waitFor(() => expect(screen.getByText('Run #42')).toBeInTheDocument())
+    expect(screen.getByText('Evaluation in progress…')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /View run #42 detail/i })).toHaveAttribute('href', '/runs/42')
+    expect(screen.queryByText('Evaluation finished')).not.toBeInTheDocument()
+  })
+
+  it('adopts the stored terminal status from persisted state', async () => {
+    renderWithProviders(<BacktestView />)
+
+    await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+
+    vi.spyOn(mock, 'startBacktest').mockResolvedValue({ run_id: 42, status: 'running' })
+    vi.spyOn(mock, 'getRun').mockResolvedValue(
+      runFixture({ id: 42, run_type: 'backtest', status: 'completed' })
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
+
+    await waitFor(() => expect(screen.getByText('Evaluation finished')).toBeInTheDocument())
+    expect(screen.queryByText('Evaluation in progress…')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /View run #42 detail/i })).toHaveAttribute('href', '/runs/42')
+  })
+
+  it('shows the stored failed status instead of claiming completion', async () => {
+    renderWithProviders(<BacktestView />)
+
+    await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+
+    vi.spyOn(mock, 'startBacktest').mockResolvedValue({ run_id: 42, status: 'running' })
+    vi.spyOn(mock, 'getRun').mockResolvedValue(
+      runFixture({ id: 42, run_type: 'backtest', status: 'failed', interrupt_reason: 'selector exploded' })
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
+
+    await waitFor(() => expect(screen.getByText('Failed')).toBeInTheDocument())
+    expect(screen.queryByText('Evaluation finished')).not.toBeInTheDocument()
+    // The run id and the path to the full persisted evidence stay available.
+    expect(screen.getByRole('link', { name: /View run #42 detail/i })).toHaveAttribute('href', '/runs/42')
+  })
+
+  it('leaves the result unknown with a retry when the status read fails', async () => {
+    renderWithProviders(<BacktestView />)
+
+    await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+
+    vi.spyOn(mock, 'startBacktest').mockResolvedValue({ run_id: 42, status: 'running' })
+    vi.spyOn(mock, 'getRun').mockRejectedValue(new Error('network down'))
+
+    fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
+
+    // A failed status read is never converted into success or failure.
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "Could not read run #42's persisted status. The result is unknown — it is not treated as completed."
+        )
+      ).toBeInTheDocument()
+    )
+    expect(screen.getByText('Status unknown')).toBeInTheDocument()
+    expect(screen.queryByText('Evaluation finished')).not.toBeInTheDocument()
+    // The run id is kept so the user can still open Run Detail.
+    expect(screen.getByRole('link', { name: /View run #42 detail/i })).toHaveAttribute('href', '/runs/42')
+
+    // The retry re-reads persisted state and adopts the stored terminal status.
+    vi.mocked(mock.getRun).mockResolvedValue(
+      runFixture({ id: 42, run_type: 'backtest', status: 'completed' })
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^Retry$/ }))
+
+    await waitFor(() => expect(screen.getByText('Evaluation finished')).toBeInTheDocument())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('flows replay through the same persisted requested-run lifecycle', async () => {
+    renderWithProviders(<BacktestView />)
+
+    await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('tab', { name: /Replay\/Reprocess/i }))
+    await waitFor(() => expect(screen.getByRole('combobox')).toBeInTheDocument())
+
+    vi.spyOn(mock, 'startReplay').mockResolvedValue({ run_id: 7, status: 'running' })
+    vi.spyOn(mock, 'getRun').mockResolvedValue(
+      runFixture({ id: 7, run_type: 'replay', status: 'running' })
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Run replay/i }))
+
+    // The start ack is not completion: replay shows the active persisted state
+    // and keeps the run reachable. Terminal adoption is the same shared
+    // code path already covered by the backtest lifecycle tests above.
+    await waitFor(() => expect(screen.getByText('Evaluation in progress…')).toBeInTheDocument())
+    expect(screen.queryByText('Evaluation finished')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /View run #7 detail/i })).toHaveAttribute('href', '/runs/7')
+  })
+
+  it('never shows a comparison against production totals for either mode', async () => {
+    renderWithProviders(<BacktestView />)
+
+    await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+
+    vi.spyOn(mock, 'startBacktest').mockResolvedValue({ run_id: 42, status: 'running' })
+    vi.spyOn(mock, 'startReplay').mockResolvedValue({ run_id: 7, status: 'running' })
+    vi.spyOn(mock, 'getRun').mockResolvedValue(
+      runFixture({ id: 42, run_type: 'backtest', status: 'completed' })
+    )
+    const listRunsSpy = vi.spyOn(mock, 'listRuns')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
+    await waitFor(() => expect(screen.getByText('Evaluation finished')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('tab', { name: /Replay\/Reprocess/i }))
+    vi.mocked(mock.getRun).mockResolvedValue(
+      runFixture({ id: 7, run_type: 'replay', status: 'completed' })
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Run replay/i }))
+    await waitFor(() => expect(screen.getByText('Evaluation finished')).toBeInTheDocument())
+
+    // No baseline/new/lost/net claim and no aggregate over production totals:
+    // BR-027 AC5 defers comparison, and unrelated production runs are not a
+    // valid baseline.
+    expect(screen.queryByText(/Comparison results/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Historical accepted/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Proposed accepted/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/New catches/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Lost catches/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Net change/i)).not.toBeInTheDocument()
+    expect(listRunsSpy).not.toHaveBeenCalled()
   })
 
   it('supports file upload for proposed configuration', async () => {
@@ -206,7 +359,7 @@ describe('BacktestView', () => {
     await waitFor(() => expect(screen.getAllByText(/Loaded 3 proposed routes from file/i)).toHaveLength(2))
 
     fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
-    await waitFor(() => expect(screen.getByText(/Comparison results/i)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Evaluation finished')).toBeInTheDocument())
 
     const call = fetchSpy.mock.calls.find(
       ([input, init]) => String(input) === '/api/backtest' && init?.method === 'POST'
@@ -250,7 +403,7 @@ describe('BacktestView', () => {
     expect(JSON.stringify(await mock.listRoutes())).toBe(activeBefore)
 
     fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
-    await waitFor(() => expect(screen.getByText(/Comparison results/i)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Evaluation finished')).toBeInTheDocument())
 
     const call = fetchSpy.mock.calls.find(
       ([input, init]) => String(input) === '/api/backtest' && init?.method === 'POST'

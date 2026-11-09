@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { act, render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
-import { RunsView } from './RunsView'
+import { RunsView, RUN_POLL_INTERVAL_MS } from './RunsView'
 import { ToastProvider } from '../components/ToastProvider'
 import * as mock from '../api/mock'
 import type { Run } from '../types'
@@ -37,6 +37,10 @@ function renderView() {
 describe('RunsView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('renders run rows when runs are returned', async () => {
@@ -132,6 +136,115 @@ describe('RunsView', () => {
 
     await waitFor(() => expect(screen.getByText(/No runs yet/i)).toBeInTheDocument())
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  describe('persisted lifecycle, counts, and refresh', () => {
+    // Deterministic async control under fake timers: the clock only moves when
+    // the test says so, and `flush` drains the promise chain, so no assertion
+    // depends on wall-clock auto-advance.
+    async function flush() {
+      await act(async () => {
+        for (let i = 0; i < 25; i++) await Promise.resolve()
+        await vi.advanceTimersByTimeAsync(0)
+      })
+    }
+
+    function advance(ms: number) {
+      return act(async () => {
+        await vi.advanceTimersByTimeAsync(ms)
+        for (let i = 0; i < 25; i++) await Promise.resolve()
+      })
+    }
+
+    it('renders the failed status label and offers Failed in the status filter', async () => {
+      vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([runFixture({ id: 1, status: 'failed' })])
+
+      renderView()
+      await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument())
+
+      expect(within(screen.getByRole('table')).getByText('Failed')).toBeInTheDocument()
+      const statusSelect = screen.getByLabelText('Status')
+      expect(within(statusSelect).getByRole('option', { name: 'Failed' })).toBeInTheDocument()
+    })
+
+    it('distinguishes selected, evaluated, and discovered counts, keeping null selected as Unknown', async () => {
+      vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([
+        runFixture({ id: 1, status: 'completed', videos_selected: 12, videos_evaluated: 7, videos_discovered: 42 }),
+        runFixture({ id: 2, status: 'completed', videos_selected: 0, videos_evaluated: 4, videos_discovered: 6 }),
+        runFixture({ id: 3, status: 'completed', videos_selected: null, videos_discovered: 5 }),
+      ])
+
+      renderView()
+      await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument())
+
+      const table = screen.getByRole('table')
+      expect(within(table).getByRole('columnheader', { name: 'Selected' })).toBeInTheDocument()
+      expect(within(table).getByRole('columnheader', { name: 'Evaluated' })).toBeInTheDocument()
+      expect(within(table).getByRole('columnheader', { name: 'Discovered' })).toBeInTheDocument()
+
+      const [, row1, row2, row3] = within(table).getAllByRole('row')
+      // Known counts render as numbers.
+      expect(within(row1).getByText('12')).toBeInTheDocument()
+      expect(within(row1).getByText('7')).toBeInTheDocument()
+      expect(within(row1).getByText('42')).toBeInTheDocument()
+      // A captured empty selection is 0, not Unknown.
+      expect(within(row2).getByText('0')).toBeInTheDocument()
+      // A never-captured selection is Unknown, not 0; an absent evaluated
+      // count is an em dash, not a fabricated number.
+      expect(within(row3).getByText('Unknown')).toBeInTheDocument()
+      expect(within(row3).getByText('—')).toBeInTheDocument()
+      expect(within(row3).getByText('5')).toBeInTheDocument()
+    })
+
+    it('polls a running run and adopts the stored terminal status, then stops polling', async () => {
+      vi.useFakeTimers()
+      const listSpy = vi
+        .spyOn(mock, 'listRuns')
+        .mockResolvedValueOnce([runFixture({ id: 1, status: 'running' })])
+        .mockResolvedValueOnce([runFixture({ id: 1, status: 'failed' })])
+
+      renderView()
+      await flush()
+      const table = () => screen.getByRole('table')
+      expect(within(table()).getByText('Running')).toBeInTheDocument()
+      expect(within(table()).queryByText('Failed')).not.toBeInTheDocument()
+
+      await advance(RUN_POLL_INTERVAL_MS)
+
+      expect(within(table()).getByText('Failed')).toBeInTheDocument()
+      expect(within(table()).queryByText('Running')).not.toBeInTheDocument()
+      expect(listSpy).toHaveBeenCalledTimes(2)
+
+      // Terminal: no further refreshes are scheduled.
+      await advance(RUN_POLL_INTERVAL_MS * 2)
+      expect(listSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('keeps the last loaded list and offers a visible retry when a background refresh fails', async () => {
+      vi.useFakeTimers()
+      const running = runFixture({ id: 1, status: 'running' })
+      vi.spyOn(mock, 'listRuns')
+        .mockResolvedValueOnce([running])
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValueOnce([running])
+
+      renderView()
+      await flush()
+      expect(screen.getByRole('table')).toBeInTheDocument()
+
+      await advance(RUN_POLL_INTERVAL_MS)
+
+      const alert = screen.getByRole('alert')
+      expect(alert).toHaveTextContent('Could not refresh run status. The list below may be out of date.')
+      // The stale-but-truthful list stays visible instead of being cleared or
+      // replaced by an empty state.
+      expect(within(screen.getByRole('table')).getByText('Running')).toBeInTheDocument()
+
+      fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
+      await flush()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(within(screen.getByRole('table')).getByText('Running')).toBeInTheDocument()
+    })
   })
 
   describe('filters', () => {

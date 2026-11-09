@@ -5,6 +5,11 @@ import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
 import type { Run, RunStatus, RunType } from '../types'
 
+// Persisted-state polling interval (ARD-001: while a listed run is stored as
+// running, the client re-reads stored run state; start acknowledgement is
+// never treated as completion).
+export const RUN_POLL_INTERVAL_MS = 5000
+
 const runTypeLabels: Record<RunType, string> = {
   scheduled: 'Scheduled',
   manual: 'Manual',
@@ -16,7 +21,14 @@ const runTypeLabels: Record<RunType, string> = {
 const runStatusLabels: Record<RunStatus, string> = {
   running: 'Running',
   completed: 'Completed',
+  failed: 'Failed',
   interrupted: 'Interrupted',
+}
+
+// Selected shows "Unknown" for a null/absent count (never captured) and "0"
+// only for a captured empty selection (BR-020).
+function selectedCountLabel(run: Run): string {
+  return run.videos_selected == null ? 'Unknown' : String(run.videos_selected)
 }
 
 interface RunFilters {
@@ -39,6 +51,8 @@ export function RunsView() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  const [refreshError, setRefreshError] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [filters, setFilters] = useState<RunFilters>(emptyFilters)
   const retryButtonRef = useRef<HTMLButtonElement>(null)
   const firstRowRef = useRef<HTMLTableRowElement>(null)
@@ -64,11 +78,43 @@ export function RunsView() {
     }
   }, [])
 
+  // Persisted-state refresh: while any listed run is stored as running, keep
+  // re-reading the run list so a terminal status replaces "running" without
+  // user action (ARD-001). A failed background read never clears the list it
+  // could not refresh; it surfaces a visible retry instead of implying the
+  // data is current.
+  const hasRunning = runs.some((r) => r.status === 'running')
+  useEffect(() => {
+    if (!hasRunning || fetchError) return
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      api.listRuns()
+        .then((r) => {
+          if (cancelled) return
+          setRuns(r)
+          setRefreshError(false)
+        })
+        .catch(() => {
+          if (cancelled) return
+          setRefreshError(true)
+        })
+    }, RUN_POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [hasRunning, fetchError])
+
   // Focus the Retry button whenever the view settles into the fetch-error
   // state: on first entry and again after a failed retry re-enables it.
   useEffect(() => {
     if (fetchError && !retrying) retryButtonRef.current?.focus()
   }, [fetchError, retrying])
+
+  // A background refresh failure renders its own alert with a Retry control
+  // (see refreshErrorRegion) and deliberately does not move focus; the
+  // fetch-error region above keeps its focus-on-entry behavior for full load
+  // failures.
 
   // After a successful retry, move focus to the first run row.
   useEffect(() => {
@@ -88,6 +134,19 @@ export function RunsView() {
       addToast('Retry failed. Please try again.', 'error')
     } finally {
       setRetrying(false)
+    }
+  }
+
+  async function handleRefreshRetry() {
+    setRefreshing(true)
+    try {
+      const r = await api.listRuns()
+      setRuns(r)
+      setRefreshError(false)
+    } catch {
+      addToast('Refresh failed. Please try again.', 'error')
+    } finally {
+      setRefreshing(false)
     }
   }
 
@@ -187,6 +246,27 @@ export function RunsView() {
     </div>
   )
 
+  const refreshErrorRegion = refreshError && (
+    <div
+      className="card"
+      role="alert"
+      aria-live="assertive"
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}
+    >
+      <p style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--color-status-failed)' }}>
+        Could not refresh run status. The list below may be out of date.
+      </p>
+      <button
+        type="button"
+        className="button"
+        onClick={handleRefreshRetry}
+        disabled={refreshing}
+      >
+        {refreshing ? 'Retrying…' : 'Retry'}
+      </button>
+    </div>
+  )
+
   return (
     <>
       <div className="page-header">
@@ -200,39 +280,48 @@ export function RunsView() {
           onRetry={handleRetry}
           retrying={retrying}
         />
-      ) : visibleRuns.length === 0 ? (
-        <div className="card empty-state">
-          {filtersActive
-            ? 'No runs match the current filters.'
-            : 'No runs yet. Start a processing run to see results here.'}
-        </div>
       ) : (
-        <div className="card">
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Started</th>
-                <th scope="col">Type</th>
-                <th scope="col">Status</th>
-                <th scope="col">Videos</th>
-                <th scope="col">Quota</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleRuns.map((r, i) => (
-                <tr key={r.id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
-                  <td data-label="Started">
-                    <Link to={`/runs/${r.id}`}>{new Date(r.started_at).toLocaleString()}</Link>
-                  </td>
-                  <td data-label="Type">{runTypeLabels[r.run_type] ?? r.run_type}</td>
-                  <td data-label="Status">{r.status}</td>
-                  <td data-label="Videos">{r.videos_discovered}</td>
-                  <td data-label="Quota">{r.quota_cost}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          {refreshErrorRegion}
+          {visibleRuns.length === 0 ? (
+            <div className="card empty-state">
+              {filtersActive
+                ? 'No runs match the current filters.'
+                : 'No runs yet. Start a processing run to see results here.'}
+            </div>
+          ) : (
+            <div className="card">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th scope="col">Started</th>
+                    <th scope="col">Type</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Selected</th>
+                    <th scope="col">Evaluated</th>
+                    <th scope="col">Discovered</th>
+                    <th scope="col">Quota</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRuns.map((r, i) => (
+                    <tr key={r.id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
+                      <td data-label="Started">
+                        <Link to={`/runs/${r.id}`}>{new Date(r.started_at).toLocaleString()}</Link>
+                      </td>
+                      <td data-label="Type">{runTypeLabels[r.run_type] ?? r.run_type}</td>
+                      <td data-label="Status">{runStatusLabels[r.status] ?? r.status}</td>
+                      <td data-label="Selected">{selectedCountLabel(r)}</td>
+                      <td data-label="Evaluated">{r.videos_evaluated ?? '—'}</td>
+                      <td data-label="Discovered">{r.videos_discovered}</td>
+                      <td data-label="Quota">{r.quota_cost}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </>
   )

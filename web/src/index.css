@@ -545,8 +545,12 @@ a {
 
 .metadata-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
   gap: 12px;
+}
+
+.metadata-list > div {
+  min-width: 0;
 }
 
 .metadata-list dt {
@@ -559,6 +563,7 @@ a {
 .metadata-list dd {
   margin: 0;
   font-size: 0.875rem;
+  overflow-wrap: anywhere;
 }
 
 .modal-backdrop {

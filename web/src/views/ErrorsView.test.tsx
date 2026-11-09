@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { ErrorsView } from './ErrorsView'
 import { ToastProvider } from '../components/ToastProvider'
 import * as mock from '../api/mock'
+import * as queueApi from '../api/queue'
 import type { ErrorEntry } from '../types'
 
 function renderWithProviders(ui: React.ReactElement) {
@@ -15,6 +16,38 @@ function renderWithProviders(ui: React.ReactElement) {
 }
 
 describe('ErrorsView', () => {
+  it('renders the server queue contract and sends the returned id to retry and remove', async () => {
+    const entry = {
+      id: 427,
+      video_id: 12,
+      external_video_id: 'yt-safe-id',
+      run_id: 9,
+      error_category: 'api_error' as const,
+      error_message: 'quotaExceeded',
+      status: 'active' as const,
+      created_at: '2026-10-01T00:00:00Z',
+      retry_count: 0,
+    }
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([entry])
+    vi.spyOn(queueApi, 'listDeferred').mockResolvedValueOnce([])
+    const retry = vi.spyOn(queueApi, 'retryError').mockResolvedValue(entry)
+    const dismiss = vi.spyOn(queueApi, 'dismissError').mockResolvedValue(entry)
+
+    renderWithProviders(<ErrorsView />)
+    const row = await waitFor(() => screen.getByText('yt-safe-id').closest('tr'))
+    expect(within(row!).getByText('api_error')).toBeInTheDocument()
+    expect(within(row!).getByText('quotaExceeded')).toBeInTheDocument()
+    fireEvent.click(within(row!).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(retry).toHaveBeenCalledWith(427))
+
+    // Reload the same real-shaped row to exercise the independent dismiss action.
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([entry])
+    renderWithProviders(<ErrorsView />)
+    const secondRow = await waitFor(() => screen.getByText('yt-safe-id').closest('tr'))
+    fireEvent.click(within(secondRow!).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(dismiss).toHaveBeenCalledWith(427))
+  })
+
   it('renders errors and deferred queues with retry/dismiss actions', async () => {
     renderWithProviders(<ErrorsView />)
 
