@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/bateau84/YuHaul/internal/diag"
 )
 
 // Handler returns an http.Handler that serves the auth endpoints. The caller
@@ -37,7 +39,7 @@ func (s *Service) handleInitiate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "youtube oauth is not configured")
 			return
 		}
-		slog.ErrorContext(r.Context(), "oauth initiate failed", "error", err)
+		slog.ErrorContext(r.Context(), "oauth initiate failed", "diagnostic", diag.Classify(err, "unknown", "unknown").String())
 		writeError(w, http.StatusInternalServerError, "failed to initiate authorization")
 		return
 	}
@@ -58,12 +60,12 @@ func (s *Service) handleCallback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "youtube oauth is not configured")
 			return
 		}
-		slog.WarnContext(r.Context(), "oauth callback failed", "error", err)
+		slog.WarnContext(r.Context(), "oauth callback failed", "diagnostic", diag.Classify(err, "unknown", "unknown").String())
 		if wantsHTML(r) {
 			http.Redirect(w, r, "/settings?auth=error", http.StatusSeeOther)
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "authorization callback failed")
 		return
 	}
 
@@ -89,7 +91,7 @@ func wantsHTML(r *http.Request) bool {
 func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status, err := s.Status(r.Context())
 	if err != nil {
-		slog.ErrorContext(r.Context(), "account status failed", "error", err)
+		slog.ErrorContext(r.Context(), "account status failed", "diagnostic", diag.Classify(err, "unknown", "unknown").String())
 		writeError(w, http.StatusInternalServerError, "failed to read account status")
 		return
 	}
@@ -102,7 +104,7 @@ func (s *Service) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]bool{"disconnected": true})
 			return
 		}
-		slog.ErrorContext(r.Context(), "account disconnect failed", "error", err)
+		slog.ErrorContext(r.Context(), "account disconnect failed", "diagnostic", diag.Classify(err, "unknown", "unknown").String())
 		writeError(w, http.StatusInternalServerError, "failed to disconnect account")
 		return
 	}

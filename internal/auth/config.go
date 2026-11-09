@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -78,12 +79,37 @@ func (c *ServiceConfig) Validate() error {
 // handlers that report auth as not configured and refuses any operation that
 // would require OAuth credentials.
 type Service struct {
-	config      *ServiceConfig
-	oauthConfig *oauth2.Config
-	encKey      []byte
-	store       TokenStore
-	states      StateStore
-	configured  bool
+	config              *ServiceConfig
+	oauthConfig         *oauth2.Config
+	encKey              []byte
+	store               TokenStore
+	states              StateStore
+	configured          bool
+	mu                  sync.Mutex
+	flight              *renewalFlight
+	pending             *pendingRenewal
+	knownFailure        *knownRenewalFailure
+	authorityGeneration uint64
+	oauthGeneration     uint64
+	disconnected        bool
+	stateGenerations    map[string]uint64
+}
+
+type renewalFlight struct {
+	done    chan struct{}
+	token   *oauth2.Token
+	err     error
+	version CredentialVersion
+}
+
+type pendingRenewal struct {
+	version CredentialVersion
+	record  TokenRecord
+}
+
+type knownRenewalFailure struct {
+	version CredentialVersion
+	reason  string
 }
 
 // NewService constructs an auth Service. It validates config, derives the
@@ -97,6 +123,9 @@ func NewService(cfg *ServiceConfig, store TokenStore, states StateStore) (*Servi
 	}
 	if store == nil {
 		return nil, errors.New("auth: TokenStore is required")
+	}
+	if _, ok := store.(ConditionalTokenStore); !ok {
+		return nil, errors.New("auth: TokenStore must support conditional credential operations")
 	}
 	if states == nil {
 		return nil, errors.New("auth: StateStore is required")
@@ -196,6 +225,16 @@ type TokenStore interface {
 	Delete(ctx context.Context) error
 }
 
+// ConditionalTokenStore adds generation-fenced credential operations required
+// by Service for callback replacement, renewal, and disconnect.
+type ConditionalTokenStore interface {
+	TokenStore
+	SaveRefresh(context.Context, CredentialVersion, *TokenRecord) (CredentialVersion, error)
+	SaveRenewalFailure(context.Context, CredentialVersion, string) error
+	ReplaceAuthorization(context.Context, *CredentialVersion, *TokenRecord) (CredentialVersion, error)
+	DeleteIfCurrent(context.Context, CredentialVersion) error
+}
+
 // StateStore persists and validates OAuth2 state parameters.
 type StateStore interface {
 	// Save stores state with an expiration time.
@@ -206,24 +245,30 @@ type StateStore interface {
 
 // TokenRecord is the durable representation of an OAuth2 token.
 type TokenRecord struct {
-	Provider       string
-	AccessToken    string
-	RefreshToken   string
-	TokenType      string
-	Expiry         time.Time
-	Scopes         []string
-	ConnectedAt    time.Time
-	UpdatedAt      time.Time
-	DisconnectedAt *time.Time
+	AuthorizationID    string
+	CredentialRevision int64
+	AccessRejected     bool
+	RenewalFailure     string
+	Provider           string
+	AccessToken        string
+	RefreshToken       string
+	TokenType          string
+	Expiry             time.Time
+	Scopes             []string
+	ConnectedAt        time.Time
+	UpdatedAt          time.Time
+	DisconnectedAt     *time.Time
 }
 
 // ConnectionStatus describes whether the service has usable credentials.
 type ConnectionStatus struct {
-	Connected     bool      `json:"connected"`
-	Authenticated bool      `json:"authenticated"`
-	Configured    bool      `json:"configured"`
-	Provider      string    `json:"provider,omitempty"`
-	Scopes        []string  `json:"scopes,omitempty"`
-	ConnectedAt   time.Time `json:"connected_at,omitempty"`
-	ExpiresAt     time.Time `json:"expires_at,omitempty"`
+	Connected           bool      `json:"connected"`
+	Authenticated       bool      `json:"authenticated"`
+	Configured          bool      `json:"configured"`
+	AuthorizationState  string    `json:"authorization_state"`
+	AuthorizationReason *string   `json:"authorization_reason"`
+	Provider            string    `json:"provider,omitempty"`
+	Scopes              []string  `json:"scopes,omitempty"`
+	ConnectedAt         time.Time `json:"connected_at,omitempty"`
+	ExpiresAt           time.Time `json:"expires_at,omitempty"`
 }
