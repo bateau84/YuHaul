@@ -4,7 +4,7 @@ title: YuHaul Admin Interface Design Specification
 description: "Human-centered design specification for the YuHaul web administration interface — a responsive, device-aware operational dashboard for managing YouTube subscription routing, inspecting processing decisions, and analyzing content discovery performance."
 tags: [design-spec, web-ui, admin-dashboard, youtube]
 status: accepted
-timestamp: 2026-10-25T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 ---
 
 ## Design Spec: YuHaul Admin Interface
@@ -29,7 +29,7 @@ The user notices their "Ambient" route has accepted 0 videos in the last 2 weeks
 The user remembers a specific channel that should have matched but didn't. They navigate to Analytics > Channels, find the channel, and see its recent videos. They click a specific video that was rejected — the Decision Detail view shows the evidence trail: "Route 'Music Discovery' condition 'title contains [genre keyword]' — NOT MATCHED. Route 'Ambient' condition 'duration > 10min' — NOT MATCHED. Result: rejected (no route matched)." They realize their route conditions need adjustment.
 
 **Scenario 4 — Error triage and deferred work (2 minutes):**
-The user checks the Errors view. The error queue shows 1 item: authentication token expired (needs manual re-authentication). They also see the Deferred tab: 2 items deferred due to quota exhaustion. The deferred items will be eligible for the next scheduled or manual run once sufficient quota is available. The user re-authenticates, then removes the resolved auth error from the queue.
+The user checks the Errors view. One item needs account reconnection because stored renewal authorization was rejected, not merely because an access token expired. They open Settings > Account and reconnect. The failed work remains inspectable; reconnection does not prove it succeeded or make an uncertain playlist action safe to repeat. They also see the Deferred tab: 2 items deferred due to quota exhaustion, eligible for a later scheduled or manual run when quota is available. Routine access expiry instead renews automatically during production work; a temporary renewal failure explains that access is unavailable without claiming revoked consent.
 
 **Scenario 5 — Backtest before committing a change (10 minutes):**
 **Status:** Future-target comparison illustration; comparison against earlier same-YuHaul production outcomes is deferred from first-use launch. The scenario text is retained.
@@ -45,8 +45,8 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 
 | # | Workflow | Surfaces / Endpoints | ACs Served | Capability Gap |
 |---|----------|---------------------|------------|----------------|
-| 1 | **Account Connection** — OAuth flow to connect YouTube account | Settings > Account, `POST /api/settings/account/connect` | AC 1 | None |
-| 2 | **Discovery & Processing** — Scheduled or manual run discovers videos, evaluates routes, executes actions | Overview (trigger), Runs (trigger + inspect), `POST /api/runs`, `GET /api/runs/:id/progress` (SSE) | AC 2, 11, 12, 13, 14, 30, 32 | None |
+| 1 | **Account Connection and Renewal** — OAuth connection, automatic production renewal, truthful recovery status | Settings > Account, Overview account summary, production callers; account endpoints follow Architecture | AC 1; BR-034, OC-006 | Status/renewal realization and assembled-path verification remain outstanding; endpoint names here are not new contracts |
+| 2 | **Discovery & Processing** — Scheduled or manual run discovers videos, evaluates routes, executes actions | Overview (trigger), Runs (trigger + inspect), `POST /api/runs`, `GET /api/runs/:id`, `GET /api/runs/:id/stream` (SSE hints) | AC 2, 11, 12, 13, 14, 30, 32 | Existing durable facts support phase/status feedback; no overall completion denominator |
 | 3 | **Route Management** — Create, edit, delete, reorder, enable/disable routes with conditions and actions | Routes (list + editor), `GET/POST/PUT/DELETE /api/routes`, `PUT /api/routes/reorder` | AC 3, 4, 5, 6 | None |
 | 4 | **Exclusion Management** — Per-route exclusion rules (channels, videos, titles, words, duration) | Route Editor > Exclusions region | AC 7 | None |
 | 5 | **Duplicate Detection** — Exact and fuzzy duplicate detection, corpus import | Settings > Data, Settings > Duplicate Threshold | AC 8, 9, 10 | None |
@@ -78,11 +78,11 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 
 **US-001: Connect YouTube Account**
 - **Actor:** YuHaul administrator (the single user)
-- **Context:** First-time setup or re-authentication after token expiry
-- **Trigger:** User navigates to Settings > Account and clicks "Connect YouTube Account"
+- **Context:** First-time setup, or reconnection because renewal authorization is missing or confirmed rejected. Routine access expiry with available renewal is not a reconnection task.
+- **Trigger:** User navigates to Settings > Account and clicks "Connect YouTube Account" or the existing "Reconnect" action when required
 - **Desired outcome:** YouTube account is authenticated via OAuth2; YuHaul can discover subscriptions and manage playlists
-- **Observable success:** Account status shows "Connected" with channel name and avatar; next run will discover subscriptions
-- **Source:** AC 1
+- **Observable success:** Account status confirms usable authorization for the intended account. Scheduled/manual production work renews expired access automatically, including after restart and between calls; failure preserves work and distinguishes temporary unavailability from reconnection required. Connection success is not a promise that a run or playlist action has succeeded.
+- **Source:** AC 1; [BR-034](/docs/requirements/yuhaul/br-034-automatic-youtube-token-refresh.md), [OC-006](/docs/requirements/yuhaul/oc-006-refresh-authorization-and-call-safety.md)
 
 **US-002: Import Historical Corpus**
 - **Actor:** YuHaul administrator migrating from the previous application
@@ -150,8 +150,8 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 - **Actor:** YuHaul administrator triggering content discovery
 - **Context:** User wants to process pending videos now rather than waiting for the next scheduled run
 - **Trigger:** User clicks "Run Now" in the header or Overview
-- **Desired outcome:** A processing run starts; the user sees real-time progress via SSE stream; run completes with outcomes
-- **Observable success:** Progress indicator shows current state (discovering, evaluating, acting); run appears in Runs list with outcome summary; accepted videos are in target playlists on YouTube
+- **Desired outcome:** A processing run starts; the user can follow its recorded phase and saved status, then inspect its outcomes without mistaking API spending for playlist success.
+- **Observable success:** The acknowledged run opens in Run Detail; recorded phase/status remain visible through discovery even before selected inputs are known. A saved terminal status replaces active progress, and recorded video/action outcomes explain the result. Start acknowledgement, Accepted, and quota usage are not playlist-insertion confirmations.
 - **Source:** AC 2, 17
 
 **US-010: Run a Dry-Run with Draft Configuration**
@@ -407,7 +407,7 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 **Goal:** Process as many videos as possible without losing eligible work.
 
 **Task sequence:**
-1. Run starts — Overview shows "Run in progress" with SSE-driven progress
+1. Run starts — Overview shows "Run in progress" with a link to its saved status and recorded phase; SSE may prompt earlier status reads
 2. At video 34, quota is exhausted
 3. Run transitions remaining 51 videos to "deferred" state
 4. Run completes with summary: 34 processed (22 accepted, 10 rejected, 2 failed), 51 deferred
@@ -422,27 +422,29 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 
 ---
 
-#### SC-007: Re-authentication After Token Expiry (Desktop, 2 minutes)
+#### SC-007: Automatic Access Renewal and Account Recovery (Desktop or Mobile)
 
-**Context:** The user's YouTube OAuth token has expired (tokens typically last hours to days).
+**Context:** A scheduled or manually initiated production run needs YouTube access after access-token expiry, including after application restart or between calls during a run. The account was previously authorized.
 
-**Goal:** Re-authenticate without losing any processing state.
+**Goal:** Continue authorized work without unnecessary reconnection, or understand the actual recovery needed without losing work or repeating an uncertain playlist change.
 
-**Task sequence:**
-1. User opens YuHaul — Overview shows "Account: Disconnected" warning
-2. Next scheduled run would fail — user sees an auth error in the Error queue
-3. User navigates to Settings > Account
-4. Account status shows "Disconnected — token expired"
-5. User clicks "Reconnect" — OAuth flow opens in new tab
-6. User authorizes on YouTube — redirected back to YuHaul
-7. Account status updates to "Connected — [channel name]"
-8. User navigates to Errors — the auth error is still in the queue
-9. User clicks "Retry" on the auth error — system re-processes the video with fresh token
-10. On success: error is dismissed from active queue
+**Task sequence — available renewal:**
+1. Production work encounters expired access, or the provider rejects the access used. The system attempts available renewal before demanding reconnection.
+2. If the user inspects account status while renewal is unresolved, it shows "Renewing YouTube access", not usable-access success or "Disconnected — token expired". Ordinary successful background renewal needs no modal or user action.
+3. After renewal and its durable save succeed, account status shows "Connected" for the intended account. Eligible work continues subject to operation-safety checks; the UI reads actual run/action evidence rather than inferring success from renewal.
 
-**Outcome:** Account reconnected, failed items retried, processing can resume.
+**Observable success:** Scheduled and manual production entry paths continue with renewed access without interactive authorization solely for expiry. Repeat after restart and expiry between calls. Later calls use recovered authorization; work and action outcomes remain truthful.
 
-**Edge condition:** If the retry fails again (e.g., video was removed from YouTube), the error updates with the new reason and stays in the queue. The user can dismiss it manually.
+**Failure/recovery branches:**
+- **Missing or confirmed rejected renewal authorization:** Overview and Settings show "Reconnect required" with a safe explanation. The user follows the existing Reconnect OAuth flow, returns to Settings > Account and sees the confirmed result. Cancellation or failure leaves recovery needed and failed work inspectable; it never claims Connected. Successful reconnection restores account access, not historical run/action success.
+- **Temporary provider/network failure:** Show "YouTube access temporarily unavailable" and explain that renewal could not complete. Do not claim consent was revoked or require reconnecting. The user can inspect the affected run/work and return later; later production work resolves authorization again. No new retry schedule, countdown or manual refresh control is promised.
+- **Renewal save failure:** Show "Could not save renewed YouTube access" with "Access renewal is unavailable. Try again later." Do not claim durable renewal success or rejected consent. Reconnect becomes necessary only on actual evidence that renewal authorization is missing/rejected.
+- **Uncertain playlist action:** Even after refresh or reconnect succeeds, retain the unresolved action and its explicit unknown-application explanation. “Playlist Action Confirmation — Authorization Pending and Unknown Application” below defines the exact run/decision wording, including guard-only and unavailable evidence. Renewal, reconnection and clicking Retry are not evidence that repeating it is safe. Existing retry/idempotency checks govern continuation; absent safe-replay evidence, work remains unresolved rather than silently repeated or marked successful.
+- **Newer user authority:** If the user disconnects or replaces the account while renewal is in flight, a late result does not restore the old account or show its success. Already issued external calls are not promised cancellable.
+
+**Outcome:** Either access recovers without unnecessary interaction, or the user sees the supported reason and recovery path. No pending work is silently discarded; failed runs remain failed, and a retained error is cleared only by its actual resolution or the user's explicit existing removal action, not by account renewal alone.
+
+**Source:** US-001, [BR-034](/docs/requirements/yuhaul/br-034-automatic-youtube-token-refresh.md), [OC-006](/docs/requirements/yuhaul/oc-006-refresh-authorization-and-call-safety.md). These are design checks, not executed acceptance evidence.
 
 ---
 
@@ -593,6 +595,105 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 - **Components:** Outcome summary cards, video outcome row (title, channel, outcome badge, route match info, expand action), filter by outcome type, quota cost breakdown, configuration version link
 - **Mode-aware interpretation:** Run and video inspection follow “Simulation Inspection — Requested-Run Results” below; production lifecycle state is not a simulation result.
 
+#### Playlist Action Confirmation — Authorization Pending and Unknown Application
+
+**Accepted amendment (2026-11-07):** Refines Run Detail and Decision Detail under [BR-034](/docs/requirements/yuhaul/br-034-automatic-youtube-token-refresh.md), [OC-006](/docs/requirements/yuhaul/oc-006-refresh-authorization-and-call-safety.md), and [Authorization ARS-001 — Evidence, retention and public uncertainty](/docs/architecture/youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md). Reuses US-001/SC-007 and the existing run/decision inspection journey. This supplies precise presentation of accepted states, not a new retry, reconciliation or historical-repair policy. It qualifies generic production `Failed`/`Not attempted` action labels elsewhere in this document when the explicit evidence below is present. Run status and recorded video categories remain unchanged.
+
+**Walkthrough:** The administrator opens a failed run and sees a video marked `Playlist outcome unknown`. Its decision detail identifies the captured playlist and explains that YuHaul cannot confirm whether the change was applied. Account access may now be Connected, but the warning remains. A different action deferred before sending says `Waiting for YouTube access` and `Not attempted in this run`. Opening Settings helps the person understand current access; it does not replay either action or change the earlier run's outcome.
+
+**Human goal and scenario checks:** The administrator needs to distinguish “not sent because access was unavailable” from “may have applied; do not repeat”, including after restart or reconnection. SC-007's uncertainty branch is checked by opening the same run/video before and after account recovery: the original warning and attempt evidence stay truthful. Its pre-send branch is checked with authorization unavailable before admission: a deferred action has no attempt time and does not claim a provider failure. Its interrupted branch is checked with only a saved unresolved guard and no action row: inspection still explains unknown application without inventing a send. These extend the existing scenario; no duplicate story IDs/files are needed.
+
+**Separate three meanings:**
+
+- **Run lifecycle:** Keep stored Running, Completed, Failed or Interrupted and existing counts. Completion does not certify every playlist result. Do not rewrite terminal run history after account recovery, or invent an `unknown` run/video outcome category or filter.
+- **Action confirmation in this run:** Explain the saved action/guard facts using the table below. A failed confirmation is not proof the playlist stayed unchanged.
+- **Current account access:** Settings/Overview use SC-007's canonical status. A historical `authorization_pending` reason is not proof that access is still unavailable. Show `View account status` linking to existing Settings > Account, not a guessed Reconnect button in run history. Only actual current status selects Reconnect in Settings.
+
+**Exact production action presentation:** Apply consistently in both per-route Actions and Layer 3 — Action outcomes. Only admitted, application-owned evidence selects these explanations; do not classify by raw error prose, HTTP status alone or missing timestamp.
+
+| Evidence supplied by the accepted contracts | Main action label | Persistent explanation / time |
+|---|---|---|
+| `deferred` with `authorization_pending` | `Waiting for YouTube access` | `Not attempted in this run. YouTube access was unavailable; the work was retained.` No attempt time. This does not mean renewal is currently running or promise automatic completion. |
+| `failed` with admitted `mutation_application_uncertain` reason/diagnostic | `Playlist outcome unknown` | `YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.` Show `Attempted {time}` only from an actual recorded attempt time. The stored failed outcome describes failure to confirm, not certain non-application. |
+| `not_attempted` with `mutation_application_uncertain` | `Not attempted — unresolved playlist action` | `This run did not repeat the playlist action because an earlier application is unresolved. Whether the earlier action was applied is unknown.` No attempt time for this row. Do not assign an earlier run/time unless actually supplied. |
+| Requested-run `unresolved_mutations` entry without an action row or matching attempt evidence | `Playlist outcome unknown` | `YuHaul cannot confirm whether this playlist action was sent or applied. Repeating it could add the video again, so it remains blocked.` If shown, `Prepared {time} — not an attempt time` uses only the supplied preparation time. Never fabricate a failed/not-attempted action row or increment attempts. |
+| Unsupported/withheld action reason or diagnostic | Keep only independently established outcome facts | `Action explanation unavailable.` Never display the raw value or infer authorization/unknown application from it. A separately valid unresolved entry still produces the warning above. |
+
+Known success and other existing conclusive dispositions retain their established labels. If a reason was withheld for safety, preserve the existing safe-withholding explanation rather than echoing it. Explanations come from registered reason/code semantics, not parsing a printable error string in the browser. Safe bounded diagnostic facts may be secondary detail; raw provider bodies, prose, URLs, tokens, authorization IDs/revisions and original error chains are absent from visible text, tooltips and accessible names.
+
+**Run Detail placement:** Keep the recorded video-outcome badge and outcome filters. Add the text `Playlist outcome unknown` immediately alongside/below the affected video's result when that requested-run row supplies an unresolved entry or an explicit uncertainty reason. For `authorization_pending`, add `Waiting for YouTube access` beside the recorded Deferred result. These are explanatory notices, not replacements for the recorded category. They remain visible on mobile, not tooltip-only. The existing video link opens Decision Detail for the same run/video. Do not compute a run-wide unresolved total from one filtered/paginated page, change accepted/failed counts, or claim that unshown videos have no uncertainty.
+
+**Decision Detail placement and hierarchy:** After Layer 1's recorded outcome and before route evidence, show a persistent H2 `Unresolved playlist actions` when valid requested-run uncertainty exists. Begin with `Restoring YouTube access does not confirm whether these playlist actions were applied.` List each supplied exact target with visible label `Playlist {target_playlist_id}` and the applicable explanation above. Use existing captured playlist names only when actually available; never fetch YouTube membership to fill this region. It remains visible even when Layer 3 says `No action outcomes recorded for this video.` Add `An unresolved playlist action is recorded above; no action outcome was recorded.` in that case. This is not a new action result. Preserve any independently recorded attempt row/time; a later blocked re-entry must not visually erase it.
+
+For guard entries and action evidence about the same target, one target notice can refer to the associated action row. Do not sum them as two attempts or imply an extra send. A receiving run's blocked row explains the earlier unresolved application, but must not borrow the original run's guard or attempt history. If no requested-run uncertainty evidence is supplied, do not show the warning merely because global processing state is failed or the account was unavailable.
+
+**Unavailable versus unknown application:** A positively supplied unresolved entry means application is unknown. Missing legacy action/guard evidence means `Playlist confirmation details unavailable for this record`, not “not sent”, “safe to retry”, or a diagnosed uncertain send. An empty/missing unresolved array does not establish historical non-application, another run's guard absence or safe retry. Keep existing missing-action copy and do not require an all-clear badge. If an explanation is withheld, say unavailable, not “never recorded” unless that is known. Mandatory list/detail read failure uses the existing failed-fetch state; it cannot become an empty successful guard/action list.
+
+**Actions, continuity and recovery:**
+
+- Run → video link → Decision Detail preserves requested-run identity. Direct links, new tabs and reload use saved run mode/evidence, never navigation-only flags. Back to run returns to that run; retain existing filter/page continuity where supported. This inspection performs local reads only, not token renewal, YouTube reads, evaluation or mutation.
+- `View account status` navigates to existing Settings > Account. The user can return using browser Back or the saved run link. Renewal/reconnection shows its actual current result there; neither navigation nor OAuth success restarts a run, clears a warning, resolves a guard or promises safe replay.
+- Add no `Retry playlist action`, `Clear uncertainty`, reconciliation or recovery control to run/decision views. Existing queue Retry/Remove/Dismiss semantics remain unchanged: none clears a guard or establishes non-application. When describing known uncertainty, say `Retry does not resolve this playlist uncertainty.` Never advertise Retry as a way to repeat a blocked target; removal does not mean an issued request was cancelled. Do not use a production run as a harmless confirmation check.
+- Read retry acknowledges loading and suppresses duplicate reads, then shows returned evidence or the existing read failure. It never retries the playlist operation. Keep last-known warnings during a failed background refresh with the existing stale indicator; do not replace them with an all-clear. Initial loading has no success/non-application claim. Unsupported/malformed uncertainty information is unavailable, not guessed or rendered verbatim. Existing not-found/back navigation remains available.
+- Saved terminal history stays fixed. Account recovery can change current status, but only supported operation evidence can change a live nonterminal confirmation. There is no promised eventual automatic resolution or new timing/retry policy in this design.
+
+**Accessibility and surface checks:** Target WCAG 2.2 AA. Warning meaning is persistent text, not color alone (SC 1.4.1); headings and per-target text have a meaningful reading order: recorded outcome → uncertainty explanation → account link → route/action evidence (SC 1.3.1/1.3.2). Unknown application is a warning, not a green success check or indefinite spinner. Keep existing design tokens; normal text contrast is at least 4.5:1 (SC 1.4.3). Target IDs and explanations wrap at 320 CSS pixels with no lost text (SC 1.4.10). All links/read-retry controls are keyboard operable with visible, unobscured focus (SC 2.1.1/2.4.7/2.4.11). Route changes focus the destination H1; background reads leave focus in place. Announce a newly changed uncertainty/pending status politely once, not on every identical poll (SC 4.1.3). Verify by keyboard, screen reader and narrow viewport against the checks below; this amendment does not assert implemented conformance.
+
+**Design decision:** Retain established run/category structure and add explicit target-level confirmation notices. Reject using generic `Failed` alone because it implies conclusive non-application; reject merging this with `Waiting for YouTube access` because renewed access cannot settle an issued mutation; reject a retry/reconciliation workflow because no such recovery capability is accepted. This is scoped refinement of the accepted design, not a new visual direction.
+
+**Evidence and downstream checks (not executed browser acceptance):** Source inspection found that `web/src/types.ts` and `web/src/api/run-videos.ts` omit `unresolved_mutations`, `web/src/lib/outcome.ts` has no labels for these two reasons and falls back to raw reason strings, and `DecisionDetailView.tsx` uses generic outcome badges. These are material presentation/projection gaps for implementation owners, not resolved by this document. Architecture owns safe diagnostic registrations and API facts under the linked ARS; implementation owns carrying them through list/detail and the real browser. No new product policy or user decision is needed. Semantic lookup was degraded; targeted source reads were used. Runtime, rendered hierarchy and assistive-technology behavior remain unverified.
+
+Check the shipped browser with real registered API projections for: pre-send authorization deferral; admitted uncertain failure with attempt time; guard-only uncertainty after restart with no action row/time/count; same-run blocked re-entry retaining earlier attempt evidence; fresh receiving-run blocked action without borrowed history; reconnect/refresh success with uncertainty unchanged; missing legacy evidence and unknown/withheld reasons; failed/stale reads; direct-link/reload; filtering/paging without false global totals; and simultaneous distinct successful, deferred and unresolved targets. Confirm run/video counts remain recorded facts, no raw provider marker reaches any rendered/accessibility surface, no inspection/retry-status action sends a playlist request, and simulation mode retains hypothetical labels without projecting current production guards.
+
+#### Run Now — Recorded Progress and Closure
+
+**Status and scope (2026-11-05):** Accepted amendment for the user's requested production-run feedback, especially discovery with unknown selected count and zero counters. Reuses US-009; no new run mode, telemetry, processing policy, or requirement is introduced. This section refines Overview, Run Detail, start feedback, and DD-13. It does not settle Backtest/Replay date filters or discovery/processing coordinator semantics.
+
+**Authority and dependencies:** [BR-017 — Manual Run Initiation](/docs/requirements/yuhaul/br-017-manual-run-initiation.md), [BR-020 — Run-Level and Route-Level Statistics](/docs/requirements/yuhaul/br-020-run-level-and-route-level-statistics.md), [BR-028 — Historical Run Inspection](/docs/requirements/yuhaul/br-028-historical-run-inspection.md), and the accepted [durable run diagnostics design](/docs/architecture/run-outcome-diagnostics/design/ard-001-durable-run-diagnostics-and-input-visibility.md). Saved run status/phase and run-scoped evidence remain authoritative; SSE is best-effort feedback, not completion authority.
+
+**Walkthrough / scenario:** A first-time administrator starts Run Now from Overview. Once acknowledged, Run Detail opens for that run. It says “Running — Discovering videos”, “Selected inputs: Unknown”, and “Videos with recorded route decisions: 0”. Quota may rise while these counts stay unchanged; the page explains that discovery has no known completion total. The person leaves the tab, returns, and sees freshly read saved status. If updates cannot be read, the last known values are labeled stale, not completed. When a saved terminal status is read, active progress ends and the recorded outcomes remain inspectable. Observable success is knowing whether this identified run is running, finished, failed, interrupted, or currently unconfirmable without starting another run or guessing from quota.
+
+**Start and navigation:**
+
+- Keep the existing production confirmation and explanation. On confirmation, immediately show “Starting run…” and prevent repeated submission while the start request is pending.
+- Acknowledgement with `run_id` opens `/runs/{id}` and immediately reads that run. Initial copy: “Run {id} started. Checking progress…”. This is not completion; the first read may already be terminal. Move focus to the destination heading, not a toast. Browser Back returns to Overview; direct links/reload reconstruct the same run from saved state.
+- If acceptance cannot be confirmed, show “Could not confirm whether the run started. Check Runs before starting another run.” with “View runs”. Do not automatically repeat the start request. An explicit rejection can use its safe, specific message instead.
+- While a production run is known to be running, keep Run Now unavailable with adjacent “Run in progress” and a “View run” link. Server concurrency protection remains authoritative; a stale browser is not concurrency protection. Do not disable unrelated navigation.
+
+**Placement and meaning:**
+
+- On Run Detail, put the persistent progress/status region immediately below the heading and before result cards: run identity/status, recorded phase, selected count, decision-bearing count, then status-read freshness or recovery text. Keep existing video → decision → action navigation.
+- On Overview, put the latest run's identity, type, saved status, and “View run” link above the metric cards; include the recorded phase while running. Refresh that status while running and refresh dashboard totals after observing terminal status. Associate last-run metrics with the identified run; preserve simulation qualifications when the latest run is a simulation.
+- Keep the quota meter separate, labeled “Quota today”, with persistent explanation: “YouTube API quota used today—not run progress or playlist additions.” Its real quota denominator is not a processing denominator.
+- Show `current_phase` from saved reads. Map `discovery` → “Discovering videos”; `exclusion` → “Checking exclusions”; `duplicate_detection` → “Checking duplicates”; `routing` → “Evaluating routes”; `action_execution` → “Processing playlist actions”. Do not display unknown raw phase strings. A phase indicates the recorded checkpoint, not verified success of every preceding item.
+
+**Observable states and exact copy:**
+
+| Saved/read state | Presentation and available recovery |
+|---|---|
+| `running`, recognized phase | “Running — {phase label}”. No overall progress bar, percent, ETA, heartbeat, page count, or elapsed-time-based stall claim. |
+| `running`, missing/unrecognized phase | “Running — current phase unavailable.” Continue reading status; do not infer discovery or another phase. |
+| Discovery, selected count null/absent | “Selected inputs: Unknown”. Adjacent: “Discovery is in progress. The input count is not available yet; there is no known completion total.” Zero decision/counter values do not mean no videos were found. |
+| Known selected count | “Selected inputs: {n}”. Zero is displayed only for a captured empty selection. Unknown outside discovery remains “Unknown”, with “The selected input count was not captured or is not available.” |
+| Decision-bearing count available | “Videos with recorded route decisions: {n}”. Adjacent: “Counts reflect saved evidence, not overall completion.” If absent, show “Unavailable”, not zero. Never present this as “{n} of {selected} complete”; decisions can be partial, exclusion-related, or absent for legitimate paths. Equal counts are not completion proof. |
+| `completed` | “Run completed.” Remove active progress. Show recorded outcome totals, including deferred/failed outcomes when present. Adjacent: “Processing has ended. Inspect video action outcomes for recorded playlist results.” Completion is not universal playlist success. |
+| `completed`, selected count exactly zero | Add “No inputs selected for this run.” Do not say “No videos exist” or “Nothing matched”. |
+| Terminal, no video outcome rows, selected count unknown or positive | “No video outcomes recorded for this run.” Do not infer an empty input set or rejection. With an active outcome filter, retain the existing filter-specific empty state instead. |
+| `failed` / `interrupted` | “Run failed.” / “Run interrupted.” Show recognized phase as “Last recorded phase: {phase label}” and the API-vetted reason, or existing safe-reason-unavailable/missing-reason explanation. Keep recorded counts/evidence inspectable even when Errors is empty. Do not promise automatic recovery, unchanged YouTube state, or offer a new Resume/Cancel action. |
+| Initial status read fails | “Could not load run status. Completion is unknown.” Offer “Retry status” and “Back to runs”; never leave an indefinite loading or success state. |
+| Background status read fails | Retain values as “Last known status”. Show “Could not refresh status. This run may still be processing.” and “Retry status”. Do not portray it as confirmed active work or turn a read failure into run failure. |
+| SSE unavailable, saved reads succeed | “Live updates unavailable. Checking saved status periodically.” No repeated error toast or run-failed styling. |
+
+While running, qualify existing discovered/outcome summary cards: “Recorded totals; may be incomplete until the run finishes.” These counters are not promised to increment during discovery or each action. Accepted remains distinct from a recorded successful playlist action. Preserve simulation explanations; if shared progress presentation is reused for simulations, terminal success says “Simulation evaluation completed”, never playlist success.
+
+**Refresh, failure, and interruption:** Use the existing five-second saved-status refresh while running; SSE hints can prompt an earlier read. A terminal event only triggers a read; only its saved status ends active progress. Fresh reads replace stale values, including a terminal result reached while disconnected. On return to a visible tab, read status again; background timer throttling is not a run interruption. Label browser receipt time “Status checked at {local time}”, not “Last activity”; an unchanged phase/count is not heartbeat evidence. Keep filters/page selection and focus through background reads. Stop active refresh presentation at saved `completed`, `failed`, or `interrupted`. Do not auto-restart work.
+
+**Accessibility and responsive checks:** Target WCAG 2.2 AA. Use a named progress region and a concise polite status announcement for start, phase changes, terminal state, and loss/recovery of status reads (SC 4.1.3). Do not announce each poll, freshness timestamp, or changing count. Background updates never move focus; heading focus follows explicit navigation; retry controls remain keyboard accessible with visible, unobscured focus (SC 2.1.1, 2.4.3, 2.4.7, 2.4.11). Status/connection meaning is explicit text, not a colored dot alone (SC 1.4.1). Verify text/control contrast in supported themes (SC 1.4.3, 1.4.11), target sizes (SC 2.5.8), and single-column reflow without clipped copy/actions at 320 CSS px and usable text at 200% zoom (SC 1.4.10, 1.4.4). Any activity animation is supplementary; reduced motion retains the same text with no animation. Verify with keyboard and a screen reader that a lost connection is announced once and retry/recovery does not steal focus.
+
+**Acceptance observations:** Exercise US-009 with delayed discovery (selected unknown, zero counters, rising quota); an acknowledged run already terminal at first read; captured-zero completion versus unknown-count/no-outcome completion; partial decisions followed by failure with an empty Errors queue; completed processing containing deferred/failed outcomes; dropped SSE with working saved reads; failed saved reads followed by background-tab return/recovery; and direct-link/reload plus keyboard/screen-reader/mobile inspection. In each case the same run remains identifiable, no duplicate start is automatic, and no unknown count or missing evidence becomes a success/rejection/percentage claim.
+
+**Decision and evidence limits:** Keep the already intended automatic Run Detail navigation and text-first persistent progress. An Overview-only panel duplicates inspection; a modal traps attention; percentage/ETA presentation lacks completion facts. Existing status, phase, nullable selected count, decision-bearing count, and safe run/action evidence suffice for this amendment. No new backend facts are requested. Source inspection on 2026-11-05 found Overview's toast-only start, Run Detail's SSE-only active phase, late-finalized counters, and a named-event/payload mismatch between server SSE and its browser consumer. These are implementation follow-ups, not new protocol decisions or executed browser proof. The user's report of a discovery run with rising quota motivates the design but does not prove that run's health. No live-run diagnosis, implementation conformance, accessibility certification, or date-filter decision is claimed.
+
 **View: Decision Detail** — Inspect a single video's routing outcome; user job: understand exactly why this video was accepted, rejected, deferred, or failed — across all three layers of the outcome model.
 - **Regions:**
   - Video info region: title, channel, duration, publish date, thumbnail
@@ -601,6 +702,75 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
   - Action execution region: per-action results (succeeded/failed/deferred)
   - Evidence trail region: step-by-step route evaluation showing conditions matched/not-matched
 - **Components:** Video metadata, processing outcome badge, route decision row (route name, decision, icon, skip reason if skipped), action execution row (action type, target, result), condition evaluation row (route name, condition, result, icon)
+
+#### Run Video Recognition — Current Local Context
+
+**Amendment scope (2026-11-06):** Improve recognition in the Run Detail video list and Decision Detail using permitted local title, source-channel display name and duration. This is the bounded independent read slice in [OC-005](../requirements/yuhaul/oc-005-decision-evidence-attribution-and-availability.md) and the provisional [decision-evidence architecture](../architecture/decision-evidence/design/ard-001-run-attributed-evidence-and-metadata-lifecycles.md), not full historical evidence delivery. Reuse US-013, US-014 and SC-002; the user's Run15 feedback shows that IDs and generic exclusion badges alone do not meet their recognition/explanation goal. No new story capability, subscription-name capability, metadata storage, date meaning, or retention permission is introduced. The full historical comparison/reproduction promise remains blocked, not waived by truthful unavailable copy.
+
+**Walkthrough:** An operator opens a backtest's video list. Where permitted metadata exists locally now, the row shows a recognizable title and source channel, explicitly marked as current/local information. Opening detail preserves the same run/video and hypothetical outcome. The operator sees that local information separately from recorded route evidence. A legacy exclusion says its specific rule and compared input are unavailable; the current title never becomes an explanation of what the historical run compared. If metadata has expired, labeled identifiers remain usable without exposing the expired values or calling YouTube.
+
+**Information hierarchy and exact copy:**
+
+- Run Detail retains its existing outcome filters, pagination, mode-qualified heading and outcome column. Show the title as the video link, `Source channel` as the source label/column, and the recorded outcome independently. IDs are secondary reference text, never unlabeled title/name substitutes. Do not add a wall of topic pills or fetch detail per row to manufacture recognition.
+- Place this persistent explanation directly above the video list: `Video information is current/local display context, not necessarily the information evaluated by this run.` The title/source columns belong to this explanation, not to the recorded evidence region. Each row with available display context also shows `Current/local information` beside/below its recognition text so the attribution survives mobile cards and partial views.
+- In Decision Detail, preserve the existing page H1, run identity and Back to run link. The video-info card precedes the outcome and route evidence. Its title is the available display title or `Video title unavailable`. Show `Source channel: {name}` or `Source channel name unavailable`. Below the card heading, show `Current/local information — not necessarily the information evaluated by this run.` Label duration `Duration`; show a known zero as `0 seconds`, never as absent. Other known durations use the existing duration format.
+- Show `Video ID: {id}` and `Channel ID: {id}` as secondary labeled text. In the list, keep the video ID visible when the title is unavailable, so identical unavailable-title links remain distinguishable; show channel ID when the source name is unavailable. In detail both IDs remain available regardless of recognition metadata. Preserve the accepted muted short UUID beside each route name; this amendment does not remove route disambiguation.
+- Where a field has a trustworthy observation/fetch time, label it `Observed at {time}` alongside that field or a clearly associated shared timestamp. Do not label it as run-time input or use run start/discovery time as a substitute. Do not invent a timestamp when unknown. Apply availability independently: missing title does not hide an available duration or source name.
+- Only title, source-channel display name and duration are added by this slice. Existing publication/thumbnail design is not a request to expose expired rows, load external images, or add those fields here. Do not infer a separate subscription name from channel identity. Current/local metadata may change between list and detail reads without changing the recorded decision.
+
+**Per-field availability:** Use the following text only when supported by the inspection response. The UI does not diagnose absence from a null field, missing database row or empty string. No fingerprint/hash is a title; no fallback to a channel-name store with unestablished provenance/freshness is permitted.
+
+| Field state | Title | Source-channel name | Duration |
+|---|---|---|---|
+| Available and eligible now | Display title | Display name | Known duration, including zero |
+| Unavailable, cause unknown | `Video title unavailable` | `Source channel name unavailable` | `Duration unavailable` |
+| Known expired | `Video title unavailable — local metadata expired` | `Source channel name unavailable — local metadata expired` | `Duration unavailable — local metadata expired` |
+| Known not captured | `Video title not recorded` | `Source channel name not recorded` | `Duration not recorded` |
+| Known withheld | `Video title unavailable for display` | `Source channel name unavailable for display` | `Duration unavailable for display` |
+| Context read failed | Keep any independently available fields; identify the affected context with `Could not load local video information.` and `Retry local information`. Do not turn this into expired/not-recorded or hide successfully loaded decisions. | Same context failure | Same context failure |
+
+Withhold expired/inactive fields at their release deadline, even if cleanup has not removed their stored values. No stale-value preview, raw sensitive reason, provider refresh control or YouTube call is introduced. `Retry local information` rereads local retained context for the same run/video only; no evaluation or mutation. If the response cannot separate context failure from a failed decision read, show the truthful decision-read failure rather than invent partial success. Exact API shape belongs to Architecture.
+
+**Exclusion evidence:** The later “Causal Exclusion — Run List and Decision Detail” amendment below replaces the generic-only presentation for captured causes. Keep the overall outcome separate from route evidence. Generic-only historical rows remain incomplete; do not claim an absence was never recorded unless the evidence supports it.
+
+An exclusion describes supporting route evidence, not the cause of every route or the whole video's category. Disabled and final-route skips retain their separate reasons; none is a failed condition or an execution failure. Never recompute a historical match from current metadata, configuration, or a snapshot rule list.
+
+**Simulation and missing actions:** Retain the accepted hypothetical labels and persistent simulation explanation on both views. Recognition context does not imply fresh discovery or evaluation completion. Simulated actions remain `Not attempted`; no action record remains `No simulated actions recorded for this video.` Do not infer a playlist target, successful insertion, run failure, or complete route coverage from missing actions or a generic exclusion. Keep the existing production outcome/attempt distinctions unchanged.
+
+**Read recovery and continuity:** Preserve the requested run/video on direct link, refresh, retry and Back. Missing run mode retains the existing safe context gate, never production-default interpretation. A conclusive missing decision shows `No decision record found for this video in this run.` A failed decision read ends loading with `Could not load decision evidence. This loading error does not determine the run's result.` Offer `Retry decision evidence` and `Back to run`. Retry only reads local retained information; late responses from another run/video never replace the selected record. Back restores the originating list filter/page where available. These recovery states express OC-005, not a new run lifecycle or restart capability.
+
+**Accessibility/responsive checks:** Target WCAG 2.2 AA. Keep attribution, missing-field reasons and hypothetical qualifiers visible ordinary text, not hover-only content (SC 1.3.1, 1.4.1). At 320 CSS px and 200% text zoom, use the existing stacked video cards and single-column detail; titles, IDs, source names and unavailable copy wrap without clipping or page-level horizontal scrolling (SC 1.4.4, 1.4.10). Normal and muted text meet 4.5:1 contrast; controls/focus indicators meet applicable 3:1 non-text contrast (SC 1.4.3, 1.4.11). Title links and retry/Back controls have visible, unobscured keyboard focus and meaningful names; unavailable-title links include the video ID in their accessible name and visible secondary text (SC 2.1.1, 2.4.3, 2.4.7, 2.4.11, 4.1.2). Use at least 24 CSS px targets or applicable spacing exceptions, preferably 44 px for touch (SC 2.5.8). Navigation focuses H1; local-context retries/background reads do not steal focus. Announce context read failure/recovery once, politely, not every field or poll (SC 4.1.3). Keep the same reading order and labeled metadata relationships for screen readers.
+
+**Downstream observations:** Check list → detail with available title/source/duration, partial fields, zero duration, unknown-cause absence, known expiry exactly at the deadline, known not-captured/withheld, and a context read failure/recovery with usable decisions. Change local metadata between reads: attribution remains current/local and historical cause remains unchanged. A Run15-shaped generic exclusion remains explicitly incomplete even beside a useful title; one excluded route plus a matching route retains the recorded overall category. Direct links and failed/not-found reads terminate truthfully; retry preserves identity and makes no YouTube call or new evaluation. Verify mobile, keyboard and screen-reader recognition without relying on pills, color or unlabeled IDs. These are intended checks, not observed implementation acceptance.
+
+**Open authority boundary:** Full historical-input reproduction remains unresolved under OC-005/BR-015 and the architecture's retention boundary. The independently specified causal-reference explanation below does not resolve that boundary. Compliance/research and Architect own establishing a permitted realization; if it cannot meet the accepted promise, the product owner decides any precise scope amendment. This does not certify existing raw audit release/storage as safe or complete.
+
+#### Causal Exclusion — Run List and Decision Detail
+
+**Scope and sources (2026-11-07):** This amendment refines existing US-013, US-014 and SC-002, not a new workflow. It applies to production and simulation decisions under [BR-015 AC10–13](../requirements/yuhaul/br-015-explainable-route-decisions.md), [OC-005](../requirements/yuhaul/oc-005-decision-evidence-attribution-and-availability.md), and [decision-evidence ARS-002](../architecture/decision-evidence/specifications/ars-002-causal-exclusion-capture-and-inspection.md). The user's accepted exception for old generic-only records does not excuse missing capture in newly evaluated decisions. No retention permission or new external refresh is implied.
+
+**Walkthrough:** An operator sees a rejected video in a run. Its list row separately says that route A did not match and route B was skipped by exclusion #3 in that run's configuration; the specific rule and comparison are visible without opening detail. In detail, route B says its recorded match prevented its conditions from being evaluated. The configured phrase appears only if permitted for display, and the unavailable compared input is labeled separately. If an old row has only a generic skip, both views say `Rule unavailable` and explain that the record is incomplete. A later rename or a current title does not rewrite this explanation. Simulation stays hypothetical.
+
+**Placement and attribution:** Retain the video-level recorded outcome and mode labels separately. For every presented exclusion decision on the Run Detail list row, show a visible route-scoped explanation directly with that video, not only in a tooltip or detail. Show all such route causes, including when multiple routes exclude the same video; do not imply complete route coverage from a partial response. In Decision Detail place the same information inside the corresponding route card after `Skipped — excluded from this route.` and before conditions/actions. Preserve other routes' distinct results. In both views show route UUID alongside its label: `Route: {name} (ID: {uuid})` for `run_snapshot`; `Route: {name} (current/local name; ID: {uuid})` for `current_local`; `Route name unavailable (ID: {uuid})` for `unavailable` or unrecognized attribution. A current name is recognition only, not a historical name. If the UUID is unavailable due to a failed mandatory read, show the existing safe read failure, not an invented identity.
+
+**Captured, supported cause:** For `available`, display `Recorded causal exclusion: configuration {config_version_id}, exclusion #{index + 1}.` The ordinal is the occurrence in that run's complete configuration, not a position in today's editor. Follow with `Matched rule: {comparison sentence}.` and `Conditions were not evaluated for this route because this exclusion matched.` The list includes all three facts as concise ordinary text; detail uses the same meaning. Render only released configured values as text, never HTML. Do not disclose or reconstruct a withheld value through another field.
+
+| Type / comparison | Comparison sentence; `{value}` is the original permitted configured value |
+|---|---|
+| channel / exact | `Channel ID exactly equals configured channel ID “{value}”` |
+| video / exact | `Video ID exactly equals configured video ID “{value}”` |
+| title / trimmed_equal_fold | `Title equals configured title “{value}”, ignoring surrounding whitespace and case` |
+| word / lowercase_substring | `Title contains configured substring “{value}”, ignoring case` |
+| duration_min / strict_less_than | `Duration is strictly less than configured minimum {value} seconds` |
+| duration_max / strict_greater_than | `Duration is strictly greater than configured maximum {value} seconds` |
+
+For `configured_value_status: withheld`, replace the value with `value unavailable for display`, keeping the field, comparison and occurrence; add `Configured value unavailable for display.` For `unavailable`, replace it with `value unavailable` and add `Configured value unavailable.` Do not say the rule was not captured. Do not substitute blank or zero. After the comparison on each surface show `Compared input unavailable in this rule-reference record.` This means the projection provides no historical input; it does not assert expiry, emptiness or a known reason. Do not substitute current/local metadata, another route's audit or current rules. The recorded match explains the branch, not independent reproduction.
+
+**Incomplete and incompatible states:** Preserve the route's recorded skip and the video's recorded overall outcome in every case. For `not_recorded`, including old generic-only rows and a missing causal object from an older response, show `Route exclusion recorded; rule unavailable. This explanation is incomplete.` Do not assert the cause of absence or infer a rule from a single candidate. For `definition_unavailable`, show `Route exclusion recorded; the captured rule definition is unavailable. This explanation is incomplete.` For `unsupported`, show `Route exclusion recorded; the captured rule cannot be interpreted by this version. This explanation is incomplete.` For `invalid_reference`, show `Route exclusion recorded; the captured rule reference is invalid. This explanation is incomplete.` For an unknown status or comparison use the unsupported wording, never echo unknown raw values. Where a valid configuration ID and nonnegative occurrence are supplied for an unresolved reference, show `Captured reference: configuration {id}, exclusion #{index + 1}.` Show only supported scalars and never imply a usable definition or match. All these states also show `Compared input unavailable in this rule-reference record.` The first two unavailable situations must not be collapsed: absence of a captured rule and an unresolvable captured definition are different. No actual query/read failure becomes an unavailable-rule success.
+
+**Read and accessibility behavior:** Existing list/detail loading, failed-read retry, not-found, local-context partial failure and Back behavior remain as in this specification. Retry rereads the same run/video locally, without evaluating, mutation or provider refresh; stale responses cannot replace the selected run/video. A missing run mode stays unresolved, never assumed production. Apply WCAG 2.2 AA: route, skip, comparison, attribution and limitations are real text in reading order, not color or hover alone (SC 1.3.1, 1.4.1); at 320 CSS px and 200% zoom, each cause wraps without loss (SC 1.4.4, 1.4.10). List links and retry controls remain keyboard reachable with visible, unobscured focus (SC 2.1.1, 2.4.7, 2.4.11); entering detail focuses its heading and inline updates do not steal focus. Verify with keyboard, screen reader and viewport checks; this design is not an accessibility certification.
+
+**Implementation checks and limits:** Exercise list and detail for each supported type, both duration equality boundaries and substring semantics; duplicate/changed/reordered rules must still identify the first recorded occurrence. Exercise multiple excluded routes, a nonmatching route plus an exclusion, a separate matched route, both production and each simulation, missing/withheld values, unresolved/unsupported/invalid references, old generic-only reuse and a new decision for the same video. Confirm no action or playlist target is inferred for an excluded route. A failed mandatory read ends in the existing error/retry state, not a legacy placeholder. Prove the composed producer → durable record → API → real-client list/detail path and restart; shaped fixtures alone do not prove capture. Positive release of configured values requires the separate compliance/safety decision identified by ARS-002; until then withholding preserves the partial cause but does not prove permitted-value acceptance. Full historical reproduction remains unresolved outside the accepted legacy exception.
 
 #### Simulation Inspection — Requested-Run Results
 
@@ -628,8 +798,27 @@ Simulation Decision Detail also shows `Run {id}` beside/below the H1 so a direct
 - Decision Detail H2: `Layer 1 — Hypothetical outcome`; H2 `Layer 2 — Route decisions` stays unchanged. Hide the production `Processing state: …` line and production deferred/error/completion annotations in simulation result regions. Do not relabel the production lifecycle state as a simulation state.
 - Per-route action subsection: `Simulated actions`. Layer 3 H2: `Layer 3 — Simulated action outcomes`. Under that H2 show `These actions were not executed. Accepted means the video matched this simulation's routing rules, not that a playlist was changed.` Keep actual route/condition results (`Matched`, `Did not match`, `Skipped`) and recorded targets unchanged.
 - Simulation action badge `not_attempted`: `Not attempted`, with its existing neutral treatment; never `Succeeded`, `Executed` or `Would succeed`. Empty Layer 3: `No simulated actions recorded for this video.` An empty action set is not proof of rejection.
-- Simulation list empty: `No hypothetical video outcomes yet.` Filter-empty copy and Clear outcome filter remain unchanged. Fetch-error wording: `Failed to load hypothetical video outcomes. Check your connection and try again.` Do not show production results as a fallback after a failed simulation fetch.
+- Simulation list empty/loading: use the state-aware copy in “Empty Simulation — Recorded Selection” below. Filter-empty copy and Clear outcome filter remain unchanged. Fetch-error wording: `Failed to load hypothetical video outcomes. Check your connection and try again.` Do not show production results as a fallback after a failed simulation fetch.
 - Production per-route action subsection becomes neutral `Actions`, replacing `Actions executed` even when rows are failed/deferred/not attempted. Keep H2 `Layer 3 — Action outcomes`, real row badges (`Succeeded`, `Failed`, `Deferred`, `Not attempted`), and production outcome/lifecycle explanation. Production empty Layer 3: `No action outcomes recorded for this video.` No fabricated prior success or already-applied evidence is introduced.
+
+##### Empty Simulation — Recorded Selection
+
+**Bounded amendment (2026-11-06):** A person opens a completed dry-run with Selected 0 and Evaluated videos 0. Instead of being told to expect future results, they see that this run selected no videos and why dry-run inputs differ from discovery. This corrects the accepted empty copy, not the selector. Existing US-011 and the simulation-inspection scenario remain the design basis; no new workflow or story is added.
+
+**Placement and precedence:** Use the existing empty region under H2 `Hypothetical video outcomes`. A request in progress is not an empty result. Before the first successful outcome response, show `Loading hypothetical video outcomes…`, not any recorded-empty claim. A fetch failure retains the existing error and retry control. After a successful fetch, an active filter with no matches retains `No videos match the current filters.` and Clear outcome filter. Only an unfiltered, successfully loaded empty list uses the following copy:
+
+| Stored run state and counts | Exact empty-region copy |
+|---|---|
+| `dry_run`, `completed`, selected explicitly 0 and evaluated explicitly 0 | `No videos were selected for this dry run.` Follow with a separate paragraph: `Dry runs evaluate stored videos awaiting their first evaluation. They do not discover new videos or re-evaluate previously processed videos.` |
+| Any simulation, `running` | `No hypothetical video outcomes recorded yet.` Keep the existing run-progress indication. |
+| Any simulation, `completed`, except the explicit dry-run zero/zero case above | `No hypothetical video outcomes were recorded for this run.` |
+| Any simulation, `failed` or `interrupted`, regardless of counts | `No hypothetical video outcomes were recorded for this run.` Keep the stored failure/interruption status and its existing explanation visible. |
+
+Missing/null selected counts remain `Unknown`, never zero. Missing evaluated counts do not qualify for the zero/zero explanation. Selected/evaluated counts alone do not override a loading, failed-fetch, filtered, or nonempty outcome list. An empty terminal result does not imply playlist success, rejection, absence of stored videos, or a current pending-work count. The explanation describes the existing dry-run selector, not why deployed run 13 selected zero; its deployment and persisted evidence have not been verified by this amendment. It does not apply the dry-run selector description to backtest or replay.
+
+**Recovery and scope:** Add no pending-workload link: the inspected UI has no supported destination for the not-yet-evaluated input set. Errors/deferred work is not that set. Do not offer a production run as a harmless way to populate a dry run; it can change playlists. Keep existing navigation, simulation disclaimer, filters and retry behavior. No discovery, reprocessing, date-selection, coordinator, or two-job behavior is introduced.
+
+**Accessibility and checks:** Keep both explanatory paragraphs as persistent text in reading order within the outcome region, not a tooltip or color-only signal (WCAG 2.2 AA, SC 1.3.1 and 1.4.1). Loading-to-empty updates leave keyboard focus in place; a changed result status is announced politely once, not repeatedly for unchanged polling responses (SC 4.1.3). Check the explicit completed dry-run zero/zero case, null/missing selected and evaluated counts, nonzero selected with an empty list, running zero/zero, failed/interrupted zero/zero, initial loading, fetch failure, filter-empty, and nonempty rows. Confirm only the explicit completed dry-run zero/zero case gets the selector explanation; all terminal cases omit `yet`. Check reading order and status announcements with a screen reader and reflow at 320 CSS pixels without clipping (SC 1.4.10). These are downstream checks, not claims of implemented or deployed conformance.
 
 **Badge interpretation/precedence:** Establish the requested run's mode before interpreting a result. In simulation mode, use the requested-run `final_outcome` projection exclusively; the unchanged production `processing_state` never overrides it. Use the same mapping on list and detail:
 
@@ -708,12 +897,28 @@ For Deferred/Failed in simulations, visible adjacent explanation is respectively
 - **Regions:**
   - Schedule region: cron-like schedule configuration
   - Quota region: API quota limits, current usage, and quota ledger
-  - Account region: YouTube account connection status, re-authenticate option
+  - Account region: usable access, renewal and recovery status; connect/reconnect when appropriate (see Account Access — Automatic Renewal and Safe Recovery)
   - Retention playlists region: designate which playlists represent the user's actual keep signal
   - Duplicate detection region: fuzzy matching threshold configuration
   - Data region: historical corpus import, data management
   - Danger zone region: disconnect account
 - **Components:** Schedule form, quota display with ledger breakdown, account status card, retention playlist selector (multi-select from user's YouTube playlists), threshold slider with numeric display and explanation, import controls, danger action buttons
+
+#### Account Access — Automatic Renewal and Safe Recovery
+
+**Accepted reconciliation (2026-11-07):** [BR-034](/docs/requirements/yuhaul/br-034-automatic-youtube-token-refresh.md) and [OC-006](/docs/requirements/yuhaul/oc-006-refresh-authorization-and-call-safety.md) supersede expiry-only reconnection in the opening journey, US-001 and SC-007. This is a bounded amendment to the existing account card and Overview summary, not a new visual direction or a claim of implemented renewal.
+
+**Walkthrough:** A morning run renews expired access without asking the administrator to sign in again. If renewal is temporarily unavailable, the account card explains that condition and the run retains its actual failure/work evidence. Only missing or confirmed rejected renewal authorization calls for Reconnect. Returning from OAuth restores access when confirmed; it does not restart a failed run or resolve an uncertain playlist action.
+
+**Presentation and state transitions:** Use SC-007's state names, safe explanations and recovery branches consistently in Settings and Overview. Account identity, when available, is context, never proof of usable access. Expired/rejected access with only an unvalidated refresh credential is not Connected. Pending renewal shows pending only while actually unresolved; a failure leaves that state for unavailable or reconnect-required. Confirmed rejection supersedes stale Connected information, and later successful recovery supersedes earlier failure. User disconnect/account replacement supersedes late old-account results.
+
+An initial status read shows "Loading account status"; a failed status read shows "Could not load account status" with "Retry account status". That button rereads status, not a promised provider renewal, run restart or action replay. During the read, acknowledge "Loading account status" and prevent duplicate reads; on completion show the returned state or keep the read failure. Previously shown identity may remain labeled as last known, never as current access confirmation. Do not turn unknown/read failure into revoked consent, Disconnected or Connected. First-time/no-account state retains "Connect YouTube Account"; intentional disconnect remains distinct from renewal failure. Do not silently open OAuth. Reconnect is a deliberate existing flow, with an opening acknowledgment and duplicate-launch prevention until it returns or fails; cancellation/failure restores that action with a safe explanation and preserves work.
+
+**Safety and scope:** Render only application-owned safe reasons. No tokens, refresh credentials, raw provider responses or raw error chains appear in text, tooltips, links or accessibility names. No new token-expiry timer, proactive status-triggered provider call, refresh button, retry budget, simulation provider call or historical run replay is introduced. Account recovery is independent of operation completion; retain actual run/action evidence and SC-007's uncertainty warning wherever the affected work is inspected. Architecture owns status/API realization, not a UI inference from expiry or credential presence.
+
+**Accessibility and responsive checks:** Target WCAG 2.2 AA. Under SC 1.4.1/1.3.1, status, reason and recovery action appear together in text, not color or avatar alone. Under SC 4.1.3, announce meaningful pending/result changes politely once without repeating unchanged polling results or stealing focus. Under SC 2.1.1/2.4.3/2.4.7/2.4.11, keyboard users can reach Connect, Reconnect and Retry account status in reading order with visible unobscured focus; inline status updates preserve focus, OAuth return restores the Account context with focus on its heading, and a cancelled/failed launch restores focus to its trigger. Under SC 1.4.3/1.4.4/1.4.10, text meets 4.5:1 contrast and status/recovery copy wraps at 320 CSS px and 200% text resize. Verify the rendered interface, keyboard return path and screen-reader announcements; this documentation change does not establish implementation conformance.
+
+**Decision and outstanding evidence:** Keep the existing account surface and distinguish renewal pending/unavailable from reconnect-required. A binary Connected/Disconnected interpretation is rejected because it invents revocation or usability; forcing OAuth on every expiry contradicts BR-034. No new story IDs or separate files are needed: US-001/SC-007 now cover the accepted capability. The supplied expiry-only account-status and Run20 401 observations identify a reconciliation concern, not proof of refresh-grant rejection, restart token loss or Run19's cause. Architecture/implementation owners still owe supported status facts and the assembled production-path checks in BR-034/OC-006, including temporary/save failure, restart, overlapping renewal, disconnect/replacement and uncertain mutation. No user-owned ambiguity blocks this bounded design.
 
 #### Fixed Duplicate Continuation — Settings and Recorded History
 
@@ -928,7 +1133,7 @@ Advisories are system-generated suggestions based on channel and route performan
 **Manual run trigger interaction:**
 - System: "Run" button in header always visible
 - On click: dropdown with "Run Now" and "Dry Run" options
-- "Run Now" on click: confirmation dialog "Start a processing run now?", on confirm: starts run, frontend subscribes to SSE stream (`/api/runs/:id/stream`), navigates to Run Detail for the new run with live progress
+- "Run Now" on click: confirmation dialog "Start a processing run now?"; on confirm, acknowledge the pending request, then navigate the acknowledged run ID to Run Detail. Follow “Run Now — Recorded Progress and Closure”: saved reads supply phase/status and terminal confirmation; SSE is optional faster feedback, not completion authority.
 - "Dry Run" on click: confirmation dialog (see SC-003), on confirm: starts dry-run, subscribes to SSE stream, shows live progress, navigates to dry-run results
 
 **Route delete button states:**
@@ -1116,10 +1321,10 @@ Advisories are system-generated suggestions based on channel and route performan
 - Requirement: Toasts must use `role="status"` and `aria-live="polite"` for non-urgent messages (success toasts) and `role="alert"` and `aria-live="assertive"` for error toasts. Toasts must auto-dismiss after 5 seconds minimum (allow user to extend). Toast must have a visible close button.
 - Verification: Automated: axe-core confirms role and aria-live. Manual: screen reader announces toast content without focus moving to it.
 
-**Component/interaction: Run progress indicator (SSE-driven)**
+**Component/interaction: Recorded run progress indicator**
 - Standard: WCAG 2.2 SC 4.1.3 Status Messages (AA)
-- Requirement: The run progress indicator must use `role="status"` and `aria-live="polite"` so screen readers announce progress updates without interrupting focus. Progress must include text describing current state (e.g., "Processing: 12 of 42 videos", "Evaluating route conditions", "Actions in progress") — not just a visual bar or spinner. On SSE connection loss, an error message must appear using `role="alert"` and `aria-live="assertive"`.
-- Verification: Manual: activate screen reader, trigger a run, confirm progress updates are announced. Disconnect network mid-run, confirm error is announced.
+- Requirement: Follow “Run Now — Recorded Progress and Closure”. Use `role="status"` and `aria-live="polite"` for concise state-transition announcements, not every poll/count/timestamp. Explicit phase and status text remains available without animation. Connection loss/recovery is announced once without moving focus; lost SSE alone is not run failure. No fabricated completion fraction.
+- Verification: With a screen reader, start a delayed discovery run, lose SSE and then saved-status reads, and restore connectivity. Confirm phase, unknown counts, stale state, recovery, and saved terminal status are understandable without repeated announcements or stolen focus.
 
 **Component/interaction: Focus indicators**
 - Standard: WCAG 2.2 SC 2.4.7 Focus Visible (AA), SC 2.4.11 Focus Not Obscured (AA)
@@ -1267,11 +1472,11 @@ Advisories are system-generated suggestions based on channel and route performan
 - Alternatives considered: Filter by provenance on channel list — rejected because it adds UI complexity to the primary scan view.
 - Trade-off accepted: User must click into a channel to see provenance breakdown. Acceptable because provenance inspection is investigative, not daily scanning.
 
-**DD-13: SSE for real-time run progress transport**
-- Decision: Run progress is delivered via Server-Sent Events (SSE) through a REST endpoint (`/api/runs/:id/stream`). The frontend subscribes and receives real-time events for processing state transitions, per-video outcomes, and quota updates.
-- Rationale: Runs may take minutes. Users need immediate feedback. SSE is unidirectional (server→client), has native browser support (`EventSource`), auto-reconnects, and works over standard HTTP. WebSocket was considered but adds unnecessary bidirectional complexity.
-- Alternatives considered: Polling (adds latency, wastes requests), no real-time progress (poor UX), WebSocket (over-engineered).
-- Trade-off accepted: SSE requires server-side streaming support, but this is well-supported by Go's `http.Flusher` interface.
+**DD-13: Saved run status with optional SSE feedback**
+- Decision: Reconcile the original SSE-only design with the accepted durable diagnostic boundary. Run Detail reads saved phase/status on entry and periodically while running; `/api/runs/:id/stream` may prompt faster reads. Only a saved terminal status establishes closure. See “Run Now — Recorded Progress and Closure” for visible states.
+- Rationale: Runs may take minutes; discovery can have unknown selected inputs and unchanged counters. The person needs truthful continuity after reload or lost events, not a fabricated completion total.
+- Alternatives considered: SSE-only/no persistent feedback loses recoverability; percentage/ETA has no defensible denominator; a modal interrupts other work. Keep automatic navigation to existing Run Detail rather than build a second monitoring surface.
+- Trade-off accepted: Saved reads have modest latency; optional SSE improves responsiveness without becoming a second lifecycle authority. This is an experience dependency on the existing architecture, not a new transport/schema decision.
 
 ### Open Design Questions
 

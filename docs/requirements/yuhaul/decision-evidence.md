@@ -3,6 +3,7 @@ type: requirement
 title: Decision Evidence
 description: Every meaningful route decision must be explainable from durable evidence.
 tags: [requirement, evidence, MUST]
+timestamp: 2026-11-07T00:00:00Z
 ---
 
 **Status:** accepted
@@ -10,6 +11,8 @@ tags: [requirement, evidence, MUST]
 
 ## Statement
 The system SHALL record sufficient evidence for every meaningful route decision such that the user can inspect the decision and understand why a video was accepted, rejected, deferred, or failed.
+
+The user-approved generic-only legacy boundary is defined by [BR-015 AC13](br-015-explainable-route-decisions.md) and shared through [OC-005](oc-005-decision-evidence-attribution-and-availability.md): old generic-only exclusion records remain explicitly incomplete and display “rule unavailable”, without reconstruction. This bounded exception applies to the historical explanation criteria below, not to new exclusion capture. Every newly evaluated exclusion still requires its actual causal rule, comparison and permitted configured value. Provider-derived historical-input retention remains separately unresolved; this exception grants no retention permission.
 
 ## Acceptance criteria
 1. Each route decision is associated with a durable evidence record
@@ -21,6 +24,7 @@ The system SHALL record sufficient evidence for every meaningful route decision 
 ## Derived from
 
 - Anchor: YuHaul — YouTube Subscription Discovery & Routing — relative path `../../anchors/youtube-discovery-routing.md` (AC 15)
+- User's 2026-11-07 “Yes, that is ok” answer to whether old exclusion records may say “rule unavailable”, relayed verbatim in the specification assignment; exact provenance and bounded scope are recorded in [BR-015](br-015-explainable-route-decisions.md).
 
 ## Verified by
 

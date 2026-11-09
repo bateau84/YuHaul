@@ -3,7 +3,7 @@ type: design
 title: YuHaul System Architecture
 description: "System architecture for YuHaul — a personal, stateful discovery and routing system for YouTube subscription content with compliance-aware storage, quota management, and decision explainability. Imported duplicate-reference eligibility survives same-ID native fingerprint upserts."
 tags: [architecture, design, yuhaul, youtube, routing]
-timestamp: 2026-10-25T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 ---
 
 **Status:** accepted
@@ -13,7 +13,7 @@ YuHaul discovers subscription videos, flags historical title matches, and sends 
 ## Derived from
 
 - [Anchor](../anchors/youtube-discovery-routing.md)
-- [Requirement Index](../requirements/yuhaul/index.md) (32 BRs + 4 OCs)
+- [Requirement Index](../requirements/yuhaul/index.md) (canonical BR/OC baseline and later accepted amendments)
 - [Design Spec](../design/yuhaul-admin-ui-design.md)
 - [Reconciliation Report](../requirements/yuhaul/reconciliation-report.md)
 - [YouTube Compliance Analysis](yuhaul-youtube-compliance.md)
@@ -28,12 +28,14 @@ YuHaul discovers subscription videos, flags historical title matches, and sends 
 - [ARS-004 — Route UUID Schema, API, and Migration Contract](ars-004-route-uuid-schema-api-migration.md)
 - [ADR-017 — Fixed Duplicate Continuation with Inert Legacy Fields](duplicate-continuation/decisions/adr-017-fixed-duplicate-continuation.md)
 - [ARS-005 — Duplicate Continuation Compatibility and Results Contract](duplicate-continuation/specifications/ars-005-duplicate-continuation-compatibility-results.md)
+- [ARD-001 — Shared YouTube Renewal and Mutation Send Safety](youtube-authorization/design/ard-001-shared-renewal-and-mutation-send-safety.md)
+- [ARS-001 — Authorization State, Dispatch and Send Guard](youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md)
 
 ## Satisfies
 
 | Requirement | Artifact | Notes |
 |---|---|---|
-| BR-001 Secure YouTube Account Connection | §OAuth and Credential Storage | OAuth2 flow, token persistence |
+| [BR-001 Secure YouTube Account Connection](../requirements/yuhaul/br-001-secure-youtube-account-connection.md) | §OAuth and Credential Storage; authorization ARD/ARS | Existing OAuth2/encrypted custody is reused; accepted renewal and user-authority fencing are decided target behavior, not yet implemented/verified. |
 | BR-002 Subscription-Based Discovery | §Discovery Subsystem | Polling-based channel feed retrieval |
 | BR-003 Multiple Ordered Route Definition | §Data Model, §Processing Pipeline, §API Surface | Stable public UUID over retained integer FK; BR-003 AC10 permits duplicate display names; evaluation order/history preserved (ADR-011, ARS-004). |
 | BR-004 Route Conditions and Playlist Actions | §Data Model, §Router Engine | Condition/Action config per route |
@@ -65,10 +67,12 @@ YuHaul discovers subscription videos, flags historical title matches, and sends 
 | BR-030 Temporary Failure Work Preservation | §Quota Management, §State Management | Deferred/error queues preserve work |
 | BR-031 User Authority Over Policy Decisions | §Advisory System | Evidence-backed, no autonomous changes |
 | BR-032 Processing Outcome Distinction | §Outcome Model, §API Surface | Five primary categories + not-yet-evaluated; run-detail video outcomes filter by category (ARS-001) |
+| [BR-034 Automatic YouTube Token Refresh](../requirements/yuhaul/br-034-automatic-youtube-token-refresh.md) | §OAuth and Credential Storage; authorization ARD/ARS | Shared owner, encrypted commit-before-use renewal, per-request expiry/rejection resolution, truthful status and conservative mutation replay veto. Decided target, not implementation proof. |
 | OC-001 YouTube API Quota and Failure Semantics | §Quota Management | Quota exhaustion = operational state |
 | [OC-002 Route Evaluation Outcome Semantics](../requirements/yuhaul/oc-002-route-evaluation-outcome-semantics.md) | §Outcome Model, §Processing Pipeline; ARS-005 | Satisfied by the design: fully excluded inputs terminate before detection; survivors continue after a match. A duplicate is supporting evidence, not an outcome or exclusion. ARS-005 identifies the pending historical short-circuit and partial-exclusion counting corrections; shared vocabulary is unchanged. |
 | OC-003 Configuration Snapshot for Historical Interpretation | §Configuration Versioning | Immutable snapshots linked to runs |
 | [OC-004 Imported History as Duplicate References](../requirements/yuhaul/oc-004-imported-history-as-duplicate-reference.md) | §Duplicate Detection Engine, §Migration, §Statistics and Analytics; ADR-017/ARS-005 | Eligibility/no-self-match/credit realized elsewhere by ADR-013/014 and ARS-002; preserved here. Guarantee 5 uses the same fixed continuation for imported matches. Filtering evaluated inputs does not revoke imported reference eligibility or create credit. |
+| [OC-006 Refresh Authorization and Call Safety](../requirements/yuhaul/oc-006-refresh-authorization-and-call-safety.md) | §OAuth and Credential Storage; authorization ARD/ARS | One-process identity/revision fencing, Disconnect/replacement precedence, persisted uncertain-send guard and independent renewal/operation evidence. No blind replay or new multi-writer promise. |
 | User direction — authenticated ingress and automatic Let's Encrypt TLS | §Ingress Authentication and Network Exposure | HTTPS Traefik BasicAuth plus cert-manager-managed `yuhaul-tls`; HTTP redirects to an endpoint-free sink except for a narrowly scoped HTTP-01 solver route. Issuer/solver annotations and priority are present; explicit app router TLS activation and the Ingress-provider `allowEmptyServices: true` prerequisite require correction after real-provider review. Cluster issuance and exact corrected request-path verification remain open (ADR-010/ARS-003). |
 
 ## Problem
@@ -145,7 +149,7 @@ Each action execution produces one outcome:
 |---|---|
 | `succeeded` | Action completed successfully |
 | `failed` | Action attempted and failed |
-| `not_attempted` | Action skipped due to dry-run mode or prior failure |
+| `not_attempted` | Hypothetical simulation action, or actual action suppressed by prior failure/completion; reason distinguishes the latter cases |
 | `deferred` | Action deferred due to quota or temporary failure |
 
 ### Primary Outcome Classification (OC-002)
@@ -465,6 +469,7 @@ Lifecycle: Records created at discovery. `expires_at = fetched_at + 30 days`. Me
 │                                      │     'failed'
 │ config_version_id INTEGER           │
 │ videos_discovered INTEGER DEFAULT 0  │
+│ selected_video_count INTEGER         │  ← nullable captured input count (migration 016)
 │ videos_accepted INTEGER DEFAULT 0    │
 │ videos_rejected INTEGER DEFAULT 0    │
 │ videos_excluded INTEGER DEFAULT 0    │
@@ -517,6 +522,7 @@ Lifecycle: Records created at discovery. `expires_at = fetched_at + 30 days`. Me
 │ outcome TEXT NOT NULL               │  ← 'succeeded' | 'failed' |
 │                                      │     'not_attempted' | 'deferred'
 │ error_message TEXT                  │
+│ outcome_reason TEXT                 │  ← nullable explanatory code (migration 016)
 │ executed_at TIMESTAMP               │
 │ UNIQUE(run_id, video_id, target_playlist_id, action_type)
 └──────────────────────────────────────┘
@@ -1117,7 +1123,7 @@ Route `id` values, route path identifiers, and every public route-reference fiel
 
 `GET /api/routes` returns active routes ordered by `evaluation_order`, with each route identified by a UUID and independently addressable when names repeat. Each list item has an integer `match_count`, including explicit zero. The count is the number of distinct `route_decision.video_id` values matched by that route over its lifetime, joined to `scheduled` or `manual` production runs; repeated matches of the same video/route pair count once, and dry-run, replay, and backtest decisions are excluded. It is a list-only projection; `GET /api/routes/:route_uuid` returns configuration without `match_count`. Route loading or count aggregation failure returns `500 {"error":"failed to list routes"}` for the whole response. The unused per-route `/stats` endpoint is not part of the supported API contract (ADR-006, ARS-001, ARS-004).
 
-BR-032 AC5 is realized on the Run Detail page, not by the Runs List filters. `GET /api/runs/:id/videos` accepts an optional `outcome` from the six final-outcome values; the returned videos and pagination totals are both filtered, and an unsupported non-empty value returns `400`. The Run Detail view requests up to 100 videos for the selected category and shows the matching total; it currently has no control for later pages (ARS-001).
+BR-032 AC5 is realized on the Run Detail page, not by the Runs List filters. `GET /api/runs/:id/videos` accepts an optional `outcome` from the six final-outcome values; the returned videos and pagination totals are both filtered, and an unsupported non-empty value returns `400`. Run Detail requests 100 videos per page, shows the matching total, and now exposes Previous/Next controls using the existing `page` parameter; filter changes reset to page 1 (ARS-001). Component/API coverage does not establish a >100-video real-browser journey.
 
 The accepted Route List design requires drag-to-reorder as the primary interaction and keeps explicit Move Up/Down buttons as the single-pointer and keyboard-accessible alternative. `RoutesView` now implements the ADR-008 choice with `@dnd-kit/react`: the grip starts dragging, Escape/canceled drops do not persist, and successful drops share the existing move-and-save path with the buttons. The targeted frontend tests and production build pass; touch/pen and mobile-scrolling behavior have not been verified in a real browser.
 
@@ -1128,6 +1134,16 @@ The accepted Route List design requires drag-to-reorder as the primary interacti
 Real-time progress via SSE at `/api/runs/:id/stream`. Chosen over WebSocket for architectural simplicity: the communication is unidirectional (server → client), the single-user context eliminates connection multiplexing concerns, and SSE works over standard HTTP without protocol upgrade negotiation.
 
 Events: `run.started`, `run.phase`, `run.video.processed`, `run.quota.warning`, `run.completed`, `run.error`.
+
+### OAuth and Credential Storage
+
+Production work automatically renews expired access using available stored refresh authorization, including after restart and between calls. Expiry alone does not require reconnecting. [BR-034](../requirements/yuhaul/br-034-automatic-youtube-token-refresh.md) and [OC-006](../requirements/yuhaul/oc-006-refresh-authorization-and-call-safety.md) supersede the previous expiry-implies-reauthorization rule. For example, a morning scheduled run renews access, commits the encrypted replacement, then discovers subscriptions without user interaction.
+
+The [authorization design](youtube-authorization/design/ard-001-shared-renewal-and-mutation-send-safety.md) selects one shared auth.Service owner and the existing AES-GCM SQLite credential store. Per-request dispatch, not a cached per-run token, checks authority and expiry; one shared renewal flight commits encrypted replacements before use. Missing/rejected refresh authorization requires reconnecting. Temporary provider/network/save failure is unavailable renewal, not proof of revoked consent. Account status is a local, truthful snapshot; it does not implicitly call the provider. Disconnect/new accepted authorization fences old clients and late renewal/callback results.
+
+Renewal never proves an issued playlist mutation did not apply. A minimal exact-target durable send guard commits before possible POST issue, remains when application is uncertain, and vetoes all later retries/resumes/new-run sends. Existing recorded successes still suppress repeats. Unknown pre-upgrade action work is not made safe by an empty new guard table. The [exact authorization/call-safety specification](youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md) defines schema, status, diagnostic/queue extensions, legacy admission and verification. Single-process/one-writer/Recreate deployment remains mandatory; no automatic reconciler or historical-run restart is added.
+
+**Realization status:** decided technical architecture, not implemented or runtime-proven here. Direct source reads still find ActiveToken returning stored access, StaticTokenSource in the YouTube client and post-POST-only action recording. The supplied Run20 401/expired-status observations do not establish invalid refresh consent or restart token loss, and Run19's exact cause remains unproven. No live account/database recovery was performed by this documentation change.
 
 ### Scheduling and Recovery
 
@@ -1140,6 +1156,8 @@ Events: `run.started`, `run.phase`, `run.video.processed`, `run.quota.warning`, 
 #### Run Recovery
 
 Run `status` has four states: `running`, `completed`, `interrupted`, and `failed`. `interrupted` and `failed` are distinct terminal-adjacent states with different recovery semantics; both carry a reason in `interrupt_reason` (redefined as "the reason the run is not in a normal terminal state").
+
+The [run-diagnostics realization](run-outcome-diagnostics/design/ard-001-durable-run-diagnostics-and-input-visibility.md) records current production/simulation failure handling, captured nullable `videos_selected`, decision-derived `videos_evaluated`, per-action reasons, vetted public diagnostics, and persisted-status polling. It includes local tests and bounded browser evidence, not exhaustive recovery, container/deployment or live-provider certification. Simulation counts remain aggregates, not selected-input membership proof; historical date filtering remains blocked and same-app production comparison deferred.
 
 **Interrupted (resumable):** a run whose process was cleanly stopped at a phase boundary (e.g. crash mid-run):
 
@@ -1155,6 +1173,12 @@ Run `status` has four states: `running`, `completed`, `interrupted`, and `failed
 2. Run records `completed_at`, `duration_seconds`, and `quota_cost` (terminal accounting), and its outcome counters are recomputed
 3. The run is NOT auto-resumed — it is excluded from the interrupted-run resume queue
 4. The operator initiates a fresh run after remedying the cause (e.g. re-connecting the account)
+
+**Per-video failure, stranded work and shutdown (decided, not yet implemented):**
+
+- Under [ADR-006](youtube-authorization/decisions/adr-006-per-video-action-failure-isolation-and-stranded-work-retention.md), a video whose action fails or is guard-blocked is recorded `failed` with an active error entry, and independent videos continue. Such a run can still be `completed`.
+- Before a run becomes `failed`, every unfinished video is retained: still-owned retry groups are requeued, and other videos get a runtime error entry. If that retention cannot commit, the run stays `interrupted`.
+- Under [ADR-007](youtube-authorization/decisions/adr-007-asynchronous-startup-resume-and-shutdown-interruption.md), a stop caused by cancellation (SIGTERM or deadline) is `interrupted`. Startup resume runs in the background behind a producer gate, so HTTP and probes stay available.
 
 #### Deferred Work Recovery
 
@@ -1265,7 +1289,7 @@ Schema migration 012 creates the append-only `route_identity` registry while ret
 
 1. Process crash mid-run: run status = interrupted, resumes on next run
 2. Quota exhaustion mid-run: remaining work deferred, processed in next run
-3. Auth token expiry mid-run: remaining work deferred, user prompted to re-authorize
+3. Auth access expiry/rejection mid-run: resolve available automatic renewal and encrypted durable save under BR-034/OC-006 before safe continuation. Missing/rejected refresh authorization preserves remaining work and offers reconnect; temporary/save failure reports renewal unavailable. An issued uncertain playlist mutation stays unresolved and is not blindly replayed after renewal. See §OAuth and Credential Storage; this is decided target behavior, not implementation proof.
 4. Processing phase failure or panic (e.g. no active token): run status = failed, terminal, not auto-resumed
 5. Metadata expiry: evidence degrades gracefully, one-click refresh restores
 6. Database corruption: SQLite backup (file copy) restores to last consistent state

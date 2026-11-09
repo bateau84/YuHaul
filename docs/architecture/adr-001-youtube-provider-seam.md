@@ -3,6 +3,7 @@ type: decision
 title: ADR-001 — YouTube Provider Seam via Base URL Override
 description: Thread the existing youtube.WithBaseURL option through the shipped binary behind a YUHAUL_YOUTUBE_BASE_URL environment variable so Product Acceptance can run the assembled artifact against a fake YouTube endpoint without modifying the binary.
 tags: [architecture, decision, yuhaul, youtube, provider-seam, product-acceptance]
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 **Status:** accepted
@@ -83,7 +84,7 @@ The base URL remains the *only* substitutable dimension of the client. OAuth tok
 
 The decision is accepted and its seam is implemented. Current source wires `YUHAUL_YOUTUBE_BASE_URL` through the discovery engine, action executor, and metadata fetcher to `youtube.WithBaseURL`. The unit tests `TestWithBaseURLUsesOverrideURL` and `TestExecutor_WithYouTubeBaseURLUsesOverrideURL` exercise requests against an `httptest.Server`. The independent [pre-merge readiness rerun](../ephemeral-reports/critic/yuhaul-pre-merge-readiness/rerun-review.md) records the three-site wiring, successful unit/integration/build/vet checks, and resolution of the former provider-seam MAJOR.
 
-Still outstanding: run the assembled-binary PA-001 confirmation with `YUHAUL_YOUTUBE_BASE_URL` pointing at the fake provider. The former gate explicitly recorded that this specific confirmation had not yet been executed; this is a remaining product-acceptance proof, not an unresolved architecture option or a claim that the run has passed.
+Later bounded assembled-binary/browser confirmation is now available through [run-diagnostics ARD-001](run-outcome-diagnostics/design/ard-001-durable-run-diagnostics-and-input-visibility.md), §Verification and composition: E2E-001 drives real UI route creation, manual discovery/action failure, queue retry and dismissal through this base-URL seam, and E2E-003 drives nonzero dry-run and actual Backtest. The binary, token store/service, pipeline, quota wiring, SQLite and API stay product-owned; only external YouTube is replaced. A synthetic unexpired token is an isolated persisted prerequisite written through production `auth.SQLiteTokenStore`, not proof of Google OAuth acquisition/refresh or live-provider compatibility. This later evidence establishes use of the seam; it is not retroactive completion of every older PA-001 assertion, a full container/deployment check, or a separately substituted auth service. Exact reports and limits are in ARD-001.
 
 ## Open questions
 
