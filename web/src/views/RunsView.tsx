@@ -23,6 +23,7 @@ const runStatusLabels: Record<RunStatus, string> = {
   completed: 'Completed',
   failed: 'Failed',
   interrupted: 'Interrupted',
+  stopped: 'Stopped by user',
 }
 
 // Selected shows "Unknown" for a null/absent count (never captured) and "0"

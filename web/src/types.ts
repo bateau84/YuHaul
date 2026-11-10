@@ -83,7 +83,9 @@ export type RunType =
 
 // The persisted run lifecycle (System Architecture §Run Recovery / ADR-002):
 // `failed` is a terminal state distinct from the resumable `interrupted`.
-export type RunStatus = 'running' | 'completed' | 'failed' | 'interrupted'
+// `stopped` is the terminal state of a run the user stopped (ARS-003). A run
+// that is `running` with a non-null stop_requested_at is "stopping".
+export type RunStatus = 'running' | 'completed' | 'failed' | 'interrupted' | 'stopped'
 
 export interface Run {
   id: number
@@ -122,10 +124,25 @@ export interface Run {
   initiated_by?: 'run_now' | 'schedule' | 'queue_retry' | null
   interrupt_cause?: 'time_limit' | 'shutdown' | null
   current_phase?: string
+  // RFC 3339 UTC instant a stop was recorded; null when none. status
+  // 'running' with this set means stopping (ARS-003 §4.2).
+  stop_requested_at?: string | null
+  // true only for the one run Discard would currently accept; null when the
+  // server could not decide (every item then). Absent from older servers.
+  discardable?: boolean | null
+  // Present only when discardable is true.
+  discard_cause?: DiscardCause
   // Backtest/Replay only: the saved UTC-day range of YouTube published dates
   // (null bound = none). Both null means no date filter was applied. Absent
   // or null for every other run type.
   published_range?: PublishedRange | null
+}
+
+export type DiscardCause = 'snapshot_unavailable' | 'snapshot_unreadable' | 'checkpoint_unrecognized'
+
+// A run is stopping while it still runs but a stop has been recorded.
+export function isStopping(run: Pick<Run, 'status' | 'stop_requested_at'>): boolean {
+  return run.status === 'running' && !!run.stop_requested_at
 }
 
 export interface PublishedRange {
@@ -478,13 +495,20 @@ export interface ErrorEntry {
   retry_count: number
 }
 
+export type DeferredReason =
+  | 'quota_exhausted'
+  | 'api_rate_limited'
+  | 'authorization_pending'
+  | 'stopped_by_user'
+  | 'discarded_by_user'
+
 export interface DeferredItem {
   id: number
   video_id: number
   video_title?: string
   channel_name?: string
   run_id: number
-  deferral_reason: string
+  deferral_reason: DeferredReason | (string & {})
   deferred_reason_unavailable?: boolean
   retry_after?: string
   status: 'pending' | 'retrying' | 'completed' | 'discarded'

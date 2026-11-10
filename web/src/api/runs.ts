@@ -1,5 +1,5 @@
-import type { Route, Run, BacktestComparison } from '../types'
-import { api } from './core'
+import type { Route, Run, BacktestComparison, DiscardCause, RunStatus } from '../types'
+import { api, ApiError } from './core'
 
 export async function listRuns(): Promise<Run[]> {
   const data = await api<{ runs: Run[] }>('/api/runs')
@@ -36,6 +36,67 @@ export interface StartRunResult {
 
 export async function startRun(): Promise<StartRunResult> {
   return api<StartRunResult>('/api/runs', { method: 'POST' })
+}
+
+// Stop and Discard refusals are ApiErrors whose code is one of these closed
+// values (ARS-002 §3, ARS-003 §4.1). reason accompanies run_not_active
+// (not_executing | ending) and run_not_discardable
+// (resumable | not_oldest | not_eligible); runId is always set for them.
+export type StopRefusalCode =
+  | 'invalid_run_id'
+  | 'shutting_down'
+  | 'run_not_found'
+  | 'run_ended'
+  | 'run_not_active'
+  | 'stop_failed'
+
+export type DiscardRefusalCode =
+  | 'invalid_run_id'
+  | 'shutting_down'
+  | 'startup_recovery_active'
+  | 'production_run_active'
+  | 'run_not_found'
+  | 'run_ended'
+  | 'run_not_discardable'
+  | 'discard_failed'
+  | 'discard_outcome_unknown'
+
+const STOP_REFUSAL_CODES: readonly string[] = ['invalid_run_id', 'shutting_down', 'run_not_found', 'run_ended', 'run_not_active', 'stop_failed']
+const DISCARD_REFUSAL_CODES: readonly string[] = [
+  'invalid_run_id', 'shutting_down', 'startup_recovery_active', 'production_run_active', 'run_not_found',
+  'run_ended', 'run_not_discardable', 'discard_failed', 'discard_outcome_unknown',
+]
+
+// Narrow an error from stopRun/discardRun to its closed refusal code. Returns
+// undefined for network failures and any error without a known code.
+export function stopRefusalCode(err: unknown): StopRefusalCode | undefined {
+  return err instanceof ApiError && err.code && STOP_REFUSAL_CODES.includes(err.code) ? (err.code as StopRefusalCode) : undefined
+}
+
+export function discardRefusalCode(err: unknown): DiscardRefusalCode | undefined {
+  return err instanceof ApiError && err.code && DISCARD_REFUSAL_CODES.includes(err.code) ? (err.code as DiscardRefusalCode) : undefined
+}
+
+export interface StopRunResult {
+  run_id: number
+  status: 'running'
+  // already_stopping is a success: a stop was recorded earlier.
+  stop: 'accepted' | 'already_stopping'
+}
+
+export async function stopRun(id: number): Promise<StopRunResult> {
+  return api<StopRunResult>(`/api/runs/${id}/stop`, { method: 'POST' })
+}
+
+export interface DiscardRunResult {
+  run_id: number
+  status: Extract<RunStatus, 'failed'>
+  outcome: 'discarded'
+  cause: DiscardCause
+}
+
+export async function discardRun(id: number): Promise<DiscardRunResult> {
+  return api<DiscardRunResult>(`/api/runs/${id}/discard`, { method: 'POST' })
 }
 
 export async function startDryRun(draft?: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string }> {
