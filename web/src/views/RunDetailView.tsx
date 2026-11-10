@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams, Link, useNavigate, useLocation } from 'react-router-dom'
 import * as api from '../api/client'
 import { Badge } from '../components/Badge'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
@@ -83,6 +83,31 @@ function terminalStatusLine(status: RunStatus): string {
   }
 }
 
+type RunNowAdmission = 'started' | 'resumed' | 'accepted'
+
+// The acknowledgement line of this Run Now press only. It comes from
+// navigation state, because the server keeps no "was resumed" fact.
+function admissionFromState(state: unknown): RunNowAdmission | null {
+  const value = (state as { runNowAdmission?: unknown } | null)?.runNowAdmission
+  return value === 'started' || value === 'resumed' || value === 'accepted' ? value : null
+}
+
+function admissionLine(admission: RunNowAdmission, runId: number): string {
+  switch (admission) {
+    case 'resumed': return `Run ${runId} resumed. It continues from where it stopped. No new run was started.`
+    case 'started': return `Run ${runId} started.`
+    default: return `Run ${runId} accepted.`
+  }
+}
+
+// A manual Run Now run the server says stopped at its time limit. Anything
+// else (shutdown, unknown cause, scheduled, legacy, failed, simulation) keeps
+// the generic interrupted copy and makes no resume promise.
+function stoppedAtTimeLimit(run: Run): boolean {
+  return run.run_type === 'manual' && run.status === 'interrupted'
+    && run.initiated_by === 'run_now' && run.interrupt_cause === 'time_limit'
+}
+
 const outcomeOptions = Object.entries(videoOutcomeLabels) as [VideoFinalOutcome, string][]
 
 function currentMetadata(value: VideoOutcome['current_local_metadata'], field: 'title' | 'channel_name' | 'duration_seconds'): string {
@@ -112,7 +137,11 @@ export function RunDetailView() {
 function RunDetailContent({ id }: { id?: string }) {
   const navigate = useNavigate()
   const { addToast } = useToast()
+  const location = useLocation()
   const runId = Number(id)
+  // Read once, then drop it from history state so a reload shows ordinary
+  // saved status without the transient line.
+  const [admission] = useState(() => admissionFromState(location.state))
   const [run, setRun] = useState<Run | null>(null)
   const [runNotFound, setRunNotFound] = useState(false)
   const [runReadError, setRunReadError] = useState(false)
@@ -132,6 +161,12 @@ function RunDetailContent({ id }: { id?: string }) {
   const runReadRequestRef = useRef(0)
   const runReadInFlightRef = useRef<Promise<void> | null>(null)
   const loaded = run !== null
+
+  useEffect(() => {
+    if (admission) navigate(location.pathname + location.search, { replace: true, state: null })
+    // Run once on arrival.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Focus the run heading once the run has loaded (or re-loaded through a
   // status retry).
@@ -334,7 +369,14 @@ function RunDetailContent({ id }: { id?: string }) {
     )
   }
 
-  if (!run) return <div className="empty-state">Loading run {runId} status…</div>
+  if (!run) {
+    return (
+      <div className="empty-state">
+        {admission && <p role="status">{admissionLine(admission, runId)} Checking progress…</p>}
+        Loading run {runId} status…
+      </div>
+    )
+  }
 
   const mode = simulationMode(run.run_type)
   const recordedEmptyDryRunSelection = run.run_type === 'dry_run'
@@ -343,6 +385,7 @@ function RunDetailContent({ id }: { id?: string }) {
     && run.videos_evaluated === 0
   const outcomeLabel = mode ? 'Hypothetical outcome' : 'Outcome'
   const isTerminal = run.status === 'failed' || run.status === 'interrupted'
+  const timeLimited = stoppedAtTimeLimit(run)
 
   return (
     <>
@@ -376,6 +419,15 @@ function RunDetailContent({ id }: { id?: string }) {
         </div>
       )}
 
+      {admission && (
+        <div className="card" role="status" aria-live="polite" style={{ marginBottom: 16 }}>
+          <p style={{ margin: 0 }}><strong>{admissionLine(admission, run.id)}</strong></p>
+          {admission === 'resumed' && (
+            <p style={{ margin: '8px 0 0' }}>Playlist additions already recorded as successful are not repeated. An addition whose earlier outcome could not be confirmed stays marked as unconfirmed.</p>
+          )}
+        </div>
+      )}
+
       {(run.status === 'running' || isTerminal) && (
         <section className="card" role="region" aria-label="Run progress" aria-live="off" style={{ marginBottom: 16 }}>
           <p role="status" aria-live="polite" style={{ margin: 0 }}>{progressAnnouncement(run, runReadError)}</p>
@@ -394,7 +446,7 @@ function RunDetailContent({ id }: { id?: string }) {
       {run.status !== 'running' && (
         <div className="card" role="status" aria-live="polite" style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <strong>{terminalStatusLine(run.status)}</strong>
+            <strong>{timeLimited ? 'Run interrupted — time limit reached.' : terminalStatusLine(run.status)}</strong>
             {run.completed_at && (
               <span style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
                 {new Date(run.completed_at).toLocaleString()}
@@ -403,6 +455,12 @@ function RunDetailContent({ id }: { id?: string }) {
           </div>
           {isTerminal && (
             <p style={{ margin: '8px 0 0', color: 'var(--color-status-failed)' }}>{failureExplanation(run)}</p>
+          )}
+          {timeLimited && (
+            <p style={{ margin: '8px 0 0' }}>
+              Work done up to this point is saved. Pressing Run Now continues the oldest run stopped this way. This run continues only if it is the oldest and can be resumed safely.{' '}
+              <Link to="/">Go to Overview</Link>
+            </p>
           )}
         </div>
       )}

@@ -116,6 +116,11 @@ export interface Run {
   // Set by the server when a stored interrupt/failure reason existed but was
   // withheld by safe-diagnostic vetting; the raw text is never sent (ARD-001).
   failure_reason_unavailable?: boolean
+  // Closed-set provenance, always present in server JSON and null when unknown
+  // or legacy. Run Detail uses both only to tell a manual Run Now run that
+  // stopped at its time limit apart from every other interrupted run.
+  initiated_by?: 'run_now' | 'schedule' | 'queue_retry' | null
+  interrupt_cause?: 'time_limit' | 'shutdown' | null
   current_phase?: string
   // Backtest/Replay only: the saved UTC-day range of YouTube published dates
   // (null bound = none). Both null means no date filter was applied. Absent

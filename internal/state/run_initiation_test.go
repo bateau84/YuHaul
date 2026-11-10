@@ -126,7 +126,8 @@ func TestM3_InterruptCauseGuard(t *testing.T) {
 	require.Error(t, s.InterruptRunWithCause(ctx, id, "x", "bogus"), "an unknown cause is rejected by the schema")
 }
 
-// M5: reads round-trip both fields; neither is part of the public JSON.
+// M5: reads round-trip both fields; the public JSON exposes them as the
+// snake_case closed-set values (null when unproven or legacy).
 func TestM5_ProjectionRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
@@ -167,8 +168,23 @@ func TestM5_ProjectionRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	var fields map[string]any
 	require.NoError(t, json.Unmarshal(body, &fields))
-	for _, internal := range []string{"initiated_by", "interrupt_cause", "InitiatedBy", "InterruptCause"} {
-		require.NotContains(t, fields, internal, "internal field leaked into the public JSON")
+	require.Equal(t, "run_now", fields["initiated_by"])
+	require.Equal(t, "time_limit", fields["interrupt_cause"])
+	for _, goName := range []string{"InitiatedBy", "InterruptCause"} {
+		require.NotContains(t, fields, goName, "Go field name leaked into the public JSON")
+	}
+
+	for id, want := range map[int64][2]any{retry: {"queue_retry", nil}, legacy: {nil, nil}} {
+		r, err := s.GetRun(ctx, id)
+		require.NoError(t, err)
+		body, err := json.Marshal(r)
+		require.NoError(t, err)
+		var f map[string]any
+		require.NoError(t, json.Unmarshal(body, &f))
+		require.Contains(t, f, "initiated_by", "key must stay present")
+		require.Contains(t, f, "interrupt_cause", "key must stay present")
+		require.Equal(t, want[0], f["initiated_by"])
+		require.Equal(t, want[1], f["interrupt_cause"])
 	}
 }
 

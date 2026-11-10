@@ -61,7 +61,7 @@ describe('Overview', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Run Now/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
 
-    expect(await screen.findByText(/Could not confirm whether the run started/)).toBeInTheDocument()
+    expect(await screen.findByText(/Could not confirm whether a run started or resumed/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'View runs' })).toHaveAttribute('href', '/runs')
     expect(screen.getByRole('button', { name: /Run Now/i })).toBeDisabled()
     expect(startRequests).toBe(1)

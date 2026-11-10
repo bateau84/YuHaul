@@ -21,6 +21,34 @@ function phaseLabel(phase?: string): string | undefined {
   }
 }
 
+// `resume_unavailable` reason sentences. The raw reason is never rendered:
+// anything outside this closed set gets the "not available" sentence.
+const resumeReasonSentences: Record<string, string> = {
+  snapshot_unavailable: 'Its saved settings are missing.',
+  snapshot_unreadable: 'Its saved settings cannot be read.',
+  snapshot_inadmissible: 'Its saved settings cannot be used safely.',
+  checkpoint_unrecognized: 'Its saved progress point is not recognized.',
+  terminal_timestamp_contradiction: 'Its saved record is contradictory: it has a completion time but is marked interrupted.',
+  recheck_at_write: 'Its saved state changed while Run Now was checking it. Check the run, then press Run Now again if that is still what you want.',
+}
+const resumeReasonFallback = 'The reason is not available in this version of the interface.'
+
+type RunNowNotice =
+  | { kind: 'active' }
+  | { kind: 'resume_unavailable'; runId?: number; reason?: string }
+  | { kind: 'unavailable' }
+  | { kind: 'unconfirmed' }
+
+// Branches on HTTP status and the machine code only, never on message text.
+function noticeForError(err: unknown): RunNowNotice {
+  if (err instanceof ApiError) {
+    if (err.status === 409 && err.code === 'production_run_active') return { kind: 'active' }
+    if (err.status === 409 && err.code === 'resume_unavailable') return { kind: 'resume_unavailable', runId: err.runId, reason: err.reason }
+    if (err.status === 503) return { kind: 'unavailable' }
+  }
+  return { kind: 'unconfirmed' }
+}
+
 function statusLabel(status: string): string {
   return status.charAt(0).toUpperCase() + status.slice(1)
 }
@@ -40,6 +68,7 @@ export function Overview() {
   const [startingRun, setStartingRun] = useState(false)
   const startingRunRef = useRef(false)
   const [startUncertain, setStartUncertain] = useState(false)
+  const [notice, setNotice] = useState<RunNowNotice | null>(null)
   const [statusStale, setStatusStale] = useState(false)
   const [statusCheckedAt, setStatusCheckedAt] = useState<Date | null>(null)
   const overviewRefreshInFlightRef = useRef(false)
@@ -132,14 +161,19 @@ export function Overview() {
     if (startingRunRef.current) return
     startingRunRef.current = true
     setConfirmRun(false)
+    setNotice(null)
     setStartingRun(true)
     try {
       const res = await api.startRun()
       setStartUncertain(false)
-      navigate(`/runs/${res.run_id}`)
+      const admission = res.admission === 'started' || res.admission === 'resumed' ? res.admission : 'accepted'
+      navigate(`/runs/${res.run_id}`, { state: { runNowAdmission: admission } })
     } catch (err) {
-      if (err instanceof ApiError) addToast(err.message, 'error')
-      else setStartUncertain(true)
+      const next = noticeForError(err)
+      setNotice(next)
+      // A refusal changed nothing, so Run Now stays usable. An unconfirmed
+      // outcome keeps it disabled until the person has checked Runs.
+      if (next.kind === 'unconfirmed') setStartUncertain(true)
     } finally {
       startingRunRef.current = false
       setStartingRun(false)
@@ -197,7 +231,50 @@ export function Overview() {
   return (
     <>
       {header}
-      {(run || startUncertain || startingRun) && (
+      {notice && (
+        <div className="card" role="alert" style={{ marginBottom: 16 }}>
+          {notice.kind === 'active' && (
+            <>
+              <p style={{ margin: 0 }}><strong>Run Now did nothing.</strong> A production run is already running. Nothing was started or resumed.</p>
+              <p style={{ margin: '8px 0 0' }}>Wait for it to finish, then press Run Now again.</p>
+              <p style={{ margin: '8px 0 0' }}>
+                {activeRun ? <Link to={`/runs/${activeRun.id}`}>View run</Link> : <Link to="/runs">View runs</Link>}
+              </p>
+            </>
+          )}
+          {notice.kind === 'resume_unavailable' && (
+            <>
+              <p style={{ margin: 0 }}>
+                <strong>Run Now did nothing.</strong> Run {notice.runId ?? 'unknown'} stopped at its time limit but cannot be resumed safely. No new run was started and nothing was changed. {resumeReasonSentences[notice.reason ?? ''] ?? resumeReasonFallback}
+              </p>
+              {notice.runId !== undefined && (
+                <p style={{ margin: '8px 0 0' }}><Link to={`/runs/${notice.runId}`}>View run {notice.runId}</Link></p>
+              )}
+              <p style={{ margin: '8px 0 0' }}>
+                While run {notice.runId ?? 'it'} is the oldest run stopped this way, Run Now will keep refusing. YuHaul does not offer a way to resume or discard it from this screen. The schedule is not affected. Dry Run stays available.
+              </p>
+            </>
+          )}
+          {notice.kind === 'unavailable' && (
+            <>
+              <p style={{ margin: 0 }}><strong>Run Now did nothing.</strong> YuHaul can&apos;t accept a run right now. It may be starting up or shutting down. Nothing was started or resumed. Try again in a minute.</p>
+              <p style={{ margin: '8px 0 0' }}><Link to="/runs">View runs</Link></p>
+            </>
+          )}
+          {notice.kind === 'unconfirmed' && (
+            <>
+              <p style={{ margin: 0 }}>Could not confirm whether a run started or resumed. Check Runs before pressing Run Now again.</p>
+              <p style={{ margin: '8px 0 0' }}><Link to="/runs">View runs</Link></p>
+            </>
+          )}
+          {notice.kind !== 'unconfirmed' && (
+            <p style={{ margin: '8px 0 0' }}>
+              <button type="button" className="button" onClick={() => setNotice(null)}>Dismiss</button>
+            </p>
+          )}
+        </div>
+      )}
+      {(run || startingRun) && (
         <section className="card" role="region" aria-label="Latest run" aria-live="off" style={{ marginBottom: 16 }}>
           {startingRun ? (
             <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Starting run…</strong></p>
@@ -215,12 +292,6 @@ export function Overview() {
             <>
               <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Run {run.id} — {run.run_type} — {statusLabel(run.status)}</strong></p>
               <p style={{ margin: '8px 0' }}><Link to={`/runs/${run.id}`}>View run</Link></p>
-            </>
-          )}
-          {startUncertain && (
-            <>
-              <p role="status" aria-live="polite">Could not confirm whether the run started. Check Runs before starting another run.</p>
-              <Link to="/runs">View runs</Link>
             </>
           )}
         </section>
@@ -291,11 +362,11 @@ export function Overview() {
 
       <ConfirmDialog
         open={confirmRun}
-        title="Start a processing run?"
+        title="Start a processing run now?"
         onConfirm={startRun}
         onCancel={() => setConfirmRun(false)}
       >
-        This will discover new videos and apply your current routes.
+        This will discover new videos and apply your current routes. If an earlier Run Now run stopped at its time limit, this continues the oldest such run instead of starting a new one.
       </ConfirmDialog>
 
       <ConfirmDialog

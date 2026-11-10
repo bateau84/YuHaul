@@ -127,10 +127,11 @@ type Run struct {
 
 	// InitiatedBy records who started a production run (InitiatedBy* values).
 	// It is written once at insert; nil for every pre-024 row and for
-	// simulation runs. Internal: never part of the public JSON.
+	// simulation runs. Serialized by MarshalJSON as initiated_by.
 	InitiatedBy *string `json:"-"`
 	// InterruptCause records why an interrupted run stopped (InterruptCause*
-	// values). Nil when the cause is unproven. Internal, like InitiatedBy.
+	// values). Nil when the cause is unproven. Serialized by MarshalJSON as
+	// interrupt_cause.
 	InterruptCause *string `json:"-"`
 
 	// PublishedFrom/PublishedTo are the Backtest/Replay published-date range
@@ -164,7 +165,12 @@ func (r Run) MarshalJSON() ([]byte, error) {
 		FailureReasonUnavailable bool    `json:"failure_reason_unavailable,omitempty"`
 		CurrentPhase             *string `json:"current_phase"`
 		PublishedRange           any     `json:"published_range"`
-	}{alias: (*alias)(&r)}
+		// InitiatedBy and InterruptCause are closed-set values (see the
+		// constants above) that let Run Detail tell a time-limit-interrupted
+		// Run Now run apart. Always present; null when unproven or legacy.
+		InitiatedBy    *string `json:"initiated_by"`
+		InterruptCause *string `json:"interrupt_cause"`
+	}{alias: (*alias)(&r), InitiatedBy: r.InitiatedBy, InterruptCause: r.InterruptCause}
 	if pr := r.publishedRange(); pr != nil {
 		out.PublishedRange = pr
 	}

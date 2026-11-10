@@ -29,7 +29,9 @@ export async function getRun(id: number): Promise<Run | undefined> {
 export interface StartRunResult {
   run_id: number
   status: string
-  admission: 'started' | 'resumed'
+  // Optional on purpose: a 202 without a known admission is accepted without
+  // claiming it was new or resumed.
+  admission?: 'started' | 'resumed'
 }
 
 export async function startRun(): Promise<StartRunResult> {
