@@ -70,7 +70,29 @@ describe('ErrorsView', () => {
     const deferredRow = screen.getByText('Pop Hit 2026').closest('tr')
     expect(deferredRow).not.toBeNull()
     expect(within(deferredRow!).getByRole('button', { name: /Retry now/i })).toBeInTheDocument()
-    expect(within(deferredRow!).getByRole('button', { name: /Discard/i })).toBeInTheDocument()
+    expect(within(deferredRow!).getByRole('button', { name: 'Dismiss deferred item: Pop Hit 2026' })).toBeInTheDocument()
+    expect(within(deferredRow!).queryByRole('button', { name: /Discard/i })).not.toBeInTheDocument()
+  })
+
+  it('labels handed-over deferred items and falls back to the video id for the dismiss name', async () => {
+    const base = { video_id: 5, status: 'pending' as const, created_at: '2026-10-01T00:00:00Z', retry_count: 0 }
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
+    vi.spyOn(queueApi, 'listDeferred').mockResolvedValueOnce([
+      { ...base, id: 1, video_title: 'Stopped One', run_id: 41, deferral_reason: 'stopped_by_user' },
+      { ...base, id: 2, video_title: 'Discarded One', run_id: 42, deferral_reason: 'discarded_by_user' },
+      { ...base, id: 3, run_id: 43, deferral_reason: 'stopped_by_user', deferred_reason_unavailable: true },
+    ])
+    renderWithProviders(<ErrorsView />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Deferred/i })).toBeEnabled())
+    fireEvent.click(screen.getByRole('tab', { name: /Deferred/i }))
+
+    const stopped = (await screen.findByText('Stopped One')).closest('tr')!
+    expect(within(stopped).getByText('Waiting for the next run. Run 41 was stopped by user.')).toBeInTheDocument()
+    expect(within(stopped).getByText('Eligible for the next run')).toBeInTheDocument()
+    const discarded = screen.getByText('Discarded One').closest('tr')!
+    expect(within(discarded).getByText('Waiting for the next run. Run 42 was discarded.')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for the next run.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dismiss deferred item: 5' })).toBeInTheDocument()
   })
 
   it('dismisses an error and removes it from the list', async () => {

@@ -4,6 +4,21 @@ import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
 import type { ErrorEntry, DeferredItem } from '../types'
 
+// Items handed over by a discard (BR-017) or a stop (BR-035) wait for the next
+// run. Other reasons render as the API supplies them.
+function isHandedOver(d: DeferredItem): boolean {
+  return d.deferral_reason === 'stopped_by_user' || d.deferral_reason === 'discarded_by_user'
+}
+
+function deferredReasonLabel(d: DeferredItem): string {
+  if (d.deferred_reason_unavailable) return 'Waiting for the next run.'
+  if (isHandedOver(d)) {
+    const what = d.deferral_reason === 'stopped_by_user' ? 'stopped by user' : 'discarded'
+    return `Waiting for the next run. Run ${d.run_id} was ${what}.`
+  }
+  return d.deferral_reason
+}
+
 export function ErrorsView() {
   const [tab, setTab] = useState<'errors' | 'deferred'>('errors')
   const [errors, setErrors] = useState<ErrorEntry[]>([])
@@ -98,7 +113,7 @@ export function ErrorsView() {
     try {
       await api.discardDeferred(id)
       setDeferred((prev) => prev.filter((d) => d.id !== id))
-      addToast('Deferred item discarded', 'success')
+      addToast('Deferred item dismissed', 'success')
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to discard deferred item', 'error')
     }
@@ -198,17 +213,25 @@ export function ErrorsView() {
                     {deferred.map((d, i) => (
                       <tr key={d.id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
                         <td data-label="Video">{d.video_title ?? d.video_id}</td>
-                        <td data-label="Reason">{d.deferral_reason}</td>
+                        <td data-label="Reason">{deferredReasonLabel(d)}</td>
                         <td data-label="Retry after">
-                          {d.retry_after ? new Date(d.retry_after).toLocaleString() : 'Next run'}
+                          {d.retry_after
+                            ? new Date(d.retry_after).toLocaleString()
+                            : isHandedOver(d)
+                              ? 'Eligible for the next run'
+                              : 'Next run'}
                         </td>
                         <td data-label="Actions">
                           <div style={{ display: 'flex', gap: 8 }}>
                             <button className="button" onClick={() => retryDeferred(d.id)}>
                               Retry now
                             </button>
-                            <button className="button" onClick={() => discardDeferred(d.id)}>
-                              Discard
+                            <button
+                              className="button"
+                              aria-label={`Dismiss deferred item: ${d.video_title ?? d.video_id}`}
+                              onClick={() => discardDeferred(d.id)}
+                            >
+                              Dismiss
                             </button>
                           </div>
                         </td>
