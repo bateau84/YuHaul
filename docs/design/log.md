@@ -3,8 +3,13 @@ type: Log
 title: Design documentation change log
 description: Records maintenance of the accepted human-facing design documentation.
 tags: [design, documentation, change-log]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
+
+## 2026-11-10
+
+- Updated [admin interface design](/docs/design/yuhaul-admin-ui-design.md), “Run Now — Resume After a Time Limit”, after implementation in commit a016744. Closed gap (1): the run API now exposes `initiated_by` and `interrupt_cause`. Set the section's implementation status to “implemented in a016744; browser/screen-reader verification pending”. Recorded the implementer's judgement call that the resumed status line stays visible while the page stays open (still dropped on reload, since no saved resumed fact exists). Gaps (2)–(4) remain open. Docs only; no new browser or accessibility proof.
+- Amended [admin interface design](/docs/design/yuhaul-admin-ui-design.md) with “Run Now — Resume After a Time Limit” under [BR-017](/docs/requirements/yuhaul/br-017-manual-run-initiation.md) AC7–AC12 (Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`). Specified acknowledgement copy for a resumed run, exact refusal copy for `production_run_active`, `resume_unavailable` (per closed reason, with the action open to the person), 503 and unconfirmed outcomes, and the Run Detail interrupted-run explanation. Replaced the stale “no Resume” line in the interrupted-run row, and added the resume sentence to the Run Now dialog. Recorded gaps: interruption cause exposure, no saved resumed marker, no way to clear an unusable candidate, and no code to split 503 causes. Design only; no code, requirements, browser or accessibility verification.
 
 ## 2026-11-07
 

@@ -679,7 +679,7 @@ Check the shipped browser with real registered API projections for: pre-send aut
 | `completed` | “Run completed.” Remove active progress. Show recorded outcome totals, including deferred/failed outcomes when present. Adjacent: “Processing has ended. Inspect video action outcomes for recorded playlist results.” Completion is not universal playlist success. |
 | `completed`, selected count exactly zero | Add “No inputs selected for this run.” Do not say “No videos exist” or “Nothing matched”. |
 | Terminal, no video outcome rows, selected count unknown or positive | “No video outcomes recorded for this run.” Do not infer an empty input set or rejection. With an active outcome filter, retain the existing filter-specific empty state instead. |
-| `failed` / `interrupted` | “Run failed.” / “Run interrupted.” Show recognized phase as “Last recorded phase: {phase label}” and the API-vetted reason, or existing safe-reason-unavailable/missing-reason explanation. Keep recorded counts/evidence inspectable even when Errors is empty. Do not promise automatic recovery, unchanged YouTube state, or offer a new Resume/Cancel action. |
+| `failed` / `interrupted` | “Run failed.” / “Run interrupted.” Show recognized phase as “Last recorded phase: {phase label}” and the API-vetted reason, or existing safe-reason-unavailable/missing-reason explanation. Keep recorded counts/evidence inspectable even when Errors is empty. Do not promise automatic recovery or unchanged YouTube state. Run Detail has no Resume or Cancel button: continuing a run happens only through Run Now. An interrupted manual run stopped by its time limit gets the extra explanation in “Run Now — Resume After a Time Limit”; every other failed or interrupted run keeps this row's copy and has no resume promise. |
 | Initial status read fails | “Could not load run status. Completion is unknown.” Offer “Retry status” and “Back to runs”; never leave an indefinite loading or success state. |
 | Background status read fails | Retain values as “Last known status”. Show “Could not refresh status. This run may still be processing.” and “Retry status”. Do not portray it as confirmed active work or turn a read failure into run failure. |
 | SSE unavailable, saved reads succeed | “Live updates unavailable. Checking saved status periodically.” No repeated error toast or run-failed styling. |
@@ -693,6 +693,75 @@ While running, qualify existing discovered/outcome summary cards: “Recorded to
 **Acceptance observations:** Exercise US-009 with delayed discovery (selected unknown, zero counters, rising quota); an acknowledged run already terminal at first read; captured-zero completion versus unknown-count/no-outcome completion; partial decisions followed by failure with an empty Errors queue; completed processing containing deferred/failed outcomes; dropped SSE with working saved reads; failed saved reads followed by background-tab return/recovery; and direct-link/reload plus keyboard/screen-reader/mobile inspection. In each case the same run remains identifiable, no duplicate start is automatic, and no unknown count or missing evidence becomes a success/rejection/percentage claim.
 
 **Decision and evidence limits:** Keep the already intended automatic Run Detail navigation and text-first persistent progress. An Overview-only panel duplicates inspection; a modal traps attention; percentage/ETA presentation lacks completion facts. Existing status, phase, nullable selected count, decision-bearing count, and safe run/action evidence suffice for this amendment. No new backend facts are requested. Source inspection on 2026-11-05 found Overview's toast-only start, Run Detail's SSE-only active phase, late-finalized counters, and a named-event/payload mismatch between server SSE and its browser consumer. These are implementation follow-ups, not new protocol decisions or executed browser proof. The user's report of a discovery run with rising quota motivates the design but does not prove that run's health. No live-run diagnosis, implementation conformance, accessibility certification, or date-filter decision is claimed.
+
+#### Run Now — Resume After a Time Limit
+
+**Status and scope (2026-11-10):** Amendment for [BR-017](/docs/requirements/yuhaul/br-017-manual-run-initiation.md) AC7–AC12, which needs a visible UI. It supersedes any earlier statement here that an interrupted run cannot be continued, for time-limit-interrupted manual runs only. It extends “Run Now — Recorded Progress and Closure”, reusing US-009. It adds no capability, button, or telemetry.
+
+**Implementation status:** implemented in commit a016744 (`a01674440a54175ee9c1e0395c7093f4dd8b1b61`); browser and screen-reader verification pending. The run API now exposes `initiated_by` (`run_now`, `schedule`, `queue_retry` or null) and `interrupt_cause` (`time_limit`, `shutdown` or null).
+
+**Walkthrough:** Run Now started run 30, which stopped at its time limit and shows “Run interrupted”. Later the administrator presses Run Now and confirms. The dialog already said an earlier stopped run would be continued. Run Detail for run 30 opens, with focus on its heading, and says “Run 30 resumed. It continues from where it stopped. No new run was started.” Status then follows the normal progress rules. Had run 30 been unusable, Overview would instead keep the person in place and say run 30 cannot be resumed safely, name the reason, and link to it. Observable success: the person can tell whether the press resumed an existing run, started a new one, or did nothing, and which run it concerns.
+
+**What the API gives the UI.** `POST /api/runs`:
+
+| Response | Meaning |
+|---|---|
+| 202 `admission: "started"` | New run `run_id` created. |
+| 202 `admission: "resumed"` | Existing run `run_id` continues; no new run, no new snapshot. |
+| 409 `code: "production_run_active"` | Another production run is executing; nothing started or resumed. |
+| 409 `code: "resume_unavailable"` with `run_id`, `reason` | The oldest time-limit-interrupted run cannot be continued safely; no new run was started; nothing changed. |
+| 503 | Startup recovery in progress, or shutdown; nothing started or resumed. The two have no machine code. |
+| other error / no response | Outcome not confirmed. |
+
+The UI branches on `status`, `code` and `admission`, never on message text. `reason` is a closed set; render only the mapped copy below, never the raw value. A missing or unknown `admission` on a 202 is treated as accepted without claiming new or resumed.
+
+**Exact copy after acceptance.** Navigate to `/runs/{run_id}`; focus the Run Detail heading.
+
+| Case | Status-region first line (persistent until the first saved status read replaces it) | Further text |
+|---|---|---|
+| `started` | “Run {id} started. Checking progress…” (unchanged) | none |
+| `resumed` | “Run {id} resumed. It continues from where it stopped. No new run was started. Checking progress…” | “Playlist additions already recorded as successful are not repeated. An addition whose earlier outcome could not be confirmed stays marked as unconfirmed.” |
+| 202, unknown `admission` | “Run {id} accepted. Checking progress…” | none |
+
+The resumption line comes from navigation state of this press only. The server does not expose a saved “was resumed” fact, so after reload or direct link the run shows ordinary saved status and phase. Do not claim any persistent resumed marker, resume count or resume time. While the page stays open, the line stays visible and is not removed when status changes or the run finishes; this was the implementer's judgement call, as the design did not set a lifetime. It is cleared from history state after first read, so it never returns on reload.
+
+A resumed run keeps its id and original settings. Run Detail shows “Running — {phase label}” from the saved checkpoint, and the normal selected/decision count rules apply. Counts reflect saved evidence and may already be non-zero at the first read. If the run reaches its time limit again, it is an ordinary interrupted run and the “Interrupted run” text below applies again.
+
+**Exact copy for refusals.** Show a persistent inline message directly under the Overview header, not a toast (toasts time out, which would lose a safety-relevant message). It stays until the person dismisses it, presses Run Now again, or leaves Overview. Use `role="alert"`, give it a text prefix, and do not move focus. Re-enable Run Now afterwards. Every refusal says nothing was started or changed, except the unconfirmed cases.
+
+| Case | Message | Links / action |
+|---|---|---|
+| `production_run_active` | “Run Now did nothing. A production run is already running. Nothing was started or resumed.” | “View run” link when Overview knows the active run; otherwise “View runs”. Tell them to wait for it to finish, then press Run Now again. |
+| `resume_unavailable` | “Run Now did nothing. Run {id} stopped at its time limit but cannot be resumed safely. No new run was started and nothing was changed. {Reason sentence}” | Link “View run {id}”. Then: “While run {id} is the oldest run stopped this way, Run Now will keep refusing. YuHaul does not offer a way to resume or discard it from this screen. The schedule is not affected.” Dry Run stays available. |
+| 503 | “Run Now did nothing. YuHaul can't accept a run right now. It may be starting up or shutting down. Nothing was started or resumed. Try again in a minute.” | “View runs” link. |
+| Other server error, or no response | “Could not confirm whether a run started or resumed. Check Runs before pressing Run Now again.” | “View runs”. No automatic retry (existing start-uncertainty rule, which this reuses). |
+
+`resume_unavailable` reason sentences (the `{Reason sentence}` above):
+
+| `reason` | Sentence |
+|---|---|
+| `snapshot_unavailable` | “Its saved settings are missing.” |
+| `snapshot_unreadable` | “Its saved settings cannot be read.” |
+| `snapshot_inadmissible` | “Its saved settings cannot be used safely.” |
+| `checkpoint_unrecognized` | “Its saved progress point is not recognized.” |
+| `terminal_timestamp_contradiction` | “Its saved record is contradictory: it has a completion time but is marked interrupted.” |
+| `recheck_at_write` | “Its saved state changed while Run Now was checking it. Check the run, then press Run Now again if that is still what you want.” |
+| anything else | “The reason is not available in this version of the interface.” |
+
+No refusal copy promises that the run can be fixed, that YouTube state is unchanged, or that waiting will resolve a `resume_unavailable` refusal. “Nothing was changed” is only used where the server contract guarantees a refusal changes nothing.
+
+**On Run Detail — interrupted run.** Applies only when the saved run is a manual Run Now run, `interrupted`, and the API reports that the interruption cause is the time limit. If the API does not report the cause (`interrupt_cause` null or absent), use the generic “Run interrupted.” row and make no resume promise.
+
+- Heading status: “Run interrupted — time limit reached.” Keep “Last recorded phase: {phase label}” and the recorded counts.
+- Explanation: “Work done up to this point is saved. Pressing Run Now continues the oldest run stopped this way. This run continues only if it is the oldest and can be resumed safely.” Add a link “Go to Overview” to where Run Now is. Do not add a Resume button.
+- Do not say it “will resume”, “resumes next”, or “resumes automatically”. The UI cannot know whether it is the oldest or whether a guarded target blocks it.
+- A run interrupted by shutdown, process loss, or any other cause, a scheduled run, a legacy run, a failed run, and a simulation do not get this text.
+
+**Accessibility.** Target WCAG 2.2 AA. Refusal and uncertain messages are inline text with a visible “Run Now did nothing.” or equivalent prefix, not color or an icon alone (SC 1.4.1). `role="alert"` announces the refusal once without stealing focus (SC 4.1.3); the resumed line on Run Detail is part of the existing polite progress region, announced once. The run link is keyboard operable with visible, unobscured focus (SC 2.1.1, 2.4.7, 2.4.11), and its text names the run (“View run 30”, SC 2.4.4). The message wraps at 320 CSS px with no clipped text (SC 1.4.10). The message persists, so there is no time limit on reading it (SC 2.2.1). Run Now is not disabled by a refusal; during the pending request it follows the existing “Starting run…” rule.
+
+**Acceptance observations:** With a real server, press Run Now with: a time-limit-interrupted run (resumed, same id, named, not a new run, Run Detail heading focused); two such runs (oldest named, the other unchanged); an active run (`production_run_active` copy and link); an unusable candidate for each closed reason plus an unknown reason (mapped sentence, no raw value, link to the run, no new run); startup recovery or shutdown (503 copy); a dropped connection (uncertain copy, no auto repeat). On Run Detail, check the interrupted copy appears only for a time-limit-interrupted manual run, reload drops the resumed line but not the status, and screen-reader and 320 px checks pass.
+
+**Decision and capability gaps.** Rejected: a toast (disappears, no link), an Overview-only banner on success (the run page is where progress lives), and a Resume button on Run Detail (a press would act on the oldest candidate, not necessarily the one on screen, so a per-run button would mislead). Gaps, not resolved here: (1) the run API may not expose the interruption cause, which the Run Detail interrupted text needs (closed in a016744: the run API exposes `initiated_by` and `interrupt_cause`); (2) there is no saved “resumed” marker, so the resumption line is transient; (3) a candidate that stays unusable blocks all new runs through Run Now and the product offers the person no way to clear it, which is a recovery capability the requirements owner would need to decide; (4) 503 has no code to separate startup recovery from shutdown. Gap (1) is closed; gaps (2)–(4) remain. Implementation is in a016744 (Overview refusal as persistent alert, Run Detail line and time-limit text); accessibility and browser behavior are unverified.
 
 **View: Decision Detail** — Inspect a single video's routing outcome; user job: understand exactly why this video was accepted, rejected, deferred, or failed — across all three layers of the outcome model.
 - **Regions:**
@@ -1133,7 +1202,7 @@ Advisories are system-generated suggestions based on channel and route performan
 **Manual run trigger interaction:**
 - System: "Run" button in header always visible
 - On click: dropdown with "Run Now" and "Dry Run" options
-- "Run Now" on click: confirmation dialog "Start a processing run now?"; on confirm, acknowledge the pending request, then navigate the acknowledged run ID to Run Detail. Follow “Run Now — Recorded Progress and Closure”: saved reads supply phase/status and terminal confirmation; SSE is optional faster feedback, not completion authority.
+- "Run Now" on click: confirmation dialog "Start a processing run now?" with the added sentence “If an earlier Run Now run stopped at its time limit, this continues the oldest such run instead of starting a new one.”; on confirm, acknowledge the pending request, then navigate the acknowledged run ID to Run Detail. Start, resume and refusal feedback follow “Run Now — Resume After a Time Limit”, not a toast. Follow “Run Now — Recorded Progress and Closure”: saved reads supply phase/status and terminal confirmation; SSE is optional faster feedback, not completion authority.
 - "Dry Run" on click: confirmation dialog (see SC-003), on confirm: starts dry-run, subscribes to SSE stream, shows live progress, navigates to dry-run results
 
 **Route delete button states:**
