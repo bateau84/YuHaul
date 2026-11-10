@@ -3,10 +3,12 @@ type: decision
 title: ADR-001 — Capture the Causal Exclusion as an Immutable Snapshot Reference
 description: Record which configured exclusion actually caused a future route skip without retaining compared provider input, inventing legacy causes or claiming complete historical reproduction.
 tags: [architecture, decision, exclusions, evidence, snapshots, privacy]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
 
-**Status:** accepted — bounded technical realization for future decision capture; not implemented or runtime-verified by this artifact. Full evaluated-input retention and historical reproduction remain blocked separately.
+**Status:** accepted — bounded technical realization for future decision capture; not implemented or runtime-verified by this artifact.
+
+**Reconciliation, 2026-11-10.** The user decided that (1) past inputs are shown as current/local or “unavailable”, with no historical provider snapshots, and BR-015 AC7 now promises explanation, not reproduction; and (2) the matched rule's configured value is always shown when the rule resolves. This reference-only capture is therefore the accepted realization of the causal part of AC7, not a partial one. Statements below that call reproduction or input retention “blocked”, or that make configured-value display depend on eligibility evidence, are superseded. [ARS-002](../specifications/ars-002-causal-exclusion-capture-and-inspection.md) carries the updated contract. BR-009 durable titles for duplicate detection remain a separate open question.
 
 ## Decision
 
@@ -34,7 +36,8 @@ This is a separate useful slice of the accepted explainability obligation, not a
 | OC-005 Guarantees 7–10 | Preserve route versus video scope, distinguish legacy absence and value withholding, release only relevant permitted configured evidence. Current/local recognition stays separate. |
 | OC-005 Guarantees 11–12 | No provider repair or production action is introduced; simulation capture remains hypothetical and run-scoped. Existing mode gates still apply. |
 | BR-015 AC10–13; OC-005 cases 6–10 | ARS-002 specifies mandatory future capture and list/detail explanation. Generic-only new skips fail, including a new evaluation of a video with old history. User-approved old generic-only rows display “rule unavailable” in both surfaces, preserve supported outcomes and remain unchanged on reuse. Implementation and composed proof remain outstanding. |
-| BR-015 AC7 outside AC13's accepted legacy boundary; OC-005 compared-input/reproduction portion; BR-009 title preservation | **Still unresolved/blocked**, not satisfied by a reference or the recorded fact that a branch matched. Accepted legacy incompleteness is not recovered/reproducible input. This decision grants no raw-input retention basis. |
+| BR-015 AC7 as amended 2026-11-10; OC-005 Guarantees 2, 4–6 | **Satisfied by design** together with current/local display: the reference identifies the causal rule; compared inputs are shown as current/local or “unavailable”. No raw-input retention is added or needed. |
+| BR-009 title preservation | **Still open** (duplicate detection only), not affected by this decision. |
 
 ## Decision question and constraints
 

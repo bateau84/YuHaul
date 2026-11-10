@@ -3,10 +3,23 @@ type: Log
 title: YuHaul Requirements Change Log
 description: Chronological record of changes to the YuHaul behavioral requirement bundle.
 tags: [changelog, log, okf, requirements, yuhaul]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
 
 # YuHaul Requirements Update Log
+
+## 2026-11-10
+
+**User decisions of 2026-11-10.** Source: the user's explicit decisions, relayed in the specification assignment (Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`), with a later relayed answer for the date field. The original human conversation was not independently inspected. Docs only; no code, database or live operation; no runtime acceptance.
+
+1. **Run 14 declined:** left as it is, with no recovery and no backfill; its saved unevaluated videos stay unprocessed. The [run14-recovery](../run14-recovery/index.md) index, contract and log are marked declined. No accepted requirement changed.
+2. **Historical inputs:** [BR-015](br-015-explainable-route-decisions.md) AC7 now promises explanation from app-owned evidence, not reproduction of provider-input comparisons. Past inputs are shown as current/local information or “unavailable”, and no historical provider snapshot is retained. [OC-005](oc-005-decision-evidence-attribution-and-availability.md) Guarantees 2, 4, 5 and 6, its invariants, verification cases 1, 3, 9 and 10 and its reconciliation section are aligned. [Legacy Decision Evidence](decision-evidence.md) is aligned. [BR-009](br-009-historical-title-persistence-and-corpus-import.md) gets a reconciliation note only: its durable titles serve duplicate detection, not decision inspection. AC1–9 are unchanged, and its durable-title-versus-expiry question stays open. Interpretation: the assignment's “BR-009/AC7” is read as BR-015 AC7 plus BR-009, because BR-009 AC7 concerns import completeness.
+3. **Time-limit resume:** [BR-017](br-017-manual-run-initiation.md) AC7–12 and verification. The next Run Now resumes the oldest time-limit-interrupted manual run (earliest start, then lowest ID), one per press, under its original ID, snapshot and checkpoint, with no new run. Version-0/legacy, otherwise-interrupted, scheduled, queue-retry, terminal and simulation runs are excluded. Send guards and recorded successes keep blocking repeat additions. An unusable candidate fails closed without starting a new run. Specification choices: the ordering, one per press, and fail-closed.
+4. **Configured exclusion values:** BR-015 AC11 and OC-005 Guarantees 5 and 10 now require the matched rule's configured value to be shown, because it is the user's own configuration and release-eligible. It is never withheld on provider-data or diagnostic-safety grounds, and it is “unavailable” only when the definition cannot be resolved. Architecture [ARS-002](../../architecture/decision-evidence/specifications/ars-002-causal-exclusion-capture-and-inspection.md) is updated to match; see the architecture log.
+5. **Backtest date range:** [BR-027](br-027-historical-backtesting.md) AC8–13 and verification. The filter uses the YouTube published date, in UTC days, with both chosen days included; no range means no filter. The UTC, inclusive and no-range defaults were proposed by the assigning session; the user did not object, and the assignment records them as accepted. Specification choices: a single bound applies alone; with a range, a video without a local published date is not selected and no YouTube call is made; a reversed or invalid range starts no run; counts cover only selected videos; a zero-match range completes with zero; and the range is saved with the run and shown on inspection. Applying these rules to Replay mode is an interpretation of the accepted design; it is listed as a non-blocking open question. The earlier “pending” status was superseded the same day by the user's answer.
+6. **Coordinator direction:** both jobs run automatically on separate schedules, and quota exhaustion is acceptable because work continues after the reset. It is recorded in the [index](index.md) and the coordinator architecture index as **still a proposal, not accepted**. BR-016, BR-017 AC2/AC6 and the quota requirements are unchanged.
+
+[Index](index.md) summary, tables and open questions are updated. Earlier log entries that call AC7 reproduction, configured-value release, date meaning, Run 14 recovery or timely manual resume open are superseded only for these points. **Architect maintenance outstanding:** the decision-evidence ARD-001, ADR-001 and ARS-001, the System Architecture, run-diagnostics ARD-001 and coordinator ARD-001 still use pre-decision wording. Realization of BR-017 AC7–12 and BR-027 AC8–13 is not designed. Designer owns the presentation of the resume acknowledgement, the date controls and the saved-range display.
 
 ## 2026-11-07
 

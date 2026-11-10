@@ -3,7 +3,7 @@ type: design
 title: YuHaul System Architecture
 description: "System architecture for YuHaul — a personal, stateful discovery and routing system for YouTube subscription content with compliance-aware storage, quota management, and decision explainability. Imported duplicate-reference eligibility survives same-ID native fingerprint upserts."
 tags: [architecture, design, yuhaul, youtube, routing]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
 
 **Status:** accepted
@@ -49,9 +49,9 @@ YuHaul discovers subscription videos, flags historical title matches, and sends 
 | BR-012 Idempotent Playlist Actions | §State Management | ExecutedAction unique constraint |
 | BR-013 Quota-Limited Work Deferral | §Quota Management | Deferral queue, no-false-rejection |
 | BR-014 Failed Work Retention and Retry | §State Management | ErrorEntry with retry/dismiss |
-| BR-015 Explainable Route Decisions | §Decision Evidence | ConditionAudit per-route trail |
+| BR-015 Explainable Route Decisions | §Decision Evidence | ConditionAudit per-route trail. AC7 as amended 2026-11-10: explanation from app-owned evidence; past inputs shown as current/local or “unavailable”; no historical provider-input snapshot ([decision-evidence](decision-evidence/index.md)). |
 | BR-016 Configurable Scheduled Runs | §Scheduling and Recovery | Internal cron scheduler |
-| BR-017 Manual Run Initiation | §API Surface | POST /runs endpoint |
+| BR-017 Manual Run Initiation | §API Surface, §Run Recovery | POST /runs endpoint. AC7–12 (2026-11-10): Run Now first resumes the oldest time-limit-interrupted Run Now run under the production lock ([run-initiation ADR-001/ARS-001](run-initiation/index.md)); implemented, review pending. |
 | BR-018 API Consumption Accounting | §Quota Management | QuotaLedger per-operation tracking |
 | BR-019 Quota-Aware Processing | §Quota Management | Pre-flight budget check |
 | BR-020 Run-Level and Route-Level Statistics | §Statistics | Run/Route computed views; Route List lifetime match count uses distinct production-matched videos per route (ADR-006) |
@@ -61,7 +61,7 @@ YuHaul discovers subscription videos, flags historical title matches, and sends 
 | BR-024 Trend Visualization | §Web Interface | Chart endpoints, time-series API |
 | BR-025 Configuration History | §Configuration Versioning | ConfigVersion snapshots linked to runs |
 | BR-026 Dry-Run Evaluation | §Processing Pipeline | Dry-run mode, action suppression |
-| BR-027 Historical Backtesting | §Backtest Engine | Replay against retained observations |
+| BR-027 Historical Backtesting | §Backtest Engine | Replay against retained observations. AC8–13 (2026-11-10): UTC published-day range persisted on the run, with the date taken only from an eligible local metadata row ([run-initiation ADR-002/ARS-001](run-initiation/index.md)); implemented, review pending. |
 | BR-028 Historical Run Inspection | §API Surface | Run detail + decision detail endpoints |
 | BR-029 Responsive Administration | §Web Interface | SPA with responsive layout |
 | BR-030 Temporary Failure Work Preservation | §Quota Management, §State Management | Deferred/error queues preserve work |
@@ -917,7 +917,7 @@ Video (video_id, channel_id, processing_state, final_outcome)
        └── ExecutedAction (action_type, target, outcome, error_message)
 ```
 
-**Evidence display with expired metadata:** When TransientMetadata has expired, the evidence structure is always available from Store B. Displayable values degrade to fingerprint or "metadata expired — refresh available." One-click refresh re-fetches metadata (1 unit per 50 videos).
+**Evidence display with expired metadata:** When TransientMetadata has expired, the evidence structure is always available from Store B. The earlier rule ("displayable values degrade to fingerprint or 'metadata expired — refresh available'; one-click refresh re-fetches metadata") is **superseded for decision inspection** by BR-015 AC7/AC11 and OC-005 as amended on 2026-11-10. Inspection shows a past decision's inputs only as current/local information, labeled as such, or as “unavailable”. It never shows a fingerprint as a title and never calls YouTube to fill gaps. The matched exclusion rule's configured value is always shown when the rule resolves. See [decision-evidence ARS-001/ARS-002](decision-evidence/index.md).
 
 ### Duplicate Detection Engine
 
@@ -1157,13 +1157,13 @@ Renewal never proves an issued playlist mutation did not apply. A minimal exact-
 
 Run `status` has four states: `running`, `completed`, `interrupted`, and `failed`. `interrupted` and `failed` are distinct terminal-adjacent states with different recovery semantics; both carry a reason in `interrupt_reason` (redefined as "the reason the run is not in a normal terminal state").
 
-The [run-diagnostics realization](run-outcome-diagnostics/design/ard-001-durable-run-diagnostics-and-input-visibility.md) records current production/simulation failure handling, captured nullable `videos_selected`, decision-derived `videos_evaluated`, per-action reasons, vetted public diagnostics, and persisted-status polling. It includes local tests and bounded browser evidence, not exhaustive recovery, container/deployment or live-provider certification. Simulation counts remain aggregates, not selected-input membership proof; historical date filtering remains blocked and same-app production comparison deferred.
+The [run-diagnostics realization](run-outcome-diagnostics/design/ard-001-durable-run-diagnostics-and-input-visibility.md) records current production/simulation failure handling, captured nullable `videos_selected`, decision-derived `videos_evaluated`, per-action reasons, vetted public diagnostics, and persisted-status polling. It includes local tests and bounded browser evidence, not exhaustive recovery, container/deployment or live-provider certification. Simulation counts remain aggregates, not selected-input membership proof; historical date filtering is specified by BR-027 AC8–13 and designed in [run-initiation ADR-002/ARS-001](run-initiation/index.md), but not implemented; same-app production comparison remains deferred.
 
 **Interrupted (resumable):** a run whose process was cleanly stopped at a phase boundary (e.g. crash mid-run):
 
 1. Run status set to `interrupted` with `interrupt_reason`
 2. Videos in `evaluating` or `acted` state are re-processing candidates
-3. Next run checks for interrupted runs and resumes from last known state
+3. Startup recovery resumes guarded interrupted runs from their last known state before producers open ([ADR-005](youtube-authorization/decisions/adr-005-startup-recovery-for-guarded-production-runs.md)). In addition, Run Now resumes the oldest Run Now run whose saved `interrupt_cause` is `time_limit`, instead of starting a new run ([run-initiation ADR-001](run-initiation/decisions/adr-001-run-now-resumes-time-limit-interrupted-manual-run.md), BR-017 AC7–12; implemented, review pending). Run Now does not resume scheduled, queue-retry, shutdown-interrupted or legacy runs.
 4. Idempotency guards prevent duplicate insertions on resume
 5. Videos in `completed` state are never reprocessed
 
@@ -1178,7 +1178,7 @@ The [run-diagnostics realization](run-outcome-diagnostics/design/ard-001-durable
 
 - Under [ADR-006](youtube-authorization/decisions/adr-006-per-video-action-failure-isolation-and-stranded-work-retention.md), a video whose action fails or is guard-blocked is recorded `failed` with an active error entry, and independent videos continue. Such a run can still be `completed`.
 - Before a run becomes `failed`, every unfinished video is retained: still-owned retry groups are requeued, and other videos get a runtime error entry. If that retention cannot commit, the run stays `interrupted`.
-- Under [ADR-007](youtube-authorization/decisions/adr-007-asynchronous-startup-resume-and-shutdown-interruption.md), a stop caused by cancellation (SIGTERM or deadline) is `interrupted`. Startup resume runs in the background behind a producer gate, so HTTP and probes stay available.
+- Under [ADR-007](youtube-authorization/decisions/adr-007-asynchronous-startup-resume-and-shutdown-interruption.md), a stop caused by cancellation (SIGTERM or deadline) is `interrupted`. Startup resume runs in the background behind a producer gate, so HTTP and probes stay available. Run-initiation ARS-001 adds the internal `run.interrupt_cause` (`time_limit` when the Run Now 30-minute limit expired, `shutdown` on cancellation) and `run.initiated_by`; together they select Run Now resume candidates.
 
 #### Deferred Work Recovery
 

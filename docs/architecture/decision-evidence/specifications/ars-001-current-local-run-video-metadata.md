@@ -3,7 +3,7 @@ type: specification
 title: ARS-001 — Current-Local Run-Video Metadata
 description: Exact additive list/detail JSON contract for local title, source-channel name, duration, provenance, availability and optional-context read failure, without historical input capture.
 tags: [architecture, specification, api, metadata, run-history, availability]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
 
 **Status:** accepted — bounded wire contract for the implemented current/local read slice. Not acceptance of full historical evidence, retention permission, complete API safety or shipping.
@@ -32,7 +32,8 @@ This contract specifies existing emitted fields, not a new storage model. It mak
 | BR-015 AC9; OC-005 failure semantics and Guarantee 11 | Same-endpoint local retry preserves identity; mandatory read errors remain errors; optional-context failure preserves mandatory evidence. No evaluation/provider repair. |
 | OC-005 Guarantee 12; BR-027 AC4/6–7 | Enrichment neither changes mode/outcomes nor executes actions/provider calls or writes production state/statistics. Existing mode gates remain elsewhere. |
 | BR-028 AC2–3, AC9 | Adds recognition to existing requested-run list/detail. Full causal explanation, cross-run search and retry-count obligations remain elsewhere. |
-| BR-015 AC1–7; BR-009 durable-title promise; full causal capture | Not satisfied by this extension. Historical reproduction/retention remains blocked under the parent design; safe unavailable copy is not a waiver. |
+| BR-015 AC7 as amended 2026-11-10 | This contract supplies the input half: past inputs are shown as current/local (labeled) or “unavailable”, which is now the accepted promise. The causal half is ARS-002. |
+| BR-015 AC1–6; BR-009 durable-title promise; full causal capture | Not satisfied by this extension. BR-009 durable titles for duplicate detection remain open under the parent design. |
 
 ## Scope and related contracts
 
@@ -222,4 +223,4 @@ Maintain producer → real SQLite → registered HTTP → bundled adapter/view c
 
 ## Limits and open questions
 
-There is no open user-owned decision for these exact current/local wire fields. The parent design still owns the unresolved historical input/title-retention conflict, causal exclusion capture and old raw-audit lifecycle risk. Current metadata can assist recognition of a legacy Run15-shaped record but cannot identify which exclusion actually matched or reconstruct its compared input. This specification neither backfills those facts nor certifies existing audit storage/release as safe. Dates, production comparison, retention permission, full accessibility and whole-product acceptance remain unchanged and unproved here.
+There is no open user-owned decision for these exact current/local wire fields. Under the user's 2026-11-10 decision, past inputs are current/local or “unavailable” and no historical input is retained, so this contract is the accepted input realization for BR-015 AC7. The parent design still owns the BR-009 durable-title question, causal exclusion capture (ARS-002) and the old raw-audit lifecycle risk. Current metadata can assist recognition of a legacy Run15-shaped record but cannot identify which exclusion actually matched or reconstruct its compared input. This specification neither backfills those facts nor certifies existing audit storage/release as safe. Backtest dates are specified separately ([run-initiation ADR-002](../../run-initiation/decisions/adr-002-backtest-replay-published-date-range.md)), which reuses this contract's release rule for published dates. Production comparison, full accessibility and whole-product acceptance remain unchanged and unproved here.

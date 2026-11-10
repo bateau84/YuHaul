@@ -1,4 +1,8 @@
-# Run 14 recovery — provisional contract
+# Run 14 recovery — declined
+
+**Status: declined by the user on 2026-11-10.** The user's explicit decision, relayed in the specification assignment (Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`), is to leave run 14 as it is: no recovery and no backfill. Its saved unevaluated videos stay unprocessed. Nothing below is authorized or planned. The proposal is kept as history only. Accepted YuHaul requirements are unchanged, and no live operation was or is performed. The original human conversation was not independently inspected.
+
+The text below is the original proposal.
 
 The goal is to make the saved unfinished work recoverable without pretending discovery finished, repeating playlist additions, or spending an unapproved amount of quota. For example, an approved small recovery slice can finish some videos and retain the remainder; run 14 still records its original discovery failure, not a successful run caused by later processing.
 

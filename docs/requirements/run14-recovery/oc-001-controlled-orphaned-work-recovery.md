@@ -2,11 +2,11 @@
 type: obligation-contract
 title: OC-001 — Controlled Orphaned-Work Recovery Handoff
 description: Provisional semantic agreement for preserving run 14 leftovers, explicitly activating bounded production recovery, and reporting partial and uncertain outcomes truthfully.
-tags: [obligation-contract, recovery, authority, quota, idempotency, provisional]
-timestamp: 2026-11-07T00:00:00Z
+tags: [obligation-contract, recovery, authority, quota, idempotency, declined]
+timestamp: 2026-11-10T00:00:00Z
 ---
 
-**Status:** provisional proposal, not accepted new product scope or implementation acceptance. The SHALL clauses below describe the candidate flow if authorized. Existing accepted obligations cited below apply independently. No authorization to mutate a live database, change run status, restart, or issue provider requests is conveyed.
+**Status:** declined, 2026-11-10. The user decided to leave run 14 as it is: no recovery and no backfill; its saved unevaluated videos stay unprocessed. This proposal is not authorized, not planned and not normative; it is kept as history only. The open user choices below are closed by that decision. Original status: provisional proposal, not accepted new product scope or implementation acceptance. The SHALL clauses below describe the candidate flow if authorized. Existing accepted obligations cited below apply independently. No authorization to mutate a live database, change run status, restart, or issue provider requests is conveyed.
 **Priority:** MUST for any authorized realization of this candidate flow.
 **Identity:** OC-001 is local to the run14-recovery bundle, not a replacement for YuHaul's accepted quota OC-001.
 
