@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,6 +72,8 @@ type mockYouTubeServer struct {
 	// status makes the server answer with that status and body and record no
 	// insertion (a provider failure).
 	insertDecision func(playlistID, videoID string) (int, string)
+	// requests counts every HTTP request the endpoint received.
+	requests atomic.Int64
 }
 
 type playlistInsertion struct {
@@ -106,13 +109,19 @@ func newMockYouTubeServer(channels []mockChannel, videos []mockVideo) *mockYouTu
 	mux.HandleFunc("/channels", m.handleChannels)
 	mux.HandleFunc("/playlistItems", m.handlePlaylistItems)
 	mux.HandleFunc("/videos", m.handleVideos)
-	m.server = httptest.NewServer(mux)
+	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.requests.Add(1)
+		mux.ServeHTTP(w, r)
+	}))
 	return m
 }
 
 func (m *mockYouTubeServer) URL() string {
 	return m.server.URL
 }
+
+// Requests is the number of HTTP requests the endpoint has received.
+func (m *mockYouTubeServer) Requests() int { return int(m.requests.Load()) }
 
 func (m *mockYouTubeServer) Close() {
 	m.server.Close()

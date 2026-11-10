@@ -44,6 +44,8 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 	if err != nil {
 		return err
 	}
+	initiator := state.InitiatedByQueueRetry
+	run.InitiatedBy = &initiator
 	p.productionMu.Lock()
 	defer p.productionMu.Unlock()
 	if p.auth == nil {

@@ -30,8 +30,7 @@ import (
 // to internal integer keys in its single proposal-ingest transaction
 // (ADR-012).
 type Pipeline interface {
-	StartRun(ctx context.Context, runType state.RunType) (*state.Run, error)
-	Execute(ctx context.Context, runID int64)
+	AdmitRunNow(ctx context.Context) (*pipeline.RunNowAdmission, error)
 	DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error)
 	ExecuteDryRun(ctx context.Context, runID int64)
 	Replay(ctx context.Context, configVersionID *int64) (*state.Run, error)
@@ -154,9 +153,11 @@ type Server struct {
 	// runBase parents every manual production run (ADR-007 §3.4). Cancelling
 	// it interrupts the runs; WaitRuns waits for them to stop.
 	runBase context.Context
-	runMu   sync.Mutex
-	runWG   sync.WaitGroup
-	closing bool
+	// runTimeLimit bounds one Run Now execution (defaultRunTimeLimit).
+	runTimeLimit time.Duration
+	runMu        sync.Mutex
+	runWG        sync.WaitGroup
+	closing      bool
 }
 
 // WithRunContext derives manual production runs from ctx so process shutdown
@@ -165,6 +166,20 @@ func WithRunContext(ctx context.Context) Option {
 	return func(s *Server) {
 		if ctx != nil {
 			s.runBase = ctx
+		}
+	}
+}
+
+// defaultRunTimeLimit is how long one Run Now execution may run before it is
+// interrupted with the time-limit cause.
+const defaultRunTimeLimit = 30 * time.Minute
+
+// WithRunTimeLimit overrides the Run Now execution time limit. It exists so
+// tests can reach the real expiry path; production uses defaultRunTimeLimit.
+func WithRunTimeLimit(d time.Duration) Option {
+	return func(s *Server) {
+		if d > 0 {
+			s.runTimeLimit = d
 		}
 	}
 }
@@ -372,6 +387,7 @@ func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Optio
 		corpusImportHandler: noopCorpusImportHandler{},
 		logger:              slog.Default(),
 		runBase:             context.Background(),
+		runTimeLimit:        defaultRunTimeLimit,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -589,35 +605,53 @@ func stripPrefix(prefix string, h http.Handler) http.Handler {
 	})
 }
 
+// handleStartRun is Run Now. One press either resumes the oldest Run Now run
+// that stopped at its time limit, starts a new run, or is refused with a
+// reason (run-initiation ADR-001, ARS-001 §3.1). A refusal changes nothing.
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	if !s.trackRun() {
 		writeError(w, http.StatusServiceUnavailable, "server is shutting down")
 		return
 	}
-	run, err := s.pipeline.StartRun(r.Context(), state.RunTypeManual)
+	admission, err := s.pipeline.AdmitRunNow(r.Context())
 	if err != nil {
 		s.runWG.Done()
-		if errors.Is(err, pipeline.ErrStartupRecoveryActive) {
+		var unavailable *pipeline.ResumeUnavailableError
+		switch {
+		case errors.Is(err, pipeline.ErrStartupRecoveryActive):
 			writeError(w, http.StatusServiceUnavailable, pipeline.ErrStartupRecoveryActive.Error())
-			return
+		case errors.Is(err, pipeline.ErrProductionRunActive):
+			writeErrorCode(w, http.StatusConflict, "production_run_active", pipeline.ErrProductionRunActive.Error(), nil)
+		case errors.As(err, &unavailable):
+			s.logger.WarnContext(r.Context(), "run now refused", "code", "resume_unavailable", "run_id", unavailable.RunID, "reason", unavailable.Reason)
+			writeErrorCode(w, http.StatusConflict, "resume_unavailable",
+				fmt.Sprintf("run %d stopped at its time limit but cannot be resumed safely; no new run was started", unavailable.RunID),
+				map[string]any{"run_id": unavailable.RunID, "reason": unavailable.Reason})
+		default:
+			s.logger.ErrorContext(r.Context(), "failed to start run", "diagnostic", diag.Encode(err, "unknown", "start_run"))
+			writeError(w, http.StatusInternalServerError, "failed to start run")
 		}
-		s.logger.ErrorContext(r.Context(), "failed to start run", "diagnostic", diag.Encode(err, "unknown", "start_run"))
-		writeError(w, http.StatusInternalServerError, "failed to start run")
 		return
 	}
 
 	// Execute the pipeline asynchronously so the HTTP response returns
-	// immediately with the run ID.
+	// immediately with the run ID. The admission holds the production lock
+	// until Execute returns.
 	go func() {
 		defer s.runWG.Done()
-		ctx, cancel := context.WithTimeout(s.runBase, 30*time.Minute)
+		ctx, cancel := context.WithTimeoutCause(s.runBase, s.runTimeLimit, pipeline.ErrRunTimeLimit)
 		defer cancel()
-		s.pipeline.Execute(ctx, run.ID)
+		admission.Execute(ctx)
 	}()
 
+	outcome := "started"
+	if admission.Resumed() {
+		outcome = "resumed"
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"run_id": run.ID,
-		"status": string(run.Status),
+		"run_id":    admission.RunID(),
+		"status":    string(state.RunStatusRunning),
+		"admission": outcome,
 	})
 }
 
@@ -1605,4 +1639,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// writeErrorCode is writeError plus a stable machine-readable code and any
+// extra closed fields (never raw error text).
+func writeErrorCode(w http.ResponseWriter, status int, code, message string, extra map[string]any) {
+	body := map[string]any{"error": message, "code": code}
+	for k, v := range extra {
+		body[k] = v
+	}
+	writeJSON(w, status, body)
 }

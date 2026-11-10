@@ -103,9 +103,9 @@ func (s *Store) createRunWithGuard(ctx context.Context, db execer, run *Run, gua
 		mutationSafetyVersion = 1
 	}
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO run (started_at, run_type, status, config_version_id, action_authority_version, mutation_safety_version)
-		 VALUES (?, ?, ?, ?, ?, ?);`,
-		formatRunTime(run.StartedAt), run.RunType, run.Status, run.ConfigVersionID, run.ActionAuthorityVersion, mutationSafetyVersion)
+		`INSERT INTO run (started_at, run_type, status, config_version_id, action_authority_version, mutation_safety_version, initiated_by)
+		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
+		formatRunTime(run.StartedAt), run.RunType, run.Status, run.ConfigVersionID, run.ActionAuthorityVersion, mutationSafetyVersion, run.InitiatedBy)
 	if err != nil {
 		return 0, fmt.Errorf("creating run: %w", err)
 	}
@@ -123,7 +123,7 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count,
+		        selected_video_count, initiated_by, interrupt_cause,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run ORDER BY started_at DESC;`)
@@ -155,7 +155,7 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count,
+		        selected_video_count, initiated_by, interrupt_cause,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run WHERE status = ? AND completed_at IS NULL
@@ -188,7 +188,7 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count,
+		        selected_video_count, initiated_by, interrupt_cause,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run WHERE id = ?;`, id)
@@ -273,10 +273,28 @@ func (s *Store) FailRun(ctx context.Context, id int64, reason string, durationSe
 func (s *Store) InterruptRun(ctx context.Context, id int64, reason string) error {
 	reason = diag.GuardErrorText(reason)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE run SET status = ?, interrupt_reason = ? WHERE id = ?;`,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = NULL WHERE id = ?;`,
 		RunStatusInterrupted, reason, id)
 	if err != nil {
 		return fmt.Errorf("interrupting run %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// InterruptRunWithCause marks a run as interrupted and records why
+// (InterruptCauseTimeLimit or InterruptCauseShutdown). Status, reason and
+// cause are written in one UPDATE so a cause never outlives its interruption
+// state. Use InterruptRun when the cause is not proven.
+func (s *Store) InterruptRunWithCause(ctx context.Context, id int64, reason, cause string) error {
+	reason = diag.GuardErrorText(reason)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = ? WHERE id = ?;`,
+		RunStatusInterrupted, reason, cause, id)
+	if err != nil {
+		return fmt.Errorf("interrupting run %d with cause: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("run %d: %w", id, ErrNotFound)
@@ -288,7 +306,7 @@ func (s *Store) InterruptRun(ctx context.Context, id int64, reason string) error
 // Terminal runs are deliberately not eligible for this transition.
 func (s *Store) ResumeRun(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE run SET status = ?, interrupt_reason = NULL WHERE id = ? AND status = ?;`,
+		`UPDATE run SET status = ?, interrupt_reason = NULL, interrupt_cause = NULL WHERE id = ? AND status = ?;`,
 		RunStatusRunning, id, RunStatusInterrupted)
 	if err != nil {
 		return fmt.Errorf("resuming run %d: %w", id, err)
@@ -996,7 +1014,7 @@ func scanRun(sc interface {
 	Scan(dest ...any) error
 }) (*Run, error) {
 	r := &Run{}
-	var completedAt, interruptReason, currentPhase sql.NullString
+	var completedAt, interruptReason, currentPhase, initiatedBy, interruptCause sql.NullString
 	var durationSeconds sql.NullFloat64
 	var configVersionID sql.NullInt64
 	var selectedVideoCount sql.NullInt64
@@ -1004,9 +1022,15 @@ func scanRun(sc interface {
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
 		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
 		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion,
-		&selectedVideoCount, &r.VideosEvaluated)
+		&selectedVideoCount, &initiatedBy, &interruptCause, &r.VideosEvaluated)
 	if err != nil {
 		return nil, err
+	}
+	if initiatedBy.Valid {
+		r.InitiatedBy = &initiatedBy.String
+	}
+	if interruptCause.Valid {
+		r.InterruptCause = &interruptCause.String
 	}
 	if r.CompletedAt, err = parseStoredTimestamp(completedAt); err != nil {
 		return nil, err

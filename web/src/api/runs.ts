@@ -22,8 +22,18 @@ export async function getRun(id: number): Promise<Run | undefined> {
   }
 }
 
-export async function startRun(): Promise<{ run_id: number; status: string }> {
-  return api<{ run_id: number; status: string }>('/api/runs', { method: 'POST' })
+// Run Now either resumes the oldest run that stopped at its time limit
+// ("resumed") or starts a new one ("started"). Progress follows run_id in both
+// cases. A refusal is a 409 ApiError carrying code (production_run_active |
+// resume_unavailable) and, for resume_unavailable, runId and reason.
+export interface StartRunResult {
+  run_id: number
+  status: string
+  admission: 'started' | 'resumed'
+}
+
+export async function startRun(): Promise<StartRunResult> {
+  return api<StartRunResult>('/api/runs', { method: 'POST' })
 }
 
 export async function startDryRun(draft?: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string }> {

@@ -83,10 +83,9 @@ func TestServerRunVideoStoreIsWired(t *testing.T) {
 
 type fakePipeline struct{}
 
-func (f *fakePipeline) StartRun(ctx context.Context, runType state.RunType) (*state.Run, error) {
+func (f *fakePipeline) AdmitRunNow(ctx context.Context) (*pipeline.RunNowAdmission, error) {
 	return nil, nil
 }
-func (f *fakePipeline) Execute(ctx context.Context, runID int64) {}
 func (f *fakePipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error) {
 	return nil, nil
 }

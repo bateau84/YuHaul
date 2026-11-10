@@ -124,7 +124,26 @@ type Run struct {
 
 	// ActionAuthorityVersion is write-once producer evidence; zero is legacy/unknown.
 	ActionAuthorityVersion int `json:"-"`
+
+	// InitiatedBy records who started a production run (InitiatedBy* values).
+	// It is written once at insert; nil for every pre-024 row and for
+	// simulation runs. Internal: never part of the public JSON.
+	InitiatedBy *string `json:"-"`
+	// InterruptCause records why an interrupted run stopped (InterruptCause*
+	// values). Nil when the cause is unproven. Internal, like InitiatedBy.
+	InterruptCause *string `json:"-"`
 }
+
+// Closed values of Run.InitiatedBy and Run.InterruptCause. They are enforced
+// by the migration 024 triggers; new values need a new migration.
+const (
+	InitiatedByRunNow     = "run_now"
+	InitiatedBySchedule   = "schedule"
+	InitiatedByQueueRetry = "queue_retry"
+
+	InterruptCauseTimeLimit = "time_limit"
+	InterruptCauseShutdown  = "shutdown"
+)
 
 // MarshalJSON projects Run for public serialization. Admitted canonical and
 // exact legacy reasons are normalized to v1. Rejected historical prose is

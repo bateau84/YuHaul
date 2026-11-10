@@ -481,7 +481,7 @@ export async function getDecisionDetail(runId: number, videoId: number): Promise
   return mockDecisionDetails[`${runId}/${videoId}`]
 }
 
-export async function startRun(): Promise<{ run_id: number; status: string }> {
+export async function startRun(): Promise<{ run_id: number; status: string; admission: 'started' | 'resumed' }> {
   await delay()
   const id = uid()
   const run: Run = {
@@ -501,7 +501,7 @@ export async function startRun(): Promise<{ run_id: number; status: string }> {
     current_phase: 'discovery',
   }
   mockRuns.unshift(run)
-  return { run_id: id, status: 'running' }
+  return { run_id: id, status: 'running', admission: 'started' }
 }
 
 export async function startDryRun(_draft?: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string }> {

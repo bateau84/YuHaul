@@ -217,18 +217,30 @@ func (p *Pipeline) StartRun(ctx context.Context, runType state.RunType) (*state.
 	if err != nil {
 		return nil, err
 	}
+	initiator := state.InitiatedByRunNow
+	if runType == state.RunTypeScheduled {
+		initiator = state.InitiatedBySchedule
+	}
+	run.InitiatedBy = &initiator
 	p.productionMu.Lock()
 	defer p.productionMu.Unlock()
-	qs := p.queueStore
-	if qs == nil {
-		qs, err = queue.NewStore(p.db)
-		if err != nil {
-			return nil, err
-		}
+	if err := p.createClaimedRunLocked(ctx, run); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+// createClaimedRunLocked persists run and claims the deferred retry work it
+// receives in one transaction, then announces it. It sets run.ID and requires
+// productionMu to be held by the caller.
+func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) error {
+	qs, err := p.retryStore()
+	if err != nil {
+		return err
 	}
 	items, err := qs.ListDeferredRetryCandidates(ctx, time.Now())
 	if err != nil {
-		return nil, err
+		return err
 	}
 	err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
 		id, err := p.stateStore.CreateGuardedMutationRunTx(ctx, tx, run, true)
@@ -244,10 +256,10 @@ func (p *Pipeline) StartRun(ctx context.Context, runType state.RunType) (*state.
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: create and claim run: %w", err)
+		return fmt.Errorf("pipeline: create and claim run: %w", err)
 	}
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
-	return run, nil
+	return nil
 }
 
 // Capture is deliberately outside the execution gate: waiting cannot change
@@ -286,6 +298,14 @@ func (p *Pipeline) prepareProductionRun(ctx context.Context, runType state.RunTy
 func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 	p.productionMu.Lock()
 	defer p.productionMu.Unlock()
+	p.executeHeld(ctx, runID, false)
+}
+
+// executeHeld is the Execute body; the caller holds productionMu. resumeAdmitted
+// marks a run Run Now admission already moved from interrupted to running: it
+// is a resume (its start phase comes from the saved checkpoint) although its
+// status no longer says interrupted.
+func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted bool) {
 	logger := p.logger.With("run_id", runID)
 	logger.InfoContext(ctx, "pipeline execute started")
 
@@ -346,8 +366,8 @@ func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 			return
 		}
 	}
-	isResume := run.Status == state.RunStatusInterrupted
-	if isResume {
+	isResume := run.Status == state.RunStatusInterrupted || resumeAdmitted
+	if run.Status == state.RunStatusInterrupted {
 		if err := p.stateStore.ResumeRun(ctx, runID); err != nil {
 			p.failRun(ctx, runID, "resume run failed", err)
 			return
@@ -533,7 +553,7 @@ func (p *Pipeline) failRun(ctx context.Context, runID int64, message string, err
 		// resumable, not failed (ADR-007 §3.1, ADR-006 §2.1). No sweep runs;
 		// current_phase and every committed disposition stay. The reason
 		// carries only the registered canceled/timeout code.
-		p.interruptAuthorityRun(ctx, runID, diag.InterruptReason(err, ctx.Err(), message))
+		p.interruptRunWithCause(ctx, runID, diag.InterruptReason(err, ctx.Err(), message), interruptCauseFor(ctx))
 		return
 	}
 	p.retainThenFail(ctx, runID, reason, func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {

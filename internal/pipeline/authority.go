@@ -362,9 +362,22 @@ func sweepStrandedWork(ctx context.Context, qs *queue.Store, tx *sql.Tx, runID i
 }
 
 func (p *Pipeline) interruptAuthorityRun(ctx context.Context, runID int64, reason string) {
+	p.interruptRunWithCause(ctx, runID, reason, "")
+}
+
+// interruptRunWithCause persists an interruption under the bounded finalization
+// context. A non-empty cause is stored with the status in the same write; an
+// empty cause means the cause is not proven and is stored as NULL.
+func (p *Pipeline) interruptRunWithCause(ctx context.Context, runID int64, reason, cause string) {
 	finalizeCtx, cancel := runFinalizationContext(ctx)
 	defer cancel()
-	if err := p.stateStore.InterruptRun(finalizeCtx, runID, reason); err != nil {
+	var err error
+	if cause == "" {
+		err = p.stateStore.InterruptRun(finalizeCtx, runID, reason)
+	} else {
+		err = p.stateStore.InterruptRunWithCause(finalizeCtx, runID, reason, cause)
+	}
+	if err != nil {
 		p.logger.ErrorContext(ctx, "interrupt authority run finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
 	}
 }

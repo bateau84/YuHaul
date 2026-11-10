@@ -1,14 +1,11 @@
 package pipeline
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 
-	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/diag"
 )
 
@@ -105,32 +102,17 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 			rows.Close()
 			return nil, &startupCheckError{id, "terminal_timestamp_contradiction"}
 		}
-		if safety != 1 || authority != 1 || !snapshot.Valid {
+		if safety != 1 || authority != 1 {
 			rows.Close()
 			return nil, &startupCheckError{id, "authority"}
 		}
+		if reason := validateResumableRow(completed, phase, snapshot); reason != "" {
+			rows.Close()
+			return nil, &startupCheckError{id, startupCheckFor(reason)}
+		}
 		ph := "unknown"
 		if phase.Valid {
-			switch Phase(phase.String) {
-			case PhaseDiscovery, PhaseExclusion, PhaseDuplicateDetect, PhaseRouting, PhaseActionExecution:
-				ph = phase.String
-			default:
-				rows.Close()
-				return nil, &startupCheckError{id, "checkpoint"}
-			}
-		}
-		var snap config.Snapshot
-		if !bytes.HasPrefix(bytes.TrimSpace([]byte(snapshot.String)), []byte("{")) {
-			rows.Close()
-			return nil, &startupCheckError{id, "snapshot_readable"}
-		}
-		if err := json.Unmarshal([]byte(snapshot.String), &snap); err != nil {
-			rows.Close()
-			return nil, &startupCheckError{id, "snapshot_readable"}
-		}
-		if err := validateSnapshotRoutes(snap); err != nil {
-			rows.Close()
-			return nil, &startupCheckError{id, "snapshot_admissible"}
+			ph = phase.String
 		}
 		candidates = append(candidates, candidate{id, status, ph})
 	}
@@ -145,7 +127,7 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 	for _, c := range candidates {
 		if c.status == "running" {
 			reason := (diag.Facts{Phase: c.phase, Operation: "load_run", Code: "unknown_error"}).String()
-			result, err := tx.ExecContext(ctx, `UPDATE run SET status='interrupted', interrupt_reason=? WHERE id=? AND status='running' AND completed_at IS NULL AND run_type IN ('manual','scheduled') AND mutation_safety_version=1 AND action_authority_version=1`, reason, c.id)
+			result, err := tx.ExecContext(ctx, `UPDATE run SET status='interrupted', interrupt_reason=?, interrupt_cause=NULL WHERE id=? AND status='running' AND completed_at IS NULL AND run_type IN ('manual','scheduled') AND mutation_safety_version=1 AND action_authority_version=1`, reason, c.id)
 			if err != nil {
 				return nil, fmt.Errorf("startup recovery update: %w", err)
 			}

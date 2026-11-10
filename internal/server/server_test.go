@@ -54,7 +54,7 @@ func setupServerTest(t *testing.T) (*sql.DB, *state.Store, *state.Machine, func(
 }
 
 type fakePipeline struct {
-	started          bool
+	admitErr         error
 	run              *state.Run
 	execute          int64
 	dryRun           *state.Run
@@ -71,14 +71,13 @@ func newFakePipeline(run *state.Run) *fakePipeline {
 	return &fakePipeline{run: run, done: make(chan struct{})}
 }
 
-func (f *fakePipeline) StartRun(ctx context.Context, runType state.RunType) (*state.Run, error) {
-	f.started = true
-	return f.run, nil
-}
-
-func (f *fakePipeline) Execute(ctx context.Context, runID int64) {
-	f.execute = runID
-	close(f.done)
+// AdmitRunNow can only refuse: a *pipeline.RunNowAdmission is built solely by
+// the real pipeline. Accepted presses are covered in e2e with the real one.
+func (f *fakePipeline) AdmitRunNow(ctx context.Context) (*pipeline.RunNowAdmission, error) {
+	if f.admitErr != nil {
+		return nil, f.admitErr
+	}
+	return nil, errors.New("fake pipeline cannot admit a run")
 }
 
 func (f *fakePipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error) {
@@ -265,36 +264,6 @@ func TestHandleQueueEndpointsMounted(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"errors":`)
 	assert.Contains(t, rec.Body.String(), `"diag:v1 phase=unknown operation=unknown code=unknown_error"`)
 	assert.Contains(t, rec.Body.String(), `"error_message_unavailable":true`)
-}
-
-func TestHandleStartRun(t *testing.T) {
-	ctx := context.Background()
-	_, stateStore, _, cleanup := setupServerTest(t)
-	defer cleanup()
-
-	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
-	runID, err := stateStore.CreateRun(ctx, run)
-	require.NoError(t, err)
-	run.ID = runID
-
-	fp := newFakePipeline(run)
-	broadcast := pipeline.NewBroadcaster()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := NewServer(fp, broadcast, WithServerLogger(logger))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/runs", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusAccepted, rec.Code)
-	assert.True(t, fp.started)
-	select {
-	case <-fp.done:
-		assert.Equal(t, runID, fp.execute)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for pipeline Execute")
-	}
-	assert.Contains(t, rec.Body.String(), "\"run_id\":")
 }
 
 func TestHandleRunStream(t *testing.T) {

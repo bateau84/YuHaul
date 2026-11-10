@@ -101,6 +101,10 @@ type mockYouTubeServer struct {
 	insertFailTarget        string
 	insertFailStatus        int
 	insertFailBody          string
+	// insertHook sees every playlist POST before it is applied. A non-zero
+	// status makes the endpoint answer with it and record nothing; the hook may
+	// block first to hold the call in flight.
+	insertHook func(playlistID, videoID string) (status int, body string)
 }
 
 func newMockYouTubeServer(channels []mockChannel, videos []mockVideo) *mockYouTubeServer {
@@ -273,7 +277,14 @@ func (m *mockYouTubeServer) handlePlaylistItems(w http.ResponseWriter, r *http.R
 		}
 		m.mu.Lock()
 		failTarget, failStatus, failBody := m.insertFailTarget, m.insertFailStatus, m.insertFailBody
+		hook := m.insertHook
 		m.mu.Unlock()
+		if hook != nil {
+			if status, payload := hook(body.Snippet.PlaylistID, body.Snippet.ResourceID.VideoID); status != 0 {
+				writeProviderFailure(w, status, payload)
+				return
+			}
+		}
 		if failTarget != "" && failTarget == body.Snippet.PlaylistID {
 			writeProviderFailure(w, failStatus, failBody)
 			return
