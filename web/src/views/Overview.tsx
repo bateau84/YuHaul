@@ -7,6 +7,8 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import type { Overview as OverviewData } from '../api/overview'
 import { ApiError } from '../api/core'
+import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
+import { isStopping } from '../types'
 
 const RUN_POLL_INTERVAL_MS = 5000
 
@@ -50,6 +52,7 @@ function noticeForError(err: unknown): RunNowNotice {
 }
 
 function statusLabel(status: string): string {
+  if (status === 'stopped') return 'Stopped by user'
   return status.charAt(0).toUpperCase() + status.slice(1)
 }
 
@@ -71,6 +74,8 @@ export function Overview() {
   const [notice, setNotice] = useState<RunNowNotice | null>(null)
   const [statusStale, setStatusStale] = useState(false)
   const [statusCheckedAt, setStatusCheckedAt] = useState<Date | null>(null)
+  const [stopOutcome, setStopOutcome] = useState<StopOutcome | null>(null)
+  const stopMessageRef = useRef<HTMLDivElement>(null)
   const overviewRefreshInFlightRef = useRef(false)
 
   useEffect(() => {
@@ -123,6 +128,23 @@ export function Overview() {
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [lastRunStatus])
+
+  const stopKind = stopOutcome?.kind
+  useEffect(() => {
+    if (stopKind === 'accepted' || stopKind === 'already_stopping') stopMessageRef.current?.focus()
+  }, [stopKind])
+
+  async function handleStopOutcome(outcome: StopOutcome) {
+    setStopOutcome(outcome)
+    try {
+      const next = await api.getOverview()
+      setOverview(next)
+      setStatusCheckedAt(new Date())
+      setStatusStale(false)
+    } catch {
+      setStatusStale(true)
+    }
+  }
 
   // Focus the Retry button whenever the view settles into the fetch-error
   // state: on first entry and again after a failed retry re-enables it.
@@ -228,6 +250,7 @@ export function Overview() {
 
   const run = overview.last_run
   const activeRun = run?.status === 'running' ? run : null
+  const statusWord = activeRun && isStopping(activeRun) ? 'Stopping' : 'Running'
   return (
     <>
       {header}
@@ -274,6 +297,9 @@ export function Overview() {
           )}
         </div>
       )}
+      {stopOutcome && (
+        <StopRunMessage ref={stopMessageRef} outcome={stopOutcome} onDismiss={() => setStopOutcome(null)} />
+      )}
       {(run || startingRun) && (
         <section className="card" role="region" aria-label="Latest run" aria-live="off" style={{ marginBottom: 16 }}>
           {startingRun ? (
@@ -281,8 +307,12 @@ export function Overview() {
           ) : null}
           {activeRun && (
             <>
-              <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Run {activeRun.id} — {statusStale ? 'Last known status: Running' : 'Running'}{phaseLabel(activeRun.current_phase) ? ` — ${statusStale ? 'Last known phase' : 'Current phase'}: ${phaseLabel(activeRun.current_phase)}` : ` — ${statusStale ? 'last known' : 'current'} phase unavailable.`}</strong></p>
-              <p style={{ margin: '8px 0' }}><Link to={`/runs/${activeRun.id}`}>View run</Link></p>
+              {isStopping(activeRun) && <p style={{ margin: 0 }}>Run {activeRun.id} is stopping. Run Now stays unavailable until it has stopped.</p>}
+              <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Run {activeRun.id} — {statusStale ? `Last known status: ${statusWord}` : statusWord}{phaseLabel(activeRun.current_phase) ? ` — ${statusStale ? 'Last known phase' : 'Current phase'}: ${phaseLabel(activeRun.current_phase)}` : ` — ${statusStale ? 'last known' : 'current'} phase unavailable.`}</strong></p>
+              <p style={{ margin: '8px 0' }}>
+                <Link to={`/runs/${activeRun.id}`}>View run</Link>
+              </p>
+              <StopRunControl run={activeRun} onOutcome={handleStopOutcome} />
               {statusStale
                 ? <p role="alert" aria-live="assertive" style={{ margin: 0 }}>Could not refresh run status; this run may still be processing.</p>
                 : <p style={{ margin: 0 }}>Status checked at {statusCheckedAt?.toLocaleTimeString() ?? 'unknown'}.</p>}

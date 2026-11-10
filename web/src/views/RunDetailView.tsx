@@ -4,11 +4,12 @@ import * as api from '../api/client'
 import { Badge } from '../components/Badge'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { CausalExclusion } from '../components/CausalExclusion'
+import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
 import { useToast } from '../hooks/useToast'
 import { deriveRouteDecision, simulationExplanation, simulationMode, videoOutcomeLabels } from '../lib/outcome'
 import { routeAttribution } from '../lib/route-attribution'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
-import type { PublishedRange, Run, RunStatus, VideoFinalOutcome, VideoOutcome } from '../types'
+import { isStopping, type PublishedRange, type Run, type RunStatus, type VideoFinalOutcome, type VideoOutcome } from '../types'
 
 // The run videos endpoint caps page_size at 100 (internal/server/run_handlers.go).
 // Request the maximum so one page holds as much of the run as possible; later
@@ -48,6 +49,9 @@ function phaseLabel(phase?: string): string | undefined {
 
 function progressAnnouncement(run: Run, readError: boolean): string {
   const label = phaseLabel(run.current_phase)
+  if (isStopping(run)) {
+    return label ? `Stopping — ${label}. Run ${run.id} has been told to stop and is saving its work.` : `Stopping. Run ${run.id} has been told to stop and is saving its work.`
+  }
   if (run.status === 'running') {
     const phasePrefix = readError ? 'Last known phase' : 'Current phase'
     return label ? `Run in progress — ${phasePrefix}: ${label}` : 'Run in progress — Current phase unavailable.'
@@ -71,6 +75,8 @@ function failureExplanation(run: Run): string {
 
 function terminalStatusLine(status: RunStatus): string {
   switch (status) {
+    case 'stopped':
+      return 'Run stopped by user'
     case 'completed':
       return 'Run completed'
     case 'failed':
@@ -107,6 +113,10 @@ function admissionLine(admission: RunNowAdmission, runId: number): string {
 function stoppedAtTimeLimit(run: Run): boolean {
   return run.run_type === 'manual' && run.status === 'interrupted'
     && run.initiated_by === 'run_now' && run.interrupt_cause === 'time_limit'
+}
+
+function statusText(run: Run): string {
+  return isStopping(run) ? 'Stopping' : run.status
 }
 
 const outcomeOptions = Object.entries(videoOutcomeLabels) as [VideoFinalOutcome, string][]
@@ -148,6 +158,8 @@ function RunDetailContent({ id }: { id?: string }) {
   const [runReadError, setRunReadError] = useState(false)
   const [runContextError, setRunContextError] = useState(false)
   const [runRetrying, setRunRetrying] = useState(false)
+  const [stopOutcome, setStopOutcome] = useState<StopOutcome | null>(null)
+  const stopMessageRef = useRef<HTMLDivElement>(null)
   const [statusCheckedAt, setStatusCheckedAt] = useState<Date | null>(null)
   const [videos, setVideos] = useState<VideoOutcome[]>([])
   const [videoTotal, setVideoTotal] = useState(0)
@@ -261,7 +273,7 @@ function RunDetailContent({ id }: { id?: string }) {
         }
         setRunContextError(false)
         const previous = runStatusRef.current
-        if (previous === 'completed' || previous === 'failed') return
+        if (previous === 'completed' || previous === 'failed' || previous === 'stopped') return
         runStatusRef.current = next.status
         setRun(next)
         setStatusCheckedAt(new Date())
@@ -316,6 +328,17 @@ function RunDetailContent({ id }: { id?: string }) {
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
   }, [runStatus, loadRun])
+
+  // Acknowledgements take focus (the button was replaced); refusals do not.
+  const stopKind = stopOutcome?.kind
+  useEffect(() => {
+    if (stopKind === 'accepted' || stopKind === 'already_stopping') stopMessageRef.current?.focus()
+  }, [stopKind])
+
+  function handleStopOutcome(outcome: StopOutcome) {
+    setStopOutcome(outcome)
+    void loadRun()
+  }
 
   function applyOutcomeFilter(value: VideoFinalOutcome | '') {
     setPage(1)
@@ -387,6 +410,8 @@ function RunDetailContent({ id }: { id?: string }) {
   const outcomeLabel = mode ? 'Hypothetical outcome' : 'Outcome'
   const isTerminal = run.status === 'failed' || run.status === 'interrupted'
   const timeLimited = stoppedAtTimeLimit(run)
+  const stopped = run.status === 'stopped'
+  const stopping = isStopping(run)
 
   return (
     <>
@@ -412,7 +437,7 @@ function RunDetailContent({ id }: { id?: string }) {
           style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}
         >
           <p style={{ margin: 0, color: 'var(--color-status-failed)' }}>
-            Could not refresh status. This run may still be processing. Last known status: {run.status}.
+            Could not refresh status. This run may still be processing. Last known status: {statusText(run)}.
           </p>
           <button type="button" className="button" onClick={handleRunRetry} disabled={runRetrying}>
             {runRetrying ? 'Retrying…' : 'Retry'}
@@ -429,16 +454,21 @@ function RunDetailContent({ id }: { id?: string }) {
         </div>
       )}
 
+      {stopOutcome && (
+        <StopRunMessage ref={stopMessageRef} outcome={stopOutcome} onRunPage onDismiss={() => setStopOutcome(null)} />
+      )}
+
       {(run.status === 'running' || isTerminal) && (
         <section className="card" role="region" aria-label="Run progress" aria-live="off" style={{ marginBottom: 16 }}>
           <p role="status" aria-live="polite" style={{ margin: 0 }}>{progressAnnouncement(run, runReadError)}</p>
-          {run.status === 'running' && run.current_phase === 'discovery' && run.videos_selected == null && (
+          {run.status === 'running' && !stopping && run.current_phase === 'discovery' && run.videos_selected == null && (
             <p style={{ margin: '8px 0 0' }}>{runReadError ? 'The last recorded phase was discovery. The input count is not available; there is no known completion total. Zero decision/counter values do not mean no videos were found.' : 'Discovery is in progress. The input count is not available yet; there is no known completion total. Zero decision/counter values do not mean no videos were found.'}</p>
           )}
           {run.status === 'running' && run.videos_selected != null && <p style={{ margin: '8px 0 0' }}>Selected inputs: {run.videos_selected}</p>}
           {run.status === 'running' && run.videos_selected == null && run.current_phase !== 'discovery' && <p style={{ margin: '8px 0 0' }}>Selected inputs: Unknown. The selected input count was not captured or is not available.</p>}
           <p style={{ margin: '8px 0 0' }}>Videos with recorded route decisions: {run.videos_evaluated ?? 'Unavailable'}. Counts reflect saved evidence, not overall completion.</p>
           <p style={{ margin: '8px 0 0' }}>Status checked at {statusCheckedAt?.toLocaleTimeString() ?? 'unknown'}.</p>
+          {run.status === 'running' && <StopRunControl run={run} onOutcome={handleStopOutcome} />}
         </section>
       )}
 
@@ -447,13 +477,27 @@ function RunDetailContent({ id }: { id?: string }) {
       {run.status !== 'running' && (
         <div className="card" role="status" aria-live="polite" style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <strong>{timeLimited ? 'Run interrupted — time limit reached.' : terminalStatusLine(run.status)}</strong>
+            <strong>{stopped ? terminalStatusLine('stopped') : timeLimited ? 'Run interrupted — time limit reached.' : terminalStatusLine(run.status)}</strong>
             {run.completed_at && (
               <span style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
                 {new Date(run.completed_at).toLocaleString()}
               </span>
             )}
           </div>
+          {stopped && (
+            <>
+              <p style={{ margin: '8px 0 0' }}>
+                Last recorded phase: {phaseLabel(run.current_phase) ?? 'unavailable'}.
+                {mode && ' Results are incomplete because the run was stopped.'}
+              </p>
+              {!mode && (
+                <p style={{ margin: '8px 0 0' }}>
+                  Run {run.id} will not be resumed. Its unfinished videos are in the deferred queue, and the next new run will process them automatically.{' '}
+                  <Link to="/errors">View deferred queue</Link>
+                </p>
+              )}
+            </>
+          )}
           {isTerminal && (
             <p style={{ margin: '8px 0 0', color: 'var(--color-status-failed)' }}>{failureExplanation(run)}</p>
           )}
@@ -549,11 +593,13 @@ function RunDetailContent({ id }: { id?: string }) {
           ) : (
             <div className="empty-state">
               {mode ? (
-                recordedEmptyDryRunSelection ? (
+                recordedEmptyDryRunSelection && !stopped ? (
                   <>
                     <p>No videos were selected for this dry run.</p>
                     <p>Dry runs evaluate stored videos awaiting their first evaluation. They do not discover new videos or re-evaluate previously processed videos.</p>
                   </>
+                ) : stopped ? (
+                  'No results were recorded before the run was stopped.'
                 ) : run.status === 'running' ? (
                   'No hypothetical video outcomes recorded yet.'
                 ) : (
