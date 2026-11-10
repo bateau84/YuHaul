@@ -343,6 +343,71 @@ describe('RunsView', () => {
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     })
 
+    describe('stopping and stopped runs', () => {
+      const stopRuns = (): Run[] => [
+        runFixture({ id: 1, status: 'completed', videos_discovered: 11 }),
+        runFixture({ id: 2, status: 'failed', videos_discovered: 22 }),
+        runFixture({ id: 3, status: 'running', videos_discovered: 33 }),
+        runFixture({ id: 4, status: 'running', stop_requested_at: '2026-09-08T06:05:00Z', videos_discovered: 44 }),
+        runFixture({ id: 5, status: 'stopped', stop_requested_at: '2026-09-08T06:05:00Z', videos_discovered: 55 }),
+      ]
+
+      const visible = () =>
+        ['11', '22', '33', '44', '55'].filter((n) => screen.queryByText(n) !== null)
+
+      it('shows neutral Stopping and Stopped by user badges with an icon and text', async () => {
+        await renderWithRuns(stopRuns())
+
+        const rows = within(screen.getByRole('table')).getAllByRole('row')
+        const stopping = within(rows[4]).getByText('Stopping')
+        const stopped = within(rows[5]).getByText('Stopped by user')
+        for (const badge of [stopping, stopped]) {
+          expect(badge).toHaveClass('badge', 'badge--not-evaluated')
+          expect(badge).not.toHaveClass('badge--failed')
+          expect(badge.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
+        }
+        // A plain running run is not marked as stopping.
+        expect(within(rows[3]).getByText('Running')).toBeInTheDocument()
+        expect(within(rows[3]).queryByText('Stopping')).not.toBeInTheDocument()
+      })
+
+      it('offers both statuses in the status filter', async () => {
+        await renderWithRuns(stopRuns())
+
+        const select = screen.getByLabelText('Status')
+        expect(within(select).getByRole('option', { name: 'Stopping' })).toBeInTheDocument()
+        expect(within(select).getByRole('option', { name: 'Stopped by user' })).toBeInTheDocument()
+      })
+
+      it('Stopping filter shows only stopping runs', async () => {
+        await renderWithRuns(stopRuns())
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'stopping' } })
+        await waitFor(() => expect(visible()).toEqual(['44']))
+      })
+
+      it('Running filter also shows a stopping run, because it is still running', async () => {
+        await renderWithRuns(stopRuns())
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'running' } })
+        await waitFor(() => expect(visible()).toEqual(['33', '44']))
+      })
+
+      it('Stopped by user filter shows only stopped runs', async () => {
+        await renderWithRuns(stopRuns())
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'stopped' } })
+        await waitFor(() => expect(visible()).toEqual(['55']))
+      })
+
+      it('counts a stopped run as neither failed nor completed', async () => {
+        await renderWithRuns(stopRuns())
+
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } })
+        await waitFor(() => expect(visible()).toEqual(['22']))
+
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'completed' } })
+        await waitFor(() => expect(visible()).toEqual(['11']))
+      })
+    })
+
     it('disables the filter controls while the list is in the fetch-error state', async () => {
       vi.spyOn(mock, 'listRuns').mockRejectedValueOnce(new Error('network down'))
 

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import * as api from '../api/client'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
+import { isStopping } from '../types'
 import type { Run, RunStatus, RunType } from '../types'
 
 // Persisted-state polling interval (ARD-001: while a listed run is stored as
@@ -26,6 +27,46 @@ const runStatusLabels: Record<RunStatus, string> = {
   stopped: 'Stopped by user',
 }
 
+// "Stopping" is not a stored status: it is a running run with a recorded stop
+// (isStopping). It is offered as its own filter value.
+type StatusFilter = RunStatus | 'stopping'
+
+const statusFilterLabels: Record<StatusFilter, string> = {
+  ...runStatusLabels,
+  stopping: 'Stopping',
+}
+
+// A stopping run is still running, so it matches both the Stopping and the
+// Running filters. A stopped run matches only Stopped by user: it is neither
+// Failed nor Completed.
+function matchesStatus(run: Run, filter: StatusFilter | ''): boolean {
+  if (filter === '') return true
+  if (filter === 'stopping') return isStopping(run)
+  return run.status === filter
+}
+
+function StopSquareIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+      <rect x="1" y="1" width="8" height="8" rx="1" fill="currentColor" />
+    </svg>
+  )
+}
+
+// Neutral badge with icon and text: never colour alone, and not styled as a
+// failure.
+function StatusCell({ run }: { run: Run }) {
+  if (isStopping(run) || run.status === 'stopped') {
+    return (
+      <span className="badge badge--not-evaluated">
+        <StopSquareIcon />
+        {isStopping(run) ? 'Stopping' : runStatusLabels.stopped}
+      </span>
+    )
+  }
+  return <>{runStatusLabels[run.status] ?? run.status}</>
+}
+
 // Selected shows "Unknown" for a null/absent count (never captured) and "0"
 // only for a captured empty selection (BR-020).
 function selectedCountLabel(run: Run): string {
@@ -36,7 +77,7 @@ interface RunFilters {
   from: string
   to: string
   runType: RunType | ''
-  status: RunStatus | ''
+  status: StatusFilter | ''
 }
 
 const emptyFilters: RunFilters = { from: '', to: '', runType: '', status: '' }
@@ -161,7 +202,7 @@ export function RunsView() {
   const visibleRuns = useMemo(() => {
     return runs.filter((r) => {
       if (filters.runType !== '' && r.run_type !== filters.runType) return false
-      if (filters.status !== '' && r.status !== filters.status) return false
+      if (!matchesStatus(r, filters.status)) return false
       const day = utcDay(r.started_at)
       if (filters.from !== '' && day < filters.from) return false
       if (filters.to !== '' && day > filters.to) return false
@@ -233,9 +274,9 @@ export function RunsView() {
             onChange={(e) => updateFilter('status', e.target.value as RunFilters['status'])}
           >
             <option value="">All statuses</option>
-            {(Object.keys(runStatusLabels) as RunStatus[]).map((s) => (
+            {(Object.keys(statusFilterLabels) as StatusFilter[]).map((s) => (
               <option key={s} value={s}>
-                {runStatusLabels[s]}
+                {statusFilterLabels[s]}
               </option>
             ))}
           </select>
@@ -311,7 +352,7 @@ export function RunsView() {
                         <Link to={`/runs/${r.id}`}>{new Date(r.started_at).toLocaleString()}</Link>
                       </td>
                       <td data-label="Type">{runTypeLabels[r.run_type] ?? r.run_type}</td>
-                      <td data-label="Status">{runStatusLabels[r.status] ?? r.status}</td>
+                      <td data-label="Status"><StatusCell run={r} /></td>
                       <td data-label="Selected">{selectedCountLabel(r)}</td>
                       <td data-label="Evaluated">{r.videos_evaluated ?? '—'}</td>
                       <td data-label="Discovered">{r.videos_discovered}</td>
