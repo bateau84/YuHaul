@@ -106,7 +106,7 @@ func (a *RunNowAdmission) Release()                    // releases without execu
 func (p *Pipeline) AdmitRunNow(ctx context.Context) (*RunNowAdmission, error)
 ```
 
-`AdmitRunNow` algorithm, in order:
+`AdmitRunNow` algorithm, in order. **Amended by [ARS-002](ars-002-discard-unusable-time-limit-run.md) §2.3 (not implemented):** after step 1, take `initiationMu` with a blocking `Lock()` and release it before returning, so a press made during a discard waits for that discard instead of failing; the candidate `SELECT` in step 3 is extracted into `selectRunNowCandidateTx`, which the discard also uses.
 
 1. `refuseWhileRecovering()` → `ErrStartupRecoveryActive`.
 2. `if !p.productionMu.TryLock() { return nil, ErrProductionRunActive }`.
@@ -330,7 +330,7 @@ Each test uses real migrated SQLite (`store.ApplyMigrations`) unless marked *uni
 | Ranged selection excludes videos whose local metadata has expired (30-day lifecycle unless refreshed), so ranges over older periods may select few or none. | Follows accepted INV-9 and the decision-evidence release rule; reported, not escalated. Revisit if compliance establishes that `published_at` may be kept and used after expiry. | Product owner (awareness); compliance for any widening | No |
 | Run Now during an active production run changes from "request waits" to `409 production_run_active`. | Decided in ADR-001 within BR-017 AC6 ("prevented"). Designer to supply the refusal copy. | Designer | No |
 | Pre-024 time-limit-interrupted manual runs cannot be proven Run Now/time-limit runs. | Fail closed: not eligible for Run Now; still resumed by startup recovery. | — | No |
-| An unusable oldest candidate blocks every Run Now press until it is repaired. The next process start also blocks on it in startup classification (existing ADR-005 behavior). | Required by BR-017 AC11 (fail closed, no skip). No automatic repair is designed or authorized. | Product owner if a repair path is wanted | No |
+| An unusable oldest candidate blocks every Run Now press until it is repaired. The next process start also blocks on it in startup classification (existing ADR-005 behavior). | Required by BR-017 AC11 (fail closed, no skip). **Updated 2026-11-10:** BR-017 AC13–21 add a user Discard, realized in [ADR-003](../decisions/adr-003-discard-unusable-time-limit-run.md)/[ARS-002](ars-002-discard-unusable-time-limit-run.md). The startup block remains and makes Discard unreachable after a restart; escalated in ADR-003 Findings. | Product owner (startup behavior) | No |
 | Replay applying the range (BR-027 index open question). | Realized for both modes, per the accepted design (US-012). Narrow the trigger and handler if the owner decides otherwise. | Product owner | No |
 | SQLite `date()` normalization for impossible days. | Verified: the trigger rejects `2026-02-30`. The Go parser stays authoritative. | — | No |
 

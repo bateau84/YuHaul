@@ -8,6 +8,8 @@ timestamp: 2026-11-10T00:00:00Z
 
 **Status:** accepted — technical realization of BR-017 AC7–12. Implemented 2026-11-10 in commit `2476375`; independent review pending. Realization deviations (validator order, migration split, quota test stub) are in [ARS-001 §10](../specifications/ars-001-run-initiation-schema-and-api.md#10-implementation-record-and-deviations). The exact schema, API and test contract is [ARS-001](../specifications/ars-001-run-initiation-schema-and-api.md).
 
+**Extended 2026-11-10 by [ADR-003](adr-003-discard-unusable-time-limit-run.md) (not implemented):** the user can discard the candidate this admission refuses as `resume_unavailable`. `AdmitRunNow` takes a short `initiationMu` before `TryLock` so it serializes with a discard; its refusals and acknowledgements are otherwise unchanged.
+
 ## Summary
 
 When a Run Now run hits its 30-minute limit, the pipeline now saves *why* it stopped (`interrupt_cause = 'time_limit'`) and *who started it* (`initiated_by = 'run_now'`). The next Run Now press looks for the oldest such run while holding the production execution lock. If it finds one, it validates the run's saved snapshot and checkpoint and moves the run back to `running` in one transaction. It then hands the held lock to the background execution, which continues from the saved checkpoint. If it finds none, it starts a new run as before. If another production run holds the lock, the press is refused with `409` instead of waiting.
