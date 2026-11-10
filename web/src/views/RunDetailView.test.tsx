@@ -752,3 +752,29 @@ describe('RunDetailView pagination (ARS-001)', () => {
     expect(within(screen.getByRole('table')).getAllByRole('row')).toHaveLength(7)
   })
 })
+
+describe('RunDetailView saved published-date range (BR-027 AC13)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetRun.mockReset()
+    serveVideos([])
+  })
+
+  it.each([
+    ['both days', { from: '2026-10-01', to: '2026-10-31' }, 'from 2026-10-01 to 2026-10-31'],
+    ['start only', { from: '2026-10-01', to: null }, 'from 2026-10-01 to none'],
+    ['end only', { from: null, to: '2026-10-31' }, 'from none to 2026-10-31'],
+    ['no filter', { from: null, to: null }, 'No date filter was applied'],
+  ])('shows the saved range for a backtest run: %s', async (_name, range, text) => {
+    mockGetRun.mockResolvedValue({ ...runFixture, run_type: 'backtest', published_range: range })
+    renderView()
+    expect(await screen.findByTestId('published-range')).toHaveTextContent(text)
+  })
+
+  it('shows no range line for a run that has none', async () => {
+    mockGetRun.mockResolvedValue({ ...runFixture, published_range: null })
+    renderView()
+    await screen.findByText('Run completed')
+    expect(screen.queryByTestId('published-range')).not.toBeInTheDocument()
+  })
+})

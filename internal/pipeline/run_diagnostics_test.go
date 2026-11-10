@@ -161,7 +161,7 @@ func TestReplay_EmptyCorpusSelectionStoresZero(t *testing.T) {
 
 	createReplayRouteWithAction(t, ctx, deps, "Jazz", "jazz", "PLjazz")
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteReplay(ctx, run.ID)
 
@@ -178,7 +178,7 @@ func TestReplay_RouteLoadFailureBeforeSelectionStaysUnknown(t *testing.T) {
 	deps, cleanup := setupReplayPipeline(t)
 	defer cleanup()
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 
 	deps.pipeline.router = nil
@@ -209,7 +209,7 @@ func TestBacktest_VideoFailureAfterSelectionKeepsKnownCount(t *testing.T) {
 		DuplicateThreshold: 0.5,
 		DuplicateBehavior:  "skip",
 		Routes:             []config.ProposalRoute{proposalRoute(proposalTestUUID, "jazz", "jazz")},
-	})
+	}, state.PublishedRange{})
 	require.NoError(t, err)
 
 	abortRouteDecisions(t, ctx, deps.db)
@@ -239,7 +239,7 @@ func TestReplay_PanicAfterSelectionEndsFailedNotCompleted(t *testing.T) {
 	require.NoError(t, err)
 	createRetainedVideo(t, ctx, deps, prodRunID, "vid1", "ch1", "cool jazz live")
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 
 	deps.pipeline.meta = metadata.NewManager(nil, nil, nil)
@@ -272,9 +272,9 @@ func TestSimulationCanceledAtInitialLoadFinalizesFailed(t *testing.T) {
 				t.Cleanup(cleanup)
 				p = deps.pipeline
 				if mode == "replay" {
-					run, err = p.Replay(ctx, nil)
+					run, err = p.Replay(ctx, nil, state.PublishedRange{})
 				} else {
-					run, err = p.Backtest(ctx, &config.ProposalSnapshot{})
+					run, err = p.Backtest(ctx, &config.ProposalSnapshot{}, state.PublishedRange{})
 				}
 			}
 			require.NoError(t, err)
@@ -325,9 +325,9 @@ func TestSimulationDeadlineAfterSelectionFinalizesFailed(t *testing.T) {
 				require.NoError(t, createErr)
 				createRetainedVideo(t, ctx, deps, prodID, "deadline-video", "channel", "match title")
 				if mode == "replay" {
-					run, err = p.Replay(ctx, nil)
+					run, err = p.Replay(ctx, nil, state.PublishedRange{})
 				} else {
-					run, err = p.Backtest(ctx, &config.ProposalSnapshot{Routes: []config.ProposalRoute{proposalRoute(proposalTestUUID, "match", "match")}})
+					run, err = p.Backtest(ctx, &config.ProposalSnapshot{Routes: []config.ProposalRoute{proposalRoute(proposalTestUUID, "match", "match")}}, state.PublishedRange{})
 				}
 			}
 			require.NoError(t, err)
@@ -381,7 +381,7 @@ func TestHistoricalFailedWriteFallsBackToInterrupted(t *testing.T) {
 	prodID, err := deps.stateStore.CreateRun(ctx, prod)
 	require.NoError(t, err)
 	createRetainedVideo(t, ctx, deps, prodID, "fallback-video", "channel", "fallback title")
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	require.NoError(t, deps.stateStore.SetRunSelectedCount(ctx, run.ID, 1))
 	_, err = deps.db.ExecContext(ctx, `CREATE TRIGGER reject_failed_status BEFORE UPDATE OF status ON run WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'injected failed-status rejection'); END;`)
@@ -404,7 +404,7 @@ func TestHistoricalCompletionFailureRetriesThenFailsTerminally(t *testing.T) {
 	ctx := context.Background()
 	deps, cleanup := setupReplayPipeline(t)
 	defer cleanup()
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	_, err = deps.db.ExecContext(ctx, `CREATE TRIGGER reject_completion BEFORE UPDATE OF status ON run WHEN NEW.status = 'completed' BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;`)
 	require.NoError(t, err)

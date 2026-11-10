@@ -8,7 +8,7 @@ import { useToast } from '../hooks/useToast'
 import { deriveRouteDecision, simulationExplanation, simulationMode, videoOutcomeLabels } from '../lib/outcome'
 import { routeAttribution } from '../lib/route-attribution'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
-import type { Run, RunStatus, VideoFinalOutcome, VideoOutcome } from '../types'
+import type { PublishedRange, Run, RunStatus, VideoFinalOutcome, VideoOutcome } from '../types'
 
 // The run videos endpoint caps page_size at 100 (internal/server/run_handlers.go).
 // Request the maximum so one page holds as much of the run as possible; later
@@ -95,6 +95,13 @@ function currentMetadata(value: VideoOutcome['current_local_metadata'], field: '
       : String(value[field])
   }
   return currentLocalUnavailableLabel(field, availability)
+}
+
+// The range saved with a Backtest/Replay run. Days are shown exactly as stored
+// (UTC calendar days); a missing bound is "none".
+function describePublishedRange(range: PublishedRange): string {
+  if (range.from === null && range.to === null) return 'Published date filter: none. No date filter was applied.'
+  return `Published date filter (UTC days, both included): from ${range.from ?? 'none'} to ${range.to ?? 'none'}.`
 }
 
 export function RunDetailView() {
@@ -346,6 +353,9 @@ function RunDetailContent({ id }: { id?: string }) {
         </button>
       </div>
       {mode && <p role="status">{simulationExplanation}</p>}
+      {run.published_range && (
+        <p data-testid="published-range">{describePublishedRange(run.published_range)}</p>
+      )}
 
       {/* A refresh failure after a successful load keeps the last stored
           status on screen and states that it may be out of date, with a

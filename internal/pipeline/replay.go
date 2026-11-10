@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,13 +14,31 @@ import (
 	"github.com/bateau84/YuHaul/internal/state"
 )
 
+// ErrInvalidDateRange is returned (wrapped) by Replay and Backtest when the
+// published-date range is invalid. It is returned before any run, snapshot or
+// configuration lookup exists (run-initiation ADR-002).
+var ErrInvalidDateRange = errors.New("invalid date range")
+
+// checkPublishedRange re-validates a range handed to Replay/Backtest.
+func checkPublishedRange(rng state.PublishedRange) error {
+	if _, rerr := state.ParsePublishedRange(rng.From, rng.To); rerr != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidDateRange, rerr.Error())
+	}
+	return nil
+}
+
 // Replay creates a replay run and starts it. The caller must invoke
-// ExecuteReplay in a goroutine.
-func (p *Pipeline) Replay(ctx context.Context, configVersionID *int64) (*state.Run, error) {
+// ExecuteReplay in a goroutine. rng is persisted immutably on the run.
+func (p *Pipeline) Replay(ctx context.Context, configVersionID *int64, rng state.PublishedRange) (*state.Run, error) {
+	if err := checkPublishedRange(rng); err != nil {
+		return nil, err
+	}
 	run := &state.Run{
-		StartedAt: time.Now().UTC(),
-		RunType:   state.RunTypeReplay,
-		Status:    state.RunStatusRunning,
+		StartedAt:     time.Now().UTC(),
+		RunType:       state.RunTypeReplay,
+		Status:        state.RunStatusRunning,
+		PublishedFrom: rng.From,
+		PublishedTo:   rng.To,
 	}
 
 	cfgID, err := p.resolveReplayConfig(ctx, configVersionID)
@@ -70,15 +89,20 @@ func (p *Pipeline) ExecuteReplay(ctx context.Context, runID int64) {
 // identity anchors and registry mappings where required — in the same SQLite
 // transaction that stores the immutable ConfigVersion snapshot and the run
 // row.
-func (p *Pipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error) {
+func (p *Pipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot, rng state.PublishedRange) (*state.Run, error) {
+	if err := checkPublishedRange(rng); err != nil {
+		return nil, err
+	}
 	if proposed == nil {
 		return nil, fmt.Errorf("pipeline: backtest requires a proposed configuration")
 	}
 
 	run := &state.Run{
-		StartedAt: time.Now().UTC(),
-		RunType:   state.RunTypeBacktest,
-		Status:    state.RunStatusRunning,
+		StartedAt:     time.Now().UTC(),
+		RunType:       state.RunTypeBacktest,
+		Status:        state.RunStatusRunning,
+		PublishedFrom: rng.From,
+		PublishedTo:   rng.To,
 	}
 
 	if err := p.ingestProposalRun(ctx, "backtest proposed configuration", proposed, run); err != nil {
@@ -120,15 +144,22 @@ func (p *Pipeline) executeHistorical(ctx context.Context, runID int64, runType s
 		return
 	}
 
-	videos, err := p.stateStore.ListRetainedVideos(ctx)
+	// Without a range every retained video is selected. With one, only videos
+	// whose locally held, still-eligible published date is in range are; the
+	// selector reads local rows only and never calls YouTube (ADR-002).
+	var videos []state.Video
+	if rng := run.Range(); rng.IsSet() {
+		videos, err = p.stateStore.ListRetainedVideosPublishedIn(ctx, rng, time.Now().UTC())
+	} else {
+		videos, err = p.stateStore.ListRetainedVideos(ctx)
+	}
 	if err != nil {
 		p.failHistoricalRun(ctx, runID, fmt.Sprintf("list %s videos failed", label), err)
 		return
 	}
-	// Until date-range semantics are settled, replay/backtest select all
-	// retained observations. Capture the selector's established set before
-	// evaluation so a later failure keeps the known selection and an empty
-	// corpus is stored as zero, not unknown (ARD-001).
+	// Capture the selector's established set before evaluation so a later
+	// failure keeps the known selection and an empty selection is stored as
+	// zero, not unknown (ARD-001).
 	p.captureSelectedCount(ctx, runID, len(videos))
 
 	p.setPhase(ctx, runID, PhaseRouting)

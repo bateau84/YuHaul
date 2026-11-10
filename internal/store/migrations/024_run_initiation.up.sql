@@ -37,3 +37,35 @@ WHEN NEW.interrupt_cause IS NOT NULL
 BEGIN
     SELECT RAISE(ABORT, 'invalid run interrupt cause');
 END;
+
+-- Published-date range for Backtest/Replay (run-initiation ADR-002 / ARS-001 §1).
+-- Calendar days (YYYY-MM-DD, UTC), written once in the run's INSERT and never
+-- changed. NULL on every pre-024 row: those runs selected all retained videos.
+ALTER TABLE run ADD COLUMN published_from TEXT;
+ALTER TABLE run ADD COLUMN published_to TEXT;
+
+CREATE TRIGGER run_published_range_insert
+BEFORE INSERT ON run
+WHEN (NEW.published_from IS NOT NULL OR NEW.published_to IS NOT NULL)
+  AND (
+    NEW.run_type NOT IN ('backtest','replay')
+    OR (NEW.published_from IS NOT NULL AND NOT (
+        typeof(NEW.published_from) = 'text' AND length(NEW.published_from) = 10
+        AND NEW.published_from GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+        AND IFNULL(date(NEW.published_from) = NEW.published_from, 0)))
+    OR (NEW.published_to IS NOT NULL AND NOT (
+        typeof(NEW.published_to) = 'text' AND length(NEW.published_to) = 10
+        AND NEW.published_to GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+        AND IFNULL(date(NEW.published_to) = NEW.published_to, 0)))
+    OR (NEW.published_from IS NOT NULL AND NEW.published_to IS NOT NULL
+        AND NEW.published_from > NEW.published_to))
+BEGIN
+    SELECT RAISE(ABORT, 'invalid run published range');
+END;
+
+CREATE TRIGGER run_published_range_immutable
+BEFORE UPDATE OF published_from, published_to ON run
+WHEN OLD.published_from IS NOT NEW.published_from OR OLD.published_to IS NOT NEW.published_to
+BEGIN
+    SELECT RAISE(ABORT, 'run published range is immutable');
+END;

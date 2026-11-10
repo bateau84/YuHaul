@@ -46,7 +46,7 @@ func TestRetryAuthority_QuotaProposalChangedRouteAndSiblings(t *testing.T) {
 			// Direct pipeline callers use internal action vocabulary; HTTP normally
 			// translates add_to_playlist before this seam.
 			proposal.Routes[0].Actions[0].ActionType = "playlist_insert"
-			bt, err := env.pipeline.Backtest(ctx, &proposal)
+			bt, err := env.pipeline.Backtest(ctx, &proposal, state.PublishedRange{})
 			require.NoError(t, err)
 			env.pipeline.ExecuteBacktest(ctx, bt.ID)
 			ds, err := env.stateStore.GetRouteDecisionsForVideoInRun(ctx, items[0].VideoID, bt.ID)

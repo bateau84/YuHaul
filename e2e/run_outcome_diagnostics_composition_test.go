@@ -321,7 +321,7 @@ func TestComposition_ReplayEvaluationFailureHasSourceFactsAfterReopen(t *testing
 	require.NoError(t, err)
 	env.pipeline.Execute(ctx, productionRun.ID)
 
-	replayRun, err := env.pipeline.Replay(ctx, nil)
+	replayRun, err := env.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	var existingDecisions int
 	require.NoError(t, env.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM route_decision`).Scan(&existingDecisions))
@@ -490,7 +490,7 @@ func TestComposition_SimulationSelectorsThroughHTTP(t *testing.T) {
 	require.NoError(t, err)
 	env.pipeline.ExecuteDryRun(ctx, dry.ID)
 
-	replay, err := env.pipeline.Replay(ctx, nil)
+	replay, err := env.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	env.pipeline.ExecuteReplay(ctx, replay.ID)
 
@@ -518,7 +518,7 @@ func TestComposition_SimulationSelectorsThroughHTTP(t *testing.T) {
 				{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PLbacktest"},
 			},
 		}},
-	})
+	}, state.PublishedRange{})
 	require.NoError(t, err)
 	env.pipeline.ExecuteBacktest(ctx, backtest.ID)
 	assert.Equal(t, requestsBeforeBacktest, env.server.Requests(),
@@ -756,7 +756,7 @@ func TestComposition_ZeroSelectionThroughHTTP(t *testing.T) {
 	require.NoError(t, err)
 	env.pipeline.ExecuteDryRun(ctx, dry.ID)
 
-	replay, err := env.pipeline.Replay(ctx, nil)
+	replay, err := env.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	env.pipeline.ExecuteReplay(ctx, replay.ID)
 	env.server.assertBearerRequests(t)

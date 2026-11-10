@@ -63,6 +63,10 @@ type fakePipeline struct {
 	replayConfigID   *int64
 	backtest         *state.Run
 	backtestProposed config.ProposalSnapshot
+	replayRange      state.PublishedRange
+	backtestRange    state.PublishedRange
+	replayCalls      int
+	backtestCalls    int
 	done             chan struct{}
 	proposalErr      error
 }
@@ -96,7 +100,9 @@ func (f *fakePipeline) ExecuteDryRun(ctx context.Context, runID int64) {
 	close(f.done)
 }
 
-func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64) (*state.Run, error) {
+func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64, rng state.PublishedRange) (*state.Run, error) {
+	f.replayCalls++
+	f.replayRange = rng
 	f.replayConfigID = configVersionID
 	if f.replay == nil {
 		f.replay = f.run
@@ -109,7 +115,9 @@ func (f *fakePipeline) ExecuteReplay(ctx context.Context, runID int64) {
 	close(f.done)
 }
 
-func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error) {
+func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot, rng state.PublishedRange) (*state.Run, error) {
+	f.backtestCalls++
+	f.backtestRange = rng
 	if f.proposalErr != nil {
 		return nil, f.proposalErr
 	}

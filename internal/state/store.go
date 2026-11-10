@@ -103,9 +103,10 @@ func (s *Store) createRunWithGuard(ctx context.Context, db execer, run *Run, gua
 		mutationSafetyVersion = 1
 	}
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO run (started_at, run_type, status, config_version_id, action_authority_version, mutation_safety_version, initiated_by)
-		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
-		formatRunTime(run.StartedAt), run.RunType, run.Status, run.ConfigVersionID, run.ActionAuthorityVersion, mutationSafetyVersion, run.InitiatedBy)
+		`INSERT INTO run (started_at, run_type, status, config_version_id, action_authority_version, mutation_safety_version, initiated_by, published_from, published_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		formatRunTime(run.StartedAt), run.RunType, run.Status, run.ConfigVersionID, run.ActionAuthorityVersion, mutationSafetyVersion, run.InitiatedBy,
+		run.PublishedFrom, run.PublishedTo)
 	if err != nil {
 		return 0, fmt.Errorf("creating run: %w", err)
 	}
@@ -123,7 +124,7 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count, initiated_by, interrupt_cause,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run ORDER BY started_at DESC;`)
@@ -155,7 +156,7 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count, initiated_by, interrupt_cause,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run WHERE status = ? AND completed_at IS NULL
@@ -188,7 +189,7 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count, initiated_by, interrupt_cause,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run WHERE id = ?;`, id)
@@ -1015,6 +1016,7 @@ func scanRun(sc interface {
 }) (*Run, error) {
 	r := &Run{}
 	var completedAt, interruptReason, currentPhase, initiatedBy, interruptCause sql.NullString
+	var publishedFrom, publishedTo sql.NullString
 	var durationSeconds sql.NullFloat64
 	var configVersionID sql.NullInt64
 	var selectedVideoCount sql.NullInt64
@@ -1022,9 +1024,15 @@ func scanRun(sc interface {
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
 		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
 		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion,
-		&selectedVideoCount, &initiatedBy, &interruptCause, &r.VideosEvaluated)
+		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &r.VideosEvaluated)
 	if err != nil {
 		return nil, err
+	}
+	if publishedFrom.Valid {
+		r.PublishedFrom = &publishedFrom.String
+	}
+	if publishedTo.Valid {
+		r.PublishedTo = &publishedTo.String
 	}
 	if initiatedBy.Valid {
 		r.InitiatedBy = &initiatedBy.String
@@ -1060,10 +1068,17 @@ func scanRun(sc interface {
 func scanVideo(sc interface {
 	Scan(dest ...any) error
 }) (*Video, error) {
+	return scanVideoWith(sc)
+}
+
+// scanVideoWith scans the video columns followed by any extra destinations.
+func scanVideoWith(sc interface {
+	Scan(dest ...any) error
+}, extra ...any) (*Video, error) {
 	v := &Video{}
 	var finalOutcome, deferredReason, errorMessage, completedAt sql.NullString
-	err := sc.Scan(&v.ID, &v.VideoID, &v.ChannelID, &v.DiscoveredAt, &v.DiscoveredInRunID,
-		&v.ProcessingState, &finalOutcome, &deferredReason, &errorMessage, &completedAt)
+	err := sc.Scan(append([]any{&v.ID, &v.VideoID, &v.ChannelID, &v.DiscoveredAt, &v.DiscoveredInRunID,
+		&v.ProcessingState, &finalOutcome, &deferredReason, &errorMessage, &completedAt}, extra...)...)
 	if err != nil {
 		return nil, err
 	}

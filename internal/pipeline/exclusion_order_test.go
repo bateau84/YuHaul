@@ -323,10 +323,10 @@ func TestExclusionBeforeDuplicate_Historical(t *testing.T) {
 				if tc.allExcluded {
 					second.Exclusions = first.Exclusions
 				}
-				run, err := deps.pipeline.Backtest(ctx, proposalSnapshot(first, second))
+				run, err := deps.pipeline.Backtest(ctx, proposalSnapshot(first, second), state.PublishedRange{})
 				require.NoError(t, err)
 				if mode == "replay" {
-					run, err = deps.pipeline.Replay(ctx, run.ConfigVersionID)
+					run, err = deps.pipeline.Replay(ctx, run.ConfigVersionID, state.PublishedRange{})
 					require.NoError(t, err)
 					deps.pipeline.ExecuteReplay(ctx, run.ID)
 				} else {

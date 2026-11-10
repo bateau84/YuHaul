@@ -928,7 +928,7 @@ func TestINV8_ModeIsolation(t *testing.T) {
 	require.Equal(t, state.RunStatusCompleted, drLoaded.Status)
 
 	// Replay.
-	rp, err := env.pipeline.Replay(ctx, nil)
+	rp, err := env.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	env.pipeline.ExecuteReplay(ctx, rp.ID)
 	rpLoaded, err := env.stateStore.GetRun(ctx, rp.ID)
@@ -954,7 +954,7 @@ func TestINV8_ModeIsolation(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, state.PublishedRange{})
 	require.NoError(t, err)
 	env.pipeline.ExecuteBacktest(ctx, bt.ID)
 	btLoaded, err := env.stateStore.GetRun(ctx, bt.ID)

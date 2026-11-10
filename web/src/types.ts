@@ -117,6 +117,15 @@ export interface Run {
   // withheld by safe-diagnostic vetting; the raw text is never sent (ARD-001).
   failure_reason_unavailable?: boolean
   current_phase?: string
+  // Backtest/Replay only: the saved UTC-day range of YouTube published dates
+  // (null bound = none). Both null means no date filter was applied. Absent
+  // or null for every other run type.
+  published_range?: PublishedRange | null
+}
+
+export interface PublishedRange {
+  from: string | null
+  to: string | null
 }
 
 export type VideoProcessingState =

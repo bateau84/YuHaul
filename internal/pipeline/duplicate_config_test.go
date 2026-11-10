@@ -91,7 +91,7 @@ func TestHistoricalEvaluationUsesSelectedThreshold(t *testing.T) {
 				require.NoError(t, svc.SetDuplicateThreshold(ctx, 0.1))
 				var run *state.Run
 				if mode == "replay" {
-					run, err = deps.pipeline.Replay(ctx, selectedID)
+					run, err = deps.pipeline.Replay(ctx, selectedID, state.PublishedRange{})
 				} else {
 					run, err = deps.pipeline.Backtest(ctx, &config.ProposalSnapshot{
 						DuplicateThreshold: threshold,
@@ -101,7 +101,7 @@ func TestHistoricalEvaluationUsesSelectedThreshold(t *testing.T) {
 							Conditions: []config.SnapshotCondition{{Field: "title", Operator: "contains", Value: "jazz"}},
 							Actions:    []config.SnapshotAction{{ActionType: "playlist_insert", TargetPlaylistID: "PLjazz"}},
 						}},
-					})
+					}, state.PublishedRange{})
 				}
 				require.NoError(t, err)
 				selectedDetector, err := deps.pipeline.detectorForRun(ctx, run.ID)

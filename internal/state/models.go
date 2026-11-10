@@ -132,6 +132,12 @@ type Run struct {
 	// InterruptCause records why an interrupted run stopped (InterruptCause*
 	// values). Nil when the cause is unproven. Internal, like InitiatedBy.
 	InterruptCause *string `json:"-"`
+
+	// PublishedFrom/PublishedTo are the Backtest/Replay published-date range
+	// (UTC calendar days), written once at insert; nil means unbounded. They
+	// reach clients through the published_range projection in MarshalJSON.
+	PublishedFrom *string `json:"-"`
+	PublishedTo   *string `json:"-"`
 }
 
 // Closed values of Run.InitiatedBy and Run.InterruptCause. They are enforced
@@ -157,7 +163,11 @@ func (r Run) MarshalJSON() ([]byte, error) {
 		InterruptReason          *string `json:"interrupt_reason"`
 		FailureReasonUnavailable bool    `json:"failure_reason_unavailable,omitempty"`
 		CurrentPhase             *string `json:"current_phase"`
+		PublishedRange           any     `json:"published_range"`
 	}{alias: (*alias)(&r)}
+	if pr := r.publishedRange(); pr != nil {
+		out.PublishedRange = pr
+	}
 	if r.InterruptReason != nil {
 		if value, unavailable := diag.AdmitErrorText(*r.InterruptReason); value != "" {
 			out.InterruptReason = &value

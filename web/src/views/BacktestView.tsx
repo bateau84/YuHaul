@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import * as api from '../api/client'
+import { ApiError } from '../api/core'
 import { RouteEditor } from '../components/RouteEditor'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
@@ -161,6 +162,9 @@ export function BacktestView() {
   const [selectedVersion, setSelectedVersion] = useState<number | ''>('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  // The server's invalid_date_range message, kept beside the date controls
+  // until the next start; nothing is started when it is set.
+  const [rangeError, setRangeError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const [retrying, setRetrying] = useState(false)
   // The run requested by the last start acknowledgement, its latest persisted
@@ -359,12 +363,15 @@ export function BacktestView() {
     setRequested(null)
     setRunDetail(null)
     setStatusReadError(false)
+    setRangeError(null)
     try {
       const kind = mode === 'hypothetical' ? 'backtest' : 'replay'
+      // The day strings are the inputs' own values, sent unchanged (no Date).
+      const days = { from: dateFrom, to: dateTo }
       const res =
         kind === 'backtest'
-          ? await api.startBacktest({ routes: draft, duplicate_threshold: 0.5 })
-          : await api.startReplay(selectedVersion ? Number(selectedVersion) : undefined)
+          ? await api.startBacktest({ routes: draft, duplicate_threshold: 0.5 }, days)
+          : await api.startReplay(selectedVersion ? Number(selectedVersion) : undefined, days)
       // The start response is only an acknowledgement that a run was requested
       // (ARD-001). The run id is shown immediately; its persisted state —
       // never the ack — decides whether the result is running, finished,
@@ -375,6 +382,10 @@ export function BacktestView() {
       await loadStatus(target)
     } catch (err) {
       // A failed start fabricates no run id and no result.
+      if (err instanceof ApiError && err.status === 400 && err.message.startsWith('invalid date range')) {
+        setRangeError(err.message)
+        return
+      }
       addToast(err instanceof Error ? err.message : 'Failed to start run', 'error')
     } finally {
       setRunning(false)
@@ -522,15 +533,25 @@ export function BacktestView() {
             <label className="form-label" htmlFor="from-date">
               From date
             </label>
-            <input id="from-date" type="date" className="form-input" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            <input id="from-date" type="date" className="form-input" aria-describedby="date-range-notice" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
           </div>
           <div>
             <label className="form-label" htmlFor="to-date">
               To date
             </label>
-            <input id="to-date" type="date" className="form-input" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+            <input id="to-date" type="date" className="form-input" aria-describedby="date-range-notice" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
           </div>
         </div>
+        <p id="date-range-notice" style={{ margin: '8px 0 0', color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+          Days are UTC days and both days are included. The filter only covers videos whose details YuHaul still holds
+          locally, which is roughly the last 30 days. Videos whose details have expired are left out, and nothing is
+          requested from YouTube. With no days chosen, nothing is filtered.
+        </p>
+        {rangeError && (
+          <p role="alert" style={{ margin: '8px 0 0', color: 'var(--color-status-failed)' }}>
+            {rangeError}. No run was started.
+          </p>
+        )}
       </div>
 
       <button className="button button--primary" onClick={run} disabled={running || (mode === 'hypothetical' && draft.length === 0)}>

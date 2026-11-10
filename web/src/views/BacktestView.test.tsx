@@ -487,4 +487,77 @@ describe('BacktestView', () => {
     expect(screen.queryByText('added')).not.toBeInTheDocument()
     expect(screen.queryByText('removed')).not.toBeInTheDocument()
   })
+  describe('published-date range (BR-027 AC8-11)', () => {
+    // The test fetch stub answers via the mock API; this spies on the exact
+    // request body each start sends.
+    function startBodies(path: string): Record<string, unknown>[] {
+      return vi.mocked(globalThis.fetch).mock.calls
+        .filter(([url, init]) => String(url) === path && init?.method === 'POST')
+        .map(([, init]) => JSON.parse(String(init?.body)))
+    }
+
+    it('sends the date strings exactly as entered, never through Date, in both modes', async () => {
+      const dateSpy = vi.spyOn(globalThis, 'Date')
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      renderWithProviders(<BacktestView />)
+      await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+
+      fireEvent.change(screen.getByLabelText('From date'), { target: { value: '2026-10-01' } })
+      fireEvent.change(screen.getByLabelText('To date'), { target: { value: '2026-10-31' } })
+      dateSpy.mockClear()
+      fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
+      await waitFor(() => expect(startBodies('/api/backtest')).toHaveLength(1))
+      expect(startBodies('/api/backtest')[0]).toMatchObject({ published_from: '2026-10-01', published_to: '2026-10-31' })
+
+      fireEvent.click(screen.getByRole('tab', { name: /Replay\/Reprocess/i }))
+      // The first start must finish (button re-enabled) before the next one.
+      fireEvent.click(await screen.findByRole('button', { name: /Run replay/i }))
+      await waitFor(() => expect(startBodies('/api/runs/replay')).toHaveLength(1))
+      expect(startBodies('/api/runs/replay')[0]).toEqual({ published_from: '2026-10-01', published_to: '2026-10-31' })
+
+      // Neither start built a Date from the chosen day strings.
+      for (const call of dateSpy.mock.calls) {
+        expect(call.map(String).join(' ')).not.toContain('2026-10')
+      }
+      fetchSpy.mockRestore()
+    })
+
+    it('omits an empty control and sends only the chosen bound', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      renderWithProviders(<BacktestView />)
+      await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+
+      fireEvent.change(screen.getByLabelText('To date'), { target: { value: '2026-10-31' } })
+      fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
+      await waitFor(() => expect(startBodies('/api/backtest')).toHaveLength(1))
+      const body = startBodies('/api/backtest')[0]
+      expect(body).toMatchObject({ published_to: '2026-10-31' })
+      expect(body).not.toHaveProperty('published_from')
+      fetchSpy.mockRestore()
+    })
+
+    it('says the filter only covers locally held details, about the last 30 days', async () => {
+      renderWithProviders(<BacktestView />)
+      const notice = await screen.findByText(/only covers videos whose details YuHaul still holds/i)
+      expect(notice).toHaveTextContent('roughly the last 30 days')
+      expect(screen.getByLabelText('From date')).toHaveAccessibleDescription(/last 30 days/)
+    })
+
+    it('shows the server message and starts nothing for an invalid range', async () => {
+      renderWithProviders(<BacktestView />)
+      await waitFor(() => expect(screen.getByText('Music Discovery')).toBeInTheDocument())
+      const message = 'invalid date range: the start day must not be after the end day'
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) =>
+        String(url) === '/api/backtest'
+          ? new Response(JSON.stringify({ error: message, code: 'invalid_date_range', field: null }), { status: 400 })
+          : new Response('{}', { status: 200 }))
+
+      fireEvent.change(screen.getByLabelText('From date'), { target: { value: '2026-11-02' } })
+      fireEvent.change(screen.getByLabelText('To date'), { target: { value: '2026-11-01' } })
+      fireEvent.click(screen.getByRole('button', { name: /Run backtest/i }))
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(message)
+      expect(screen.queryByText('Requested run')).not.toBeInTheDocument()
+    })
+  })
 })

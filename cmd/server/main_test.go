@@ -90,11 +90,11 @@ func (f *fakePipeline) DryRun(ctx context.Context, draft *config.ProposalSnapsho
 	return nil, nil
 }
 func (f *fakePipeline) ExecuteDryRun(ctx context.Context, runID int64) {}
-func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64) (*state.Run, error) {
+func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64, rng state.PublishedRange) (*state.Run, error) {
 	return nil, nil
 }
 func (f *fakePipeline) ExecuteReplay(ctx context.Context, runID int64) {}
-func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error) {
+func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot, rng state.PublishedRange) (*state.Run, error) {
 	return nil, nil
 }
 func (f *fakePipeline) ExecuteBacktest(ctx context.Context, runID int64) {}

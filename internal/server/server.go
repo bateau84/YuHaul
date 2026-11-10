@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -33,9 +34,9 @@ type Pipeline interface {
 	AdmitRunNow(ctx context.Context) (*pipeline.RunNowAdmission, error)
 	DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error)
 	ExecuteDryRun(ctx context.Context, runID int64)
-	Replay(ctx context.Context, configVersionID *int64) (*state.Run, error)
+	Replay(ctx context.Context, configVersionID *int64, rng state.PublishedRange) (*state.Run, error)
 	ExecuteReplay(ctx context.Context, runID int64)
-	Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error)
+	Backtest(ctx context.Context, proposed *config.ProposalSnapshot, rng state.PublishedRange) (*state.Run, error)
 	ExecuteBacktest(ctx context.Context, runID int64)
 }
 
@@ -710,29 +711,44 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
-	var cfgID *int64
+	// The range is accepted only in the body, so it is never silently ignored.
+	q := r.URL.Query()
+	if q.Has("published_from") || q.Has("published_to") {
+		writeInvalidDateRange(w, "invalid date range: send published_from/published_to in the request body", nil)
+		return
+	}
 
-	if q := r.URL.Query().Get("config_version_id"); q != "" {
+	var body struct {
+		ConfigVersionID *int64   `json:"config_version_id"`
+		PublishedFrom   dayField `json:"published_from"`
+		PublishedTo     dayField `json:"published_to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		s.logger.ErrorContext(r.Context(), "failed to decode replay body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	rng, ok := parseRequestedRange(w, body.PublishedFrom, body.PublishedTo)
+	if !ok {
+		return
+	}
+
+	cfgID := body.ConfigVersionID
+	if q := q.Get("config_version_id"); q != "" {
 		id, err := strconv.ParseInt(q, 10, 64)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid config_version_id")
 			return
 		}
 		cfgID = &id
-	} else {
-		var body struct {
-			ConfigVersionID *int64 `json:"config_version_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
-			s.logger.ErrorContext(r.Context(), "failed to decode replay body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-		cfgID = body.ConfigVersionID
 	}
 
-	run, err := s.pipeline.Replay(r.Context(), cfgID)
+	run, err := s.pipeline.Replay(r.Context(), cfgID, rng)
 	if err != nil {
+		if errors.Is(err, pipeline.ErrInvalidDateRange) {
+			writeInvalidDateRange(w, "invalid date range", nil)
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "failed to start replay", "diagnostic", diag.Encode(err, "unknown", "start_run"))
 		if errors.Is(err, state.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "config version not found")
@@ -758,10 +774,16 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ProposedConfiguration *proposalRequest `json:"proposed_configuration"`
+		PublishedFrom         dayField         `json:"published_from"`
+		PublishedTo           dayField         `json:"published_to"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		s.logger.ErrorContext(r.Context(), "failed to decode backtest body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	rng, ok := parseRequestedRange(w, body.PublishedFrom, body.PublishedTo)
+	if !ok {
 		return
 	}
 
@@ -787,8 +809,12 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.pipeline.Backtest(r.Context(), proposed)
+	run, err := s.pipeline.Backtest(r.Context(), proposed, rng)
 	if err != nil {
+		if errors.Is(err, pipeline.ErrInvalidDateRange) {
+			writeInvalidDateRange(w, "invalid date range", nil)
+			return
+		}
 		if errors.Is(err, pipeline.ErrInvalidProposal) {
 			// Fixed classification only: the error text is never logged or returned.
 			s.logger.WarnContext(r.Context(), "rejected invalid backtest proposal", "class", "invalid_proposal", "operation", "start_run")
@@ -1639,6 +1665,43 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// dayField is an optional JSON calendar-day member: absent or null means
+// unbounded. A string is validated by state.ParsePublishedRange; any other
+// JSON type is kept as an empty string, which that parser rejects, so the
+// error names the right field in the right order.
+type dayField struct{ Value *string }
+
+func (d *dayField) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
+	var v string
+	if err := json.Unmarshal(b, &v); err != nil {
+		v = ""
+	}
+	d.Value = &v
+	return nil
+}
+
+// parseRequestedRange validates the request's range and answers 400
+// invalid_date_range itself when it is invalid, before anything is created.
+func parseRequestedRange(w http.ResponseWriter, from, to dayField) (state.PublishedRange, bool) {
+	rng, rerr := state.ParsePublishedRange(from.Value, to.Value)
+	if rerr != nil {
+		var field *string
+		if rerr.Field != "" {
+			field = &rerr.Field
+		}
+		writeInvalidDateRange(w, "invalid date range: "+rerr.Error(), field)
+		return state.PublishedRange{}, false
+	}
+	return rng, true
+}
+
+func writeInvalidDateRange(w http.ResponseWriter, message string, field *string) {
+	writeErrorCode(w, http.StatusBadRequest, "invalid_date_range", message, map[string]any{"field": field})
 }
 
 // writeErrorCode is writeError plus a stable machine-readable code and any

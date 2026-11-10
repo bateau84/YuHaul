@@ -43,16 +43,35 @@ export async function startDryRun(draft?: { routes: Route[]; duplicate_threshold
   })
 }
 
-export async function startReplay(configVersionId?: number): Promise<{ run_id: number; status: string }> {
+// Calendar-day strings exactly as a date input holds them (YYYY-MM-DD). They
+// are sent unchanged and never pass through Date, so the browser's time zone
+// cannot move a day (run-initiation ADR-002). An empty string means unchosen.
+export interface PublishedDays {
+  from?: string
+  to?: string
+}
+
+function publishedDayFields(days?: PublishedDays): { published_from?: string; published_to?: string } {
+  const out: { published_from?: string; published_to?: string } = {}
+  if (days?.from) out.published_from = days.from
+  if (days?.to) out.published_to = days.to
+  return out
+}
+
+export async function startReplay(configVersionId?: number, days?: PublishedDays): Promise<{ run_id: number; status: string }> {
+  const body = {
+    ...(configVersionId !== undefined ? { config_version_id: configVersionId } : {}),
+    ...publishedDayFields(days),
+  }
   return api<{ run_id: number; status: string }>('/api/runs/replay', {
     method: 'POST',
-    body: configVersionId !== undefined ? JSON.stringify({ config_version_id: configVersionId }) : undefined,
+    body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
   })
 }
 
-export async function startBacktest(proposed: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string; comparison?: BacktestComparison }> {
+export async function startBacktest(proposed: { routes: Route[]; duplicate_threshold: number }, days?: PublishedDays): Promise<{ run_id: number; status: string; comparison?: BacktestComparison }> {
   return api<{ run_id: number; status: string; comparison?: BacktestComparison }>('/api/backtest', {
     method: 'POST',
-    body: JSON.stringify({ proposed_configuration: proposed }),
+    body: JSON.stringify({ proposed_configuration: proposed, ...publishedDayFields(days) }),
   })
 }
