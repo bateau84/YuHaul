@@ -10,9 +10,10 @@ function reference(cause: Cause | null | undefined): string | undefined {
 }
 
 function comparison(cause: Cause): string | undefined {
+  // Shown exactly as configured; rendered by React as text, never as markup.
   const value = cause.configured_value_status === 'available' && typeof cause.configured_value === 'string'
     ? cause.configured_value
-    : cause.configured_value_status === 'withheld' ? 'value unavailable for display' : 'value unavailable'
+    : 'value unavailable'
   switch (`${cause.exclusion_type}/${cause.field}/${cause.comparison}`) {
     case 'channel/channel_id/exact': return `Channel ID exactly equals configured channel ID “${value}”`
     case 'video/video_id/exact': return `Video ID exactly equals configured video ID “${value}”`
@@ -43,12 +44,12 @@ export function CausalExclusion({ decision, showRoute = false }: { decision: Rou
     {sentence ? <>
       <p>Recorded causal exclusion: {ref}.</p>
       <p>Matched rule: {sentence}.</p>
-      {cause?.configured_value_status === 'withheld' && <p>Configured value unavailable for display.</p>}
-      {(cause?.configured_value_status !== 'available' && cause?.configured_value_status !== 'withheld' || typeof cause?.configured_value !== 'string' && cause?.configured_value_status === 'available') && <p>Configured value unavailable.</p>}
+      {(cause?.configured_value_status !== 'available' || typeof cause?.configured_value !== 'string') && <p>Configured value unavailable.</p>}
       <p>Conditions were not evaluated for this route because this exclusion matched.</p>
     </> : <>
       <p>{incomplete}</p>
       {ref && <p>Captured reference: {ref}.</p>}
+      {cause?.status === 'definition_unavailable' && comparison(cause) && <p>Captured rule: {comparison(cause)}.</p>}
     </>}
     <p>Compared input unavailable in this rule-reference record.</p>
   </div>

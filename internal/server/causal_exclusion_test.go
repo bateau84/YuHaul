@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/bateau84/YuHaul/internal/config"
@@ -32,8 +33,8 @@ func TestCausalExclusionProjection(t *testing.T) {
 			require.Equal(t, tc.field, *got.Field)
 			require.Equal(t, tc.comparison, *got.Comparison)
 			require.True(t, *got.Matched)
-			require.Nil(t, got.ConfiguredValue)
-			require.Equal(t, "withheld", got.ConfiguredValueStatus)
+			require.Equal(t, tc.value, *got.ConfiguredValue)
+			require.Equal(t, "available", got.ConfiguredValueStatus)
 		})
 	}
 	for _, tc := range []struct {
@@ -78,7 +79,7 @@ func TestCausalExclusionMalformedSnapshotHTTP(t *testing.T) {
 		{"null value", `{"exclusion_type":"word","exclusion_value":null}`, "definition_unavailable", "unavailable"},
 		{"missing type", `{"exclusion_value":"secret"}`, "definition_unavailable", "unavailable"},
 		{"null type", `{"exclusion_type":null,"exclusion_value":"secret"}`, "definition_unavailable", "unavailable"},
-		{"empty value", `{"exclusion_type":"word","exclusion_value":""}`, "available", "withheld"},
+		{"empty value", `{"exclusion_type":"word","exclusion_value":""}`, "available", "available"},
 		{"invalid duration", `{"exclusion_type":"duration_min","exclusion_value":"bad"}`, "invalid_reference", "unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,7 +105,15 @@ func TestCausalExclusionMalformedSnapshotHTTP(t *testing.T) {
 				}
 				require.Equal(t, tc.status, cause.Status)
 				require.Equal(t, tc.valueStatus, cause.ConfiguredValueStatus)
-				require.Nil(t, cause.ConfiguredValue)
+				if tc.name == "empty value" {
+					require.Equal(t, "", *cause.ConfiguredValue)
+				} else {
+					require.Nil(t, cause.ConfiguredValue)
+				}
+				if tc.name == "missing value" || tc.name == "null value" {
+					require.Equal(t, "word", *cause.ExclusionType)
+					require.Equal(t, "lowercase_substring", *cause.Comparison)
+				}
 				if tc.status != "available" {
 					require.Nil(t, cause.Matched)
 				}
@@ -156,7 +165,6 @@ func TestCausalExclusionRegisteredListAndDetail(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		require.Equal(t, http.StatusOK, rec.Code)
-		require.NotContains(t, rec.Body.String(), "secret")
 		var body map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 		var decisions []routeDecisionSummary
@@ -176,5 +184,52 @@ func TestCausalExclusionRegisteredListAndDetail(t *testing.T) {
 		require.Equal(t, "available", decisions[0].CausalExclusion.Status)
 		require.Equal(t, 2, *decisions[0].CausalExclusion.ExclusionIndex)
 		require.Equal(t, "lowercase_substring", *decisions[0].CausalExclusion.Comparison)
+		require.Equal(t, "secret", *decisions[0].CausalExclusion.ConfiguredValue)
+		require.Equal(t, "available", decisions[0].CausalExclusion.ConfiguredValueStatus)
 	}
+}
+
+// The configured value is released exactly as configured: markup, quotes and
+// non-ASCII text are neither escaped nor normalized by the projection.
+func TestCausalExclusionConfiguredValueExact(t *testing.T) {
+	index, version, cfg := 0, 1, int64(42)
+	reason := state.SkipReasonExclusion
+	d := state.RouteDecision{RouteID: 7, Decision: state.RouteDecisionSkipped, SkipReason: &reason, ExclusionIndex: &index, ExclusionSemanticsVersion: &version}
+	for _, value := range []string{
+		`<script>alert("x")</script> & <b>bold</b>`,
+		`He said "hi" and 'bye' \ back`,
+		"  Ünïcödé 日本語 🎵 café  ",
+		strings.Repeat("long ", 200),
+	} {
+		e := &runRouteEvidence{routes: map[int64]config.SnapshotRoute{7: {Exclusions: []config.SnapshotExclusion{{ExclusionType: "word", ExclusionValue: value}}}}}
+		got := projectCausalExclusion(d, &cfg, e)
+		require.Equal(t, "available", got.Status)
+		require.Equal(t, "available", got.ConfiguredValueStatus)
+		require.Equal(t, value, *got.ConfiguredValue)
+	}
+}
+
+func TestCausalExclusionUnresolvedKeepsIdentity(t *testing.T) {
+	index, version, cfg := 3, 1, int64(42)
+	reason := state.SkipReasonExclusion
+	d := state.RouteDecision{RouteID: 7, Decision: state.RouteDecisionSkipped, SkipReason: &reason, ExclusionIndex: &index, ExclusionSemanticsVersion: &version}
+	// Route resolves, rule has a type but no value.
+	var route config.SnapshotRoute
+	require.NoError(t, json.Unmarshal([]byte(`{"exclusions":[{},{},{},{"exclusion_type":"title"}]}`), &route))
+	e := &runRouteEvidence{routes: map[int64]config.SnapshotRoute{7: route}}
+	got := projectCausalExclusion(d, &cfg, e)
+	require.Equal(t, "definition_unavailable", got.Status)
+	require.Equal(t, "unavailable", got.ConfiguredValueStatus)
+	require.Nil(t, got.ConfiguredValue)
+	require.Nil(t, got.Matched)
+	require.Equal(t, 3, *got.ExclusionIndex)
+	require.Equal(t, int64(42), *got.ConfigVersionID)
+	require.Equal(t, "title", *got.ExclusionType)
+	require.Equal(t, "trimmed_equal_fold", *got.Comparison)
+	// Route cannot be resolved at all: identity scalars stay, value unavailable.
+	got = projectCausalExclusion(d, &cfg, &runRouteEvidence{})
+	require.Equal(t, "definition_unavailable", got.Status)
+	require.Equal(t, "unavailable", got.ConfiguredValueStatus)
+	require.Equal(t, 3, *got.ExclusionIndex)
+	require.Equal(t, int64(42), *got.ConfigVersionID)
 }

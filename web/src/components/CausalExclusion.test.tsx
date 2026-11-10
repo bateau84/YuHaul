@@ -22,11 +22,35 @@ describe('causal exclusion presentation', () => {
     cleanup()
   })
 
-  it('does not expose withheld value and labels current route name', () => {
-    render(<CausalExclusion decision={{ ...decision, route_name_source: 'current_local', causal_exclusion: { ...cause, configured_value_status: 'withheld', configured_value: 'secret' } }} showRoute />)
+  it('labels current route name', () => {
+    render(<CausalExclusion decision={{ ...decision, route_name_source: 'current_local' }} showRoute />)
     expect(screen.getByText('Route: Route A (current/local name; ID: uuid)')).toBeTruthy()
-    expect(screen.queryByText(/secret/)).toBeNull()
-    expect(screen.getByText('Configured value unavailable for display.')).toBeTruthy()
+    cleanup()
+  })
+
+  it.each([
+    '<img src=x onerror=alert(1)> & <b>bold</b>',
+    `say "hi" and 'bye' \\ back`,
+    'Ünïcödé 日本語 🎵 café',
+    'x'.repeat(500),
+  ])('shows configured value %j exactly as text, never as markup', (value) => {
+    const { container } = render(<CausalExclusion decision={{ ...decision, causal_exclusion: { ...cause, exclusion_type: 'word', comparison: 'lowercase_substring', configured_value: value } }} showRoute />)
+    expect(screen.getByText(`Matched rule: Title contains configured substring “${value}”, ignoring case.`)).toBeTruthy()
+    expect(container.querySelector('img, b')).toBeNull()
+    expect(screen.queryByText('Configured value unavailable.')).toBeNull()
+    cleanup()
+  })
+
+  it('keeps identity, type and comparison when the rule cannot be resolved', () => {
+    render(<CausalExclusion decision={{ ...decision, causal_exclusion: { ...cause, status: 'definition_unavailable', exclusion_type: 'word', field: 'title', comparison: 'lowercase_substring', configured_value: null, configured_value_status: 'unavailable', matched: null } }} />)
+    expect(screen.getByText('Captured reference: configuration 42, exclusion #1.')).toBeTruthy()
+    expect(screen.getByText('Captured rule: Title contains configured substring “value unavailable”, ignoring case.')).toBeTruthy()
+    cleanup()
+  })
+
+  it('treats a legacy withheld status as unavailable, not as a value', () => {
+    render(<CausalExclusion decision={{ ...decision, causal_exclusion: { ...cause, configured_value_status: 'withheld', configured_value: 'secret' } }} />)
+    expect(screen.getByText('Configured value unavailable.')).toBeTruthy()
     cleanup()
   })
 

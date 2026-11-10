@@ -682,7 +682,7 @@ func projectCausalExclusion(d state.RouteDecision, configVersionID *int64, evide
 		return out
 	}
 	ex := route.Exclusions[*out.ExclusionIndex]
-	if !ex.HasType() || !ex.HasValue() {
+	if !ex.HasType() {
 		out.Status = "definition_unavailable"
 		return out
 	}
@@ -697,9 +697,11 @@ func projectCausalExclusion(d state.RouteDecision, configVersionID *int64, evide
 	case "word":
 		field, comparison = "title", "lowercase_substring"
 	case "duration_min", "duration_max":
-		if _, err := strconv.Atoi(ex.ExclusionValue); err != nil {
-			out.Status = "invalid_reference"
-			return out
+		if ex.HasValue() {
+			if _, err := strconv.Atoi(ex.ExclusionValue); err != nil {
+				out.Status = "invalid_reference"
+				return out
+			}
 		}
 		field = "duration_seconds"
 		if ex.ExclusionType == "duration_min" {
@@ -711,12 +713,20 @@ func projectCausalExclusion(d state.RouteDecision, configVersionID *int64, evide
 		out.Status = "unsupported"
 		return out
 	}
-	out.Status = "available"
 	out.ExclusionType, out.Field, out.Comparison = &ex.ExclusionType, &field, &comparison
+	if !ex.HasValue() {
+		// Rule identity, type and comparison stay known; only the value is missing.
+		out.Status = "definition_unavailable"
+		return out
+	}
+	out.Status = "available"
 	matched := true
 	out.Matched = &matched
-	// The snapshot has no origin or eligibility proof for releasing its value.
-	out.ConfiguredValueStatus = "withheld"
+	// The configured value is the user's own configuration (BR-015 AC11): it is
+	// released unchanged, in run-video responses only.
+	value := ex.ExclusionValue
+	out.ConfiguredValue = &value
+	out.ConfiguredValueStatus = "available"
 	return out
 }
 
