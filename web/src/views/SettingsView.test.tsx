@@ -349,6 +349,181 @@ describe('SettingsView historical corpus import', () => {
   })
 })
 
+describe('SettingsView retention playlists', () => {
+  const RETENTION_FIXTURE = {
+    id: 1,
+    playlist_id: 'PLrotation',
+    playlist_name: 'Rotation',
+    designated_at: '2026-08-01T10:00:00Z',
+    is_active: true,
+  }
+
+  beforeEach(() => {
+    window.history.replaceState({}, '', '/settings')
+    sessionStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('offers the user\'s playlists in a dropdown and persists the selected ID and name', async () => {
+    vi.spyOn(mock, 'listRetentionPlaylists').mockResolvedValue([])
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([
+      { playlist_id: 'PLmusic', playlist_name: 'Music Discovery' },
+      { playlist_id: 'PLambient', playlist_name: 'Ambient' },
+    ])
+    const create = vi.spyOn(mock, 'createRetentionPlaylist').mockResolvedValue({
+      ...RETENTION_FIXTURE,
+      playlist_id: 'PLambient',
+      playlist_name: 'Ambient',
+    })
+
+    renderWithToast(<SettingsView />)
+
+    const select = (await screen.findByLabelText('Add a retention playlist')) as HTMLSelectElement
+    await waitFor(() => expect(select).toBeEnabled())
+    expect(screen.getByRole('option', { name: 'Music Discovery' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Ambient' })).toBeInTheDocument()
+    // No free-text playlist ID/name entry remains.
+    expect(screen.queryByPlaceholderText('Playlist ID')).toBeNull()
+    expect(screen.queryByPlaceholderText('Playlist name')).toBeNull()
+
+    fireEvent.change(select, { target: { value: 'PLambient' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(create).toHaveBeenCalledWith({ playlist_id: 'PLambient', playlist_name: 'Ambient' }))
+    // The designation is persisted from the fetched playlist, not typed input.
+    expect(await screen.findByText('Ambient (PLambient)')).toBeInTheDocument()
+    // Selection resets so the same playlist cannot be double-added silently.
+    expect(select).toHaveValue('')
+  })
+
+  it('shows a loading state with the selector disabled', async () => {
+    vi.spyOn(mock, 'listRetentionPlaylists').mockResolvedValue([])
+    let resolvePlaylists!: (value: { playlist_id: string; playlist_name: string }[]) => void
+    vi.spyOn(mock, 'listPlaylists').mockReturnValue(
+      new Promise((resolve) => {
+        resolvePlaylists = resolve
+      }),
+    )
+
+    renderWithToast(<SettingsView />)
+
+    const select = (await screen.findByLabelText('Add a retention playlist')) as HTMLSelectElement
+    expect(select).toBeDisabled()
+    expect(select).toHaveValue('')
+    expect(screen.getByRole('option', { name: 'Loading playlists...' })).toBeInTheDocument()
+    expect(screen.getByText('Loading playlists')).toBeInTheDocument()
+
+    await act(async () => {
+      resolvePlaylists([{ playlist_id: 'PLmusic', playlist_name: 'Music Discovery' }])
+    })
+    await waitFor(() => expect(select).toBeEnabled())
+    expect(screen.getByRole('option', { name: 'Select a playlist' }).selected).toBe(true)
+  })
+
+  it('shows an empty state with a link to YouTube when the account has no playlists', async () => {
+    vi.spyOn(mock, 'listRetentionPlaylists').mockResolvedValue([])
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([])
+
+    renderWithToast(<SettingsView />)
+
+    expect(await screen.findByText('No playlists found.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Create a playlist on YouTube first/i })).toHaveAttribute(
+      'href',
+      'https://www.youtube.com',
+    )
+  })
+
+  it('surfaces a playlist fetch error with retry that recovers', async () => {
+    vi.spyOn(mock, 'listRetentionPlaylists').mockResolvedValue([])
+    vi.spyOn(mock, 'listPlaylists')
+      .mockRejectedValueOnce(new Error('network error'))
+      .mockResolvedValue([{ playlist_id: 'PLmusic', playlist_name: 'Music Discovery' }])
+
+    renderWithToast(<SettingsView />)
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('network error')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+    const select = (await screen.findByLabelText('Add a retention playlist')) as HTMLSelectElement
+    await waitFor(() => expect(select).toBeEnabled())
+    expect(screen.getByRole('option', { name: 'Music Discovery' })).toBeInTheDocument()
+  })
+
+  it('shows a connect hint instead of a failing fetch when the account is not connected', async () => {
+    vi.spyOn(mock, 'getSettings').mockResolvedValue({
+      schedule: '0 6 * * *',
+      quota_limit: 10000,
+      duplicate_threshold: 0.5,
+      duplicate_behavior: 'continue',
+      account_connected: false,
+    })
+    const listPlaylists = vi.spyOn(mock, 'listPlaylists')
+
+    renderWithToast(<SettingsView />)
+
+    expect(
+      await screen.findByText('Connect your YouTube account to choose your playlists for retention.'),
+    ).toBeInTheDocument()
+    // No guaranteed-"not authenticated" request is fired for the picker.
+    expect(listPlaylists).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Add a retention playlist')).toBeNull()
+  })
+
+  it('excludes already-designated playlists from the dropdown', async () => {
+    vi.spyOn(mock, 'listRetentionPlaylists').mockResolvedValue([RETENTION_FIXTURE])
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([
+      { playlist_id: 'PLrotation', playlist_name: 'Rotation' },
+      { playlist_id: 'PLambient', playlist_name: 'Ambient' },
+    ])
+
+    renderWithToast(<SettingsView />)
+
+    // The designated playlist stays listed for removal but is not re-offered.
+    expect(await screen.findByText('Rotation (PLrotation)')).toBeInTheDocument()
+    const select = (await screen.findByLabelText('Add a retention playlist')) as HTMLSelectElement
+    await waitFor(() => expect(select).toBeEnabled())
+    expect(screen.queryByRole('option', { name: 'Rotation' })).toBeNull()
+    expect(screen.getByRole('option', { name: 'Ambient' })).toBeInTheDocument()
+  })
+
+  it('keeps a saved designation that is missing from the fetched playlists visible and removable', async () => {
+    // A retention playlist deleted on YouTube (or otherwise absent from
+    // GET /api/playlists) must not vanish from the designated list.
+    vi.spyOn(mock, 'listRetentionPlaylists').mockResolvedValue([
+      { ...RETENTION_FIXTURE, playlist_id: 'PLgone', playlist_name: 'Deleted on YouTube' },
+    ])
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([{ playlist_id: 'PLmusic', playlist_name: 'Music Discovery' }])
+    const remove = vi.spyOn(mock, 'deleteRetentionPlaylist').mockResolvedValue()
+
+    renderWithToast(<SettingsView />)
+
+    expect(await screen.findByText('Deleted on YouTube (PLgone)')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(1))
+  })
+
+  it('makes a removed designation selectable again', async () => {
+    vi.spyOn(mock, 'listRetentionPlaylists').mockResolvedValue([RETENTION_FIXTURE])
+    vi.spyOn(mock, 'listPlaylists').mockResolvedValue([{ playlist_id: 'PLrotation', playlist_name: 'Rotation' }])
+    vi.spyOn(mock, 'deleteRetentionPlaylist').mockResolvedValue()
+
+    renderWithToast(<SettingsView />)
+
+    const select = (await screen.findByLabelText('Add a retention playlist')) as HTMLSelectElement
+    await waitFor(() => expect(select).toBeEnabled())
+    expect(screen.queryByRole('option', { name: 'Rotation' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(screen.queryByText('Rotation (PLrotation)')).toBeNull())
+    expect(screen.getByRole('option', { name: 'Rotation' })).toBeInTheDocument()
+  })
+})
+
 describe('SettingsView corpus import recency', () => {
   const ORIGINAL_TZ = process.env.TZ
 

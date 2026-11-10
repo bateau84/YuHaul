@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
+import { AlertCircle, Loader2 } from 'lucide-react'
 import * as api from '../api/client'
 import { ApiError } from '../api/core'
 import { useToast } from '../hooks/useToast'
 import type {
   Settings,
   RetentionPlaylist,
+  Playlist,
   CorpusImportJobStatus,
   CorpusImportMetadata,
   CorpusImportPreview,
@@ -90,7 +92,12 @@ function formatCorpusRecency(iso: string): string | null {
 export function SettingsView() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [playlists, setPlaylists] = useState<RetentionPlaylist[]>([])
-  const [newPlaylist, setNewPlaylist] = useState({ playlist_id: '', playlist_name: '' })
+  // User's own YouTube playlists (GET /api/playlists) backing the retention
+  // selector, mirroring the RouteEditor picker's loading/empty/error contract.
+  const [userPlaylists, setUserPlaylists] = useState<Playlist[]>([])
+  const [userPlaylistsLoading, setUserPlaylistsLoading] = useState(true)
+  const [userPlaylistsError, setUserPlaylistsError] = useState<string | null>(null)
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [retryKey, setRetryKey] = useState(0)
@@ -114,6 +121,30 @@ export function SettingsView() {
       cancelled = true
     }
   }, [retryKey])
+
+  const loadUserPlaylists = useCallback(async () => {
+    setUserPlaylistsLoading(true)
+    setUserPlaylistsError(null)
+    try {
+      const data = await api.listPlaylists()
+      setUserPlaylists(data)
+    } catch (err) {
+      setUserPlaylistsError(err instanceof Error ? err.message : 'Failed to load playlists')
+    } finally {
+      setUserPlaylistsLoading(false)
+    }
+  }, [])
+
+  // Fetch the user's playlists only once the account connection state is known;
+  // when disconnected the API would only answer "not authenticated", so the
+  // selector shows a connect hint instead of a guaranteed-failing request.
+  const accountConnected = settings?.account_connected ?? false
+  /* eslint-disable react/set-state-in-effect */
+  useEffect(() => {
+    if (!accountConnected) return
+    loadUserPlaylists()
+  }, [accountConnected, loadUserPlaylists])
+  /* eslint-enable react/set-state-in-effect */
 
   function retry() {
     setLoading(true)
@@ -381,13 +412,16 @@ export function SettingsView() {
     }
   }
 
-  async function addPlaylist(e: React.FormEvent) {
-    e.preventDefault()
-    if (!newPlaylist.playlist_id) return
+  async function addPlaylist() {
+    const chosen = userPlaylists.find((p) => p.playlist_id === selectedPlaylistId)
+    if (!chosen) return
     try {
-      const created = await api.createRetentionPlaylist(newPlaylist)
+      const created = await api.createRetentionPlaylist({
+        playlist_id: chosen.playlist_id,
+        playlist_name: chosen.playlist_name,
+      })
       setPlaylists((prev) => [...prev, created])
-      setNewPlaylist({ playlist_id: '', playlist_name: '' })
+      setSelectedPlaylistId('')
       addToast('Retention playlist added', 'success')
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to add playlist', 'error')
@@ -516,21 +550,71 @@ export function SettingsView() {
             </li>
           ))}
         </ul>
-        <form onSubmit={addPlaylist} style={{ display: 'flex', gap: 8 }}>
-          <input
-            className="form-input"
-            placeholder="Playlist ID"
-            value={newPlaylist.playlist_id}
-            onChange={(e) => setNewPlaylist((p) => ({ ...p, playlist_id: e.target.value }))}
-          />
-          <input
-            className="form-input"
-            placeholder="Playlist name"
-            value={newPlaylist.playlist_name}
-            onChange={(e) => setNewPlaylist((p) => ({ ...p, playlist_name: e.target.value }))}
-          />
-          <button type="submit" className="button button--primary">Add</button>
-        </form>
+        {settings.account_connected ? (
+          <>
+            <label className="form-label" htmlFor="retention-playlist-select">
+              Add a retention playlist
+            </label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <select
+                id="retention-playlist-select"
+                className="form-select"
+                value={selectedPlaylistId}
+                onChange={(e) => setSelectedPlaylistId(e.target.value)}
+                disabled={userPlaylistsLoading || userPlaylistsError !== null}
+                aria-busy={userPlaylistsLoading}
+              >
+                <option value="">{userPlaylistsLoading ? 'Loading playlists...' : 'Select a playlist'}</option>
+                {userPlaylists
+                  .filter((p) => !playlists.some((r) => r.playlist_id === p.playlist_id))
+                  .map((p) => (
+                    <option key={p.playlist_id} value={p.playlist_id}>
+                      {p.playlist_name}
+                    </option>
+                  ))}
+              </select>
+              {userPlaylistsLoading && <Loader2 size={16} className="spinner" aria-hidden="true" style={{ alignSelf: 'center' }} />}
+              <button
+                type="button"
+                className="button button--primary"
+                onClick={() => void addPlaylist()}
+                disabled={!selectedPlaylistId}
+              >
+                Add
+              </button>
+            </div>
+            {userPlaylistsLoading && (
+              <div aria-live="polite" style={MUTED_STYLE}>
+                Loading playlists
+              </div>
+            )}
+            {!userPlaylistsLoading && userPlaylistsError === null && userPlaylists.length === 0 && (
+              <div aria-live="polite" style={MUTED_STYLE}>
+                No playlists found.{ ' ' }
+                <a
+                  href="https://www.youtube.com"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Create a playlist on YouTube first.
+                </a>
+              </div>
+            )}
+            {userPlaylistsError && (
+              <div className="form-error" role="alert" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <AlertCircle size={14} aria-hidden="true" />
+                {userPlaylistsError}
+                <button type="button" className="button" style={{ marginLeft: 8 }} onClick={loadUserPlaylists}>
+                  Retry
+                </button>
+              </div>
+            )}
+          </>
+        ) : (
+          <p style={MUTED_STYLE}>
+            Connect your YouTube account to choose your playlists for retention.
+          </p>
+        )}
       </div>
 
       <div className="card">
