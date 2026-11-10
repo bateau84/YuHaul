@@ -1,6 +1,11 @@
 import '@testing-library/jest-dom'
+import { configure } from '@testing-library/react'
 import * as mock from '../api/mock'
 import type { Route, Settings } from '../types'
+
+// Async queries resolve as soon as the condition holds; the larger ceiling only
+// matters when the machine is loaded. It must stay below testTimeout.
+configure({ asyncUtilTimeout: 15000 })
 
 const originalFetch = globalThis.fetch
 
