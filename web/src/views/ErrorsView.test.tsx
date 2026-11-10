@@ -95,6 +95,48 @@ describe('ErrorsView', () => {
     expect(screen.getByRole('button', { name: 'Dismiss deferred item: 5' })).toBeInTheDocument()
   })
 
+  it('opens the Deferred tab from ?tab=deferred', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
+    vi.spyOn(queueApi, 'listDeferred').mockResolvedValueOnce([
+      { id: 1, video_id: 5, video_title: 'Waiting One', status: 'pending', created_at: '2026-10-01T00:00:00Z', retry_count: 0, run_id: 41, deferral_reason: 'stopped_by_user' },
+    ])
+    render(
+      <MemoryRouter initialEntries={['/errors?tab=deferred']}>
+        <ToastProvider><ErrorsView /></ToastProvider>
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('Waiting One')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Deferred/ })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('warns that a handed-over item will not be retried and dismisses only after confirming', async () => {
+    const show = HTMLDialogElement.prototype.showModal
+    const close = HTMLDialogElement.prototype.close
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
+    HTMLDialogElement.prototype.close = function () { this.removeAttribute('open') }
+    try {
+      vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
+      vi.spyOn(queueApi, 'listDeferred').mockResolvedValueOnce([
+        { id: 7, video_id: 5, video_title: 'Handed One', status: 'pending', created_at: '2026-10-01T00:00:00Z', retry_count: 0, run_id: 41, deferral_reason: 'discarded_by_user' },
+      ])
+      const discard = vi.spyOn(queueApi, 'discardDeferred').mockResolvedValue(undefined as never)
+      render(
+        <MemoryRouter initialEntries={['/errors?tab=deferred']}>
+          <ToastProvider><ErrorsView /></ToastProvider>
+        </MemoryRouter>,
+      )
+      fireEvent.click(await screen.findByRole('button', { name: 'Dismiss deferred item: Handed One' }))
+      const dialog = screen.getByRole('dialog', { name: 'Dismiss this deferred item?' })
+      expect(dialog).toHaveTextContent('It will not be retried, but the historical record will be preserved.')
+      expect(discard).not.toHaveBeenCalled()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss' }))
+      await waitFor(() => expect(discard).toHaveBeenCalledWith(7))
+    } finally {
+      HTMLDialogElement.prototype.showModal = show
+      HTMLDialogElement.prototype.close = close
+    }
+  })
+
   it('dismisses an error and removes it from the list', async () => {
     renderWithProviders(<ErrorsView />)
 

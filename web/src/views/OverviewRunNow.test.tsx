@@ -217,7 +217,17 @@ describe('Overview Run Now acknowledgement and refusals', () => {
       expect(alert).toHaveTextContent('Run Now did nothing. Run 30 stopped at its time limit but cannot be resumed safely. No new run was started and nothing was changed. ' + sentence)
       expect(alert).not.toHaveTextContent(reason === 'brand_new_reason' ? reason : `raw server text`)
       expect(within(alert).getByRole('link', { name: 'View run 30' })).toHaveAttribute('href', '/runs/30')
-      expect(alert).toHaveTextContent('While run 30 is the oldest run stopped this way, Run Now will keep refusing. YuHaul does not offer a way to resume or discard it from this screen. The schedule is not affected.')
+      const discardable = reason !== 'recheck_at_write' && reason !== 'brand_new_reason'
+      if (discardable) {
+        expect(alert).toHaveTextContent('While run 30 is the oldest run stopped this way, Run Now will keep refusing. To unblock Run Now, you can discard run 30. The schedule is not affected.')
+        expect(within(alert).getByRole('button', { name: 'Discard run 30' })).toBeInTheDocument()
+      } else {
+        expect(within(alert).queryByRole('button', { name: /Discard run/ })).not.toBeInTheDocument()
+        expect(alert).not.toHaveTextContent('will keep refusing')
+        if (reason === 'brand_new_reason') {
+          expect(alert).toHaveTextContent('Run Now may keep refusing. Open the run to see whether it can be discarded. The schedule is not affected.')
+        }
+      }
       expect(alert).toHaveTextContent('Dry Run stays available.')
       expect(screen.getByRole('button', { name: /Run Now/i })).toBeEnabled()
       expect(screen.getByRole('button', { name: /Dry Run/i })).toBeEnabled()

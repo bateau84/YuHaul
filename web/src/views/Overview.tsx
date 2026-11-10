@@ -8,6 +8,7 @@ import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import type { Overview as OverviewData } from '../api/overview'
 import { ApiError } from '../api/core'
 import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
+import { DiscardRunControl } from '../components/DiscardRunControl'
 import { isStopping } from '../types'
 
 const RUN_POLL_INTERVAL_MS = 5000
@@ -34,6 +35,30 @@ const resumeReasonSentences: Record<string, string> = {
   recheck_at_write: 'Its saved state changed while Run Now was checking it. Check the run, then press Run Now again if that is still what you want.',
 }
 const resumeReasonFallback = 'The reason is not available in this version of the interface.'
+
+// The five reasons that make the run discardable (design: "Where the control
+// appears"). recheck_at_write and unknown reasons offer no button.
+const discardableReasons = new Set([
+  'snapshot_unavailable',
+  'snapshot_unreadable',
+  'snapshot_inadmissible',
+  'checkpoint_unrecognized',
+  'terminal_timestamp_contradiction',
+])
+
+function isDiscardableReason(reason?: string): boolean {
+  return reason !== undefined && discardableReasons.has(reason)
+}
+
+function resumeRefusalPromise(reason: string | undefined, runId: number | undefined): string {
+  const id = runId ?? 'it'
+  if (isDiscardableReason(reason)) {
+    return `While run ${id} is the oldest run stopped this way, Run Now will keep refusing. To unblock Run Now, you can discard run ${id}. The schedule is not affected.`
+  }
+  // The recheck_at_write sentence already says what to do; no refusal promise.
+  if (reason === 'recheck_at_write') return ''
+  return `While run ${id} is the oldest run stopped this way, Run Now may keep refusing. Open the run to see whether it can be discarded. The schedule is not affected.`
+}
 
 type RunNowNotice =
   | { kind: 'active' }
@@ -72,6 +97,7 @@ export function Overview() {
   const startingRunRef = useRef(false)
   const [startUncertain, setStartUncertain] = useState(false)
   const [notice, setNotice] = useState<RunNowNotice | null>(null)
+  const [noticeDiscarded, setNoticeDiscarded] = useState(false)
   const [statusStale, setStatusStale] = useState(false)
   const [statusCheckedAt, setStatusCheckedAt] = useState<Date | null>(null)
   const [stopOutcome, setStopOutcome] = useState<StopOutcome | null>(null)
@@ -134,8 +160,7 @@ export function Overview() {
     if (stopKind === 'accepted' || stopKind === 'already_stopping') stopMessageRef.current?.focus()
   }, [stopKind])
 
-  async function handleStopOutcome(outcome: StopOutcome) {
-    setStopOutcome(outcome)
+  async function refreshOverview() {
     try {
       const next = await api.getOverview()
       setOverview(next)
@@ -144,6 +169,16 @@ export function Overview() {
     } catch {
       setStatusStale(true)
     }
+  }
+
+  async function handleStopOutcome(outcome: StopOutcome) {
+    setStopOutcome(outcome)
+    await refreshOverview()
+  }
+
+  function handleDiscarded() {
+    setNoticeDiscarded(true)
+    void refreshOverview()
   }
 
   // Focus the Retry button whenever the view settles into the fetch-error
@@ -184,6 +219,7 @@ export function Overview() {
     startingRunRef.current = true
     setConfirmRun(false)
     setNotice(null)
+    setNoticeDiscarded(false)
     setStartingRun(true)
     try {
       const res = await api.startRun()
@@ -273,9 +309,21 @@ export function Overview() {
               {notice.runId !== undefined && (
                 <p style={{ margin: '8px 0 0' }}><Link to={`/runs/${notice.runId}`}>View run {notice.runId}</Link></p>
               )}
-              <p style={{ margin: '8px 0 0' }}>
-                While run {notice.runId ?? 'it'} is the oldest run stopped this way, Run Now will keep refusing. YuHaul does not offer a way to resume or discard it from this screen. The schedule is not affected. Dry Run stays available.
-              </p>
+              {!noticeDiscarded && (
+                <p style={{ margin: '8px 0 0' }}>
+                  {resumeRefusalPromise(notice.reason, notice.runId)} Dry Run stays available.
+                </p>
+              )}
+              {notice.runId !== undefined && isDiscardableReason(notice.reason) && (
+                <div style={{ margin: '8px 0 0' }}>
+                  <DiscardRunControl
+                    runId={notice.runId}
+                    cause={notice.reason}
+                    onDiscarded={handleDiscarded}
+                    onRefused={refreshOverview}
+                  />
+                </div>
+              )}
             </>
           )}
           {notice.kind === 'unavailable' && (

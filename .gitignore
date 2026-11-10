@@ -14,3 +14,4 @@ k8s/secret.yaml
 *.db-shm
 *.db-wal
 /yuhaul-server
+web/.vitest/

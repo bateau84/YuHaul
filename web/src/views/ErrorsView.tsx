@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import * as api from '../api/client'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
 import type { ErrorEntry, DeferredItem } from '../types'
@@ -20,7 +22,10 @@ function deferredReasonLabel(d: DeferredItem): string {
 }
 
 export function ErrorsView() {
-  const [tab, setTab] = useState<'errors' | 'deferred'>('errors')
+  // "View deferred queue" links open the Deferred tab with ?tab=deferred.
+  const [searchParams] = useSearchParams()
+  const [tab, setTab] = useState<'errors' | 'deferred'>(searchParams.get('tab') === 'deferred' ? 'deferred' : 'errors')
+  const [confirmDismiss, setConfirmDismiss] = useState<DeferredItem | null>(null)
   const [errors, setErrors] = useState<ErrorEntry[]>([])
   const [deferred, setDeferred] = useState<DeferredItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -229,7 +234,7 @@ export function ErrorsView() {
                             <button
                               className="button"
                               aria-label={`Dismiss deferred item: ${d.video_title ?? d.video_id}`}
-                              onClick={() => discardDeferred(d.id)}
+                              onClick={() => (isHandedOver(d) ? setConfirmDismiss(d) : discardDeferred(d.id))}
                             >
                               Dismiss
                             </button>
@@ -244,6 +249,23 @@ export function ErrorsView() {
           )}
         </>
       )}
+
+      {/* A handed-over video waits only for the next run, so dismissing it
+          means nothing will pick it up (design: "Deferred rows handed over"). */}
+      <ConfirmDialog
+        open={confirmDismiss !== null}
+        title="Dismiss this deferred item?"
+        confirmLabel="Dismiss"
+        destructive
+        onConfirm={() => {
+          const item = confirmDismiss
+          setConfirmDismiss(null)
+          if (item) void discardDeferred(item.id)
+        }}
+        onCancel={() => setConfirmDismiss(null)}
+      >
+        It will not be retried, but the historical record will be preserved.
+      </ConfirmDialog>
     </>
   )
 }

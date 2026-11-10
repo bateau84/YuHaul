@@ -101,7 +101,7 @@ describe('Run Detail — stop an active run', () => {
     expect(await screen.findByText('Run stopped by user')).toBeTruthy()
     expect(screen.getByText(/Last recorded phase: Processing playlist actions\./)).toBeTruthy()
     expect(screen.getByText(/Run 41 will not be resumed\. Its unfinished videos are in the deferred queue/)).toBeTruthy()
-    expect(screen.getByRole('link', { name: 'View deferred queue' }).getAttribute('href')).toBe('/errors')
+    expect(screen.getByRole('link', { name: 'View deferred queue' }).getAttribute('href')).toBe('/errors?tab=deferred')
     expect(screen.queryByText(/Run failed/)).toBeNull()
   })
 

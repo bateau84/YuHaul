@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import * as api from '../api/client'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
+import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
 import { useToast } from '../hooks/useToast'
 import { isStopping } from '../types'
 import type { Run, RunStatus, RunType } from '../types'
@@ -100,6 +101,8 @@ export function RunsView() {
   const firstRowRef = useRef<HTMLTableRowElement>(null)
   const recoveredRef = useRef(false)
   const { addToast } = useToast()
+  const [stopOutcome, setStopOutcome] = useState<StopOutcome | null>(null)
+  const stopMessageRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -189,6 +192,23 @@ export function RunsView() {
       addToast('Refresh failed. Please try again.', 'error')
     } finally {
       setRefreshing(false)
+    }
+  }
+
+  // Acknowledgements take focus (the Stop button was replaced); refusals do not.
+  const stopKind = stopOutcome?.kind
+  useEffect(() => {
+    if (stopKind === 'accepted' || stopKind === 'already_stopping') stopMessageRef.current?.focus()
+  }, [stopKind])
+
+  // Re-read the list so the row shows the saved status, not the press.
+  async function handleStopOutcome(outcome: StopOutcome) {
+    setStopOutcome(outcome)
+    try {
+      setRuns(await api.listRuns())
+      setRefreshError(false)
+    } catch {
+      setRefreshError(true)
     }
   }
 
@@ -325,6 +345,9 @@ export function RunsView() {
       ) : (
         <>
           {refreshErrorRegion}
+          {stopOutcome && (
+            <StopRunMessage ref={stopMessageRef} outcome={stopOutcome} onDismiss={() => setStopOutcome(null)} />
+          )}
           {visibleRuns.length === 0 ? (
             <div className="card empty-state">
               {filtersActive
@@ -343,6 +366,7 @@ export function RunsView() {
                     <th scope="col">Evaluated</th>
                     <th scope="col">Discovered</th>
                     <th scope="col">Quota</th>
+                    <th scope="col">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -357,6 +381,11 @@ export function RunsView() {
                       <td data-label="Evaluated">{r.videos_evaluated ?? '—'}</td>
                       <td data-label="Discovered">{r.videos_discovered}</td>
                       <td data-label="Quota">{r.quota_cost}</td>
+                      {/* Below 768px rows stack full width, so the 44px Stop
+                          button wraps inside the row at 320px with no clipping. */}
+                      <td data-label={r.status === 'running' ? 'Actions' : undefined}>
+                        {r.status === 'running' && <StopRunControl run={r} onOutcome={handleStopOutcome} />}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

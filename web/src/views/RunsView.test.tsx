@@ -55,6 +55,17 @@ describe('RunsView', () => {
     expect(within(table).getByText('42')).toBeInTheDocument()
   })
 
+  it('offers Stop run N only in rows of running runs', async () => {
+    vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([
+      runFixture({ id: 41, status: 'running' }),
+      runFixture({ id: 40, status: 'completed' }),
+      runFixture({ id: 39, status: 'stopped' }),
+    ])
+    renderView()
+    expect(await screen.findByRole('button', { name: 'Stop run 41' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^Stop run/ })).toHaveLength(1)
+  })
+
   it('renders empty state when the fetch succeeds with an empty list', async () => {
     vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([])
 

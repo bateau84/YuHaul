@@ -124,7 +124,7 @@ describe('DiscardRunControl', () => {
     expect(ack).toHaveTextContent(
       'Discarded: run 30 is now marked failed and will not be resumed. Its unfinished videos are in the deferred queue, and the next new run will process them automatically. Nothing was sent to YouTube. Press Run Now to continue with the next stopped run, or to start a new run.',
     )
-    expect(within(ack).getByRole('link', { name: 'View deferred queue' })).toHaveAttribute('href', '/errors')
+    expect(within(ack).getByRole('link', { name: 'View deferred queue' })).toHaveAttribute('href', '/errors?tab=deferred')
     expect(within(ack).getByRole('link', { name: 'View run 30' })).toHaveAttribute('href', '/runs/30')
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.queryByRole('button', { name: /Discard run/ })).toBeNull()

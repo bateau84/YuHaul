@@ -23,6 +23,8 @@ export {
   startDryRun,
   startReplay,
   startBacktest,
+  stopRun,
+  discardRun,
 } from './runs'
 
 // Overview is wired to the real backend.

@@ -5,6 +5,8 @@ import { Badge } from '../components/Badge'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { CausalExclusion } from '../components/CausalExclusion'
 import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
+import { DiscardRunControl } from '../components/DiscardRunControl'
+import { discardReasonSentence } from '../lib/discard-reason'
 import { useToast } from '../hooks/useToast'
 import { deriveRouteDecision, simulationExplanation, simulationMode, videoOutcomeLabels } from '../lib/outcome'
 import { routeAttribution } from '../lib/route-attribution'
@@ -160,6 +162,7 @@ function RunDetailContent({ id }: { id?: string }) {
   const [runRetrying, setRunRetrying] = useState(false)
   const [stopOutcome, setStopOutcome] = useState<StopOutcome | null>(null)
   const stopMessageRef = useRef<HTMLDivElement>(null)
+  const [discardAttempted, setDiscardAttempted] = useState(false)
   const [statusCheckedAt, setStatusCheckedAt] = useState<Date | null>(null)
   const [videos, setVideos] = useState<VideoOutcome[]>([])
   const [videoTotal, setVideoTotal] = useState(0)
@@ -340,6 +343,14 @@ function RunDetailContent({ id }: { id?: string }) {
     void loadRun()
   }
 
+  // A discard attempt can make the re-read run non-discardable; the control
+  // stays mounted (button withdrawn via `available`) so its acknowledgement or
+  // refusal message and focus survive that re-read.
+  function handleDiscardAttempt() {
+    setDiscardAttempted(true)
+    void loadRun()
+  }
+
   function applyOutcomeFilter(value: VideoFinalOutcome | '') {
     setPage(1)
     setOutcomeFilter(value)
@@ -493,7 +504,7 @@ function RunDetailContent({ id }: { id?: string }) {
               {!mode && (
                 <p style={{ margin: '8px 0 0' }}>
                   Run {run.id} will not be resumed. Its unfinished videos are in the deferred queue, and the next new run will process them automatically.{' '}
-                  <Link to="/errors">View deferred queue</Link>
+                  <Link to="/errors?tab=deferred">View deferred queue</Link>
                 </p>
               )}
             </>
@@ -503,11 +514,32 @@ function RunDetailContent({ id }: { id?: string }) {
           )}
           {timeLimited && (
             <p style={{ margin: '8px 0 0' }}>
-              Work done up to this point is saved. Pressing Run Now continues the oldest run stopped this way. This run continues only if it is the oldest and can be resumed safely.{' '}
+              Work done up to this point is saved. Pressing Run Now continues the oldest run stopped this way.
+              {run.discardable !== true && ' This run continues only if it is the oldest and can be resumed safely.'}{' '}
               <Link to="/">Go to Overview</Link>
             </p>
           )}
         </div>
+      )}
+
+      {/* Driven only by the run read's discardable fact. Kept mounted after a
+          confirmed discard so the acknowledgement survives the re-read. */}
+      {(run.discardable === true || discardAttempted) && (
+        <section className="card" aria-label="Discard run" style={{ marginBottom: 16 }}>
+          {run.discardable === true && (
+            <p style={{ margin: '0 0 8px' }}>
+              Run {run.id} cannot be resumed. {discardReasonSentence(run.discard_cause)} Run Now will keep refusing until run {run.id} is discarded.
+            </p>
+          )}
+          <DiscardRunControl
+            runId={run.id}
+            cause={run.discard_cause}
+            onRunPage
+            available={run.discardable === true}
+            onDiscarded={handleDiscardAttempt}
+            onRefused={handleDiscardAttempt}
+          />
+        </section>
       )}
 
       {mode && <h2 className="section-title">Hypothetical results</h2>}

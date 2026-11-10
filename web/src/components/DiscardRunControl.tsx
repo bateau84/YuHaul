@@ -2,24 +2,8 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError } from '../api/core'
 import { discardRefusalCode, discardRun, type DiscardRefusalCode, type DiscardRunResult } from '../api/runs'
+import { discardReasonSentence } from '../lib/discard-reason'
 import { ModalDialog } from './ModalDialog'
-
-// Reason sentences for the unusable-run causes (design: "Run Now — Resume After
-// a Time Limit", reason table). Anything else gets the neutral fallback; the raw
-// value is never shown.
-const REASON_SENTENCES: Record<string, string> = {
-  snapshot_unavailable: 'Its saved settings are missing.',
-  snapshot_unreadable: 'Its saved settings cannot be read.',
-  snapshot_inadmissible: 'Its saved settings cannot be used safely.',
-  checkpoint_unrecognized: 'Its saved progress point is not recognized.',
-  terminal_timestamp_contradiction:
-    'Its saved record is contradictory: it has a completion time but is marked interrupted.',
-}
-const FALLBACK_REASON = 'Its saved data cannot be used to continue it safely.'
-
-function discardReasonSentence(cause: string | undefined | null): string {
-  return (cause && REASON_SENTENCES[cause]) || FALLBACK_REASON
-}
 
 interface Props {
   runId: number
@@ -27,6 +11,11 @@ interface Props {
   cause?: string | null
   /** True when rendered on this run's own page: the "View run" link is omitted. */
   onRunPage?: boolean
+  /**
+   * False once the run read says the run is no longer discardable: the button is
+   * withdrawn but a refusal message or acknowledgement already shown stays.
+   */
+  available?: boolean
   /** Called after a confirmed discard so the page can re-read the run. */
   onDiscarded?: (result: DiscardRunResult) => void
   /** Called after a refusal or uncertain result so the page can re-read the run. */
@@ -123,7 +112,7 @@ function failureFor(err: unknown, runId: number, onRunPage: boolean): Failure {
  * That Cannot Be Resumed"). The component never infers discardability: the
  * parent renders it only when the run read says the run is discardable.
  */
-export function DiscardRunControl({ runId, cause, onRunPage = false, onDiscarded, onRefused }: Props) {
+export function DiscardRunControl({ runId, cause, onRunPage = false, available = true, onDiscarded, onRefused }: Props) {
   const [open, setOpen] = useState(false)
   const [pending, setPending] = useState(false)
   const [dialogFailure, setDialogFailure] = useState<Failure | null>(null)
@@ -186,7 +175,7 @@ export function DiscardRunControl({ runId, cause, onRunPage = false, onDiscarded
           Press Run Now to continue with the next stopped run, or to start a new run.
         </p>
         <p>
-          <Link to="/errors">View deferred queue</Link>
+          <Link to="/errors?tab=deferred">View deferred queue</Link>
           {!onRunPage && (
             <>
               {' '}
@@ -205,10 +194,12 @@ export function DiscardRunControl({ runId, cause, onRunPage = false, onDiscarded
           {pageFailure.body}
         </div>
       )}
-      <button type="button" ref={triggerRef} className="button" onClick={() => { setPageFailure(null); setOpen(true) }}>
-        Discard run {runId}
-      </button>
-      {open && (
+      {available && (
+        <button type="button" ref={triggerRef} className="button" onClick={() => { setPageFailure(null); setOpen(true) }}>
+          Discard run {runId}
+        </button>
+      )}
+      {available && open && (
         <ModalDialog labelledBy={titleId} describedBy={descId} initialFocusRef={keepRef} onCancel={close}>
           <div aria-busy={pending}>
             <h2 id={titleId} className="modal-title">Discard run {runId}?</h2>
