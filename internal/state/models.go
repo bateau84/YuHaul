@@ -87,6 +87,9 @@ const (
 	RunStatusCompleted   RunStatus = "completed"
 	RunStatusInterrupted RunStatus = "interrupted"
 	RunStatusFailed      RunStatus = "failed"
+	// RunStatusStopped is a run the user stopped (run-initiation ADR-004). It
+	// is final and always carries StopRequestedAt.
+	RunStatusStopped RunStatus = "stopped"
 )
 
 // Run is a single execution of the processing pipeline.
@@ -121,6 +124,9 @@ type Run struct {
 	// (ARD-001 failure diagnostic boundary).
 	InterruptReason *string `json:"interrupt_reason"`
 	CurrentPhase    *string `json:"current_phase"`
+	// StopRequestedAt is the durable stop marker. It is set once, on a running
+	// run, when the user presses Stop; the run then ends only as stopped.
+	StopRequestedAt *time.Time `json:"stop_requested_at"`
 
 	// ActionAuthorityVersion is write-once producer evidence; zero is legacy/unknown.
 	ActionAuthorityVersion int `json:"-"`

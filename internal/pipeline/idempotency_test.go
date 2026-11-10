@@ -74,6 +74,28 @@ type mockYouTubeServer struct {
 	insertDecision func(playlistID, videoID string) (int, string)
 	// requests counts every HTTP request the endpoint received.
 	requests atomic.Int64
+	// gate, when set, runs for every request before it is handled; it may block
+	// to hold the request in flight. log records when each request started.
+	gate func(r *http.Request)
+	log  []requestRecord
+}
+
+type requestRecord struct {
+	Method, Path string
+	At           time.Time
+}
+
+// RequestLog returns every request the endpoint received, in arrival order.
+func (m *mockYouTubeServer) RequestLog() []requestRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]requestRecord(nil), m.log...)
+}
+
+func (m *mockYouTubeServer) setGate(g func(r *http.Request)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gate = g
 }
 
 type playlistInsertion struct {
@@ -111,6 +133,13 @@ func newMockYouTubeServer(channels []mockChannel, videos []mockVideo) *mockYouTu
 	mux.HandleFunc("/videos", m.handleVideos)
 	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.requests.Add(1)
+		m.mu.Lock()
+		m.log = append(m.log, requestRecord{Method: r.Method, Path: r.URL.Path, At: time.Now()})
+		gate := m.gate
+		m.mu.Unlock()
+		if gate != nil {
+			gate(r)
+		}
 		mux.ServeHTTP(w, r)
 	}))
 	return m

@@ -223,3 +223,40 @@ func TestInterruptReasonKeepsContextCodeAndStepFacts(t *testing.T) {
 		})
 	}
 }
+
+// Stop and discard reasons (run-initiation ARS-003 §1.3, ARS-002 §1).
+func TestStopAndDiscardReasonsRoundTrip(t *testing.T) {
+	for _, s := range []string{
+		"diag:v1 phase=unknown operation=stop_run code=stopped_by_user",
+		"diag:v1 phase=unknown operation=discard_run code=snapshot_unavailable",
+		"diag:v1 phase=unknown operation=discard_run code=snapshot_unreadable",
+		"diag:v1 phase=unknown operation=discard_run code=checkpoint_unrecognized",
+	} {
+		got, ok := AdmitStored(s)
+		if !ok || got != s {
+			t.Errorf("AdmitStored(%q) = %q, %v", s, got, ok)
+		}
+		if g := GuardErrorText(s); g != s {
+			t.Errorf("GuardErrorText(%q) = %q", s, g)
+		}
+	}
+	for _, f := range []Facts{
+		{Phase: "unknown", Operation: "stop_run", Code: "timeout"},
+		{Phase: "unknown", Operation: "finalize_run", Code: "stopped_by_user"},
+		{Phase: "unknown", Operation: "stop_run", Code: "stopped_by_user", Status: "500"},
+		{Phase: "unknown", Operation: "discard_run", Code: "timeout"},
+		{Phase: "unknown", Operation: "finalize_run", Code: "snapshot_unavailable"},
+		{Phase: "unknown", Operation: "discard_run", Code: "snapshot_unavailable", Status: "500"},
+		{Phase: "unknown", Operation: "discard_run", Code: "stopped_by_user"},
+		{Phase: "unknown", Operation: "stop_run", Code: "snapshot_unreadable"},
+	} {
+		if f.Valid() {
+			t.Errorf("%+v must be invalid", f)
+		}
+	}
+	for _, r := range []string{"stopped_by_user", "discarded_by_user"} {
+		if _, ok := GuardDisposition(r, "queue_reason"); !ok {
+			t.Errorf("queue_reason %s rejected", r)
+		}
+	}
+}

@@ -38,6 +38,9 @@ type Pipeline interface {
 	ExecuteReplay(ctx context.Context, runID int64)
 	Backtest(ctx context.Context, proposed *config.ProposalSnapshot, rng state.PublishedRange) (*state.Run, error)
 	ExecuteBacktest(ctx context.Context, runID int64)
+	StopRun(ctx context.Context, runID int64) (*pipeline.StopResult, error)
+	DiscardRun(ctx context.Context, runID int64) (*pipeline.DiscardResult, error)
+	DiscardableRun(ctx context.Context) (runID int64, cause string, ok bool, err error)
 }
 
 // ConfigHandler is the subset of config.Handler used by the server.
@@ -523,6 +526,8 @@ func (noopQueueHandler) DeferredHandler() http.Handler {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/runs", s.handleStartRun)
+	mux.HandleFunc("POST /api/runs/{id}/stop", s.handleStopRun)
+	mux.HandleFunc("POST /api/runs/{id}/discard", s.handleDiscardRun)
 	mux.HandleFunc("POST /api/runs/dry-run", s.handleDryRun)
 	mux.HandleFunc("POST /api/runs/replay", s.handleReplay)
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
@@ -849,7 +854,12 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	if runs == nil {
 		runs = []state.Run{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+	d := s.discardState(r.Context())
+	projected := make([]any, 0, len(runs))
+	for _, run := range runs {
+		projected = append(projected, s.projectRun(r.Context(), run, d))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": projected})
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
@@ -869,7 +879,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load run")
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	writeJSON(w, http.StatusOK, s.projectRun(r.Context(), *run, s.discardState(r.Context())))
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -879,7 +889,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load overview")
 		return
 	}
-	writeJSON(w, http.StatusOK, overview)
+	writeJSON(w, http.StatusOK, s.projectOverview(r.Context(), overview))
 }
 
 func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
@@ -932,7 +942,7 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
-			if ev.Type == pipeline.EventRunCompleted || ev.Type == pipeline.EventRunError {
+			if ev.Type == pipeline.EventRunCompleted || ev.Type == pipeline.EventRunError || ev.Type == pipeline.EventRunStopped {
 				return
 			}
 		case <-ticker.C:

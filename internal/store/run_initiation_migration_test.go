@@ -58,7 +58,7 @@ func TestMigration024UpgradeLeavesExistingRunsUntouched(t *testing.T) {
 	require.NoError(t, err)
 	var version int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM schema_migrations LIMIT 1`).Scan(&version))
-	require.Equal(t, 24, version)
+	require.GreaterOrEqual(t, version, 24)
 
 	after, _ := dumpColumns(t, db, oldColumns)
 	require.Equal(t, before, after, "no existing column value may change")

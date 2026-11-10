@@ -49,6 +49,7 @@ func (p *Pipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (
 		run.ID = id
 	}
 
+	p.registerRun(run.ID)
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	return run, nil
 }
@@ -61,6 +62,13 @@ func (p *Pipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (
 func (p *Pipeline) ExecuteDryRun(ctx context.Context, runID int64) {
 	logger := p.logger.With("run_id", runID, "run_type", state.RunTypeDryRun)
 	logger.InfoContext(ctx, "dry-run execute started")
+
+	ctl := p.registerRun(runID)
+	defer p.finishRun(ctx, runID)
+	ctx, stopped := ctl.attach(ctx)
+	if stopped {
+		return
+	}
 
 	defer func() {
 		if r := recover(); r != nil {

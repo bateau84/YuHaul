@@ -69,6 +69,15 @@ type fakePipeline struct {
 	backtestCalls    int
 	done             chan struct{}
 	proposalErr      error
+
+	stopRes       *pipeline.StopResult
+	stopErr       error
+	discardRes    *pipeline.DiscardResult
+	discardErr    error
+	discardableID int64
+	discardCause  string
+	discardableOK bool
+	discardableEr error
 }
 
 func newFakePipeline(run *state.Run) *fakePipeline {
@@ -133,6 +142,18 @@ func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSn
 func (f *fakePipeline) ExecuteBacktest(ctx context.Context, runID int64) {
 	f.execute = runID
 	close(f.done)
+}
+
+func (f *fakePipeline) StopRun(ctx context.Context, runID int64) (*pipeline.StopResult, error) {
+	return f.stopRes, f.stopErr
+}
+
+func (f *fakePipeline) DiscardRun(ctx context.Context, runID int64) (*pipeline.DiscardResult, error) {
+	return f.discardRes, f.discardErr
+}
+
+func (f *fakePipeline) DiscardableRun(ctx context.Context) (int64, string, bool, error) {
+	return f.discardableID, f.discardCause, f.discardableOK, f.discardableEr
 }
 
 type fakeOverviewProvider struct {

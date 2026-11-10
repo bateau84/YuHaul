@@ -87,6 +87,8 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 		}
 		return err
 	}
+	ctl := p.registerRun(run.ID)
+	defer p.finishRun(ctx, run.ID)
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	// A manual retry run has no discovery workload: its selector is the claim
 	// above, whose owned retry rows are now the run's complete input set.
@@ -98,8 +100,15 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 		p.captureSelectedCount(ctx, run.ID, len(ids))
 	}
 	ctx = context.WithValue(ctx, guardedRetryGroupKey{}, claimedReceipt)
+	ctx, stopped := ctl.attach(ctx)
+	if stopped {
+		return nil // settled by finishRun
+	}
 	if err := p.processDeferredItems(ctx, run.ID); err != nil {
 		p.failRun(ctx, run.ID, "manual retry failed", err)
+		if stopOwnsEnding(ctx) {
+			return nil // the user stopped this retry; finishRun settles it
+		}
 		return err
 	}
 	p.completeRun(ctx, run.ID)

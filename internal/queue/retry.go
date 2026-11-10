@@ -135,8 +135,15 @@ func (s *Store) WithRetryTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommit, err)
+	}
+	return nil
 }
+
+// ErrCommit marks an error returned by WithRetryTx when fn succeeded but the
+// transaction's Commit failed. The commit's outcome is then unconfirmed.
+var ErrCommit = errors.New("queue: commit retry transaction")
 
 // ClaimDeferredGroupTx claims the selected item's outstanding video siblings.
 // false means stale/ineligible work or another live owner; it changes nothing.
@@ -198,7 +205,7 @@ func (s *Store) claimRetryGroupTx(ctx context.Context, tx *sql.Tx, entryID, runI
 		err := tx.QueryRowContext(ctx, `SELECT EXISTS (
 		 SELECT 1 FROM deferred_item d LEFT JOIN run r ON r.id = d.retry_run_id
 		 WHERE d.video_id = ? AND ((d.status = 'pending' AND (d.retry_after IS NULL OR julianday(d.retry_after) <= julianday(?)))
-		 OR (d.status = 'retrying' AND (d.retry_run_id IS NULL OR r.status = 'failed'))))`, videoID, now.UTC().Format(time.RFC3339Nano)).Scan(&eligible)
+		 OR (d.status = 'retrying' AND (d.retry_run_id IS NULL OR r.status IN ('failed','stopped')))))`, videoID, now.UTC().Format(time.RFC3339Nano)).Scan(&eligible)
 		if err != nil || !eligible {
 			return receipt, videoID, false, err
 		}
@@ -277,7 +284,7 @@ func retryOwner(ctx context.Context, tx *sql.Tx, videoID int64) (int64, error) {
 		if !status.Valid || (mode.String != "manual" && mode.String != "scheduled") {
 			return 0, fmt.Errorf("video %d invalid owner %d: %w", videoID, id, ErrRetryOwnership)
 		}
-		if status.String == "failed" {
+		if status.String == "failed" || status.String == "stopped" {
 			continue
 		}
 		if (status.String != "running" && status.String != "interrupted") || (owner != 0 && owner != id) {
@@ -465,7 +472,7 @@ func (s *Store) ListDeferredRetryCandidates(ctx context.Context, now time.Time) 
 	 FROM deferred_item d JOIN video v ON v.id = d.video_id
 	 WHERE d.id = (SELECT x.id FROM deferred_item x WHERE x.video_id = d.video_id AND x.status IN ('pending','retrying') ORDER BY x.created_at, x.id LIMIT 1)
 	 AND EXISTS (SELECT 1 FROM deferred_item x LEFT JOIN run r ON r.id = x.retry_run_id WHERE x.video_id = d.video_id AND
-	 ((x.status = 'pending' AND (x.retry_after IS NULL OR julianday(x.retry_after) <= julianday(?))) OR (x.status = 'retrying' AND (x.retry_run_id IS NULL OR r.status = 'failed'))))
+	 ((x.status = 'pending' AND (x.retry_after IS NULL OR julianday(x.retry_after) <= julianday(?))) OR (x.status = 'retrying' AND (x.retry_run_id IS NULL OR r.status IN ('failed','stopped')))))
 	 ORDER BY d.created_at, d.id`, now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err

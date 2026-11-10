@@ -263,6 +263,9 @@ func (p *Pipeline) retainAuthorityFailure(ctx context.Context, runID int64, vide
 // cannot complete, the run is left resumable as interrupted and is never
 // failed. It reports whether the run became failed.
 func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason string, retain func(context.Context, *queue.Store, *sql.Tx) error) bool {
+	if !p.mayFinalize(runID) {
+		return false
+	}
 	qs, err := queue.NewStore(p.db)
 	if err != nil {
 		p.logger.ErrorContext(ctx, "open run retention store", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "retain_failure"))
@@ -303,45 +306,8 @@ func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason strin
 // a retained queue (ADR-006 §3). It makes no provider call, touches no send
 // guard and writes no action evidence or counters.
 func sweepStrandedWork(ctx context.Context, qs *queue.Store, tx *sql.Tx, runID int64, reason string) error {
-	var runType string
-	if err := tx.QueryRowContext(ctx, `SELECT run_type FROM run WHERE id=?`, runID).Scan(&runType); err != nil {
-		return fmt.Errorf("sweep run %d: %w", runID, err)
-	}
-	if runType != string(state.RunTypeManual) && runType != string(state.RunTypeScheduled) {
-		return nil
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT v.id,
-	  EXISTS(SELECT 1 FROM deferred_item d WHERE d.video_id=v.id AND d.retry_run_id=?1)
-	   OR EXISTS(SELECT 1 FROM error_entry e WHERE e.video_id=v.id AND e.retry_run_id=?1)
-	 FROM video v
-	 WHERE (v.discovered_in_run_id=?1
-	   OR v.id IN (SELECT video_id FROM route_decision WHERE run_id=?1)
-	   OR v.id IN (SELECT video_id FROM deferred_item WHERE retry_run_id=?1)
-	   OR v.id IN (SELECT video_id FROM error_entry WHERE retry_run_id=?1))
-	  AND v.processing_state <> 'completed'
-	  AND NOT EXISTS(SELECT 1 FROM run_video_outcome o WHERE o.run_id=?1 AND o.video_id=v.id
-	   AND o.final_outcome IN ('accepted','rejected','excluded','deferred','failed'))
-	 ORDER BY v.id`, runID)
+	unfinished, err := unfinishedRunMembersTx(ctx, tx, runID)
 	if err != nil {
-		return fmt.Errorf("select unfinished videos: %w", err)
-	}
-	type member struct {
-		videoID    int64
-		retryOwned bool
-	}
-	var unfinished []member
-	for rows.Next() {
-		var m member
-		if err := rows.Scan(&m.videoID, &m.retryOwned); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan unfinished video: %w", err)
-		}
-		unfinished = append(unfinished, m)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, m := range unfinished {
@@ -369,6 +335,9 @@ func (p *Pipeline) interruptAuthorityRun(ctx context.Context, runID int64, reaso
 // context. A non-empty cause is stored with the status in the same write; an
 // empty cause means the cause is not proven and is stored as NULL.
 func (p *Pipeline) interruptRunWithCause(ctx context.Context, runID int64, reason, cause string) {
+	if !p.mayFinalize(runID) {
+		return
+	}
 	finalizeCtx, cancel := runFinalizationContext(ctx)
 	defer cancel()
 	var err error
@@ -380,4 +349,69 @@ func (p *Pipeline) interruptRunWithCause(ctx context.Context, runID int64, reaso
 	if err != nil {
 		p.logger.ErrorContext(ctx, "interrupt authority run finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
 	}
+}
+
+// unfinishedMember is a video a production run has not finished, and whether a
+// queue row it claimed refers to it.
+type unfinishedMember struct {
+	videoID    int64
+	retryOwned bool
+}
+
+// unfinishedRunMembersTx selects the videos a production run has not finished
+// (ADR-006 §3). A non-production run has none.
+func unfinishedRunMembersTx(ctx context.Context, tx *sql.Tx, runID int64) ([]unfinishedMember, error) {
+	var runType string
+	if err := tx.QueryRowContext(ctx, `SELECT run_type FROM run WHERE id=?`, runID).Scan(&runType); err != nil {
+		return nil, fmt.Errorf("sweep run %d: %w", runID, err)
+	}
+	if runType != string(state.RunTypeManual) && runType != string(state.RunTypeScheduled) {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT v.id,
+	  EXISTS(SELECT 1 FROM deferred_item d WHERE d.video_id=v.id AND d.retry_run_id=?1)
+	   OR EXISTS(SELECT 1 FROM error_entry e WHERE e.video_id=v.id AND e.retry_run_id=?1)
+	 FROM video v
+	 WHERE (v.discovered_in_run_id=?1
+	   OR v.id IN (SELECT video_id FROM route_decision WHERE run_id=?1)
+	   OR v.id IN (SELECT video_id FROM deferred_item WHERE retry_run_id=?1)
+	   OR v.id IN (SELECT video_id FROM error_entry WHERE retry_run_id=?1))
+	  AND v.processing_state <> 'completed'
+	  AND NOT EXISTS(SELECT 1 FROM run_video_outcome o WHERE o.run_id=?1 AND o.video_id=v.id
+	   AND o.final_outcome IN ('accepted','rejected','excluded','deferred','failed'))
+	 ORDER BY v.id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("select unfinished videos: %w", err)
+	}
+	var unfinished []unfinishedMember
+	for rows.Next() {
+		var m unfinishedMember
+		if err := rows.Scan(&m.videoID, &m.retryOwned); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan unfinished video: %w", err)
+		}
+		unfinished = append(unfinished, m)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return unfinished, nil
+}
+
+// listUnfinishedRunVideosTx returns the IDs of the videos a production run has
+// not finished, for the deferred-queue handoff (ARS-003 §2). Non-production
+// runs return an empty set.
+func listUnfinishedRunVideosTx(ctx context.Context, tx *sql.Tx, runID int64) ([]int64, error) {
+	members, err := unfinishedRunMembersTx(ctx, tx, runID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(members))
+	for _, m := range members {
+		ids = append(ids, m.videoID)
+	}
+	return ids, nil
 }

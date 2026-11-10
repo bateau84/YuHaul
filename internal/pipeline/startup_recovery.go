@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bateau84/YuHaul/internal/diag"
 )
@@ -70,16 +71,38 @@ func (e *startupCheckError) Error() string {
 }
 
 func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
+	// Rows with a stop marker were accepted by a stop that did not finish
+	// settling. Read their ledger cost before the transaction: WithRetryTx and
+	// this transaction forbid a second connection (ARS-003 §3.7).
+	marked, err := p.markedStopRuns(ctx)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("startup recovery transaction: %w", err)
 	}
 	defer tx.Rollback()
+	// A marked row is settled first and never resumed. A settle failure blocks
+	// startup: the row cannot be resumed and must not be skipped.
+	if len(marked) > 0 {
+		qs, err := p.retryStore()
+		if err != nil {
+			return nil, fmt.Errorf("startup recovery stop settlement: %w", err)
+		}
+		for _, m := range marked {
+			if _, err := settleStopTx(ctx, qs, p.stateStore, tx, m.id, m.quotaCost, time.Now().UTC()); err != nil {
+				p.logger.ErrorContext(ctx, "startup stop settlement failed", "run_id", m.id, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+				return nil, &startupCheckError{m.id, "stop_settlement"}
+			}
+			p.logger.InfoContext(ctx, "startup settled a stopped run", "run_id", m.id)
+		}
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT r.id, r.status, r.completed_at, r.current_phase,
- r.mutation_safety_version, r.action_authority_version, c.snapshot
+ r.mutation_safety_version, r.action_authority_version, c.snapshot, r.run_type, r.initiated_by, r.interrupt_cause
  FROM run r LEFT JOIN config_version c ON c.id=r.config_version_id
  WHERE r.run_type IN ('manual','scheduled') AND (r.status IN ('running','interrupted') OR (r.status='completed' AND r.completed_at IS NULL))
- AND r.mutation_safety_version <> 0
+ AND r.mutation_safety_version <> 0 AND r.stop_requested_at IS NULL
  ORDER BY r.started_at, r.id`)
 	if err != nil {
 		return nil, fmt.Errorf("startup recovery read: %w", err)
@@ -92,13 +115,21 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 	for rows.Next() {
 		var id int64
 		var status string
-		var completed, phase, snapshot sql.NullString
+		var completed, phase, snapshot, runType, initiatedBy, interruptCause sql.NullString
 		var safety, authority int
-		if err := rows.Scan(&id, &status, &completed, &phase, &safety, &authority, &snapshot); err != nil {
+		if err := rows.Scan(&id, &status, &completed, &phase, &safety, &authority, &snapshot, &runType, &initiatedBy, &interruptCause); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("startup recovery scan: %w", err)
 		}
+		// The one row startup leaves alone: a time-limit Run Now run that Run
+		// Now cannot resume. The user discards it from Run Detail (BR-017 AC11).
+		timeLimitRunNow := runType.String == "manual" && initiatedBy.String == "run_now" && status == "interrupted" &&
+			interruptCause.String == "time_limit" && safety == 1 && authority == 1
 		if status == "completed" || completed.Valid {
+			if timeLimitRunNow {
+				p.logUnusableTimeLimitRun(ctx, id, resumeTerminalContradiction)
+				continue
+			}
 			rows.Close()
 			return nil, &startupCheckError{id, "terminal_timestamp_contradiction"}
 		}
@@ -107,6 +138,10 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 			return nil, &startupCheckError{id, "authority"}
 		}
 		if reason := validateResumableRow(completed, phase, snapshot); reason != "" {
+			if timeLimitRunNow {
+				p.logUnusableTimeLimitRun(ctx, id, reason)
+				continue
+			}
 			rows.Close()
 			return nil, &startupCheckError{id, startupCheckFor(reason)}
 		}
@@ -142,4 +177,46 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 		return nil, fmt.Errorf("startup recovery commit: %w", err)
 	}
 	return ids, nil
+}
+
+func (p *Pipeline) logUnusableTimeLimitRun(ctx context.Context, runID int64, reason string) {
+	p.logger.WarnContext(ctx, "startup recovery left unusable run",
+		"run_id", runID, "cause", discardCauseFor(reason), "reason", reason)
+}
+
+type markedStopRun struct {
+	id        int64
+	quotaCost int
+}
+
+// markedStopRuns lists the runs that carry a stop marker and are not yet
+// stopped, oldest first, with their ledger cost.
+func (p *Pipeline) markedStopRuns(ctx context.Context) ([]markedStopRun, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT id FROM run WHERE stop_requested_at IS NOT NULL AND status IN ('running','interrupted') ORDER BY started_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("startup recovery read stop markers: %w", err)
+	}
+	var out []markedStopRun
+	for rows.Next() {
+		var m markedStopRun
+		if err := rows.Scan(&m.id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("startup recovery scan stop marker: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("startup recovery iterate stop markers: %w", err)
+	}
+	for i := range out {
+		cost, err := p.machine.RunQuotaCost(ctx, out[i].id)
+		if err != nil {
+			return nil, &startupCheckError{out[i].id, "stop_settlement"}
+		}
+		out[i].quotaCost = cost
+	}
+	return out, nil
 }

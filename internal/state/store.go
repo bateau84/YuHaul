@@ -124,7 +124,7 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run ORDER BY started_at DESC;`)
@@ -156,7 +156,7 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run WHERE status = ? AND completed_at IS NULL
@@ -189,7 +189,7 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
 		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
-		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
 		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run WHERE id = ?;`, id)
@@ -240,7 +240,7 @@ func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE run
 		 SET status = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
-		 WHERE id = ?;`,
+		 WHERE id = ? AND stop_requested_at IS NULL;`,
 		RunStatusCompleted, formatRunTime(time.Now()), durationSeconds, quotaCost, id)
 	if err != nil {
 		return fmt.Errorf("completing run %d: %w", id, err)
@@ -259,7 +259,7 @@ func (s *Store) FailRun(ctx context.Context, id int64, reason string, durationSe
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE run
 		 SET status = ?, interrupt_reason = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
-		 WHERE id = ?;`,
+		 WHERE id = ? AND stop_requested_at IS NULL;`,
 		RunStatusFailed, reason, formatRunTime(time.Now()), durationSeconds, quotaCost, id)
 	if err != nil {
 		return fmt.Errorf("failing run %d: %w", id, err)
@@ -274,7 +274,7 @@ func (s *Store) FailRun(ctx context.Context, id int64, reason string, durationSe
 func (s *Store) InterruptRun(ctx context.Context, id int64, reason string) error {
 	reason = diag.GuardErrorText(reason)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = NULL WHERE id = ?;`,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = NULL WHERE id = ? AND stop_requested_at IS NULL;`,
 		RunStatusInterrupted, reason, id)
 	if err != nil {
 		return fmt.Errorf("interrupting run %d: %w", id, err)
@@ -292,7 +292,7 @@ func (s *Store) InterruptRun(ctx context.Context, id int64, reason string) error
 func (s *Store) InterruptRunWithCause(ctx context.Context, id int64, reason, cause string) error {
 	reason = diag.GuardErrorText(reason)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = ? WHERE id = ?;`,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = ? WHERE id = ? AND stop_requested_at IS NULL;`,
 		RunStatusInterrupted, reason, cause, id)
 	if err != nil {
 		return fmt.Errorf("interrupting run %d with cause: %w", id, err)
@@ -906,7 +906,16 @@ func createConditionAudit(ctx context.Context, db execer, a *ConditionAudit) (in
 
 // RecomputeRunCounters recomputes outcome counters for a run from video rows.
 func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
-	_, err := s.db.ExecContext(ctx,
+	return recomputeRunCounters(ctx, s.db, runID)
+}
+
+// RecomputeRunCountersTx is RecomputeRunCounters inside the caller's transaction.
+func (s *Store) RecomputeRunCountersTx(ctx context.Context, tx *sql.Tx, runID int64) error {
+	return recomputeRunCounters(ctx, tx, runID)
+}
+
+func recomputeRunCounters(ctx context.Context, db execer, runID int64) error {
+	_, err := db.ExecContext(ctx,
 		`UPDATE run SET
 		  videos_discovered = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ?),
 		  videos_accepted = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
@@ -958,7 +967,17 @@ func (s *Store) IncrementChannelRetainedTx(ctx context.Context, tx *sql.Tx, chan
 // evidence exists (without a matched or not-matched route), and
 // discovered when any route decision was recorded.
 func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int64) error {
-	_, err := s.db.ExecContext(ctx,
+	return recomputeRunCountersFromDecisions(ctx, s.db, runID)
+}
+
+// RecomputeRunCountersFromDecisionsTx is RecomputeRunCountersFromDecisions
+// inside the caller's transaction.
+func (s *Store) RecomputeRunCountersFromDecisionsTx(ctx context.Context, tx *sql.Tx, runID int64) error {
+	return recomputeRunCountersFromDecisions(ctx, tx, runID)
+}
+
+func recomputeRunCountersFromDecisions(ctx context.Context, db execer, runID int64) error {
+	_, err := db.ExecContext(ctx,
 		`UPDATE run SET
 		  videos_discovered = (SELECT COUNT(DISTINCT video_id) FROM route_decision WHERE run_id = ?),
 		  videos_accepted = (
@@ -1016,7 +1035,7 @@ func scanRun(sc interface {
 }) (*Run, error) {
 	r := &Run{}
 	var completedAt, interruptReason, currentPhase, initiatedBy, interruptCause sql.NullString
-	var publishedFrom, publishedTo sql.NullString
+	var publishedFrom, publishedTo, stopRequestedAt sql.NullString
 	var durationSeconds sql.NullFloat64
 	var configVersionID sql.NullInt64
 	var selectedVideoCount sql.NullInt64
@@ -1024,7 +1043,7 @@ func scanRun(sc interface {
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
 		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
 		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion,
-		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &r.VideosEvaluated)
+		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &stopRequestedAt, &r.VideosEvaluated)
 	if err != nil {
 		return nil, err
 	}
@@ -1041,6 +1060,9 @@ func scanRun(sc interface {
 		r.InterruptCause = &interruptCause.String
 	}
 	if r.CompletedAt, err = parseStoredTimestamp(completedAt); err != nil {
+		return nil, err
+	}
+	if r.StopRequestedAt, err = parseStoredTimestamp(stopRequestedAt); err != nil {
 		return nil, err
 	}
 	if r.ActionAuthorityVersion != 0 && r.ActionAuthorityVersion != 1 {
@@ -1165,4 +1187,50 @@ func scanConditionAudit(sc interface {
 		a.ActualValue = &actualValue.String
 	}
 	return a, nil
+}
+
+// ErrRunStopNotApplied is returned when a stop settle or discard write did not
+// change exactly one row.
+var ErrRunStopNotApplied = errors.New("state: run stop write did not apply")
+
+// StopRunTx writes the terminal stopped state inside tx (ARS-003 §3.3). The
+// run must carry a stop marker and be running or interrupted; exactly one row
+// must change.
+func (s *Store) StopRunTx(ctx context.Context, tx *sql.Tx, id int64, reason string, quotaCost int, now time.Time) error {
+	reason = diag.GuardErrorText(reason)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = NULL,
+		        completed_at = ?, duration_seconds = (julianday(?) - julianday(started_at)) * 86400, quota_cost = ?
+		 WHERE id = ? AND stop_requested_at IS NOT NULL AND status IN ('running','interrupted');`,
+		RunStatusStopped, reason, formatRunTime(now), formatRunTime(now), quotaCost, id)
+	if err != nil {
+		return fmt.Errorf("stopping run %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("stopping run %d: %w", id, ErrRunStopNotApplied)
+	}
+	return nil
+}
+
+// DiscardRunTx writes the terminal failed state of a user discard inside tx
+// (ARS-002 §2.5). Only the Run Now time-limit candidate qualifies; exactly one
+// row must change.
+func (s *Store) DiscardRunTx(ctx context.Context, tx *sql.Tx, id int64, reason string, quotaCost int) error {
+	reason = diag.GuardErrorText(reason)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE run
+		 SET status = ?, interrupt_reason = ?, interrupt_cause = NULL,
+		     completed_at = COALESCE(completed_at, ?), quota_cost = ?
+		 WHERE id = ? AND status = ? AND run_type = 'manual'
+		   AND initiated_by = 'run_now' AND interrupt_cause = 'time_limit'
+		   AND mutation_safety_version = 1 AND action_authority_version = 1
+		   AND stop_requested_at IS NULL;`,
+		RunStatusFailed, reason, formatRunTime(time.Now()), quotaCost, id, RunStatusInterrupted)
+	if err != nil {
+		return fmt.Errorf("discarding run %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("discarding run %d: %w", id, ErrRunStopNotApplied)
+	}
+	return nil
 }

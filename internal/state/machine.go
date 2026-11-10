@@ -446,7 +446,7 @@ func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 		return nil, err
 	}
 
-	quotaCost, err := m.runQuotaCost(ctx, runID)
+	quotaCost, err := m.RunQuotaCost(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +473,7 @@ func (m *Machine) FailRun(ctx context.Context, runID int64, reason string) (*Run
 		return nil, err
 	}
 
-	quotaCost, err := m.runQuotaCost(ctx, runID)
+	quotaCost, err := m.RunQuotaCost(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +500,7 @@ func (m *Machine) FailHistoricalRun(ctx context.Context, runID int64, reason str
 		return nil, err
 	}
 
-	quotaCost, err := m.runQuotaCost(ctx, runID)
+	quotaCost, err := m.RunQuotaCost(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +524,7 @@ func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run,
 		return nil, err
 	}
 
-	quotaCost, err := m.runQuotaCost(ctx, runID)
+	quotaCost, err := m.RunQuotaCost(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -541,10 +541,10 @@ func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run,
 	return m.store.GetRun(ctx, runID)
 }
 
-// runQuotaCost returns the quota units consumed on behalf of runID. When no
+// RunQuotaCost returns the quota units consumed on behalf of runID. When no
 // ledger is configured it returns 0 so tests and offline tools are not forced
 // to provide one.
-func (m *Machine) runQuotaCost(ctx context.Context, runID int64) (int, error) {
+func (m *Machine) RunQuotaCost(ctx context.Context, runID int64) (int, error) {
 	if m.ledger == nil {
 		return 0, nil
 	}

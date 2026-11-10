@@ -59,15 +59,24 @@ type ConfigStore interface {
 // Pipeline orchestrates the five-phase run lifecycle.
 type Pipeline struct {
 	productionMu sync.Mutex
-	db           *sql.DB
-	machine      *state.Machine
-	stateStore   *state.Store
-	discovery    *discovery.Engine
-	detector     *duplicate.Detector
-	router       *router.Engine
-	executor     ActionExecutor
-	ledger       *quota.Ledger
-	meta         interface {
+	// initiationMu serializes the decision section of Run Now admission and
+	// Discard. Lock order: initiationMu, then productionMu (ARS-002 §2.3).
+	initiationMu sync.Mutex
+	// runsMu guards runs, the per-run stop controls (ARS-003 §3.1).
+	runsMu sync.Mutex
+	runs   map[int64]*runControl
+	// discardTx runs DiscardRun's transaction. Nil means the queue store's
+	// WithRetryTx; tests substitute it to simulate commit failures.
+	discardTx  func(context.Context, func(*sql.Tx) error) error
+	db         *sql.DB
+	machine    *state.Machine
+	stateStore *state.Store
+	discovery  *discovery.Engine
+	detector   *duplicate.Detector
+	router     *router.Engine
+	executor   ActionExecutor
+	ledger     *quota.Ledger
+	meta       interface {
 		GetDisplayMetadata(context.Context, string) (*metadata.TransientMetadata, error)
 		RunLifecycle(context.Context) error
 	}
@@ -258,6 +267,7 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 	if err != nil {
 		return fmt.Errorf("pipeline: create and claim run: %w", err)
 	}
+	p.registerRun(run.ID)
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	return nil
 }
@@ -309,6 +319,12 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 	logger := p.logger.With("run_id", runID)
 	logger.InfoContext(ctx, "pipeline execute started")
 
+	// The run control outlives this function's other defers: finishRun settles
+	// a stop only after every terminal path has returned, still under
+	// productionMu (ARS-003 §3.3).
+	ctl := p.registerRun(runID)
+	defer p.finishRun(ctx, runID)
+
 	defer func() {
 		if r := recover(); r != nil {
 			reason := (diag.Facts{Phase: "unknown", Operation: "unknown", Code: "panic"}).String()
@@ -327,8 +343,14 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 	// Completed and failed runs are terminal. Reject re-entry before binding
 	// credentials: a disconnected account must not turn an existing outcome
 	// into a new authorization failure. Interrupted runs remain resumable below.
-	if run.Status == state.RunStatusCompleted || run.Status == state.RunStatusFailed {
+	if run.Status == state.RunStatusCompleted || run.Status == state.RunStatusFailed || run.Status == state.RunStatusStopped {
 		logger.WarnContext(ctx, "pipeline execute rejected for terminal run", "status", run.Status)
+		return
+	}
+	// A stop that arrived before this point settles without any provider call.
+	ctx, stopped := ctl.attach(ctx)
+	if stopped {
+		logger.InfoContext(ctx, "pipeline execute skipped: run stopped before it started")
 		return
 	}
 	if p.isProductionRun(run.RunType) && p.auth != nil {
@@ -485,6 +507,9 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 }
 
 func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
+	if !p.mayFinalize(runID) {
+		return
+	}
 	run, err := p.machine.CompleteRun(ctx, runID)
 	if err != nil {
 		p.logger.ErrorContext(ctx, "complete run failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
@@ -568,6 +593,9 @@ func runFinalizationContext(ctx context.Context) (context.Context, context.Cance
 }
 
 func (p *Pipeline) finalizeFailedRun(ctx context.Context, runID int64, reason string) {
+	if !p.mayFinalize(runID) {
+		return
+	}
 	finalizeCtx, cancel := runFinalizationContext(ctx)
 	defer cancel()
 	if _, err := p.machine.FailRun(finalizeCtx, runID, reason); err != nil {

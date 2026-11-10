@@ -53,6 +53,7 @@ func (p *Pipeline) Replay(ctx context.Context, configVersionID *int64, rng state
 	}
 	run.ID = id
 
+	p.registerRun(run.ID)
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	return run, nil
 }
@@ -109,6 +110,7 @@ func (p *Pipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapsh
 		return nil, err
 	}
 
+	p.registerRun(run.ID)
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	return run, nil
 }
@@ -123,6 +125,13 @@ func (p *Pipeline) ExecuteBacktest(ctx context.Context, runID int64) {
 func (p *Pipeline) executeHistorical(ctx context.Context, runID int64, runType state.RunType, label string) {
 	logger := p.logger.With("run_id", runID, "run_type", runType)
 	logger.InfoContext(ctx, fmt.Sprintf("%s execute started", label))
+
+	ctl := p.registerRun(runID)
+	defer p.finishRun(ctx, runID)
+	ctx, stopped := ctl.attach(ctx)
+	if stopped {
+		return
+	}
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -251,6 +260,9 @@ func (p *Pipeline) evaluateHistoricalVideo(ctx context.Context, runID int64, v *
 }
 
 func (p *Pipeline) completeHistoricalRun(ctx context.Context, runID int64) {
+	if !p.mayFinalize(runID) {
+		return
+	}
 	run, err := p.machine.CompleteHistoricalRun(ctx, runID)
 	if err != nil {
 		p.logger.ErrorContext(ctx, "complete historical run failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
@@ -286,6 +298,9 @@ func (p *Pipeline) completeHistoricalRun(ctx context.Context, runID int64) {
 // — never interrupted-then-completed — and only falls back to the resumable
 // `interrupted` state when failure finalization itself cannot be persisted.
 func (p *Pipeline) failHistoricalRun(ctx context.Context, runID int64, message string, err error) {
+	if !p.mayFinalize(runID) {
+		return
+	}
 	p.logger.ErrorContext(ctx, "historical run failed", "run_id", runID, "diagnostic", diag.Reason(err, message))
 	// Persisted reason, logs and SSE payload all carry only classified facts
 	// (ARD-001); the raw chain stays in process memory for control flow only.

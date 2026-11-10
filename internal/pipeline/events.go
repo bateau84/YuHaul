@@ -32,6 +32,7 @@ const (
 	EventRunQuotaWarning EventType = "run.quota.warning"
 	EventRunCompleted    EventType = "run.completed"
 	EventRunError        EventType = "run.error"
+	EventRunStopped      EventType = "run.stopped"
 )
 
 // Event is a single SSE event for run progress.

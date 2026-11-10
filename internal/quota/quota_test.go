@@ -373,8 +373,10 @@ func TestAttemptMigrationPreservesLegacyRows(t *testing.T) {
 	for _, statement := range []string{
 		`CREATE TABLE schema_migrations (version uint64, dirty bool)`,
 		`INSERT INTO schema_migrations VALUES (22, false)`,
-		// Migration 024 alters run; the fixture only needs the table to exist.
-		`CREATE TABLE run (id INTEGER PRIMARY KEY, run_type TEXT, status TEXT)`,
+		// Migrations 024 and 025 alter run and rebuild deferred_item; the fixture
+		// needs those tables, and run with its status CHECK for the 025 schema step.
+		`CREATE TABLE run (id INTEGER PRIMARY KEY, run_type TEXT, status TEXT CHECK(status IN ('running', 'completed', 'interrupted', 'failed')))`,
+		`CREATE TABLE deferred_item (id INTEGER PRIMARY KEY, video_id INTEGER, run_id INTEGER, deferral_reason TEXT, retry_after TIMESTAMP, retry_count INTEGER, status TEXT, created_at TIMESTAMP, retry_run_id INTEGER)`,
 		`CREATE TABLE quota_ledger (id INTEGER PRIMARY KEY, date TEXT, operation_type TEXT, units_consumed INTEGER, call_count INTEGER, run_id INTEGER, recorded_at DATETIME)`,
 		`INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, recorded_at) VALUES ('2020-01-01', 'videos_list', 3, 3, '2020-01-01T00:00:00Z')`,
 	} {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -98,6 +99,18 @@ func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSn
 	return nil, nil
 }
 func (f *fakePipeline) ExecuteBacktest(ctx context.Context, runID int64) {}
+
+func (f *fakePipeline) StopRun(ctx context.Context, runID int64) (*pipeline.StopResult, error) {
+	return nil, errors.New("fake pipeline cannot stop a run")
+}
+
+func (f *fakePipeline) DiscardRun(ctx context.Context, runID int64) (*pipeline.DiscardResult, error) {
+	return nil, errors.New("fake pipeline cannot discard a run")
+}
+
+func (f *fakePipeline) DiscardableRun(ctx context.Context) (int64, string, bool, error) {
+	return 0, "", false, nil
+}
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))

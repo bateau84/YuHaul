@@ -34,6 +34,8 @@ const (
 	DeferredReasonQuotaExhausted       DeferredReason = "quota_exhausted"
 	DeferredReasonAPIRateLimited       DeferredReason = "api_rate_limited"
 	DeferredReasonAuthorizationPending DeferredReason = "authorization_pending"
+	DeferredReasonStoppedByUser        DeferredReason = "stopped_by_user"
+	DeferredReasonDiscardedByUser      DeferredReason = "discarded_by_user"
 )
 
 // DeferredStatus records the lifecycle of a deferred work item.
@@ -97,7 +99,8 @@ func (s ErrorStatus) Valid() bool {
 // Valid reports whether r is a known deferred reason.
 func (r DeferredReason) Valid() bool {
 	switch r {
-	case DeferredReasonQuotaExhausted, DeferredReasonAPIRateLimited, DeferredReasonAuthorizationPending:
+	case DeferredReasonQuotaExhausted, DeferredReasonAPIRateLimited, DeferredReasonAuthorizationPending,
+		DeferredReasonStoppedByUser, DeferredReasonDiscardedByUser:
 		return true
 	}
 	return false
