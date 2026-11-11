@@ -97,6 +97,27 @@ type routeDecisionSummary struct {
 	SkipReason      *string          `json:"skip_reason,omitempty"`
 	RejectionReason *string          `json:"rejection_reason,omitempty"`
 	CausalExclusion *causalExclusion `json:"causal_exclusion"`
+	// FailedCondition is list-only. It is nil unless the decision did not
+	// match and the run's snapshot can name the first failed condition.
+	FailedCondition *failedCondition `json:"failed_condition,omitempty"`
+}
+
+// failedCondition summarizes why a route did not match, for the compact route
+// line on the Run Detail list. Field, operator, value, composition and count
+// come only from the run's immutable configuration snapshot; the condition
+// audit contributes only which conditions failed. It never carries the video's
+// compared value.
+type failedCondition struct {
+	// First failed condition, in recorded condition order.
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    string `json:"value"`
+	// Composition is "AND" or "OR", as the route evaluated it.
+	Composition string `json:"composition"`
+	// ConditionCount is the number of conditions configured on the route.
+	ConditionCount int `json:"condition_count"`
+	// FurtherFailed counts failed conditions after the first one.
+	FurtherFailed int `json:"further_failed"`
 }
 
 type causalExclusion struct {
@@ -257,7 +278,9 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 	for _, v := range videos {
 		ids = append(ids, v.VideoID)
 	}
-	for _, v := range videos {
+	decisionsByVideo := make([][]state.RouteDecision, len(videos))
+	var notMatchedIDs []int64
+	for i, v := range videos {
 		decisions, err := s.runVideoStore.GetRouteDecisionsForVideoInRun(r.Context(), v.ID, runID)
 		if err != nil {
 			s.logger.ErrorContext(r.Context(), "load route decisions failed", "video_id", v.ID, "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
@@ -265,7 +288,23 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.warnInvalidCausalShapes(r.Context(), runID, decisions)
-		item, err := toVideoListItem(v, decisions, evidence, run.ConfigVersionID)
+		decisionsByVideo[i] = decisions
+		for _, d := range decisions {
+			if d.Decision == state.RouteDecisionNotMatched {
+				notMatchedIDs = append(notMatchedIDs, d.ID)
+			}
+		}
+	}
+	// One batched read of the condition audits' pass/fail for the whole page.
+	failedIndexes, err := s.runVideoStore.ListFailedConditionIndexes(r.Context(), notMatchedIDs)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "list failed conditions failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
+		writeError(w, http.StatusInternalServerError, "failed to load route decisions")
+		return
+	}
+	for i, v := range videos {
+		decisions := decisionsByVideo[i]
+		item, err := toVideoListItem(v, decisions, evidence, run.ConfigVersionID, failedIndexes)
 		if err != nil {
 			// A decision whose route has no identity mapping fails the
 			// whole response; it is never serialized with an integer or
@@ -554,7 +593,7 @@ func projectUnresolvedMutations(items []state.UnresolvedMutation) []unresolvedMu
 }
 
 func toVideoListItem(video state.Video, decisions []state.RouteDecision,
-	evidence *runRouteEvidence, configVersionID *int64) (videoListItem, error) {
+	evidence *runRouteEvidence, configVersionID *int64, failedIndexes map[int64][]int) (videoListItem, error) {
 
 	summaries := make([]routeDecisionSummary, 0, len(decisions))
 	for _, d := range decisions {
@@ -571,6 +610,7 @@ func toVideoListItem(video state.Video, decisions []state.RouteDecision,
 			SkipReason:      skipReasonString(d.SkipReason),
 			RejectionReason: d.RejectionReason,
 			CausalExclusion: projectCausalExclusion(d, configVersionID, evidence),
+			FailedCondition: projectFailedCondition(d, evidence, failedIndexes[d.ID]),
 		})
 	}
 	errorMsg, withheld := safeErrorMessage(video.ErrorMessage)
@@ -728,6 +768,62 @@ func projectCausalExclusion(d state.RouteDecision, configVersionID *int64, evide
 	out.ConfiguredValue = &value
 	out.ConfiguredValueStatus = "available"
 	return out
+}
+
+// projectFailedCondition builds the list's failed-condition summary. It returns
+// nil, never a guess, when the decision did not fail on conditions, the run has
+// no usable snapshot for the route, or the snapshot cannot name a known field
+// and operator for the first failed condition. The list then reads "no match".
+func projectFailedCondition(d state.RouteDecision, evidence *runRouteEvidence, failed []int) *failedCondition {
+	if d.Decision != state.RouteDecisionNotMatched || len(failed) == 0 {
+		return nil
+	}
+	route, ok := evidence.routes[d.RouteID]
+	if !ok {
+		return nil
+	}
+	var first *config.SnapshotCondition
+	for i := range route.Conditions {
+		if route.Conditions[i].ConditionIndex == failed[0] {
+			first = &route.Conditions[i]
+			break
+		}
+	}
+	if first == nil || !first.HasRequiredFields() ||
+		!knownConditionField(first.Field) || !knownConditionOperator(first.Operator) {
+		return nil
+	}
+	composition := "AND"
+	if route.ConditionComposition == "OR" {
+		composition = "OR"
+	}
+	return &failedCondition{
+		Field:          first.Field,
+		Operator:       first.Operator,
+		Value:          first.Value,
+		Composition:    composition,
+		ConditionCount: len(route.Conditions),
+		FurtherFailed:  len(failed) - 1,
+	}
+}
+
+func knownConditionField(field string) bool {
+	switch router.ConditionField(field) {
+	case router.ConditionFieldTitle, router.ConditionFieldChannelID, router.ConditionFieldChannelName,
+		router.ConditionFieldDescription, router.ConditionFieldDurationSeconds:
+		return true
+	}
+	return false
+}
+
+func knownConditionOperator(operator string) bool {
+	switch router.ConditionOperator(operator) {
+	case router.ConditionOperatorContains, router.ConditionOperatorEquals, router.ConditionOperatorStartsWith,
+		router.ConditionOperatorEndsWith, router.ConditionOperatorMatchesRegex, router.ConditionOperatorGreaterThan,
+		router.ConditionOperatorLessThan, router.ConditionOperatorBetween:
+		return true
+	}
+	return false
 }
 
 func (s *Server) warnInvalidCausalShapes(ctx context.Context, runID int64, decisions []state.RouteDecision) {

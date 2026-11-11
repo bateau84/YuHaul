@@ -94,6 +94,7 @@ type RunVideoStore interface {
 	GetVideoByExternalIDInRun(ctx context.Context, runID int64, videoID string) (*state.Video, error)
 	GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.RouteDecision, error)
 	GetConditionAuditsForDecision(ctx context.Context, decisionID int64) ([]state.ConditionAudit, error)
+	ListFailedConditionIndexes(ctx context.Context, decisionIDs []int64) (map[int64][]int, error)
 	GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.ExecutedAction, error)
 	ListUnresolvedMutations(ctx context.Context, runID int64, videoIDs []int64) (map[int64][]state.UnresolvedMutation, error)
 }
@@ -476,6 +477,9 @@ func (noopRunVideoStore) GetRouteDecisionsForVideoInRun(context.Context, int64, 
 	return nil, errors.New("run video store not configured")
 }
 func (noopRunVideoStore) GetConditionAuditsForDecision(context.Context, int64) ([]state.ConditionAudit, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) ListFailedConditionIndexes(context.Context, []int64) (map[int64][]int, error) {
 	return nil, errors.New("run video store not configured")
 }
 func (noopRunVideoStore) GetExecutedActionsForVideoInRun(context.Context, int64, int64) ([]state.ExecutedAction, error) {

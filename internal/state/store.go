@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/diag"
@@ -878,6 +879,45 @@ func (s *Store) GetConditionAuditsForDecision(ctx context.Context, decisionID in
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating condition audits: %w", err)
+	}
+	return out, nil
+}
+
+// ListFailedConditionIndexes returns, for each requested route decision, the
+// condition_index of every condition that did not match, in condition order.
+// It is one query for the whole set of decisions. Only the index and the
+// pass/fail flag are read: expected and actual values are never loaded, so the
+// result cannot carry a video's compared value. Decisions with no failed
+// condition are absent from the map.
+func (s *Store) ListFailedConditionIndexes(ctx context.Context, decisionIDs []int64) (map[int64][]int, error) {
+	out := make(map[int64][]int)
+	if len(decisionIDs) == 0 {
+		return out, nil
+	}
+	marks := make([]string, len(decisionIDs))
+	args := make([]any, len(decisionIDs))
+	for i, id := range decisionIDs {
+		marks[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT route_decision_id, condition_index FROM condition_audit
+		 WHERE matched = 0 AND route_decision_id IN (`+strings.Join(marks, ",")+`)
+		 ORDER BY route_decision_id, condition_index;`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying failed conditions: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var decisionID int64
+		var index int
+		if err := rows.Scan(&decisionID, &index); err != nil {
+			return nil, fmt.Errorf("scanning failed condition: %w", err)
+		}
+		out[decisionID] = append(out[decisionID], index)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating failed conditions: %w", err)
 	}
 	return out, nil
 }
