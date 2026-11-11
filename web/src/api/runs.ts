@@ -99,6 +99,40 @@ export async function discardRun(id: number): Promise<DiscardRunResult> {
   return api<DiscardRunResult>(`/api/runs/${id}/discard`, { method: 'POST' })
 }
 
+// End ("Mark as ended", BR-036) refusals are ApiErrors with one of these closed
+// codes. reason accompanies run_not_endable (not_production | not_legacy |
+// executing); runType accompanies not_production; savedStatus accompanies
+// run_ended and end_failed.
+export type EndRefusalCode =
+  | 'invalid_run_id'
+  | 'shutting_down'
+  | 'startup_recovery_active'
+  | 'production_run_active'
+  | 'run_not_found'
+  | 'run_ended'
+  | 'run_not_endable'
+  | 'end_failed'
+  | 'end_outcome_unknown'
+
+const END_REFUSAL_CODES: readonly string[] = [
+  'invalid_run_id', 'shutting_down', 'startup_recovery_active', 'production_run_active', 'run_not_found',
+  'run_ended', 'run_not_endable', 'end_failed', 'end_outcome_unknown',
+]
+
+export function endRefusalCode(err: unknown): EndRefusalCode | undefined {
+  return err instanceof ApiError && err.code && END_REFUSAL_CODES.includes(err.code) ? (err.code as EndRefusalCode) : undefined
+}
+
+export interface EndRunResult {
+  run_id: number
+  status: Extract<RunStatus, 'failed'>
+  outcome: 'ended'
+}
+
+export async function endRun(id: number): Promise<EndRunResult> {
+  return api<EndRunResult>(`/api/runs/${id}/end`, { method: 'POST' })
+}
+
 export async function startDryRun(draft?: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string }> {
   return api<{ run_id: number; status: string }>('/api/runs/dry-run', {
     method: 'POST',

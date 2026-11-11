@@ -21,7 +21,7 @@ vi.mock('../api/runs', async (importOriginal) => ({
 const base: Run = {
   id: 41, started_at: '2026-11-10T06:00:00Z', run_type: 'scheduled', status: 'running',
   videos_discovered: 3, videos_accepted: 0, videos_rejected: 0, videos_excluded: 0, videos_deferred: 0,
-  videos_failed: 0, videos_not_yet_evaluated: 0, quota_cost: 0, current_phase: 'action_execution', initiated_by: 'schedule',
+  videos_failed: 0, videos_not_yet_evaluated: 0, quota_cost: 0, current_phase: 'action_execution', initiated_by: 'schedule', executing: true,
 }
 
 function renderPage() {

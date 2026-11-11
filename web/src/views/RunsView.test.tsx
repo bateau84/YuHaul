@@ -57,7 +57,7 @@ describe('RunsView', () => {
 
   it('offers Stop run N only in rows of running runs', async () => {
     vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([
-      runFixture({ id: 41, status: 'running' }),
+      runFixture({ id: 41, status: 'running', executing: true }),
       runFixture({ id: 40, status: 'completed' }),
       runFixture({ id: 39, status: 'stopped' }),
     ])
@@ -359,7 +359,7 @@ describe('RunsView', () => {
         runFixture({ id: 1, status: 'completed', videos_discovered: 11 }),
         runFixture({ id: 2, status: 'failed', videos_discovered: 22 }),
         runFixture({ id: 3, status: 'running', videos_discovered: 33 }),
-        runFixture({ id: 4, status: 'running', stop_requested_at: '2026-09-08T06:05:00Z', videos_discovered: 44 }),
+        runFixture({ id: 4, status: 'running', executing: true, stop_requested_at: '2026-09-08T06:05:00Z', videos_discovered: 44 }),
         runFixture({ id: 5, status: 'stopped', stop_requested_at: '2026-09-08T06:05:00Z', videos_discovered: 55 }),
       ]
 

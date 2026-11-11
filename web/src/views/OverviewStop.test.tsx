@@ -22,7 +22,7 @@ vi.mock('../api/runs', async (importOriginal) => ({
 const run: Run = {
   id: 41, started_at: '2026-11-10T06:00:00Z', run_type: 'scheduled', status: 'running',
   videos_discovered: 0, videos_accepted: 0, videos_rejected: 0, videos_excluded: 0, videos_deferred: 0,
-  videos_failed: 0, videos_not_yet_evaluated: 0, quota_cost: 0, current_phase: 'routing', initiated_by: 'schedule',
+  videos_failed: 0, videos_not_yet_evaluated: 0, quota_cost: 0, current_phase: 'routing', initiated_by: 'schedule', executing: true,
 }
 const ov = (r: Run | null): OverviewData => ({
   last_run: r, runs_today: r ? 1 : 0, error_count: 0, deferred_count: 0,

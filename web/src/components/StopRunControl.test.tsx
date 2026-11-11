@@ -13,7 +13,7 @@ vi.mock('../api/runs', async (importOriginal) => ({
 }))
 
 type Target = Parameters<typeof StopRunControl>[0]['run']
-const prod: Target = { id: 41, run_type: 'scheduled', status: 'running', initiated_by: 'schedule' }
+const prod: Target = { id: 41, run_type: 'scheduled', status: 'running', initiated_by: 'schedule', executing: true }
 
 function Harness({ run, onOutcomeSpy }: { run: Target; onOutcomeSpy?: (o: StopOutcome) => void }) {
   const [outcome, setOutcome] = useState<StopOutcome | null>(null)

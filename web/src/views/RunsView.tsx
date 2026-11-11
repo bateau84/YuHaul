@@ -4,7 +4,8 @@ import * as api from '../api/client'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
 import { useToast } from '../hooks/useToast'
-import { isStopping } from '../types'
+import { canOfferStop, isStopping } from '../types'
+import { runEnding } from '../lib/run-ending'
 import type { Run, RunStatus, RunType } from '../types'
 
 // Persisted-state polling interval (ARD-001: while a listed run is stored as
@@ -63,6 +64,16 @@ function StatusCell({ run }: { run: Run }) {
         <StopSquareIcon />
         {isStopping(run) ? 'Stopping' : runStatusLabels.stopped}
       </span>
+    )
+  }
+  if (runEnding(run) === 'ended_by_user') {
+    // Counts as failed; the second line says it was the user's end of a legacy run.
+    return (
+      <>
+        {runStatusLabels.failed}
+        <br />
+        <span style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Ended by user (legacy run)</span>
+      </>
     )
   }
   return <>{runStatusLabels[run.status] ?? run.status}</>
@@ -128,7 +139,8 @@ export function RunsView() {
   // user action (ARD-001). A failed background read never clears the list it
   // could not refresh; it surfaces a visible retry instead of implying the
   // data is current.
-  const hasRunning = runs.some((r) => r.status === 'running')
+  // An endable run is saved as running but nothing executes it: it is not progressing.
+  const hasRunning = runs.some((r) => r.status === 'running' && r.endable !== true)
   useEffect(() => {
     if (!hasRunning || fetchError) return
     let cancelled = false
@@ -383,8 +395,8 @@ export function RunsView() {
                       <td data-label="Quota">{r.quota_cost}</td>
                       {/* Below 768px rows stack full width, so the 44px Stop
                           button wraps inside the row at 320px with no clipping. */}
-                      <td data-label={r.status === 'running' ? 'Actions' : undefined}>
-                        {r.status === 'running' && <StopRunControl run={r} onOutcome={handleStopOutcome} />}
+                      <td data-label={canOfferStop(r) ? 'Actions' : undefined}>
+                        {canOfferStop(r) && <StopRunControl run={r} onOutcome={handleStopOutcome} />}
                       </td>
                     </tr>
                   ))}

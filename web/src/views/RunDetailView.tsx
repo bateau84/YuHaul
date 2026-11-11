@@ -5,13 +5,15 @@ import { Badge } from '../components/Badge'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { CausalExclusion } from '../components/CausalExclusion'
 import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
+import { EndLegacyRunControl } from '../components/EndLegacyRunControl'
+import { runEnding } from '../lib/run-ending'
 import { DiscardRunControl } from '../components/DiscardRunControl'
 import { discardReasonSentence } from '../lib/discard-reason'
 import { useToast } from '../hooks/useToast'
 import { deriveRouteDecision, simulationExplanation, simulationMode, videoOutcomeLabels } from '../lib/outcome'
 import { routeAttribution } from '../lib/route-attribution'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
-import { isStopping, type PublishedRange, type Run, type RunStatus, type VideoFinalOutcome, type VideoOutcome } from '../types'
+import { canOfferStop, isStopping, type PublishedRange, type Run, type RunStatus, type VideoFinalOutcome, type VideoOutcome } from '../types'
 
 // The run videos endpoint caps page_size at 100 (internal/server/run_handlers.go).
 // Request the maximum so one page holds as much of the run as possible; later
@@ -162,6 +164,7 @@ function RunDetailContent({ id }: { id?: string }) {
   const [runRetrying, setRunRetrying] = useState(false)
   const [stopOutcome, setStopOutcome] = useState<StopOutcome | null>(null)
   const stopMessageRef = useRef<HTMLDivElement>(null)
+  const [endAttempted, setEndAttempted] = useState(false)
   const [discardAttempted, setDiscardAttempted] = useState(false)
   const [statusCheckedAt, setStatusCheckedAt] = useState<Date | null>(null)
   const [videos, setVideos] = useState<VideoOutcome[]>([])
@@ -351,6 +354,14 @@ function RunDetailContent({ id }: { id?: string }) {
     void loadRun()
   }
 
+  // An end attempt always re-reads the run; the control stays mounted (button
+  // withdrawn via `available`) so its acknowledgement or refusal message and
+  // focus survive that re-read.
+  function handleEndSettled() {
+    setEndAttempted(true)
+    void loadRun()
+  }
+
   function applyOutcomeFilter(value: VideoFinalOutcome | '') {
     setPage(1)
     setOutcomeFilter(value)
@@ -423,6 +434,17 @@ function RunDetailContent({ id }: { id?: string }) {
   const timeLimited = stoppedAtTimeLimit(run)
   const stopped = run.status === 'stopped'
   const stopping = isStopping(run)
+  // A stuck legacy run is saved as running or interrupted, but nothing executes
+  // it. It replaces the progress and interrupted text (design: "Mark a Legacy
+  // Run as Ended"); the UI never infers this from status, age or version.
+  const endable = run.endable === true
+  const ending = runEnding(run)
+  const endedByUser = ending === 'ended_by_user'
+  const failedStatusLine = endedByUser
+    ? 'Run failed — marked as ended by user (legacy run).'
+    : ending === 'discarded_by_user'
+      ? 'Run failed — discarded by user.'
+      : terminalStatusLine(run.status)
 
   return (
     <>
@@ -469,7 +491,32 @@ function RunDetailContent({ id }: { id?: string }) {
         <StopRunMessage ref={stopMessageRef} outcome={stopOutcome} onRunPage onDismiss={() => setStopOutcome(null)} />
       )}
 
-      {(run.status === 'running' || isTerminal) && (
+      {(endable || endAttempted) && (
+        <section className="card" aria-label="Mark run as ended" style={{ marginBottom: 16 }}>
+          {endable && (
+            <>
+              <p role="status" aria-live="polite" style={{ margin: 0 }}>
+                <strong>{run.status === 'running' ? 'Marked as running — nothing is executing it.' : 'Run interrupted.'}</strong>
+              </p>
+              <p style={{ margin: '8px 0 0' }}>
+                Run {run.id} was created by an older version of YuHaul and cannot be resumed. It will not end by itself.
+                Last recorded phase: {phaseLabel(run.current_phase) ?? 'unavailable'}. Work saved so far is kept.
+              </p>
+              <p style={{ margin: '8px 0' }}>
+                You can mark it as ended. That marks it failed and leaves its unfinished videos unprocessed.
+              </p>
+            </>
+          )}
+          <EndLegacyRunControl
+            runId={run.id}
+            savedStatus={run.status === 'running' ? 'running' : 'interrupted'}
+            available={endable}
+            onSettled={handleEndSettled}
+          />
+        </section>
+      )}
+
+      {!endable && (run.status === 'running' || isTerminal) && (
         <section className="card" role="region" aria-label="Run progress" aria-live="off" style={{ marginBottom: 16 }}>
           <p role="status" aria-live="polite" style={{ margin: 0 }}>{progressAnnouncement(run, runReadError)}</p>
           {run.status === 'running' && !stopping && run.current_phase === 'discovery' && run.videos_selected == null && (
@@ -479,16 +526,16 @@ function RunDetailContent({ id }: { id?: string }) {
           {run.status === 'running' && run.videos_selected == null && run.current_phase !== 'discovery' && <p style={{ margin: '8px 0 0' }}>Selected inputs: Unknown. The selected input count was not captured or is not available.</p>}
           <p style={{ margin: '8px 0 0' }}>Videos with recorded route decisions: {run.videos_evaluated ?? 'Unavailable'}. Counts reflect saved evidence, not overall completion.</p>
           <p style={{ margin: '8px 0 0' }}>Status checked at {statusCheckedAt?.toLocaleTimeString() ?? 'unknown'}.</p>
-          {run.status === 'running' && <StopRunControl run={run} onOutcome={handleStopOutcome} />}
+          {canOfferStop(run) && <StopRunControl run={run} onOutcome={handleStopOutcome} />}
         </section>
       )}
 
       {/* Terminal stored status, including run failure, is visible here on the
           run itself — independent of the Errors queue (Task 2.1 criteria). */}
-      {run.status !== 'running' && (
+      {!endable && run.status !== 'running' && (
         <div className="card" role="status" aria-live="polite" style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <strong>{stopped ? terminalStatusLine('stopped') : timeLimited ? 'Run interrupted — time limit reached.' : terminalStatusLine(run.status)}</strong>
+            <strong>{stopped ? terminalStatusLine('stopped') : timeLimited ? 'Run interrupted — time limit reached.' : failedStatusLine}</strong>
             {run.completed_at && (
               <span style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
                 {new Date(run.completed_at).toLocaleString()}
@@ -509,8 +556,22 @@ function RunDetailContent({ id }: { id?: string }) {
               )}
             </>
           )}
-          {isTerminal && (
+          {endedByUser && (
+            <>
+              <p style={{ margin: '8px 0 0' }}>
+                You marked this run as ended. It did not fail by itself. Its unfinished videos were not processed and were not added to any queue. Its saved results, queue items and playlist records were not changed. Nothing was sent to YouTube.
+              </p>
+              <p style={{ margin: '8px 0 0' }}>Last recorded phase: {phaseLabel(run.current_phase) ?? 'unavailable'}.</p>
+            </>
+          )}
+          {isTerminal && !endedByUser && (
             <p style={{ margin: '8px 0 0', color: 'var(--color-status-failed)' }}>{failureExplanation(run)}</p>
+          )}
+          {ending === 'discarded_by_user' && (
+            <p style={{ margin: '8px 0 0' }}>
+              Run {run.id} will not be resumed. Its unfinished videos are in the deferred queue, and the next new run will process them automatically.{' '}
+              <Link to="/errors?tab=deferred">View deferred queue</Link>
+            </p>
           )}
           {timeLimited && (
             <p style={{ margin: '8px 0 0' }}>

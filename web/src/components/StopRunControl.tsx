@@ -2,7 +2,7 @@ import { forwardRef, useId, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError } from '../api/core'
 import { stopRun, stopRefusalCode, type StopRefusalCode } from '../api/runs'
-import { isStopping, type Run } from '../types'
+import { canOfferStop, isStopping, type Run } from '../types'
 import { simulationMode } from '../lib/outcome'
 import { ModalDialog } from './ModalDialog'
 
@@ -12,7 +12,7 @@ import { ModalDialog } from './ModalDialog'
 // been replaced. Branching is on HTTP status and machine code, never message
 // text.
 
-type StopTarget = Pick<Run, 'id' | 'run_type' | 'status' | 'stop_requested_at' | 'initiated_by' | 'discardable'>
+type StopTarget = Pick<Run, 'id' | 'run_type' | 'status' | 'stop_requested_at' | 'initiated_by' | 'discardable' | 'executing'>
 
 export type StopOutcome =
   | { kind: 'accepted'; runId: number }
@@ -65,11 +65,13 @@ export function StopRunControl({ run, onOutcome }: StopRunControlProps) {
   const id = run.id
   const simulation = simulationMode(run.run_type) !== null
 
+  // Shown only while the saved status says running and this server is actually
+  // executing the run (canOfferStop): a stuck legacy run is saved as running
+  // but nothing executes it, so it never gets Stop.
+  if (!canOfferStop(run)) return null
   if (accepted || isStopping(run)) {
     return <p style={{ margin: '8px 0 0' }}>Stopping run {id}…</p>
   }
-  // Shown only while the saved status says the run is running.
-  if (run.status !== 'running') return null
 
   function close() {
     if (pendingRef.current) return

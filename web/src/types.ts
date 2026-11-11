@@ -132,6 +132,14 @@ export interface Run {
   discardable?: boolean | null
   // Present only when discardable is true.
   discard_cause?: DiscardCause
+  // true for a stuck legacy production run the user may mark as ended (BR-036);
+  // false for every other run; null on every item when the server could not
+  // decide. Absent from older servers, which never offer the action.
+  endable?: boolean | null
+  // true only while this server process is executing the run (the in-process
+  // run control). A saved status of 'running' does not imply it: a stuck legacy
+  // run is saved as running and is not executing.
+  executing?: boolean
   // Backtest/Replay only: the saved UTC-day range of YouTube published dates
   // (null bound = none). Both null means no date filter was applied. Absent
   // or null for every other run type.
@@ -141,6 +149,12 @@ export interface Run {
 export type DiscardCause = 'snapshot_unavailable' | 'snapshot_unreadable' | 'checkpoint_unrecognized'
 
 // A run is stopping while it still runs but a stop has been recorded.
+// The one predicate for offering Stop: the run is saved as running and this
+// server is actually executing it. Absent or false means no Stop button.
+export function canOfferStop(run: Pick<Run, 'status' | 'executing'>): boolean {
+  return run.status === 'running' && run.executing === true
+}
+
 export function isStopping(run: Pick<Run, 'status' | 'stop_requested_at'>): boolean {
   return run.status === 'running' && !!run.stop_requested_at
 }

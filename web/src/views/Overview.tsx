@@ -9,7 +9,7 @@ import type { Overview as OverviewData } from '../api/overview'
 import { ApiError } from '../api/core'
 import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
 import { DiscardRunControl } from '../components/DiscardRunControl'
-import { isStopping } from '../types'
+import { canOfferStop, isStopping } from '../types'
 
 const RUN_POLL_INTERVAL_MS = 5000
 
@@ -125,9 +125,11 @@ export function Overview() {
     }
   }, [])
 
-  const lastRunStatus = overview?.last_run?.status
+  // A run the server says is endable is saved as running but nothing executes
+  // it: it is not "in progress", is not polled, and does not hold back Run Now.
+  const lastRunActive = overview?.last_run?.status === 'running' && overview.last_run.endable !== true
   useEffect(() => {
-    if (lastRunStatus !== 'running') return
+    if (!lastRunActive) return
     let disposed = false
     const refresh = async () => {
       if (overviewRefreshInFlightRef.current) return
@@ -138,7 +140,7 @@ export function Overview() {
         setOverview(next)
         setStatusCheckedAt(new Date())
         setStatusStale(false)
-        if (next.last_run?.status !== 'running') setStartUncertain(false)
+        if (next.last_run?.status !== 'running' || next.last_run.endable === true) setStartUncertain(false)
       } catch {
         if (!disposed) setStatusStale(true)
       } finally {
@@ -153,7 +155,7 @@ export function Overview() {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [lastRunStatus])
+  }, [lastRunActive])
 
   const stopKind = stopOutcome?.kind
   useEffect(() => {
@@ -256,7 +258,7 @@ export function Overview() {
         Overview
       </h1>
       <div style={{ display: 'flex', gap: 8 }}>
-        <button className="button button--primary" onClick={() => setConfirmRun(true)} disabled={fetchError || startingRun || Boolean(overview?.last_run?.status === 'running') || startUncertain}>
+        <button className="button button--primary" onClick={() => setConfirmRun(true)} disabled={fetchError || startingRun || lastRunActive || startUncertain}>
           <Play size={16} aria-hidden="true" /> Run Now
         </button>
         <button className="button" onClick={() => setConfirmDry(true)} disabled={fetchError}>
@@ -285,7 +287,7 @@ export function Overview() {
   if (!overview) return null
 
   const run = overview.last_run
-  const activeRun = run?.status === 'running' ? run : null
+  const activeRun = run?.status === 'running' && run.endable !== true ? run : null
   const statusWord = activeRun && isStopping(activeRun) ? 'Stopping' : 'Running'
   return (
     <>
@@ -360,7 +362,7 @@ export function Overview() {
               <p style={{ margin: '8px 0' }}>
                 <Link to={`/runs/${activeRun.id}`}>View run</Link>
               </p>
-              <StopRunControl run={activeRun} onOutcome={handleStopOutcome} />
+              {canOfferStop(activeRun) && <StopRunControl run={activeRun} onOutcome={handleStopOutcome} />}
               {statusStale
                 ? <p role="alert" aria-live="assertive" style={{ margin: 0 }}>Could not refresh run status; this run may still be processing.</p>
                 : <p style={{ margin: 0 }}>Status checked at {statusCheckedAt?.toLocaleTimeString() ?? 'unknown'}.</p>}
@@ -368,7 +370,7 @@ export function Overview() {
           )}
           {run && !activeRun && (
             <>
-              <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Run {run.id} — {run.run_type} — {statusLabel(run.status)}</strong></p>
+              <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Run {run.id} — {run.run_type} — {run.status === 'running' && run.endable === true ? 'Marked as running — nothing is executing it' : statusLabel(run.status)}</strong></p>
               <p style={{ margin: '8px 0' }}><Link to={`/runs/${run.id}`}>View run</Link></p>
             </>
           )}
