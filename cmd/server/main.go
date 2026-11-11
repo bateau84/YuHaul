@@ -25,6 +25,7 @@ import (
 
 	"github.com/bateau84/YuHaul/internal/advisory"
 	"github.com/bateau84/YuHaul/internal/auth"
+	"github.com/bateau84/YuHaul/internal/buildinfo"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/corpusimport"
 	"github.com/bateau84/YuHaul/internal/diag"
@@ -65,6 +66,7 @@ type appConfig struct {
 func main() {
 	cfg := loadConfig()
 	logger := newLogger(cfg.LogLevel)
+	logger.Info("yuhaul starting", "version", buildinfo.Version, "commit", buildinfo.Commit, "built_at", buildinfo.BuiltAt)
 
 	// Signal handling comes first (ADR-007 §1): SIGINT or SIGTERM cancels ctx,
 	// and every later step, run and the scheduler derive from it.
@@ -235,6 +237,7 @@ func main() {
 	}
 
 	root := http.NewServeMux()
+	root.Handle("GET /api/version", buildinfo.Handler())
 	root.Handle("/api/", apiServer.Handler())
 	root.Handle("/api/auth/", stripPrefix("/api/auth", authSvc.Handler()))
 	root.Handle("/api/account", stripPrefix("/api/account", authSvc.AccountHandler()))

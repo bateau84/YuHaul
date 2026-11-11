@@ -471,6 +471,21 @@ Docker Compose file.
    # your local cluster (e.g. `kind load docker-image yuhaul:latest`).
    ```
 
+   To make a build identifiable, pass the build identity and use a unique
+   tag per build (the manifest uses `imagePullPolicy: IfNotPresent`, so a
+   rebuilt `:latest` is not re-pulled by a node that already has it):
+
+   ```bash
+   docker build -t yuhaul:$(git rev-parse --short HEAD) \
+     --build-arg VERSION=dev \
+     --build-arg COMMIT=$(git rev-parse HEAD) \
+     --build-arg BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
+   ```
+
+   The running build is reported once in the startup log and by
+   `GET /api/version` (`{"version","commit","built_at"}`; `unknown` when
+   not injected).
+
 2. **Traefik v3 controller.** The cluster must run a Traefik v3 ingress
    controller with the Kubernetes Ingress and CRD providers enabled (the CRD
    provider with `safeNaming` disabled — see below), an `IngressClass` named

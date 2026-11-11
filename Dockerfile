@@ -26,7 +26,17 @@ COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 
 # CGO is not required: modernc.org/sqlite is a pure-Go SQLite driver.
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/yuhaul ./cmd/server
+# VERSION/COMMIT/BUILT_AT are injected as the build identity served at
+# GET /api/version; they default to "unknown" when not passed.
+ARG VERSION=unknown
+ARG COMMIT=unknown
+ARG BUILT_AT=unknown
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-s -w \
+      -X github.com/bateau84/YuHaul/internal/buildinfo.Version=${VERSION} \
+      -X github.com/bateau84/YuHaul/internal/buildinfo.Commit=${COMMIT} \
+      -X github.com/bateau84/YuHaul/internal/buildinfo.BuiltAt=${BUILT_AT}" \
+    -o /bin/yuhaul ./cmd/server
 
 # Runtime stage
 FROM alpine:latest

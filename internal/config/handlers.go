@@ -298,6 +298,8 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load settings")
 		return
 	}
+	// The response embeds live account state; never let the browser reuse it.
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, resp)
 }
 

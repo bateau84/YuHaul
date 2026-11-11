@@ -541,7 +541,7 @@ export function SettingsView() {
         <h2 className="section-title">Account</h2>
         {settings.account_connected ? (
           <>
-            <p>Connected as {settings.account_email}</p>
+            <p>{settings.account_email ? `Connected as ${settings.account_email}` : 'Connected'}</p>
             {settings.authorization_state === 'renewal_unavailable' && (
               <p role="status" style={{ color: 'var(--color-text-muted)' }}>
                 Access renewal is temporarily failing; it will be retried automatically.

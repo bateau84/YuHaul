@@ -127,6 +127,36 @@ describe('SettingsView', () => {
     expect(screen.queryByRole('button', { name: /Connect YouTube account/i })).not.toBeInTheDocument()
   })
 
+  it('shows the account email when one is returned', async () => {
+    vi.spyOn(mock, 'getSettings').mockResolvedValueOnce({
+      schedule: '0 6 * * *',
+      quota_limit: 10000,
+      duplicate_threshold: 0.5,
+      duplicate_behavior: 'skip',
+      account_connected: true,
+      account_email: 'user@example.com',
+    })
+
+    renderWithToast(<SettingsView />)
+    await waitFor(() => expect(screen.getByText('Connected as user@example.com')).toBeInTheDocument())
+  })
+
+  it('shows plain "Connected" without an "as" clause when no email is returned', async () => {
+    vi.spyOn(mock, 'getSettings').mockResolvedValueOnce({
+      schedule: '0 6 * * *',
+      quota_limit: 10000,
+      duplicate_threshold: 0.5,
+      duplicate_behavior: 'skip',
+      account_connected: true,
+      authorization_state: 'usable',
+      authorization_reason: null,
+    })
+
+    renderWithToast(<SettingsView />)
+    await waitFor(() => expect(screen.getByText('Connected')).toBeInTheDocument())
+    expect(screen.queryByText(/Connected as/)).not.toBeInTheDocument()
+  })
+
   it('asks for a reconnect only when authorization_state is reconnect_required', async () => {
     vi.spyOn(mock, 'getSettings').mockResolvedValueOnce({
       schedule: '0 6 * * *',

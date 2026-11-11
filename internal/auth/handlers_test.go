@@ -23,6 +23,17 @@ func TestAuthHandler_Status(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"connected":false`)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}
+
+func TestAccountHandler_StatusIsNotCacheable(t *testing.T) {
+	svc := NewDisabledService()
+	for _, path := range []string{"/", "/status"} {
+		rec := httptest.NewRecorder()
+		svc.AccountHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		assert.Equal(t, http.StatusOK, rec.Code, path)
+		assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"), path)
+	}
 }
 
 func TestOAuthCallbackProviderErrorIsRedacted(t *testing.T) {

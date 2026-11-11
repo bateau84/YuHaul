@@ -1256,6 +1256,7 @@ func TestHandleSettingsRoot(t *testing.T) {
 			srv.Handler().ServeHTTP(rec, req)
 
 			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 			body := rec.Body.String()
 			assert.Contains(t, body, `"schedule":"0 6 * * *"`)
 			assert.Contains(t, body, `"quota_limit":1234`)

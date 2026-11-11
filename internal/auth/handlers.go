@@ -95,6 +95,9 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read account status")
 		return
 	}
+	// Account state changes on connect/disconnect/renewal; a cached copy would
+	// show a stale account in the browser.
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, status)
 }
 

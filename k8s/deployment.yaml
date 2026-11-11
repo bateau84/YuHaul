@@ -34,6 +34,10 @@ spec:
       containers:
         - name: yuhaul
           image: yuhaul:latest
+          # IfNotPresent is kept so locally loaded images (kind/minikube) work.
+          # It also means a rebuilt :latest is NOT picked up by a node that
+          # already has it: deploy each build under a unique tag (for example
+          # yuhaul:$(git rev-parse --short HEAD)) and check GET /api/version.
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
