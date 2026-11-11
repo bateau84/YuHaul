@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -348,8 +349,9 @@ func TestGuardedLostResponseAccountsOneAttempt(t *testing.T) {
 	ctx := context.Background()
 	f := newGuardedProductionFixture(t)
 	defer f.db.Close()
+	var posts atomic.Int32
 	data := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.posts++
+		posts.Add(1) // the hijacked handler never answers, so nothing else orders this write
 		conn, _, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			t.Errorf("hijack: %v", err)
@@ -368,7 +370,7 @@ func TestGuardedLostResponseAccountsOneAttempt(t *testing.T) {
 	require.Equal(t, 50, units)
 	_, err = e.ExecuteBound(ctx, f.runID, f.videoID, matches, f.binding)
 	require.Error(t, err)
-	require.Equal(t, 1, f.posts)
+	require.EqualValues(t, 1, posts.Load())
 }
 
 type observingService struct {
