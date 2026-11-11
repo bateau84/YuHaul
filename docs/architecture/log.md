@@ -10,6 +10,97 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-11
 
+**Open questions closed and paging added (Architect):** Changes to the [video-search](video-search/index.md) and [run-initiation](run-initiation/index.md) topics:
+
+- **Video search:** the match `total`, positions and `page=n` jumps are added (BR-038 AC18). Q1, Q2 and S1 are closed.
+- **Run initiation, F3:** decided as variant K (BR-035 AC14 unchanged).
+- **Run initiation, F4:** does not apply (runs 17 and 21, 0 open retry rows).
+- **`GET /api/deferred`:** adds `page=n|last`, positions, `total_pages`, `queue_total` and a server-side `reason` filter.
+- **Production `retry_after` check (rq-prod-count):** returned empty, with zero future `retry_after` rows. The claim order is unchanged.
+
+Documentation only; no code change.
+
+**Re-queue stranded videos corrected after critic review (Architect):** Source: critic session `ses_e33a11010ffe4XP0Rmw0ZVtQBs`, verdict CHANGES REQUIRED for [ADR-006](run-initiation/decisions/adr-006-requeue-stranded-videos.md) and [ARS-005](run-initiation/specifications/ars-005-requeue-stranded-videos.md). Both were corrected, and the [ARS-003](run-initiation/specifications/ars-003-stop-run-and-deferred-handoff.md) amendment note was trimmed.
+
+- **F1:** veto branch 3 read the live `processing_state`, but the receiving run makes the video `acted` before it sends. The shared `LegacySendVeto` now takes `subject.assume_acted`: the scan passes 1 and `ClaimPlaylistSend` passes 0, so the send path is unchanged. Test V2 now runs a real claim, evaluation and send. The send-guard owner is asked whether branch 3 should fire on the receiving run's own `acted` transition.
+- **F2:** `absent` is now decided from the ids in the raw `videos.list` response (new `GetVideosWithReturnedIDs`). A returned item that cannot be parsed, or a chunk with an unreadable id, is `unusable` and released unchanged, without suspending fetching. Test D7 was added.
+- **F3:** claiming on provider failure awaits a user decision.
+  - Variant K (keep claiming, as amended AC14 says) stays specified.
+  - Variant S (stop claiming; needs an AC14 amendment) is ready as a three-line change in ARS-005 Appendix A.
+  - The ADR recommends S.
+- **Minor changes:**
+  - The eligible-since order, the ARS-003 handoff `retry_after` amendment and the H1(b) change were withdrawn. The existing created-at order is kept, with a `LIMIT` and a same-run exclusion, plus a revisit trigger and a one-off count of legacy rows with a future `retry_after`.
+  - Migration 026 lands first and owns both `(video_id, status)` indexes.
+  - `widenFinalOutcomeChecks` skips per table, with a no-rollback release note.
+  - The `WithRetryTx` wording was corrected: a deferred transaction whose first statement is a no-op write.
+  - `UnavailableReason` gained `shutting_down`.
+  - The stale `requeued_by_user` reason after a quota re-defer was flagged for the Designer.
+- **Findings recorded:** F4 (pre-existing: a claim erases veto branch 4's evidence; production check before the backlog drains), and the search design must map stored outcomes by identity.
+
+Documentation only; no code change.
+
+**Video search revised after critique (Architect):** The critic's verdict (session `ses_e33a11010ffe4XP0Rmw0ZVtQBs`) was CHANGES REQUIRED. Changes to [ADR-001](video-search/decisions/adr-001-held-title-search-by-request-time-scan.md), [ARS-001](video-search/specifications/ars-001-video-search-api-and-queries.md) and the [topic index](video-search/index.md):
+
+- **Outcomes:** shown as the stored `final_outcome` unchanged. `state.OutcomeCategory` and the diag-based rule are removed. Revised ARS-005 stores `unavailable_on_youtube` natively, and `failed` with code `video_unavailable` stays `failed`. F3 is closed, and T22 covers both cases.
+- **S1, speed gate:** production may hold about 85,000–155,000 titles within 30 days. The timing seed now has 150,000 held titles, and P2 at that load is the gate. If it fails, the FTS5 fallback applies. The requirements owner should update QS-001's load.
+- **Indexes:** migration 026 (run-initiation ARS-005) owns both `(video_id, status)` indexes. Search adds no migration; the conditional `0NN` migration is removed.
+- **Access-log advisory (A1):** `q` may appear in proxy access logs. It is user-typed text, not provider data.
+
+Documentation only; no code change.
+
+**Video search (Architect):** Source: [BR-038](../requirements/yuhaul/br-038-video-search-by-title-or-id.md) and [QS-001](../requirements/yuhaul/qs-001-video-search-response-time.md) (uncommitted).
+
+- Added the [video-search topic](video-search/index.md), [ADR-001](video-search/decisions/adr-001-held-title-search-by-request-time-scan.md) and [ARS-001](video-search/specifications/ars-001-video-search-api-and-queries.md).
+- **Decision:** a request-time scan of held titles, matched in Go. Rejected: SQL `LIKE` (ASCII-only folding), an FTS5 trigram index (a second title store needing secure-delete, triggers on every writer, a stable key and Go re-checks; kept as the fallback past p95 > 1 s or 150,000 held titles), and an in-memory index (a title copy outside the database).
+- **API:** `GET /api/videos/search` (tagged `kind` body, opaque keyset cursor, 50 per page) and `GET /api/videos/{videoId}`. Every response is `Cache-Control: no-store`.
+- **Shared extractions:** `metadata.ProjectLocal`/`Held`/`ParseLocalTime`, `state.OutcomeCategory`, and the per-run outcome `CASE` from `runVideoInspection`. It reuses ARS-005's `queue.RemovedByUser` and its two queue indexes.
+- **Findings:** links pasted without a scheme (user question); match total (user or Designer); the reading of "recorded a decision"; the unavailable-on-YouTube storage versus BR-032 AC1 (run-initiation); the durable `channel.channel_name` (compliance); unguarded `video.final_outcome` writes; speed unmeasured.
+
+Documentation only; no code change.
+
+**Re-queue stranded videos revised (Architect):** Source: the specifier's 2026-11-11 amendments (all uncommitted) to [BR-037](../requirements/yuhaul/br-037-requeue-stranded-videos.md) (AC4, AC11, AC13, AC17–19), [BR-035](../requirements/yuhaul/br-035-stop-active-run.md) AC14 and [BR-032](../requirements/yuhaul/br-032-processing-outcome-distinction.md) AC1. Revised [ADR-006](run-initiation/decisions/adr-006-requeue-stranded-videos.md) and [ARS-005](run-initiation/specifications/ars-005-requeue-stranded-videos.md), and amended [ARS-003](run-initiation/specifications/ars-003-stop-run-and-deferred-handoff.md) §2.
+
+- **Unavailable on YouTube:**
+  - **When:** a re-queued video (its claim holds a `requeued_by_user` row) gets the final outcome `unavailable_on_youtube` when a successful `videos.list` answer lacks it.
+  - **Stored state:** `processing_state` `evaluated`, no route decision, item `completed`, no Errors entry. A `writable_schema` step widens the `video` and `run_video_outcome` CHECKs.
+  - **Readers:** `run.videos_unavailable`, the counters, stats, events, the filter and the SPA list it separately.
+  - **No re-handoff:** `listUnfinishedRunVideosTx` treats it as finished, so a stop never re-queues it.
+  - **Other retried videos:** keep `failed`/`video_unavailable`.
+- **Provider failures:** they no longer stop claiming, as amended AC14 requires; they suspend metadata fetching for the rest of the run.
+- **Claim order:** eligible-since (`created_at`, or a later `retry_after`), then id, in batches of 500, while quota remains. The claimed set is always a prefix of that order. The ARS-003 handoff now writes `retry_after = <handoff time>` instead of NULL for a row that was waiting, so it keeps its true place.
+- **Paging prerequisite:** keyset-paged `GET /api/deferred` (`limit` 1–200, default 50; `after_id`/`before_id`; `total`; `by_reason`) and a paged Deferred view ship before the stranded-videos routes. Test X3 enforces this.
+- **Preview:** gains `already_queued.in_errors_queue`.
+- **Findings:** the user questions are closed. The open, non-blocking user questions in the requirements index remain:
+  - unavailable for other retried videos;
+  - a video that becomes available again.
+
+Documentation only; no code change.
+
+**Re-queue stranded videos (Architect):** Source: [BR-037](../requirements/yuhaul/br-037-requeue-stranded-videos.md) (uncommitted) and the user's answers of 2026-11-11: Errors-queue entries stay out; videos the user removed stay out; the preview also counts committed deferred or failed videos with no active queue item.
+
+- Added [run-initiation ADR-006](run-initiation/decisions/adr-006-requeue-stranded-videos.md) and [ARS-005](run-initiation/specifications/ars-005-requeue-stranded-videos.md).
+- **Action:** `GET /api/stranded-videos` and `POST /api/stranded-videos/requeue`.
+  - Locks: gate → `initiationMu` → `productionMu.TryLock`, plus the registered-production check.
+  - Phase A scans in a read-only transaction. Phase B inserts every item in one write transaction, in 2,000-row `json_each` chunks, rechecking only what the queue's Dismiss handlers can change.
+  - Refusals: `shutting_down`, `startup_recovery_active`, `production_run_active`, `requeue_failed`, `requeue_outcome_unknown`.
+- **Blocked:** `ClaimPlaylistSend`'s legacy veto is extracted into `state.LegacySendVeto`, with a nullable target. The scan uses the same text. A held guard blocks only when its target has no success.
+- **Schema:** migration 026 adds `requeued_by_user` (a rebuild of `deferred_item`) and indexes `deferred_item(video_id, status)` and `error_entry(video_id, status)`. The origin is `deferred_item.run_id`: the highest id among the video's ended runs.
+- **Runs:** claim in batches of 500 and keep claiming while quota remains, so the batch size is not a limit.
+- **AC13:** before evaluating any retried video, the run fetches missing or expired metadata (`videos.list`, 50 per call) through the shared quota admission.
+  - A quota, authorization or rate-limit refusal defers the video.
+  - A video absent from the response becomes `failed` with `video_unavailable`.
+  - Any other failure releases it unchanged.
+  - A backstop stops the exclusion gate, duplicate detection and routing from substituting empty metadata for a retried video.
+- **Findings:**
+  - BR-037 AC4 needs the third answer recorded (requirements).
+  - The batched-claim reading of BR-035 AC14 needs confirmation.
+  - `GET /api/deferred` has no paging, which blocks live use.
+  - Deleted videos flood the Errors queue (user question).
+  - The backlog runs before discovery (user to confirm).
+  - The timing targets are unmeasured.
+
+Documentation only; no code change.
+
 **Mark a stuck legacy run as ended implemented (Coder):** Implemented [ADR-005](run-initiation/decisions/adr-005-mark-legacy-run-as-ended.md) and [ARS-004](run-initiation/specifications/ars-004-mark-legacy-run-as-ended.md): `POST /api/runs/{id}/end`, `EndLegacyRunTx`, the `end_legacy_run` diagnostic, `endable` on run reads, the SPA control and the "discarded by user" status line. Status: implemented, review pending. Added to the contract: run reads carry `executing` (the in-process run control) and the SPA offers Stop only through `canOfferStop` (running and executing), so Stop no longer shows for run 14. Amended ARS-003 §4.2 with `executing`. Deviations and untested parts are in [ARS-004 §9](run-initiation/specifications/ars-004-mark-legacy-run-as-ended.md#9-implementation-record-and-deviations). The user confirmed that queue items the legacy run had claimed become reclaimable after it is ended.
 
 **Mark a stuck legacy run as ended (Architect):** Source: new [BR-036](../requirements/yuhaul/br-036-mark-legacy-run-as-ended.md) (user decision 2026-11-11, uncommitted in the requirements bundle).
