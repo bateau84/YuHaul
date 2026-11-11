@@ -415,6 +415,9 @@ export interface Settings {
   duplicate_threshold: number
   duplicate_behavior: string
   account_connected: boolean
+  /** Truthful account state; prefer this over account_connected for display. */
+  authorization_state?: string
+  authorization_reason?: string | null
   account_email?: string
 }
 

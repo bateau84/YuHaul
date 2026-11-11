@@ -166,7 +166,17 @@ export function SettingsView() {
 
     // Refresh account status and strip the query parameter.
     api.getAccountStatus().then((status) => {
-      setSettings((s) => (s ? { ...s, account_connected: status.connected, account_email: status.email } : s))
+      setSettings((s) =>
+        s
+          ? {
+              ...s,
+              account_connected: status.connected,
+              authorization_state: status.authorization_state,
+              authorization_reason: status.authorization_reason,
+              account_email: status.email,
+            }
+          : s,
+      )
     })
 
     params.delete('auth')
@@ -450,7 +460,9 @@ export function SettingsView() {
   async function disconnect() {
     try {
       await api.disconnectAccount()
-      setSettings((s) => (s ? { ...s, account_connected: false, account_email: undefined } : s))
+      setSettings((s) =>
+        s ? { ...s, account_connected: false, authorization_state: 'disconnected', authorization_reason: null, account_email: undefined } : s,
+      )
       addToast('Account disconnected', 'success')
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to disconnect account', 'error')
@@ -530,11 +542,20 @@ export function SettingsView() {
         {settings.account_connected ? (
           <>
             <p>Connected as {settings.account_email}</p>
+            {settings.authorization_state === 'renewal_unavailable' && (
+              <p role="status" style={{ color: 'var(--color-text-muted)' }}>
+                Access renewal is temporarily failing; it will be retried automatically.
+              </p>
+            )}
             <button className="button button--danger" onClick={disconnect}>Disconnect account</button>
           </>
         ) : (
           <>
-            <p>Account not connected.</p>
+            <p>
+              {settings.authorization_state === 'reconnect_required'
+                ? 'YouTube access was revoked or can no longer be renewed. Reconnect your account.'
+                : 'Account not connected.'}
+            </p>
             <button className="button button--primary" onClick={connectAccount}>Connect YouTube account</button>
           </>
         )}

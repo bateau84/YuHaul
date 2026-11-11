@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -187,9 +188,14 @@ func (s *Service) Status(ctx context.Context) (*ConnectionStatus, error) {
 	case connected:
 		state = "usable"
 	}
+	// Routine access-token expiry is not a reconnect demand (BR-034, SC-007):
+	// the account stays connected while renewal is possible. Only a state that
+	// needs the user to authorize again reports disconnected. Status performs no
+	// network I/O; authorization_state carries the finer detail.
+	authorized := state != "reconnect_required"
 	return &ConnectionStatus{
-		Connected:           connected && state == "usable",
-		Authenticated:       connected && state == "usable",
+		Connected:           authorized,
+		Authenticated:       authorized,
 		Configured:          true,
 		AuthorizationState:  state,
 		AuthorizationReason: reason,
@@ -640,6 +646,15 @@ func (s *Service) activeToken(ctx context.Context, boundAuthorizationID string) 
 			err = errInvalidRefreshResponse
 		}
 	}
+	// One safe line per renewal attempt: outcome category only, never token data.
+	outcome := "renewed"
+	if err != nil {
+		outcome = RenewalFailureCategory(err)
+		if outcome == "unknown" && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			outcome = "interrupted"
+		}
+	}
+	slog.InfoContext(ctx, "oauth renewal attempt", "outcome", outcome)
 	f.err = err
 	if s.flight == f {
 		s.flight = nil

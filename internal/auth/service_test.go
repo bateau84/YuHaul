@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -795,7 +796,7 @@ func TestStatusReflectsExpiry(t *testing.T) {
 		t.Fatalf("Status failed: %v", err)
 	}
 	if status.Connected {
-		t.Fatal("expected expired token to report disconnected")
+		t.Fatal("expected expired token without a refresh token to report disconnected")
 	}
 }
 
@@ -1378,5 +1379,107 @@ func TestActiveTokenGenuineSaveFailureRecoversWithoutRestart(t *testing.T) {
 	}
 	if status, err := svc.Status(ctx); err != nil || status.AuthorizationState != "usable" {
 		t.Fatalf("status = (%v, %v), want usable", status, err)
+	}
+}
+
+func newStatusTestService(t *testing.T) (*Service, *SQLiteTokenStore) {
+	t.Helper()
+	key := newTestKey(t)
+	store := newTestStore(t, key)
+	svc, err := NewService(&ServiceConfig{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost/callback", EncryptionKey: string(key)}, store, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, store
+}
+
+// BR-034 / SC-007: routine access expiry with a usable refresh token is not a
+// reconnect demand, and Status must not need network I/O to say so.
+func TestStatusExpiredAccessWithRefreshTokenStaysConnected(t *testing.T) {
+	svc, store := newStatusTestService(t)
+	ctx := context.Background()
+	if err := store.Save(ctx, &TokenRecord{Provider: "youtube", AccessToken: "expired", RefreshToken: "refresh", TokenType: "Bearer", Expiry: time.Now().Add(-time.Hour), Scopes: DefaultScopes(), ConnectedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := svc.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Connected || !status.Authenticated || status.AuthorizationState != "renewal_available" || status.AuthorizationReason != nil {
+		t.Fatalf("expired access with refresh token must stay connected: %+v", status)
+	}
+}
+
+func TestStatusRejectedRefreshRequiresReconnect(t *testing.T) {
+	svc, store := newStatusTestService(t)
+	ctx := context.Background()
+	if err := store.Save(ctx, &TokenRecord{Provider: "youtube", AccessToken: "expired", RefreshToken: "refresh", TokenType: "Bearer", Expiry: time.Now().Add(-time.Hour), Scopes: DefaultScopes(), ConnectedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveRenewalFailure(ctx, CredentialVersion{record.AuthorizationID, record.CredentialRevision}, "refresh_rejected"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := svc.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Connected || status.Authenticated || status.AuthorizationState != "reconnect_required" || status.AuthorizationReason == nil || *status.AuthorizationReason != "refresh_rejected" {
+		t.Fatalf("rejected refresh must require reconnect: %+v", status)
+	}
+}
+
+func TestStatusMissingRefreshTokenRequiresReconnect(t *testing.T) {
+	svc, store := newStatusTestService(t)
+	ctx := context.Background()
+	if err := store.Save(ctx, &TokenRecord{Provider: "youtube", AccessToken: "expired", TokenType: "Bearer", Expiry: time.Now().Add(-time.Hour), Scopes: DefaultScopes(), ConnectedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := svc.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Connected || status.AuthorizationState != "reconnect_required" || status.AuthorizationReason == nil || *status.AuthorizationReason != "refresh_missing" {
+		t.Fatalf("missing refresh token must require reconnect: %+v", status)
+	}
+}
+
+func TestRenewalAttemptLogsOutcomeCategoryOnly(t *testing.T) {
+	key := newTestKey(t)
+	store := newTestStore(t, key)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"PRIVATE_PROVIDER_DETAIL"}`))
+	}))
+	defer server.Close()
+	svc, err := NewService(&ServiceConfig{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost/callback", EncryptionKey: string(key), HTTPClient: server.Client()}, store, NewInMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.oauthConfig.Endpoint = oauth2.Endpoint{TokenURL: server.URL}
+	ctx := context.Background()
+	if err := store.Save(ctx, &TokenRecord{Provider: "youtube", AccessToken: "SECRET_ACCESS", RefreshToken: "SECRET_REFRESH", TokenType: "Bearer", Expiry: time.Now().Add(-time.Minute), Scopes: DefaultScopes(), ConnectedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	if _, err := svc.ActiveToken(ctx); err == nil {
+		t.Fatal("expected rejected refresh")
+	}
+	out := logs.String()
+	if strings.Count(out, "oauth renewal attempt") != 1 || !strings.Contains(out, "outcome=refresh_rejected") {
+		t.Fatalf("log = %q", out)
+	}
+	for _, secret := range []string{"SECRET_ACCESS", "SECRET_REFRESH", "PRIVATE_PROVIDER_DETAIL"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("log leaked %q: %s", secret, out)
+		}
 	}
 }

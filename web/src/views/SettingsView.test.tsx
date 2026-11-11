@@ -110,6 +110,39 @@ describe('SettingsView', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /Connect YouTube account/i })).toBeInTheDocument())
   })
 
+  it('keeps the account connected while access renewal is available', async () => {
+    vi.spyOn(mock, 'getSettings').mockResolvedValueOnce({
+      schedule: '0 6 * * *',
+      quota_limit: 10000,
+      duplicate_threshold: 0.5,
+      duplicate_behavior: 'skip',
+      account_connected: true,
+      authorization_state: 'renewal_available',
+      authorization_reason: null,
+      account_email: 'user@example.com',
+    })
+
+    renderWithToast(<SettingsView />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /Disconnect account/i })).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: /Connect YouTube account/i })).not.toBeInTheDocument()
+  })
+
+  it('asks for a reconnect only when authorization_state is reconnect_required', async () => {
+    vi.spyOn(mock, 'getSettings').mockResolvedValueOnce({
+      schedule: '0 6 * * *',
+      quota_limit: 10000,
+      duplicate_threshold: 0.5,
+      duplicate_behavior: 'skip',
+      account_connected: false,
+      authorization_state: 'reconnect_required',
+      authorization_reason: 'refresh_rejected',
+    })
+
+    renderWithToast(<SettingsView />)
+    await waitFor(() => expect(screen.getByText(/Reconnect your account/i)).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: /Connect YouTube account/i })).toBeInTheDocument()
+  })
+
   it('shows success toast and refreshes status when auth=connected query param is present', async () => {
     window.history.replaceState({}, '', '/settings?auth=connected')
 
