@@ -231,6 +231,7 @@ func TestStopAndDiscardReasonsRoundTrip(t *testing.T) {
 		"diag:v1 phase=unknown operation=discard_run code=snapshot_unavailable",
 		"diag:v1 phase=unknown operation=discard_run code=snapshot_unreadable",
 		"diag:v1 phase=unknown operation=discard_run code=checkpoint_unrecognized",
+		"diag:v1 phase=unknown operation=end_legacy_run code=ended_by_user",
 	} {
 		got, ok := AdmitStored(s)
 		if !ok || got != s {
@@ -249,6 +250,14 @@ func TestStopAndDiscardReasonsRoundTrip(t *testing.T) {
 		{Phase: "unknown", Operation: "discard_run", Code: "snapshot_unavailable", Status: "500"},
 		{Phase: "unknown", Operation: "discard_run", Code: "stopped_by_user"},
 		{Phase: "unknown", Operation: "stop_run", Code: "snapshot_unreadable"},
+		{Phase: "unknown", Operation: "end_legacy_run", Code: "timeout"},
+		{Phase: "unknown", Operation: "end_legacy_run", Code: "stopped_by_user"},
+		{Phase: "unknown", Operation: "stop_run", Code: "ended_by_user"},
+		{Phase: "unknown", Operation: "discard_run", Code: "ended_by_user"},
+		{Phase: "unknown", Operation: "finalize_run", Code: "ended_by_user"},
+		{Phase: "unknown", Operation: "end_legacy_run", Code: "ended_by_user", Status: "500"},
+		{Phase: "unknown", Operation: "end_legacy_run", Code: "ended_by_user", Reason: "quotaExceeded"},
+		{Phase: "unknown", Operation: "end_legacy_run", Code: "ended_by_user", SQLite: "SQLITE_BUSY"},
 	} {
 		if f.Valid() {
 			t.Errorf("%+v must be invalid", f)

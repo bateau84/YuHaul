@@ -3,10 +3,26 @@ type: Log
 title: Architecture Change Log
 description: Chronological record of changes to the docs/architecture/ bundle.
 tags: [changelog, log, okf, architecture]
-timestamp: 2026-11-10T00:00:00Z
+timestamp: 2026-11-11T00:00:00Z
 ---
 
 # Architecture Update Log
+
+## 2026-11-11
+
+**Mark a stuck legacy run as ended implemented (Coder):** Implemented [ADR-005](run-initiation/decisions/adr-005-mark-legacy-run-as-ended.md) and [ARS-004](run-initiation/specifications/ars-004-mark-legacy-run-as-ended.md): `POST /api/runs/{id}/end`, `EndLegacyRunTx`, the `end_legacy_run` diagnostic, `endable` on run reads, the SPA control and the "discarded by user" status line. Status: implemented, review pending. Added to the contract: run reads carry `executing` (the in-process run control) and the SPA offers Stop only through `canOfferStop` (running and executing), so Stop no longer shows for run 14. Amended ARS-003 §4.2 with `executing`. Deviations and untested parts are in [ARS-004 §9](run-initiation/specifications/ars-004-mark-legacy-run-as-ended.md#9-implementation-record-and-deviations). The user confirmed that queue items the legacy run had claimed become reclaimable after it is ended.
+
+**Mark a stuck legacy run as ended (Architect):** Source: new [BR-036](../requirements/yuhaul/br-036-mark-legacy-run-as-ended.md) (user decision 2026-11-11, uncommitted in the requirements bundle).
+
+- Added [run-initiation ADR-005](run-initiation/decisions/adr-005-mark-legacy-run-as-ended.md) and [ARS-004](run-initiation/specifications/ars-004-mark-legacy-run-as-ended.md).
+- **Write:** `POST /api/runs/{id}/end` runs one guarded `UPDATE`. It sets `status='failed'`, `interrupt_reason` to `diag:v1 phase=unknown operation=end_legacy_run code=ended_by_user`, and `interrupt_cause` to NULL (already NULL on version-0 rows). The row must match `run_type IN ('manual','scheduled') AND mutation_safety_version=0 AND status IN ('running','interrupted') AND stop_requested_at IS NULL`. `completed_at`, counters and quota are unchanged. There is no handoff and no provider call.
+- **Checks:** "Not executing" means no in-process run control. "No production run active" means `productionMu.TryLock` succeeds and no production run control is registered.
+- **Locks:** gate, then `initiationMu`, then `productionMu`, as Discard. A lock-free precheck answers the permanent refusals first, so repeats are always `run_ended` (BR-036 AC10).
+- **Run reads:** carry `endable`, computed with `discardable`. ARS-003 §4.2 gained a pointer.
+- **Startup:** authorization ADR-005 classification already excludes `failed` and version-0 rows, so it is unchanged.
+- **Findings:** claims that the legacy run held become reclaimable as a failed owner (requirements to confirm); no end time is shown; the read misses millisecond lock holds.
+
+Documentation only; no code change.
 
 ## 2026-11-10
 

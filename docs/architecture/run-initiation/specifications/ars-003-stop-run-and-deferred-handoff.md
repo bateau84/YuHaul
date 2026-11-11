@@ -257,6 +257,8 @@ Handler order: parse `{id}` → `trackRun()` → `StopRun(r.Context(), id)` → 
 - `stop_requested_at`: string or `null`.
 - `discardable`: `true` only for the run `DiscardableRun` returns, `false` otherwise; `null` on every item when `DiscardableRun` errors (logged with `diag.Encode`).
 - `discard_cause`: present only when `discardable` is `true`.
+- `executing`: added by [ARS-004 §4](ars-004-mark-legacy-run-as-ended.md#4-run-reads-amends-ars-003-42) (2026-11-11): `true` only while this process holds the run's control. Stop is offered only when the status is `running` and `executing` is `true`.
+- `endable`: added by [ARS-004 §4](ars-004-mark-legacy-run-as-ended.md#4-run-reads-amends-ars-003-42) (2026-11-11), and computed in the same view.
 
 Any existing `status` query filter on `GET /api/runs` accepts `stopped` [unverified whether such a filter exists].
 

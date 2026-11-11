@@ -1212,6 +1212,30 @@ func (s *Store) StopRunTx(ctx context.Context, tx *sql.Tx, id int64, reason stri
 	return nil
 }
 
+// LegacyEndableRow is the one SQL predicate for "a stuck legacy production row"
+// (run-initiation ARS-004 §1). EndableRuns, the in-transaction recheck and
+// EndLegacyRunTx all use it verbatim.
+const LegacyEndableRow = `run_type IN ('manual','scheduled') AND mutation_safety_version = 0
+  AND status IN ('running','interrupted') AND stop_requested_at IS NULL`
+
+// EndLegacyRunTx writes the user's end of a stuck legacy run inside tx: status
+// and reason only (ARS-004 §2.1). Exactly one row must change; completed_at and
+// every other field stay as stored.
+func (s *Store) EndLegacyRunTx(ctx context.Context, tx *sql.Tx, id int64, reason string) error {
+	reason = diag.GuardErrorText(reason)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = NULL
+		 WHERE id = ? AND `+LegacyEndableRow,
+		RunStatusFailed, reason, id)
+	if err != nil {
+		return fmt.Errorf("ending legacy run %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("ending legacy run %d: %w", id, ErrRunStopNotApplied)
+	}
+	return nil
+}
+
 // DiscardRunTx writes the terminal failed state of a user discard inside tx
 // (ARS-002 §2.5). Only the Run Now time-limit candidate qualifies; exactly one
 // row must change.

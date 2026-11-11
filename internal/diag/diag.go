@@ -71,14 +71,14 @@ func WithCode(err error, code string) error {
 type Facts struct{ Phase, Operation, Code, Status, Reason, SQLite string }
 
 var phases = set("unknown discovery exclusion duplicate_detection routing action_execution")
-var operations = set("unknown start_run load_run load_token select_inputs capture_selection discover load_metadata apply_exclusions detect_duplicates evaluate_video record_decision execute_action record_action retain_failure retry finalize_run record_phase inspect_run inspect_queue account_quota generate_advisory parse_response subscriptions_list channels_list playlist_items_list videos_list playlist_items_insert playlists_list refresh_token save_token account_status disconnect_account oauth_callback dispatch_request discard_run stop_run")
+var operations = set("unknown start_run load_run load_token select_inputs capture_selection discover load_metadata apply_exclusions detect_duplicates evaluate_video record_decision execute_action record_action retain_failure retry finalize_run record_phase inspect_run inspect_queue account_quota generate_advisory parse_response subscriptions_list channels_list playlist_items_list videos_list playlist_items_insert playlists_list refresh_token save_token account_status disconnect_account oauth_callback dispatch_request discard_run stop_run end_legacy_run")
 var providerReasons = set("quotaExceeded dailyLimitExceeded rateLimitExceeded userRateLimitExceeded authError forbidden insufficientPermissions backendError internalError badRequest invalidParameter notFound playlistNotFound videoNotFound playlistItemsNotAccessible playlistContainsMaximumNumberOfVideos videoAlreadyInPlaylist")
 var oauthReasons = set("invalid_request invalid_client invalid_grant unauthorized_client unsupported_grant_type invalid_scope access_denied temporarily_unavailable server_error")
 var sqliteCodes = map[int]string{1: "SQLITE_ERROR", 5: "SQLITE_BUSY", 6: "SQLITE_LOCKED", 8: "SQLITE_READONLY", 10: "SQLITE_IOERR", 11: "SQLITE_CORRUPT", 13: "SQLITE_FULL", 14: "SQLITE_CANTOPEN", 19: "SQLITE_CONSTRAINT"}
-var codes = set("unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user")
+var codes = set("unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user")
 
-// discardCodes and stopCodes are the codes bound to the discard_run and stop_run
-// operations; each operation accepts only its own codes and no other facts.
+// discardCodes are the codes bound to the discard_run operation; stop_run and
+// end_legacy_run each bind one code of their own; each operation accepts only its own codes and no other facts.
 var discardCodes = set("snapshot_unavailable snapshot_unreadable checkpoint_unrecognized")
 
 func set(s string) map[string]bool {
@@ -93,10 +93,11 @@ func (f Facts) Valid() bool {
 	if !phases[f.Phase] || !operations[f.Operation] || !codes[f.Code] {
 		return false
 	}
-	if f.Operation == "discard_run" || f.Operation == "stop_run" || discardCodes[f.Code] || f.Code == "stopped_by_user" {
+	if f.Operation == "discard_run" || f.Operation == "stop_run" || f.Operation == "end_legacy_run" || discardCodes[f.Code] || f.Code == "stopped_by_user" || f.Code == "ended_by_user" {
 		okDiscard := f.Operation == "discard_run" && discardCodes[f.Code]
 		okStop := f.Operation == "stop_run" && f.Code == "stopped_by_user"
-		return (okDiscard || okStop) && f.Status == "" && f.Reason == "" && f.SQLite == ""
+		okEnd := f.Operation == "end_legacy_run" && f.Code == "ended_by_user"
+		return (okDiscard || okStop || okEnd) && f.Status == "" && f.Reason == "" && f.SQLite == ""
 	}
 	if f.Status != "" {
 		n, e := strconv.Atoi(f.Status)

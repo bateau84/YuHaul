@@ -112,6 +112,18 @@ func (f *fakePipeline) DiscardableRun(ctx context.Context) (int64, string, bool,
 	return 0, "", false, nil
 }
 
+func (f *fakePipeline) PrecheckEndLegacyRun(ctx context.Context, runID int64) error { return nil }
+
+func (f *fakePipeline) EndLegacyRun(ctx context.Context, runID int64) (*pipeline.EndResult, error) {
+	return nil, errors.New("fake pipeline cannot end a run")
+}
+
+func (f *fakePipeline) EndableRuns(ctx context.Context) (map[int64]bool, error) {
+	return map[int64]bool{}, nil
+}
+
+func (f *fakePipeline) ExecutingRuns() map[int64]bool { return map[int64]bool{} }
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))
 }

@@ -41,6 +41,10 @@ type Pipeline interface {
 	StopRun(ctx context.Context, runID int64) (*pipeline.StopResult, error)
 	DiscardRun(ctx context.Context, runID int64) (*pipeline.DiscardResult, error)
 	DiscardableRun(ctx context.Context) (runID int64, cause string, ok bool, err error)
+	PrecheckEndLegacyRun(ctx context.Context, runID int64) error
+	EndLegacyRun(ctx context.Context, runID int64) (*pipeline.EndResult, error)
+	EndableRuns(ctx context.Context) (map[int64]bool, error)
+	ExecutingRuns() map[int64]bool
 }
 
 // ConfigHandler is the subset of config.Handler used by the server.
@@ -199,6 +203,14 @@ func (s *Server) trackRun() bool {
 	}
 	s.runWG.Add(1)
 	return true
+}
+
+// shuttingDown reports, without registering a run, whether trackRun would
+// refuse because shutdown has begun.
+func (s *Server) shuttingDown() bool {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.closing || s.runBase.Err() != nil
 }
 
 // WaitRuns stops accepting manual runs and waits until the active ones return
@@ -528,6 +540,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs", s.handleStartRun)
 	mux.HandleFunc("POST /api/runs/{id}/stop", s.handleStopRun)
 	mux.HandleFunc("POST /api/runs/{id}/discard", s.handleDiscardRun)
+	mux.HandleFunc("POST /api/runs/{id}/end", s.handleEndRun)
 	mux.HandleFunc("POST /api/runs/dry-run", s.handleDryRun)
 	mux.HandleFunc("POST /api/runs/replay", s.handleReplay)
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
@@ -854,7 +867,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	if runs == nil {
 		runs = []state.Run{}
 	}
-	d := s.discardState(r.Context())
+	d := s.readView(r.Context())
 	projected := make([]any, 0, len(runs))
 	for _, run := range runs {
 		projected = append(projected, s.projectRun(r.Context(), run, d))
@@ -879,7 +892,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load run")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.projectRun(r.Context(), *run, s.discardState(r.Context())))
+	writeJSON(w, http.StatusOK, s.projectRun(r.Context(), *run, s.readView(r.Context())))
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {

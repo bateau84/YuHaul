@@ -70,14 +70,20 @@ type fakePipeline struct {
 	done             chan struct{}
 	proposalErr      error
 
-	stopRes       *pipeline.StopResult
-	stopErr       error
-	discardRes    *pipeline.DiscardResult
-	discardErr    error
-	discardableID int64
-	discardCause  string
-	discardableOK bool
-	discardableEr error
+	stopRes        *pipeline.StopResult
+	stopErr        error
+	discardRes     *pipeline.DiscardResult
+	discardErr     error
+	discardableID  int64
+	discardCause   string
+	discardableOK  bool
+	discardableEr  error
+	endPrecheckErr error
+	endRes         *pipeline.EndResult
+	endErr         error
+	endable        map[int64]bool
+	endableErr     error
+	executing      map[int64]bool
 }
 
 func newFakePipeline(run *state.Run) *fakePipeline {
@@ -155,6 +161,20 @@ func (f *fakePipeline) DiscardRun(ctx context.Context, runID int64) (*pipeline.D
 func (f *fakePipeline) DiscardableRun(ctx context.Context) (int64, string, bool, error) {
 	return f.discardableID, f.discardCause, f.discardableOK, f.discardableEr
 }
+
+func (f *fakePipeline) PrecheckEndLegacyRun(ctx context.Context, runID int64) error {
+	return f.endPrecheckErr
+}
+
+func (f *fakePipeline) EndLegacyRun(ctx context.Context, runID int64) (*pipeline.EndResult, error) {
+	return f.endRes, f.endErr
+}
+
+func (f *fakePipeline) EndableRuns(ctx context.Context) (map[int64]bool, error) {
+	return f.endable, f.endableErr
+}
+
+func (f *fakePipeline) ExecutingRuns() map[int64]bool { return f.executing }
 
 type fakeOverviewProvider struct {
 	overview *Overview

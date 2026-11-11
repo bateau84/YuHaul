@@ -214,3 +214,140 @@ func TestRunReadProjection(t *testing.T) {
 		require.NotContains(t, run, "discard_cause")
 	}
 }
+
+// H1 for End: every row of the ARS-004 §3 table, the precheck answered before
+// the shutdown gate, and runWG balanced in every branch.
+func TestEndRunHTTPContract(t *testing.T) {
+	f := &fakePipeline{}
+	srv := controlServer(t, f)
+
+	f.endRes = &pipeline.EndResult{RunID: 14}
+	code, body := postRun(t, srv, "/api/runs/14/end")
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, map[string]any{"run_id": float64(14), "status": "failed", "outcome": "ended"}, body)
+
+	for _, bad := range []string{"abc", "0", "-3"} {
+		code, body = postRun(t, srv, "/api/runs/"+bad+"/end")
+		require.Equal(t, http.StatusBadRequest, code, bad)
+		require.Equal(t, "invalid_run_id", body["code"])
+	}
+
+	cases := []struct {
+		err    error
+		status int
+		code   string
+		extra  map[string]any
+		absent []string
+	}{
+		{&pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunNotFound}, 404, "run_not_found", nil, nil},
+		{&pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunEnded, Status: "failed"}, 409, "run_ended", map[string]any{"status": "failed"}, nil},
+		{&pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunEnded, Status: "completed"}, 409, "run_ended", map[string]any{"status": "completed"}, nil},
+		{&pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunEnded, Status: "stopped"}, 409, "run_ended", map[string]any{"status": "stopped"}, nil},
+		{&pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunNotEndable, Reason: "not_production", RunType: "replay"}, 409, "run_not_endable", map[string]any{"reason": "not_production", "run_type": "replay"}, nil},
+		{&pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunNotEndable, Reason: "not_legacy"}, 409, "run_not_endable", map[string]any{"reason": "not_legacy"}, []string{"run_type"}},
+		{&pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunNotEndable, Reason: "executing"}, 409, "run_not_endable", map[string]any{"reason": "executing"}, []string{"run_type"}},
+		{pipeline.ErrStartupRecoveryActive, 503, "startup_recovery_active", nil, nil},
+		{pipeline.ErrProductionRunActive, 409, "production_run_active", nil, nil},
+		{&pipeline.EndNotAppliedError{RunID: 14, Status: "running"}, 500, "end_failed", map[string]any{"status": "running"}, nil},
+		{&pipeline.EndNotAppliedError{RunID: 14, Status: "interrupted"}, 500, "end_failed", map[string]any{"status": "interrupted"}, nil},
+		{&pipeline.EndNotAppliedError{RunID: 14}, 500, "end_failed", nil, []string{"status"}},
+		{pipeline.ErrEndOutcomeUnknown, 500, "end_outcome_unknown", nil, nil},
+		{errors.New("raw database detail"), 500, "end_failed", nil, nil},
+	}
+	for _, tc := range cases {
+		f.endRes, f.endErr = nil, tc.err
+		code, body = postRun(t, srv, "/api/runs/14/end")
+		require.Equal(t, tc.status, code, tc.code)
+		require.Equal(t, tc.code, body["code"])
+		require.EqualValues(t, 14, body["run_id"])
+		for k, v := range tc.extra {
+			require.Equal(t, v, body[k], tc.code+" "+k)
+		}
+		for _, k := range tc.absent {
+			require.NotContains(t, body, k)
+		}
+		require.NotContains(t, body["error"], "raw database detail")
+	}
+
+	// A precheck refusal is answered before any gate or tracking.
+	f.endErr = nil
+	f.endPrecheckErr = &pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunEnded, Status: "failed"}
+	code, body = postRun(t, srv, "/api/runs/14/end")
+	require.Equal(t, http.StatusConflict, code)
+	require.Equal(t, "run_ended", body["code"])
+	f.endPrecheckErr = nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, srv.WaitRuns(ctx), "runWG is balanced in every branch")
+
+	// During shutdown an endable run answers shutting_down, an ended run run_ended.
+	code, body = postRun(t, srv, "/api/runs/14/end")
+	require.Equal(t, http.StatusServiceUnavailable, code)
+	require.Equal(t, "shutting_down", body["code"])
+	f.endPrecheckErr = &pipeline.EndRefusedError{RunID: 14, Code: pipeline.EndRunEnded, Status: "failed"}
+	code, body = postRun(t, srv, "/api/runs/14/end")
+	require.Equal(t, http.StatusConflict, code)
+	require.Equal(t, "run_ended", body["code"])
+}
+
+// R1 for the server: endable and executing are projected on every read, endable
+// is null on every item when its read fails, and it is false once shutdown has
+// begun. executing is the in-process control, independent of the saved status.
+func TestRunReadProjectsEndableAndExecuting(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, _, cleanup := setupServerTest(t)
+	defer cleanup()
+	legacyID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC().Add(-time.Hour), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	liveID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+
+	f := &fakePipeline{endable: map[int64]bool{legacyID: true}, executing: map[int64]bool{liveID: true}}
+	last := &state.Run{ID: legacyID, Status: state.RunStatusRunning}
+	srv := controlServer(t, f, WithRunStore(stateStore), WithOverviewProvider(&fakeOverviewProvider{overview: &Overview{LastRun: last}}))
+
+	get := func(path string) map[string]any {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body
+	}
+	byID := func(body map[string]any) map[int64]map[string]any {
+		out := map[int64]map[string]any{}
+		for _, item := range body["runs"].([]any) {
+			run := item.(map[string]any)
+			out[int64(run["id"].(float64))] = run
+		}
+		return out
+	}
+
+	runs := byID(get("/api/runs"))
+	require.Equal(t, true, runs[legacyID]["endable"])
+	require.Equal(t, false, runs[legacyID]["executing"], "a saved status of running is not executing")
+	require.Equal(t, false, runs[liveID]["endable"])
+	require.Equal(t, true, runs[liveID]["executing"])
+	single := get("/api/runs/" + strconv.FormatInt(legacyID, 10))
+	require.Equal(t, true, single["endable"])
+	require.Equal(t, false, single["executing"])
+	lr := get("/api/overview")["last_run"].(map[string]any)
+	require.Equal(t, true, lr["endable"])
+	require.Equal(t, false, lr["executing"])
+
+	f.endableErr = errors.New("read failed")
+	for _, run := range byID(get("/api/runs")) {
+		require.Contains(t, run, "endable")
+		require.Nil(t, run["endable"])
+		require.Contains(t, run, "executing", "executing does not depend on the endable read")
+	}
+	f.endableErr = nil
+
+	wctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	require.NoError(t, srv.WaitRuns(wctx))
+	for _, run := range byID(get("/api/runs")) {
+		require.Equal(t, false, run["endable"], "endable is false for every run once shutdown has begun")
+	}
+}

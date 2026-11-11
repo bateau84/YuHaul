@@ -67,7 +67,9 @@ type Pipeline struct {
 	runs   map[int64]*runControl
 	// discardTx runs DiscardRun's transaction. Nil means the queue store's
 	// WithRetryTx; tests substitute it to simulate commit failures.
-	discardTx  func(context.Context, func(*sql.Tx) error) error
+	discardTx func(context.Context, func(*sql.Tx) error) error
+	// endTx is the same seam for EndLegacyRun (ARS-004 §2.2).
+	endTx      func(context.Context, func(*sql.Tx) error) error
 	db         *sql.DB
 	machine    *state.Machine
 	stateStore *state.Store

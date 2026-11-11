@@ -248,7 +248,7 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 - **Actor:** YuHaul administrator checking quota-deferred items
 - **Context:** Some videos were deferred due to quota exhaustion
 - **Trigger:** User navigates to Errors > Deferred tab
-- **Desired outcome:** Deferred items show video, channel, deferral reason, and next-eligibility indicator; user can retry when quota allows or discard
+- **Desired outcome:** Deferred items show video, channel, deferral reason, and next-eligibility indicator; user can retry when quota allows or dismiss
 - **Observable success:** Deferred items are clearly distinguished from errors; next-eligibility shows when the item will be retried; manual retry is available if quota permits
 - **Source:** AC 13, 30
 
@@ -581,7 +581,7 @@ Derived from the 32 acceptance criteria. Each workflow names the surfaces and en
 
 **View: Run List** — Browse processing history; user job: find a specific run or scan recent activity.
 - **Regions:**
-  - Filter region: date range, run type (manual/scheduled/dry-run/replay/backtest), status filter
+  - Filter region: date range, run type (manual/scheduled/dry-run/replay/backtest), status filter (including “Stopping” and “Stopped by user”, see “Stop an Active Run”)
   - Run list region: chronological list of runs
 - **Components:** Run row (timestamp, type badge, duration, video count, outcome summary, quota cost, status), empty state, filter controls
 - **Filter behavior:** Filters apply to the runs returned by `GET /api/runs`. The date range matches the run start date as a UTC calendar day, inclusive of both endpoints; run type and status match the run's `run_type` and `status` values. Filters combine — a run must satisfy every active filter. `GET /api/runs` accepts no query parameters (ARS-001), so filtering happens in the client over the fetched list; server-side filtering would require extending that API contract.
@@ -658,7 +658,7 @@ Check the shipped browser with real registered API projections for: pre-send aut
 - Keep the existing production confirmation and explanation. On confirmation, immediately show “Starting run…” and prevent repeated submission while the start request is pending.
 - Acknowledgement with `run_id` opens `/runs/{id}` and immediately reads that run. Initial copy: “Run {id} started. Checking progress…”. This is not completion; the first read may already be terminal. Move focus to the destination heading, not a toast. Browser Back returns to Overview; direct links/reload reconstruct the same run from saved state.
 - If acceptance cannot be confirmed, show “Could not confirm whether the run started. Check Runs before starting another run.” with “View runs”. Do not automatically repeat the start request. An explicit rejection can use its safe, specific message instead.
-- While a production run is known to be running, keep Run Now unavailable with adjacent “Run in progress” and a “View run” link. Server concurrency protection remains authoritative; a stale browser is not concurrency protection. Do not disable unrelated navigation.
+- While a production run is known to be running, keep Run Now unavailable with adjacent “Run in progress” and a “View run” link (a stopping run shows “Run {id} is stopping” instead; see “Stop an Active Run”). Server concurrency protection remains authoritative; a stale browser is not concurrency protection. Do not disable unrelated navigation.
 
 **Placement and meaning:**
 
@@ -679,14 +679,14 @@ Check the shipped browser with real registered API projections for: pre-send aut
 | `completed` | “Run completed.” Remove active progress. Show recorded outcome totals, including deferred/failed outcomes when present. Adjacent: “Processing has ended. Inspect video action outcomes for recorded playlist results.” Completion is not universal playlist success. |
 | `completed`, selected count exactly zero | Add “No inputs selected for this run.” Do not say “No videos exist” or “Nothing matched”. |
 | Terminal, no video outcome rows, selected count unknown or positive | “No video outcomes recorded for this run.” Do not infer an empty input set or rejection. With an active outcome filter, retain the existing filter-specific empty state instead. |
-| `failed` / `interrupted` | “Run failed.” / “Run interrupted.” Show recognized phase as “Last recorded phase: {phase label}” and the API-vetted reason, or existing safe-reason-unavailable/missing-reason explanation. Keep recorded counts/evidence inspectable even when Errors is empty. Do not promise automatic recovery or unchanged YouTube state. Run Detail has no Resume or Cancel button: continuing a run happens only through Run Now. An interrupted manual run stopped by its time limit gets the extra explanation in “Run Now — Resume After a Time Limit”; every other failed or interrupted run keeps this row's copy and has no resume promise. |
+| `failed` / `interrupted` | “Run failed.” / “Run interrupted.” Show recognized phase as “Last recorded phase: {phase label}” and the API-vetted reason, or existing safe-reason-unavailable/missing-reason explanation. Keep recorded counts/evidence inspectable even when Errors is empty. Do not promise automatic recovery or unchanged YouTube state. Run Detail has no Resume button: continuing a run happens only through Run Now. A run that is not executing has no Stop control either; “Stop run {id}” exists only while a run is active (see “Stop an Active Run”). An interrupted manual run stopped by its time limit gets the extra explanation in “Run Now — Resume After a Time Limit”; every other failed or interrupted run keeps this row's copy and has no resume promise. |
 | Initial status read fails | “Could not load run status. Completion is unknown.” Offer “Retry status” and “Back to runs”; never leave an indefinite loading or success state. |
 | Background status read fails | Retain values as “Last known status”. Show “Could not refresh status. This run may still be processing.” and “Retry status”. Do not portray it as confirmed active work or turn a read failure into run failure. |
 | SSE unavailable, saved reads succeed | “Live updates unavailable. Checking saved status periodically.” No repeated error toast or run-failed styling. |
 
 While running, qualify existing discovered/outcome summary cards: “Recorded totals; may be incomplete until the run finishes.” These counters are not promised to increment during discovery or each action. Accepted remains distinct from a recorded successful playlist action. Preserve simulation explanations; if shared progress presentation is reused for simulations, terminal success says “Simulation evaluation completed”, never playlist success.
 
-**Refresh, failure, and interruption:** Use the existing five-second saved-status refresh while running; SSE hints can prompt an earlier read. A terminal event only triggers a read; only its saved status ends active progress. Fresh reads replace stale values, including a terminal result reached while disconnected. On return to a visible tab, read status again; background timer throttling is not a run interruption. Label browser receipt time “Status checked at {local time}”, not “Last activity”; an unchanged phase/count is not heartbeat evidence. Keep filters/page selection and focus through background reads. Stop active refresh presentation at saved `completed`, `failed`, or `interrupted`. Do not auto-restart work.
+**Refresh, failure, and interruption:** Use the existing five-second saved-status refresh while running; SSE hints can prompt an earlier read. A terminal event only triggers a read; only its saved status ends active progress. Fresh reads replace stale values, including a terminal result reached while disconnected. On return to a visible tab, read status again; background timer throttling is not a run interruption. Label browser receipt time “Status checked at {local time}”, not “Last activity”; an unchanged phase/count is not heartbeat evidence. Keep filters/page selection and focus through background reads. Stop active refresh presentation at saved `completed`, `failed`, `interrupted` or stopped by user. A run that is stopping is still active and keeps refreshing. Do not auto-restart work.
 
 **Accessibility and responsive checks:** Target WCAG 2.2 AA. Use a named progress region and a concise polite status announcement for start, phase changes, terminal state, and loss/recovery of status reads (SC 4.1.3). Do not announce each poll, freshness timestamp, or changing count. Background updates never move focus; heading focus follows explicit navigation; retry controls remain keyboard accessible with visible, unobscured focus (SC 2.1.1, 2.4.3, 2.4.7, 2.4.11). Status/connection meaning is explicit text, not a colored dot alone (SC 1.4.1). Verify text/control contrast in supported themes (SC 1.4.3, 1.4.11), target sizes (SC 2.5.8), and single-column reflow without clipped copy/actions at 320 CSS px and usable text at 200% zoom (SC 1.4.10, 1.4.4). Any activity animation is supplementary; reduced motion retains the same text with no animation. Verify with keyboard and a screen reader that a lost connection is announced once and retry/recovery does not steal focus.
 
@@ -732,7 +732,7 @@ A resumed run keeps its id and original settings. Run Detail shows “Running �
 | Case | Message | Links / action |
 |---|---|---|
 | `production_run_active` | “Run Now did nothing. A production run is already running. Nothing was started or resumed.” | “View run” link when Overview knows the active run; otherwise “View runs”. Tell them to wait for it to finish, then press Run Now again. |
-| `resume_unavailable` | “Run Now did nothing. Run {id} stopped at its time limit but cannot be resumed safely. No new run was started and nothing was changed. {Reason sentence}” | Link “View run {id}”. Then: “While run {id} is the oldest run stopped this way, Run Now will keep refusing. YuHaul does not offer a way to resume or discard it from this screen. The schedule is not affected.” Dry Run stays available. |
+| `resume_unavailable` | “Run Now did nothing. Run {id} stopped at its time limit but cannot be resumed safely. No new run was started and nothing was changed. {Reason sentence}” | Link “View run {id}”. Then, depending on `reason`: for `snapshot_unavailable`, `snapshot_unreadable`, `snapshot_inadmissible`, `checkpoint_unrecognized` and `terminal_timestamp_contradiction`: “While run {id} is the oldest run stopped this way, Run Now will keep refusing. To unblock Run Now, you can discard run {id}. The schedule is not affected.” and the button “Discard run {id}” (see “Run Now — Discarding a Run That Cannot Be Resumed”). For `recheck_at_write` use only the sentence in the reason table, with no refusal-will-continue claim and no button. For an unknown reason: “While run {id} is the oldest run stopped this way, Run Now may keep refusing. Open the run to see whether it can be discarded. The schedule is not affected.” with no button. Dry Run stays available. |
 | 503 | “Run Now did nothing. YuHaul can't accept a run right now. It may be starting up or shutting down. Nothing was started or resumed. Try again in a minute.” | “View runs” link. |
 | Other server error, or no response | “Could not confirm whether a run started or resumed. Check Runs before pressing Run Now again.” | “View runs”. No automatic retry (existing start-uncertainty rule, which this reuses). |
 
@@ -748,12 +748,13 @@ A resumed run keeps its id and original settings. Run Detail shows “Running �
 | `recheck_at_write` | “Its saved state changed while Run Now was checking it. Check the run, then press Run Now again if that is still what you want.” |
 | anything else | “The reason is not available in this version of the interface.” |
 
-No refusal copy promises that the run can be fixed, that YouTube state is unchanged, or that waiting will resolve a `resume_unavailable` refusal. “Nothing was changed” is only used where the server contract guarantees a refusal changes nothing.
+No refusal copy promises that the run can be fixed, that YouTube state is unchanged, or that waiting will resolve a `resume_unavailable` refusal. Discarding removes the block; it does not repair the run. “Nothing was changed” is only used where the server contract guarantees a refusal changes nothing.
 
 **On Run Detail — interrupted run.** Applies only when the saved run is a manual Run Now run, `interrupted`, and the API reports that the interruption cause is the time limit. If the API does not report the cause (`interrupt_cause` null or absent), use the generic “Run interrupted.” row and make no resume promise.
 
 - Heading status: “Run interrupted — time limit reached.” Keep “Last recorded phase: {phase label}” and the recorded counts.
 - Explanation: “Work done up to this point is saved. Pressing Run Now continues the oldest run stopped this way. This run continues only if it is the oldest and can be resumed safely.” Add a link “Go to Overview” to where Run Now is. Do not add a Resume button.
+- When the run read says this run is the discardable run (BR-017 AC22), replace the explanation above with the unusable-run text and the Discard control defined in “Run Now — Discarding a Run That Cannot Be Resumed”. This applies to all five unusable reasons.
 - Do not say it “will resume”, “resumes next”, or “resumes automatically”. The UI cannot know whether it is the oldest or whether a guarded target blocks it.
 - A run interrupted by shutdown, process loss, or any other cause, a scheduled run, a legacy run, a failed run, and a simulation do not get this text.
 
@@ -761,7 +762,235 @@ No refusal copy promises that the run can be fixed, that YouTube state is unchan
 
 **Acceptance observations:** With a real server, press Run Now with: a time-limit-interrupted run (resumed, same id, named, not a new run, Run Detail heading focused); two such runs (oldest named, the other unchanged); an active run (`production_run_active` copy and link); an unusable candidate for each closed reason plus an unknown reason (mapped sentence, no raw value, link to the run, no new run); startup recovery or shutdown (503 copy); a dropped connection (uncertain copy, no auto repeat). On Run Detail, check the interrupted copy appears only for a time-limit-interrupted manual run, reload drops the resumed line but not the status, and screen-reader and 320 px checks pass.
 
-**Decision and capability gaps.** Rejected: a toast (disappears, no link), an Overview-only banner on success (the run page is where progress lives), and a Resume button on Run Detail (a press would act on the oldest candidate, not necessarily the one on screen, so a per-run button would mislead). Gaps, not resolved here: (1) the run API may not expose the interruption cause, which the Run Detail interrupted text needs (closed in a016744: the run API exposes `initiated_by` and `interrupt_cause`); (2) there is no saved “resumed” marker, so the resumption line is transient; (3) a candidate that stays unusable blocks all new runs through Run Now and the product offers the person no way to clear it, which is a recovery capability the requirements owner would need to decide; (4) 503 has no code to separate startup recovery from shutdown. Gap (1) is closed; gaps (2)–(4) remain. Implementation is in a016744 (Overview refusal as persistent alert, Run Detail line and time-limit text); accessibility and browser behavior are unverified.
+**Decision and capability gaps.** Rejected: a toast (disappears, no link), an Overview-only banner on success (the run page is where progress lives), and a Resume button on Run Detail (a press would act on the oldest candidate, not necessarily the one on screen, so a per-run button would mislead). Gaps, not resolved here: (1) the run API may not expose the interruption cause, which the Run Detail interrupted text needs (closed in a016744: the run API exposes `initiated_by` and `interrupt_cause`); (2) there is no saved “resumed” marker, so the resumption line is transient; (3) a candidate that stays unusable blocks all new runs through Run Now and the product offers the person no way to clear it, which is a recovery capability the requirements owner would need to decide; (4) 503 has no code to separate startup recovery from shutdown. Gap (1) is closed; gaps (2) and (4) remain. Gap (3) is answered in design by BR-017 AC13–21 and “Run Now — Discarding a Run That Cannot Be Resumed” below, pending implementation and the API facts listed there. Implementation is in a016744 (Overview refusal as persistent alert, Run Detail line and time-limit text); accessibility and browser behavior are unverified.
+
+#### Run Now — Discarding a Run That Cannot Be Resumed
+
+**Status and scope (2026-11-10, amended 2026-11-10 after the stop-run decisions):** Design for [BR-017](/docs/requirements/yuhaul/br-017-manual-run-initiation.md) AC13–AC22. Not implemented. It answers capability gap (3) above, extends “Run Now — Resume After a Time Limit”, and reuses US-009. It adds one control, one confirmation dialog and one acknowledgement. It adds no Resume or bulk action. Ending an active run is a different action: see “Stop an Active Run”.
+
+**Walkthrough:** The administrator presses Run Now. Overview says run 30 stopped at its time limit, its saved settings are missing, and Run Now will keep refusing. Beside the link “View run 30” is the button “Discard run 30”. The administrator presses it. A dialog states that run 30 will be marked failed and never resumed, that its unfinished videos go to the deferred queue for the next run, and that nothing is sent to YouTube. They choose “Discard run 30”. The page then says run 30 is failed and its unfinished videos are in the deferred queue for the next run. The next Run Now press resumes the next stopped run, or starts a new run that processes the deferred videos. The same control is on run 30's own page, so the administrator can also discard it without first being refused. Observable success: the person can tell which run was discarded, that it will never run again, where its videos went, and that YouTube was not touched.
+
+**Naming rule (two actions once shared the word “Discard”).** The deferred queue's button was renamed “Dismiss” on 2026-11-10. It removes one queue item and keeps the existing dialog “Dismiss this deferred item?”. The run action discards a whole run. To keep them apart:
+
+- The run action is always labeled with the run: “Discard run {id}”. The bare word “Discard” is never used for it, in the button, dialog, toast or announcement.
+- It never appears in the Errors view or inside a queue row. “Dismiss” is the only verb for a queue item, and “Discard” is the only verb for a run.
+- The run dialog says “deferred queue” for the videos. It never says “dismiss”, and never “Error Queue”.
+- The route editor's “Discard changes” and “Discard unsaved changes?” are unrelated and unchanged.
+
+**Where the control appears.** Two places, one label. Both are driven by the discardable fact (AC22), not by the reason.
+
+1. *Run Now refusal on Overview.* Inside the `resume_unavailable` message, next to “View run {id}”, for all five unusable reasons: `snapshot_unavailable`, `snapshot_unreadable`, `snapshot_inadmissible`, `checkpoint_unrecognized` and `terminal_timestamp_contradiction`. [BR-017](/docs/requirements/yuhaul/br-017-manual-run-initiation.md) AC11 says every press refused for an unusable run names a run the user can discard. For `recheck_at_write` and unknown reasons, show no button, only “View run {id}”: the run's own page shows the control if the run is discardable at that moment.
+2. *Run Detail.* Whenever the run read says this run is the discardable run (AC22). This covers all five reasons. Place it in the interrupted-run explanation, replacing the sentence “This run continues only if it is the oldest and can be resumed safely.” Added text: “Run {id} cannot be resumed. {Reason sentence} Run Now will keep refusing until run {id} is discarded.” then the button “Discard run {id}”. Use the reason sentence for the five reasons from the `resume_unavailable` table when the read gives the cause. When it does not, use: “Its saved data cannot be used to continue it safely.” If the read does not say the run is discardable, or says it is not, show no control and no refusal promise.
+
+The button is a normal secondary button with a text label. It is not shown in run lists. At most one run shows it at a time. A stale page can show it for a run that is no longer discardable; the server rechecks when the discard is carried out (AC13) and the person then sees a refusal. The UI never infers discardability from run age, status or interruption cause.
+
+**Confirmation dialog.** Opens when the button is pressed. Nothing is sent until the person confirms. A modal dialog, not a toast or inline toggle.
+
+- Title: “Discard run {id}?”
+- Opening line: “Run {id} stopped at its time limit and cannot be resumed. {Reason sentence}”
+- Facts, as a list, in this order:
+  - “Run {id} will be marked failed. It will never be resumed.”
+  - “Its unfinished videos will be put in the deferred queue. The next new run, from Run Now or the schedule, will process them automatically.”
+  - “Nothing is sent to YouTube. Playlist additions already recorded stay recorded. An addition whose outcome could not be confirmed stays marked as unconfirmed and still blocks a repeat.”
+  - “This cannot be undone.”
+- Closing line: “Discarding does not start a run. After this, Run Now continues the next stopped run, or starts a new run if none is left. The deferred videos wait until a new run starts. The schedule is not affected.”
+- Buttons: “Discard run {id}” (confirm, destructive styling plus text) and “Keep run {id}” (cancel).
+- Behavior: initial focus is on “Keep run {id}”. Escape, “Keep run {id}”, and clicking outside the dialog all close it and change nothing. Focus returns to the “Discard run {id}” button. The confirm button is never the default action of Enter.
+- While the request is pending: confirm button reads “Discarding run {id}…”, both buttons are disabled, the dialog stays open and is marked busy. A second press cannot be sent.
+
+**Acknowledgement after a successful discard.** A persistent inline message, not a toast, with a “Discarded:” text prefix, at the top of the page where the person acted (below the Overview header, or at the top of Run Detail above the status region). It replaces the refusal message when on Overview.
+
+“Discarded: run {id} is now marked failed and will not be resumed. Its unfinished videos are in the deferred queue, and the next new run will process them automatically. Nothing was sent to YouTube. Press Run Now to continue with the next stopped run, or to start a new run.”
+
+Links: “View deferred queue” (the Deferred tab of Errors) and, when not already on it, “View run {id}”. Announce once with `role="status"`. Because the discard control disappears, move focus to this message (programmatic focus, no scroll jump past it). It stays until dismissed, until Run Now is pressed, or until the person leaves the page. On Run Detail the page re-reads the run: its status changes to “Run failed — discarded by user.” (see the comparison in “Mark a Legacy Run as Ended”) and shows the saved reason. The saved reason is server-written and API-vetted; show it as the existing failed-run row does, and never raw text. Run history and Run Detail show that reason so a discarded run can be told from one that failed alone (AC16). Run Now stays available throughout and is never started or resumed by the discard.
+
+**Refusals.** Each says the run was not discarded and nothing was changed, as AC20 guarantees, except the unconfirmed case. The UI branches on status and machine code, never message text. The dialog stays open for refusals the person may retry; for the others it closes and the message appears as a persistent inline `role="alert"` message with the prefix “Discard did nothing.”, no focus move, and the page re-reads the run so the control disappears when no longer valid. A refusal never starts or resumes any run.
+
+| Case | Dialog | Message |
+|---|---|---|
+| Run does not exist | closes | “Discard did nothing. Run {id} was not found. Nothing was changed.” Link “View runs”. |
+| Run already `failed` or `completed`, including already discarded | closes | “Discard did nothing. Run {id} has already ended, so it was not discarded again. Nothing was changed.” Link “View run {id}”. |
+| Not the discardable run | closes | “Discard did nothing. Run {id} cannot be discarded now. Only the run that is blocking Run Now can be discarded, and run {id} is not that run. Its state may have changed. Nothing was changed.” Links “View run {id}” and “Go to Overview”. |
+| Production run active | stays open | “Discard did nothing. A production run is already running. Run {id} was not discarded and nothing was changed. Wait for it to finish, then try again.” “View run” link when known, else “View runs”. |
+| 503: startup recovery or shutdown | stays open | “Discard did nothing. YuHaul can't discard a run right now. It may be starting up or shutting down. Nothing was changed. Try again in a minute.” “View runs”. |
+| Save failed; run stays interrupted | stays open | “Discard did nothing. Run {id} could not be saved as discarded, so it is still interrupted and nothing was changed. You can try again.” |
+| Other error, or no response | closes | “Could not confirm whether run {id} was discarded. Open the run to check its status before trying again.” Link “View run {id}”. No automatic retry. The saved state is either fully discarded or unchanged, never a mixture (AC15). |
+
+Where the dialog stays open, the message appears inside it with `role="alert"` and the buttons re-enable. A repeated or double-submitted discard is refused as “already ended”, and the person sees the one result.
+
+**Accessibility.** Target WCAG 2.2 AA. The dialog is modal with an accessible name (“Discard run {id}?”) and description (the opening line and facts); focus is trapped, moves in on open, and returns to the trigger on cancel (SC 2.4.3, 2.1.2 no trap because Escape exits). Every control's visible label contains the run id, so voice and screen-reader users hear which run (SC 2.5.3, 2.4.6). The destructive button is marked by its text, not color alone (SC 1.4.1). Status messages use `role="status"`; errors use `role="alert"` without stealing focus (SC 4.1.3); the one intended focus move is to the acknowledgement after the trigger is removed. Buttons and links meet target size (SC 2.5.8), focus is visible and unobscured (SC 2.4.7, 2.4.11), and the dialog and messages reflow at 320 CSS px with no clipped copy (SC 1.4.10). Messages persist, so reading is not time-limited (SC 2.2.1). Reduced motion needs no animation.
+
+**Acceptance observations:** With a real server and an unusable oldest run: the control appears in the refusal and on Run Detail with matching labels; the dialog names the run and states the four facts; cancelling by each route changes nothing and returns focus; confirming shows the pending state, then the acknowledgement; Run Detail shows “Run failed.” with the reason and the Deferred tab lists the run's videos as pending and eligible now. Press Run Now afterwards and see the next run resumed or a new run started that processes them. Check the control on Run Detail for each of the five reasons, every refusal row, a double submit, a dropped connection, a usable or younger unusable run (no control), and keyboard, screen-reader and 320 px passes. “Discard run {id}” and “Dismiss” are never confusable in label, dialog or announcement.
+
+**Capability gaps and limits.** (1) AC22 gives Run Detail the discardable fact. The 409 `resume_unavailable` response still gives only `run_id` and `reason`, so the Overview button follows the five-reason rule above; if the response also carries the discardable fact, use that instead. (2) AC22 says whether a run is discardable, not why. If the run read omits the cause, Run Detail uses the generic sentence above. (3) No discard endpoint, error codes or reason text exist yet; the table above names cases by meaning (AC20) and the architect defines the codes. (4) The count of unfinished videos is not known to the UI, so the dialog does not state a number; add one only if the API supplies it. (5) The 503 case still cannot separate startup recovery from shutdown. No code, browser or accessibility verification is claimed.
+
+**Deferred rows handed over by a discard or a stop.** Each such video has one pending deferred item with no waiting time. On the Deferred tab, show its reason as “Waiting for the next run. Run {id} was discarded.” or “Waiting for the next run. Run {id} was stopped by user.”, and its next-eligibility indicator as “Eligible for the next run”. Use the API-vetted reason, never raw text; if the reason is unavailable, use “Waiting for the next run.” These rows keep the existing “Dismiss” and manual retry controls. Dismissing one keeps the existing copy “It will not be retried”, which is true: the video then waits for nothing.
+
+#### Stop an Active Run
+
+**Status and scope (2026-11-10):** Design for [BR-035](/docs/requirements/yuhaul/br-035-stop-active-run.md) AC1–AC21. Not implemented. It reuses US-009 and extends “Run Now — Recorded Progress and Closure”. It adds one control, one confirmation dialog, one acknowledgement, a “Stopping” state and a “Stopped by user” final status. It adds no Pause, Resume or Undo.
+
+**Walkthrough:** Scheduled run 41 is adding videos to playlists. The administrator opens run 41 and presses “Stop run 41”. A dialog says run 41 will stop and never be resumed, that it will show as “Stopped by user” and not as failed, that its unfinished videos go to the deferred queue for the next run, and that nothing more is sent to YouTube. They choose “Stop run 41”. The page says run 41 is stopping, and the status reads “Stopping” rather than “Running”. A short time later the status reads “Stopped by user”, and the page says its unfinished videos are in the deferred queue. Run Now becomes available again. An addition that was already sent without an answer still shows as unconfirmed. Observable success: the person can tell that the stop was accepted, that the run is not yet finished stopping, when it has settled, and that a stop is not a failure.
+
+**Words used.** Control: “Stop run {id}”. In progress: “Stopping”. Final: “Stopped by user”. The verb “stop” is only for an active run. It is never used for an interrupted run, for the time limit, or for shutdown; those keep “interrupted”. “Stopped by user” is never shown as “failed”, “cancelled” or “aborted”.
+
+**Where the control appears.** On every surface that presents an active run, one button per run per view, labeled with the run's id:
+
+- Run Detail: in the persistent status region, after the status line and counts.
+- Overview: in the latest-run panel when that run is active, next to “Run in progress” and “View run”. A run shown in that panel does not repeat the button in the activity feed.
+- Run List and Overview activity feed: in the row of an active run.
+
+It applies to any active run: manual, scheduled, queue retry, a run being resumed by Run Now or by startup recovery, and dry run, replay and backtest. It is shown only while the saved status says the run is running and the run read says `executing` is true (the server is actually executing it; an absent `executing` shows no Stop). It is not shown for an interrupted run that is not executing (including a discardable run), for a completed, failed or stopped run, or for any run whose `endable` fact is true (a stuck legacy run that is marked running but is not executing; see “Mark a Legacy Run as Ended”). A run with `endable` true is never presented as running normally, never gets “Run in progress”, and does not keep Run Now unavailable. The UI does not decide whether a run is really executing; the server decides at the moment of the press (AC18) and the person sees a refusal if the state has moved on.
+
+**Confirmation dialog — production run** (manual, scheduled, queue retry, or a run being resumed). Modal, opened by the button. Nothing is sent until the person confirms.
+
+- Title: “Stop run {id}?”
+- Opening line: “Run {id} is {run kind} and is running now.” where {run kind} is “a Run Now run”, “a scheduled run”, “a queue retry run” or “a run being resumed”.
+- Facts, as a list, in this order:
+  - “Run {id} will stop and will never be resumed. It will be shown as “Stopped by user”, not as failed.”
+  - “Its unfinished videos will be put in the deferred queue. The next new run, from Run Now or the schedule, will process them automatically.”
+  - “No new request is sent to YouTube after you confirm. A playlist addition that was already sent and has no answer yet will be shown as unconfirmed and will not be sent again automatically.”
+  - “Results saved so far are kept. This cannot be undone.”
+- Closing line: “Stopping can take a moment while the run saves its work.”
+- Buttons: “Stop run {id}” (confirm, destructive styling plus text) and “Keep run {id} running” (cancel).
+
+**Confirmation dialog — simulation** (dry run, replay or backtest). Same structure and behavior.
+
+- Title: “Stop run {id}?”
+- Opening line: “Run {id} is {a dry run | a replay | a backtest} and is running now. It makes no changes to your playlists.”
+- Facts:
+  - “Run {id} will stop and will never be resumed. It will be shown as “Stopped by user”.”
+  - “Results saved so far stay visible and are marked incomplete.”
+  - “Nothing is added to the deferred queue, and no queue item or playlist is changed.”
+  - “No new request is sent to YouTube after you confirm. This cannot be undone.”
+- Buttons: “Stop run {id}” and “Keep run {id} running”.
+
+**Dialog behavior (both).** Initial focus is on “Keep run {id} running”. Escape, that button and clicking outside the dialog close it and change nothing; focus returns to the “Stop run {id}” button. Enter on the confirm button is never a default. While the request is pending, the confirm button reads “Stopping run {id}…”, both buttons are disabled, the dialog stays open and is marked busy, and a second press cannot be sent.
+
+**Acknowledgement.** When the server accepts the stop, close the dialog and show a persistent inline `role="status"` message with the prefix “Stopping:”, at the top of the page where the person acted (below the Overview header, or at the top of Run Detail above the status region). Move focus to this message, because the button is replaced.
+
+“Stopping: run {id} is stopping and will never be resumed. It is not stopped yet. The status will change to “Stopped by user” when it has finished saving.”
+
+Link “View run {id}” when not already on it. The message stays until dismissed or the page is left. It does not claim that videos are already in the deferred queue; that is said only after the run settles.
+
+If the server says the run is already stopping or already stopped (a repeated or double stop), it is not a refusal. Show, with the same prefix and no alert role: “Stopping: run {id} is already stopping.” or “Run {id} is already stopped by user.” Both link “View run {id}”.
+
+**The “Stopping” state.** From acceptance until the run settles:
+
+- Status line on Run Detail: “Stopping — {phase label}. Run {id} has been told to stop and is saving its work.” Never “Running”, “Completed” or “Failed”.
+- The Stop button is replaced by plain text “Stopping run {id}…”. No other run control appears.
+- Run List row, Overview latest-run panel and activity feed: status “Stopping”. Overview Run Now area: “Run {id} is stopping” with a “View run” link; Run Now stays unavailable until the saved status reaches a final state.
+- Keep the five-second saved read; a saved final state replaces this state. No percent, ETA or time-based claim, and no “stuck” claim.
+- If saved reads fail, show the existing “Could not refresh status…” copy with “Last known status: Stopping”. Do not claim the run has stopped.
+
+**Final status: “Stopped by user”.**
+
+- Badge and run list status text: “Stopped by user”, in a neutral status style with a stop-square icon and the text. It is not the failed, completed or interrupted style and is not shown in an error color. Add a token only if none of the existing neutral status styles fits.
+- Run List: the status filter gains “Stopping” and “Stopped by user”, kept separate from “Failed”, “Completed” and “Interrupted”. Overview totals and run statistics never count a stopped run as failed or completed.
+- Run Detail status line, production run: “Run stopped by user. Last recorded phase: {phase label}.” followed by “Run {id} will not be resumed. Its unfinished videos are in the deferred queue, and the next new run will process them automatically.” with the link “View deferred queue”. Recorded counts and evidence stay inspectable.
+- Run Detail status line, simulation: “Run stopped by user. Last recorded phase: {phase label}. Results are incomplete because the run was stopped.” No deferred-queue sentence.
+- A stopped simulation with no result rows shows “No results were recorded before the run was stopped.” It does not use the completed-dry-run selector explanation, and never says nothing matched.
+- A playlist addition that was sent with no answer keeps the existing “Playlist outcome unknown” presentation. Stopping does not add, hide or reclassify it.
+- Deferred rows handed over by the stop follow “Deferred rows handed over by a discard or a stop” above.
+
+**Refusals.** Prefix “Stop did nothing.” Each says nothing was changed and no YouTube call was made, as AC18 guarantees. The UI branches on status and machine code, never message text. Where the dialog closes, the message appears as a persistent inline `role="alert"` on the page, with no focus move, and the page re-reads the run so the button disappears if no longer valid.
+
+| Case | Dialog | Message and links |
+|---|---|---|
+| Run does not exist | closes | “Stop did nothing. Run {id} was not found. Nothing was changed.” “View runs”. |
+| Run already ended (`completed` or `failed`, or ended by itself first) | closes | “Stop did nothing. Run {id} has already ended, so there is nothing to stop. Nothing was changed.” “View run {id}”. |
+| Run is not active (interrupted and not executing; startup recovery has not yet started resuming it) | closes | “Stop did nothing. Run {id} is not running, so there is nothing to stop. Nothing was changed.” “View run {id}”. If the run read says it is the discardable run, add: “It cannot be resumed. You can discard it from its run page.” |
+| Shutdown has begun | stays open | “Stop did nothing. YuHaul is shutting down, so run {id} was not stopped. Nothing was changed. The shutdown will interrupt the run, and you can stop it again once it is running again.” “View runs”. |
+| 503 without a shutdown code | stays open | “Stop did nothing. YuHaul can't accept a stop right now. It may be shutting down. Nothing was changed. Try again in a minute.” “View runs”. |
+| Other error, or no response | closes | “Could not confirm whether run {id} was stopped. Open the run to check its status. If it is still running, you can press Stop again; stopping twice has the same result as stopping once.” “View run {id}”. No automatic retry. |
+
+In the “stays open” rows the message appears inside the dialog with `role="alert"` and the buttons re-enable. A run that ends by itself at the same moment as the press gets one of the first three rows, or the stop takes effect; the page never shows a mixture (AC21). The refusal never starts, resumes or changes any other run.
+
+**Accessibility.** Target WCAG 2.2 AA. The dialog is modal with an accessible name (“Stop run {id}?”) and description (opening line and facts); focus is trapped, moves in on open, and returns to the trigger on cancel; Escape exits (SC 2.4.3, 2.1.2). Every control's visible label contains the run id (“Stop run 41”), so more than one stop button on a list is distinguishable (SC 2.5.3, 2.4.6). The destructive button is marked by its text, not color alone, and “Stopped by user” is text plus icon, not color alone (SC 1.4.1). “Stopping” and the final state are announced politely once each (`role="status"`, SC 4.1.3); polls, counts and timestamps are not announced. Refusals use `role="alert"` without stealing focus; the one intended focus move is to the acknowledgement after the trigger is replaced. Buttons and links meet target size (SC 2.5.8), including inside compact list rows. Focus is visible and unobscured (SC 2.4.7, 2.4.11). Dialog and messages reflow at 320 CSS px with no clipped copy and no hidden Stop button in list rows (SC 1.4.10). Messages persist (SC 2.2.1). Reduced motion needs no animation.
+
+**Acceptance observations:** With a real server, stop each run kind (Run Now, scheduled, queue retry, resumed, dry run, replay, backtest) from Run Detail and, where shown, from Overview and the Run List. Check: the dialog differs for production and simulation; cancelling by each route changes nothing and returns focus; confirming shows the pending state, the acknowledgement and then “Stopping” until the saved status changes to “Stopped by user”; the final status is not styled or counted as failed or completed; the status filter finds it; a production stop says the unfinished videos are in the deferred queue and the Deferred tab shows them as eligible now; a stopped simulation says its results are incomplete and the Deferred tab is unchanged; an addition sent without an answer still shows as unconfirmed; and the schedule is unaffected. Check every refusal row, a double press, a dropped connection, a stop pressed as the run ends, a stop during startup recovery, and keyboard, screen-reader and 320 px passes. Run Now is unavailable while the run is stopping and available after it has stopped.
+
+**Capability gaps and limits.** (1) No stop endpoint, statuses or error codes exist yet. “Stopping” and “Stopped by user” are design labels for states the run API must expose; the architect defines the values. The UI branches on them, never on message text. (2) The UI cannot tell “already stopping” and “already stopped” from a refusal unless the response distinguishes them (AC20). (3) The response cannot yet separate shutdown from other 503 causes; the fallback row covers it. (4) The UI does not know how many videos were handed over, so no count is shown. (5) The run read does not yet say whether an addition is unconfirmed because of a stop; the existing per-video evidence presentation is used. (6) Whether the Overview activity feed and Run List rows are tall enough for a safe Stop button at 320 px is untested; if not, keep the button on Run Detail and Overview only and show a “View run {id}” link in rows. No code, browser or accessibility verification is claimed.
+
+#### Mark a Legacy Run as Ended
+
+**Status and scope (2026-11-11):** Design for [BR-036](/docs/requirements/yuhaul/br-036-mark-legacy-run-as-ended.md) AC1–AC12. Implemented 2026-11-11 (see [ARS-004 §9](/docs/architecture/run-initiation/specifications/ars-004-mark-legacy-run-as-ended.md#9-implementation-record-and-deviations)); browser and accessibility verification pending. It reuses US-009. It adds one control on Run Detail, one confirmation dialog, one acknowledgement, and a display for a run ended this way. It adds nothing to Overview, run lists or queues.
+
+**Walkthrough:** The administrator opens run 14. It is saved as running, but nothing is executing it, and it was created by an older version of YuHaul. Run Detail says so, says it cannot be resumed and will not end by itself, and offers “Mark run 14 as ended”. A dialog says run 14 will be marked failed, its unfinished videos will not be processed, and nothing else changes. They confirm. The page says run 14 is marked failed, and its status reads “Run failed — marked as ended by user (legacy run)”, with its saved results unchanged. Observable success: the person can tell that this run was ended by them, that it did not fail by itself and was not discarded or stopped, and that its videos were left unprocessed.
+
+**The three run-ending actions use different words.** They apply to different runs and do different things to the unfinished videos. Never use one action's label, verb or final status for another.
+
+| | Stop | Discard | Mark as ended |
+|---|---|---|---|
+| For | A run that is executing now | A time-limit run that cannot be resumed | A legacy run stuck as running or interrupted |
+| Button | “Stop run {id}” | “Discard run {id}” | “Mark run {id} as ended” |
+| Final status line | “Run stopped by user.” | “Run failed — discarded by user.” | “Run failed — marked as ended by user (legacy run).” |
+| Unfinished videos | Deferred queue, next new run processes them | Deferred queue, next new run processes them | Not processed, not added to any queue |
+| Counted as | Stopped, not failed | Failed | Failed |
+
+The word “ended” is only used for this action's button and status. “End run”, “Stop” and “Discard” are never used for it.
+
+**Where the control appears.** On Run Detail only, in the status region after the status line, and only when the run read says `endable` is true (BR-036 AC12). It is not shown on Overview, in run lists, or for any run whose `endable` is false or missing. The UI never infers it from status, run age or version. A stale page can show it after the run stopped being endable; the server rechecks when the action is carried out (AC2) and the person sees a refusal.
+
+**What Run Detail shows for an endable run.** It replaces the normal progress and interrupted text for that run. Show no “Running — {phase label}”, no progress claim, no Stop button and no “Run Now continues this run” text.
+
+- Saved status running: status line “Marked as running — nothing is executing it.”
+- Saved status interrupted: status line “Run interrupted.”
+- Then, for both: “Run {id} was created by an older version of YuHaul and cannot be resumed. It will not end by itself. Last recorded phase: {phase label}. Work saved so far is kept.” Keep the recorded counts and evidence inspectable.
+- Then: “You can mark it as ended. That marks it failed and leaves its unfinished videos unprocessed.” and the button “Mark run {id} as ended”.
+
+**Confirmation dialog.** Modal, opened by the button. Nothing is sent until the person confirms.
+
+- Title: “Mark run {id} as ended?”
+- Opening line: “Run {id} was created by an older version of YuHaul. Its saved status is {running | interrupted}, but nothing is executing it and it cannot be resumed.”
+- Facts, as a list, in this order:
+  - “Run {id} will be marked failed. It will never be resumed.”
+  - “Its unfinished videos will not be processed. Unlike stopping or discarding a run, this does not add them to the deferred queue or the Error Queue.”
+  - “Nothing else changes. Its saved results, playlist records, send guards and queue items stay as they are. A playlist addition whose outcome could not be confirmed stays marked as unconfirmed. Nothing is sent to YouTube.”
+  - “This cannot be undone.”
+- Closing line: “This does not start or resume any run. The schedule is not affected.”
+- Buttons: “Mark run {id} as ended” (confirm, destructive styling plus text) and “Keep run {id} as it is” (cancel).
+- Behavior: initial focus is on “Keep run {id} as it is”. Escape, that button and clicking outside close the dialog and change nothing; focus returns to the “Mark run {id} as ended” button. Enter is never a default on the confirm button. While pending, the confirm button reads “Marking run {id} as ended…”, both buttons are disabled, the dialog is marked busy, and a second press cannot be sent.
+
+**Acknowledgement.** On success, close the dialog and show a persistent inline `role="status"` message with the prefix “Marked as ended:” at the top of Run Detail, above the status region. Move focus to it, because the button disappears.
+
+“Marked as ended: run {id} is now marked failed. You ended it as a legacy run, and it will not be resumed. Its unfinished videos were not processed and were not added to any queue. Nothing was sent to YouTube.”
+
+Link “View runs”. It stays until dismissed or the page is left. The page then re-reads the run and shows the display below.
+
+**Run Detail display of a run ended this way.** The saved status is failed. When the run read carries the machine reason for this action (a stand-in for “ended by user (legacy run)”; the UI branches on that value, never on message text):
+
+- Status line: “Run failed — marked as ended by user (legacy run).”
+- Explanation: “You marked this run as ended. It did not fail by itself. Its unfinished videos were not processed and were not added to any queue. Its saved results, queue items and playlist records were not changed. Nothing was sent to YouTube.”
+- Keep “Last recorded phase: {phase label}” and the recorded counts and evidence inspectable. An unconfirmed playlist addition keeps its existing “Playlist outcome unknown” presentation.
+- No “Mark as ended”, Stop, Discard or Resume control. No deferred-queue sentence.
+- A run list row for it shows status “Failed” and, below it, “Ended by user (legacy run)”. It counts as failed.
+
+For comparison, a discarded run reads “Run failed — discarded by user.” with its API-vetted reason and the deferred-queue sentence from the Discard acknowledgement. A run that failed by itself keeps the existing “Run failed.” row with its API-vetted reason and no “by user” wording. If the run read does not carry a machine reason that identifies the cause, show “Run failed.” and the API-vetted reason as text, and make no claim about who ended it.
+
+**Refusals.** Prefix “Mark as ended did nothing.” Each says nothing was changed and no YouTube call was made, as AC9 guarantees, except the unconfirmed case. The UI branches on status and machine code, never message text. Where the dialog closes, the message appears as a persistent inline `role="alert"` message at the top of Run Detail, with no focus move, and the page re-reads the run so the button disappears if no longer valid. A refusal never starts, resumes or changes any run.
+
+| Case | Dialog | Message and links |
+|---|---|---|
+| Run does not exist | closes | “Mark as ended did nothing. Run {id} was not found. Nothing was changed.” “View runs”. |
+| Run is not a legacy run (created by the current version) | closes | “Mark as ended did nothing. Run {id} is not an older-version run, so it cannot be marked as ended. Nothing was changed.” “View run {id}”. |
+| Run is a dry run, replay or backtest | closes | “Mark as ended did nothing. Run {id} is {a dry run | a replay | a backtest}, so it cannot be marked as ended. Nothing was changed.” “View run {id}”. |
+| Run already ended (`completed`, `failed`, stopped by user, discarded, or already marked as ended) | closes | “Mark as ended did nothing. Run {id} has already ended. Nothing was changed.” “View run {id}”. |
+| Run is executing now | closes | “Mark as ended did nothing. Run {id} is running now, so it cannot be marked as ended. Nothing was changed. To end a running run, use “Stop run {id}”.” “View run {id}”. |
+| A production run is active | stays open | “Mark as ended did nothing. A production run is running, so run {id} was not marked as ended. Nothing was changed. Wait for it to finish or stop it, then try again.” “View runs”. |
+| Startup recovery in progress | stays open | “Mark as ended did nothing. YuHaul is starting up and recovering runs, so run {id} was not marked as ended. Nothing was changed. Try again in a minute.” |
+| Shutdown has begun | stays open | “Mark as ended did nothing. YuHaul is shutting down, so run {id} was not marked as ended. Nothing was changed. Try again after it has started again.” |
+| 503 without a code for the two cases above | stays open | “Mark as ended did nothing. YuHaul can't mark a run as ended right now. It may be starting up or shutting down. Nothing was changed. Try again in a minute.” |
+| Save failed; run keeps its earlier status | stays open | “Mark as ended did nothing. Run {id} could not be marked as ended, so it keeps its earlier status ({running | interrupted}). Nothing was changed. You can try again.” |
+| Other error, or no response | closes | “Could not confirm whether run {id} was marked as ended. Open the run to check its status. If it is not marked failed, you can try again; doing it twice has the same result as doing it once.” “View run {id}”. No automatic retry. |
+
+Where the dialog stays open, the message appears inside it with `role="alert"` and the buttons re-enable. A double submit or a repeat in a stale tab is answered “has already ended” and leaves the one result (AC10).
+
+**Accessibility.** Target WCAG 2.2 AA. The dialog is modal with an accessible name (“Mark run {id} as ended?”) and description (the opening line and facts); focus is trapped, moves in on open and returns to the trigger on cancel; Escape exits (SC 2.4.3, 2.1.2). Every control's visible label contains the run id (SC 2.5.3, 2.4.6). The destructive button and the status “Run failed — marked as ended by user (legacy run).” are conveyed by text, not color alone (SC 1.4.1). Status messages use `role="status"` and errors `role="alert"` without stealing focus (SC 4.1.3); the one intended focus move is to the acknowledgement after the trigger disappears. Targets, focus visibility and 320 CSS px reflow follow the Discard and Stop sections (SC 2.5.8, 2.4.7, 2.4.11, 1.4.10). Messages persist (SC 2.2.1).
+
+**Acceptance observations:** With a real server and a run-14-shaped version-0 run saved as running, and a second saved as interrupted: Run Detail shows the legacy text and the button for each, with no “Running” claim, no Stop button and no resume promise; a run with `endable` false (a current-version run, a simulation, any run while a production run is active) shows no button. The dialog names the run, says it will be marked failed and that unfinished videos will not be processed; cancelling by each route changes nothing and returns focus. Confirming shows the pending state, then the acknowledgement, then the ended display, with videos, queues and unconfirmed additions unchanged. Compare the final status of an ended, a discarded, a stopped and a self-failed run: all four read differently. Check every refusal row, a double submit, a dropped connection, a production run started between showing and confirming, and keyboard, screen-reader and 320 px passes. Run Now is available afterwards and never resumes the ended run.
+
+**Capability gaps and limits.** (1) No endpoint, error codes or machine reason for this action exist yet. The refusal table names cases by meaning (AC9); the architect defines the codes. The status line depends on a machine reason that identifies “ended by user (legacy run)” and, for the comparison, “discarded by user”; without it the UI shows only “Run failed.” and the vetted reason. (2) The 503 causes are not separable today; the fallback row covers them. (3) `endable` is specified on run reads (AC12); until it exists the control is not shown. (4) The UI cannot show a count of unprocessed videos, so none is stated. (5) Overview and run lists use the same read, so they must also stop treating an `endable` run as running; this is stated in “Stop an Active Run” but not browser-checked. No code, browser or accessibility verification is claimed.
 
 **View: Decision Detail** — Inspect a single video's routing outcome; user job: understand exactly why this video was accepted, rejected, deferred, or failed — across all three layers of the outcome model.
 - **Regions:**
@@ -781,7 +1010,7 @@ No refusal copy promises that the run can be fixed, that YouTube state is unchan
 **Information hierarchy and exact copy:**
 
 - Run Detail retains its existing outcome filters, pagination, mode-qualified heading and outcome column. Show the title as the video link, `Source channel` as the source label/column, and the recorded outcome independently. IDs are secondary reference text, never unlabeled title/name substitutes. Do not add a wall of topic pills or fetch detail per row to manufacture recognition.
-- Place this persistent explanation directly above the video list: `Video information is current/local display context, not necessarily the information evaluated by this run.` The title/source columns belong to this explanation, not to the recorded evidence region. Each row with available display context also shows `Current/local information` beside/below its recognition text so the attribution survives mobile cards and partial views.
+- Place this persistent explanation directly above the video list: `Video information is current/local display context, not necessarily the information evaluated by this run.` The title/source columns belong to this explanation, not to the recorded evidence region. Each row with available display context also shows `Current/local information` beside/below its recognition text so the attribution survives mobile cards and partial views. When any row has route lines, add directly beneath it the list-level sentence defined in “Compact route lines on the Run Detail list”.
 - In Decision Detail, preserve the existing page H1, run identity and Back to run link. The video-info card precedes the outcome and route evidence. Its title is the available display title or `Video title unavailable`. Show `Source channel: {name}` or `Source channel name unavailable`. Below the card heading, show `Current/local information — not necessarily the information evaluated by this run.` Label duration `Duration`; show a known zero as `0 seconds`, never as absent. Other known durations use the existing duration format.
 - Show `Video ID: {id}` and `Channel ID: {id}` as secondary labeled text. In the list, keep the video ID visible when the title is unavailable, so identical unavailable-title links remain distinguishable; show channel ID when the source name is unavailable. In detail both IDs remain available regardless of recognition metadata. Preserve the accepted muted short UUID beside each route name; this amendment does not remove route disambiguation.
 - Where a field has a trustworthy observation/fetch time, label it `Observed at {time}` alongside that field or a clearly associated shared timestamp. Do not label it as run-time input or use run start/discovery time as a substitute. Do not invent a timestamp when unknown. Apply availability independently: missing title does not hide an available duration or source name.
@@ -820,9 +1049,9 @@ An exclusion describes supporting route evidence, not the cause of every route o
 
 **Walkthrough:** An operator sees a rejected video in a run. Its list row separately says that route A did not match and route B was skipped by exclusion #3 in that run's configuration; the specific rule and comparison are visible without opening detail. In detail, route B says its recorded match prevented its conditions from being evaluated. The configured phrase appears only if permitted for display, and the unavailable compared input is labeled separately. If an old row has only a generic skip, both views say `Rule unavailable` and explain that the record is incomplete. A later rename or a current title does not rewrite this explanation. Simulation stays hypothetical.
 
-**Placement and attribution:** Retain the video-level recorded outcome and mode labels separately. For every presented exclusion decision on the Run Detail list row, show a visible route-scoped explanation directly with that video, not only in a tooltip or detail. Show all such route causes, including when multiple routes exclude the same video; do not imply complete route coverage from a partial response. In Decision Detail place the same information inside the corresponding route card after `Skipped — excluded from this route.` and before conditions/actions. Preserve other routes' distinct results. In both views show route UUID alongside its label: `Route: {name} (ID: {uuid})` for `run_snapshot`; `Route: {name} (current/local name; ID: {uuid})` for `current_local`; `Route name unavailable (ID: {uuid})` for `unavailable` or unrecognized attribution. A current name is recognition only, not a historical name. If the UUID is unavailable due to a failed mandatory read, show the existing safe read failure, not an invented identity.
+**Placement and attribution:** Retain the video-level recorded outcome and mode labels separately. For every presented route decision on the Run Detail list row, show one compact route line directly with that video (see “Compact route lines on the Run Detail list” below), not only in a tooltip or detail. Show all such route causes, including when multiple routes exclude the same video; do not imply complete route coverage from a partial response. The full record is one control away (the route's “Details” disclosure) and in Decision Detail. In Decision Detail place the same information inside the corresponding route card after `Skipped — excluded from this route.` and before conditions/actions. Preserve other routes' distinct results. In Decision Detail and in the list's expanded route details show route UUID alongside its label (the list's compact line shows the short ID instead): `Route: {name} (ID: {uuid})` for `run_snapshot`; `Route: {name} (current/local name; ID: {uuid})` for `current_local`; `Route name unavailable (ID: {uuid})` for `unavailable` or unrecognized attribution. A current name is recognition only, not a historical name. If the UUID is unavailable due to a failed mandatory read, show the existing safe read failure, not an invented identity.
 
-**Captured, supported cause:** For `available`, display `Recorded causal exclusion: configuration {config_version_id}, exclusion #{index + 1}.` The ordinal is the occurrence in that run's complete configuration, not a position in today's editor. Follow with `Matched rule: {comparison sentence}.` and `Conditions were not evaluated for this route because this exclusion matched.` The list includes all three facts as concise ordinary text; detail uses the same meaning. Render only released configured values as text, never HTML. Do not disclose or reconstruct a withheld value through another field.
+**Captured, supported cause:** For `available`, display `Recorded causal exclusion: configuration {config_version_id}, exclusion #{index + 1}.` The ordinal is the occurrence in that run's complete configuration, not a position in today's editor. Follow with `Matched rule: {comparison sentence}.` and `Conditions were not evaluated for this route because this exclusion matched.` Decision Detail and the list's expanded route details show all three facts as ordinary text. The list's compact line carries only the rule, in the vocabulary below. Render only released configured values as text, never HTML. Do not disclose or reconstruct a withheld value through another field.
 
 | Type / comparison | Comparison sentence; `{value}` is the original permitted configured value |
 |---|---|
@@ -833,9 +1062,99 @@ An exclusion describes supporting route evidence, not the cause of every route o
 | duration_min / strict_less_than | `Duration is strictly less than configured minimum {value} seconds` |
 | duration_max / strict_greater_than | `Duration is strictly greater than configured maximum {value} seconds` |
 
-For `configured_value_status: withheld`, replace the value with `value unavailable for display`, keeping the field, comparison and occurrence; add `Configured value unavailable for display.` For `unavailable`, replace it with `value unavailable` and add `Configured value unavailable.` Do not say the rule was not captured. Do not substitute blank or zero. After the comparison on each surface show `Compared input unavailable in this rule-reference record.` This means the projection provides no historical input; it does not assert expiry, emptiness or a known reason. Do not substitute current/local metadata, another route's audit or current rules. The recorded match explains the branch, not independent reproduction.
+For `configured_value_status: withheld`, replace the value with `value unavailable for display`, keeping the field, comparison and occurrence; add `Configured value unavailable for display.` For `unavailable`, replace it with `value unavailable` and add `Configured value unavailable.` Do not say the rule was not captured. Do not substitute blank or zero. After the comparison in Decision Detail and in each route's expanded details show `Compared input unavailable in this rule-reference record.` On the list, the one list-level sentence below covers it. This means the projection provides no historical input; it does not assert expiry, emptiness or a known reason. Do not substitute current/local metadata, another route's audit or current rules. The recorded match explains the branch, not independent reproduction.
 
-**Incomplete and incompatible states:** Preserve the route's recorded skip and the video's recorded overall outcome in every case. For `not_recorded`, including old generic-only rows and a missing causal object from an older response, show `Route exclusion recorded; rule unavailable. This explanation is incomplete.` Do not assert the cause of absence or infer a rule from a single candidate. For `definition_unavailable`, show `Route exclusion recorded; the captured rule definition is unavailable. This explanation is incomplete.` For `unsupported`, show `Route exclusion recorded; the captured rule cannot be interpreted by this version. This explanation is incomplete.` For `invalid_reference`, show `Route exclusion recorded; the captured rule reference is invalid. This explanation is incomplete.` For an unknown status or comparison use the unsupported wording, never echo unknown raw values. Where a valid configuration ID and nonnegative occurrence are supplied for an unresolved reference, show `Captured reference: configuration {id}, exclusion #{index + 1}.` Show only supported scalars and never imply a usable definition or match. All these states also show `Compared input unavailable in this rule-reference record.` The first two unavailable situations must not be collapsed: absence of a captured rule and an unresolvable captured definition are different. No actual query/read failure becomes an unavailable-rule success.
+**Incomplete and incompatible states:** Preserve the route's recorded skip and the video's recorded overall outcome in every case. For `not_recorded`, including old generic-only rows and a missing causal object from an older response, show `Route exclusion recorded; rule unavailable. This explanation is incomplete.` Do not assert the cause of absence or infer a rule from a single candidate. For `definition_unavailable`, show `Route exclusion recorded; the captured rule definition is unavailable. This explanation is incomplete.` For `unsupported`, show `Route exclusion recorded; the captured rule cannot be interpreted by this version. This explanation is incomplete.` For `invalid_reference`, show `Route exclusion recorded; the captured rule reference is invalid. This explanation is incomplete.` For an unknown status or comparison use the unsupported wording, never echo unknown raw values. Where a valid configuration ID and nonnegative occurrence are supplied for an unresolved reference, show `Captured reference: configuration {id}, exclusion #{index + 1}.` Show only supported scalars and never imply a usable definition or match. All these states also show `Compared input unavailable in this rule-reference record.` in Decision Detail and expanded details (the list uses its one list-level sentence). The first two unavailable situations must not be collapsed: absence of a captured rule and an unresolvable captured definition are different. No actual query/read failure becomes an unavailable-rule success.
+
+**Compact route lines on the Run Detail list (2026-11-11 amendment).** A user report showed that the full explanation takes about eight lines per route, which hides which rule was rejected and why. The list now shows one compact line per route. Decision Detail is unchanged and keeps the full explanation. This changes presentation only; every truthfulness rule above still holds, moved to the expanded details and one list-level sentence.
+
+*Walkthrough:* A rejected video's row shows its recorded outcome, then “Route results” with one line per route, in evaluation order: “New Listens (a3f5b2c1) — excluded: duration < 75 s” and “Fireship (6f1105be) — no match: needs channel name = “Fireship””. The person sees at once which route and which rule. Pressing “Details” on a line opens that route's full record in place: the full route ID, configuration and exclusion number, the full comparison sentence, and the compared-input note. Observable success: each route's outcome and key reason are readable without opening anything, and nothing is dropped, only moved.
+
+*Line format.* One list item per route: `{route label} — {outcome}` or `{route label} — {outcome}: {reason}`. A line may wrap at narrow widths but never holds more than one route. The outcome is text, with an icon that is never its only signal.
+
+*Route label.* The route name followed by the muted short ID, the first 8 hex characters of the route UUID, as in the accepted route-identity rule. The short ID is always shown, so same-named routes stay distinct.
+
+| Attribution | Compact label |
+|---|---|
+| `run_snapshot` | `{name} ({id8})` |
+| `current_local` | `{name} (current name, {id8})` |
+| `unavailable` or unrecognized | `Route name unavailable ({id8})` |
+
+*Group heading.* Above the lines: `Route results` for production runs, `Simulated route results` for dry run, replay and backtest. Simulated lines are otherwise worded the same; the heading and the existing hypothetical outcome and persistent simulation explanation carry the simulation labelling. No line says a playlist was changed. In the expanded details of a simulated route, the first line is `Simulated result. No playlist was changed.`
+
+*Outcomes and reasons.*
+
+| Recorded result | Compact line (example) |
+|---|---|
+| Matched | `Music Discovery (b7e9d4f2) — matched` |
+| Did not match, failed condition available | `Fireship (6f1105be) — no match: needs channel name = “Fireship”` |
+| Did not match, no failed condition on the list read | `Fireship (6f1105be) — no match` |
+| Excluded, captured rule | `New Listens (a3f5b2c1) — excluded: duration < 75 s` |
+| Skipped, earlier final route matched | `Ambient (c1d8e3a9) — skipped: an earlier final route matched` |
+| Skipped, route disabled | `Old Route (d4e5f6a7) — skipped: route disabled` |
+
+*Short rule vocabulary for exclusions* (`{v}` is the permitted configured value; text values appear in curly quotes, numbers and durations do not). The compact form is a summary; the full comparison sentence stays in the details. Screen readers get the spoken form, never the symbol (see Accessibility).
+
+| Type / comparison | Compact | Spoken |
+|---|---|---|
+| channel / exact | `channel ID = “{v}”` | channel ID equals {v} |
+| video / exact | `video ID = “{v}”` | video ID equals {v} |
+| title / trimmed_equal_fold | `title = “{v}” (any case)` | title equals {v}, any case |
+| word / lowercase_substring | `title contains “{v}” (any case)` | title contains {v}, any case |
+| duration_min / strict_less_than | `duration < {v} s` | duration less than {v} seconds |
+| duration_max / strict_greater_than | `duration > {v} s` | duration greater than {v} seconds |
+
+*Short vocabulary for route conditions* (fields `title`, `channel_name`, `description`, `channel_id`, `duration_seconds`; operators as in the Route Editor). A failed condition is shown as what the route needs, because the list does not hold the video's compared value and “not equal” would claim one. No case or whitespace semantics are stated; the details show the operator and value as recorded.
+
+| Field type / operator | Compact | Spoken |
+|---|---|---|
+| text / contains | `{field} contains “{v}”` | {field} contains {v} |
+| text / equals | `{field} = “{v}”` | {field} equals {v} |
+| text / starts_with | `{field} starts with “{v}”` | {field} starts with {v} |
+| text / ends_with | `{field} ends with “{v}”` | {field} ends with {v} |
+| text / matches_regex | `{field} matches pattern {v}` | {field} matches pattern {v} |
+| duration_seconds / equals | `duration = {v} s` | duration equals {v} seconds |
+| duration_seconds / greater_than | `duration > {v} s` | duration greater than {v} seconds |
+| duration_seconds / less_than | `duration < {v} s` | duration less than {v} seconds |
+| duration_seconds / between | `duration {min}–{max} s` | duration between {min} and {max} seconds |
+
+`{field}` is `title`, `channel name`, `description` or `channel ID`. The line is `no match: needs {condition}`. If several conditions failed under AND, show the first in recorded order and add ` (+{n} more)`. If the route uses OR, show `no match: none of {k} conditions matched` and leave the conditions to the details. Values longer than 40 characters are cut to 40 with `…` inside the quotes and shown in full in the details; a cut value is never presented as complete.
+
+*Truthfulness states, kept short.* Each replaces the rule part of the line, and the route's recorded outcome stays in front.
+
+| State | Compact line (example) |
+|---|---|
+| Legacy, `not_recorded` | `Fireship (6f1105be) — excluded: rule unavailable (record incomplete)` |
+| `definition_unavailable` | `Fireship (6f1105be) — excluded: rule definition unavailable (record incomplete)` |
+| `unsupported`, unknown status or comparison | `Fireship (6f1105be) — excluded: rule not readable by this version (record incomplete)` |
+| `invalid_reference` | `Fireship (6f1105be) — excluded: rule reference invalid (record incomplete)` |
+| Value `withheld`, exclusion | `New Listens (a3f5b2c1) — excluded: duration less than (value unavailable for display)` |
+| Value `unavailable`, exclusion | `New Listens (a3f5b2c1) — excluded: duration less than (value unavailable)` |
+| Value `withheld` or `unavailable`, condition | `Fireship (6f1105be) — no match: needs channel name equals (value unavailable for display)` |
+| Route name unavailable | `Route name unavailable (6f1105be) — excluded: duration < 75 s` |
+
+Use the spoken wording as the text when a value is withheld or unavailable, so no symbol stands next to a missing value. Never echo an unknown raw value. Never write that a rule was not captured when it was captured but cannot be read, and the two unavailable states keep their separate wording. A failed read of the list ends in the existing error and retry state, not in one of these lines.
+
+*List-level sentence.* Directly under the existing video-information sentence above the list, shown once and only when at least one row has route lines: `Route results show the recorded rule, not the video value that was compared. Use Details for the full record.` This takes the place of repeating “Compared input unavailable in this rule-reference record.” on every route.
+
+*Expanded details.* Each route line ends with a “Details” disclosure button. Its visible text is `Details`. Its accessible name is `Details for route {name} ({id8})`, or `Details for route name unavailable ({id8})`; it has `aria-expanded` and `aria-controls`. Opening it shows, in this order and as ordinary text, only the parts that apply:
+
+- `Simulated result. No playlist was changed.` (simulations only)
+- `Route: {name} (ID: {uuid})`, or the `current_local` or `unavailable` form defined above. For `current_local`, add `This is the current route name, not necessarily the name when this run was evaluated.`
+- For a captured exclusion: `Recorded causal exclusion: configuration {config_version_id}, exclusion #{index + 1}.` then `Matched rule: {comparison sentence}.` then `Conditions were not evaluated for this route because this exclusion matched.` then `Compared input unavailable in this rule-reference record.`
+- For an incomplete state: the full accepted sentence from “Incomplete and incompatible states”, `Captured reference: configuration {id}, exclusion #{index + 1}.` where valid, and the compared-input sentence.
+- For a no-match line whose conditions are on the list read: each condition as `{field} {operator} {value} — not met`. Otherwise: `Condition details are in the full decision detail.`
+- A link `Open full decision detail` to this video's Decision Detail.
+
+Opening or closing does not move focus, does not refetch, and does not change other lines. State is not kept across reload. Closed is the default.
+
+*Many routes.* Show the first 5 route lines in recorded evaluation order. If more exist, show the button `Show {n} more route results` (accessible name `Show {n} more route results for {video title}`), which reveals the rest in the same order. The count keeps the list from implying that coverage is complete. Never reorder lines by outcome.
+
+*Accessibility.* WCAG 2.2 AA. The group is a labelled list (`Route results` or `Simulated route results`); each route is one list item. Compact symbols (`=`, `<`, `>`, `–`) are hidden from assistive technology and replaced by the spoken wording (SC 1.3.1). Outcome is text plus icon, never color alone (SC 1.4.1). The “Details” button meets target size, has visible unobscured focus and is keyboard operable (SC 2.5.8, 2.4.7, 2.4.11, 2.1.1); its visible label is contained in its accessible name (SC 2.5.3). Wrapping at 320 CSS px and 200% zoom loses no text (SC 1.4.10, 1.4.4). Expanding does not steal focus; the expanded region is announced by `aria-expanded`, not a live region.
+
+*Decision Detail.* Unchanged: each route card keeps `Skipped — excluded from this route.`, then the full causal block, with the full UUID and the compared-input sentence. The list's compact vocabulary is not used there.
+
+*Gaps and decisions for others.* (1) Compact “no match” reasons need the list read to carry a short failed-condition summary (field, operator, configured value, composition, count of failed conditions). The list read does not carry condition audits today, so until it does the line reads `— no match` and the details point to Decision Detail. The list should not fetch detail per row to fill this in, and the summary must not carry the video's compared value. The architect owns the shape, and the same release rules as for exclusion values apply. (2) The brief's examples omit the short route ID and phrase the no-match reason as “channel name ≠ Fireship”. I kept the short ID because the accepted route-identity rule requires it beside every route name where identity matters, and I used “needs … =” because “≠” would assert the video's actual value, which the list does not hold, including when that value is missing. (3) Moving “Compared input unavailable…” off every list route onto a list-level sentence and the expanded details is a presentation choice; the Specifier should confirm it satisfies BR-015/OC-005, since earlier text asked for it on each surface. (4) Condition-operator case and whitespace semantics are not stated here because they are not in the accepted evidence; the details show the operator and value as recorded. No code, browser or accessibility verification is claimed.
 
 **Read and accessibility behavior:** Existing list/detail loading, failed-read retry, not-found, local-context partial failure and Back behavior remain as in this specification. Retry rereads the same run/video locally, without evaluating, mutation or provider refresh; stale responses cannot replace the selected run/video. A missing run mode stays unresolved, never assumed production. Apply WCAG 2.2 AA: route, skip, comparison, attribution and limitations are real text in reading order, not color or hover alone (SC 1.3.1, 1.4.1); at 320 CSS px and 200% zoom, each cause wraps without loss (SC 1.4.4, 1.4.10). List links and retry controls remain keyboard reachable with visible, unobscured focus (SC 2.1.1, 2.4.7, 2.4.11); entering detail focuses its heading and inline updates do not steal focus. Verify with keyboard, screen reader and viewport checks; this design is not an accessibility certification.
 
@@ -949,7 +1268,7 @@ For Deferred/Failed in simulations, visible adjacent explanation is respectively
   - Error detail region (on selection): full error context
   - Deferred list region: quota-deferred items with next-eligibility indicator
   - Deferred detail region (on selection): deferral context and manual retry option
-- **Components:** Tab selector, error row (video title, channel, error type, timestamp, retry button, remove button), error detail panel, deferred row (video title, channel, deferral reason, next-eligibility indicator, manual retry button, discard button), deferred detail panel
+- **Components:** Tab selector, error row (video title, channel, error type, timestamp, retry button, remove button), error detail panel, deferred row (video title, channel, deferral reason, next-eligibility indicator, manual retry button, “Dismiss” button), deferred detail panel
 
 **View: Backtest** — Compare proposed routing against historical observations, or replay/reprocess historical videos; user job: evaluate a configuration change before committing, or re-evaluate history with different settings.
 **Status qualification:** Comparison-specific regions/components below (actual-versus-proposed video comparison and comparison-derived new/lost/net cards) are retained future-target design, deferred from first-use launch with US-011/US-012. Requested-run hypothetical results and non-production labeling remain governed by Simulation Inspection above; the view description is not evidence that earlier production comparison is implemented.
@@ -1182,7 +1501,7 @@ Advisories are system-generated suggestions based on channel and route performan
   - If quota available: initiates retry, transitions to "Retrying" state
   - If quota unavailable: shows toast "Quota still exhausted — item will be eligible for the next scheduled or manual run"
 
-**Deferred item interaction — discard:**
+**Deferred item interaction — dismiss (button label “Dismiss”, renamed from “Discard” on 2026-11-10 so it is not confused with “Discard run {id}”; its accessible name is “Dismiss deferred item: {video title}”, falling back to the video ID):**
 - System: shows confirmation dialog "Dismiss this deferred item? It will not be retried, but the historical record will be preserved."
   - On confirm: item dismissed from active queue, toast "Deferred item dismissed"
   - On cancel: dialog closes, item unchanged
