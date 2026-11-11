@@ -32,6 +32,20 @@ describe('getRunVideos', () => {
     expect(second.route_id).toBe('r2')
   })
 
+  it('passes the list failed-condition summary through, and leaves it absent when the server sends none', async () => {
+    const failed = { field: 'channel_name', operator: 'equals', value: 'Fireship', composition: 'AND', condition_count: 2, further_failed: 1 }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(videoListResponse([{
+      id: 1, video_id: 'v', channel_id: 'c', processing_state: 'evaluated', final_outcome: 'rejected',
+      route_decisions: [
+        { route_id: 'r1', route_name: 'A', route_name_source: 'run_snapshot', decision: 'not_matched', failed_condition: failed },
+        { route_id: 'r2', route_name: 'B', route_name_source: 'run_snapshot', decision: 'not_matched' },
+      ],
+    }], 1))
+    const [first, second] = (await getRunVideos(1)).videos[0].route_decisions!
+    expect(first.failed_condition).toEqual(failed)
+    expect(second.failed_condition).toBeUndefined()
+  })
+
   it('requests the run videos without query parameters by default', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')

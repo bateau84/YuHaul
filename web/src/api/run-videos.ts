@@ -44,6 +44,7 @@ interface BackendRouteDecision {
   route_name: string
   route_name_source?: string
   causal_exclusion?: RouteDecision['causal_exclusion']
+  failed_condition?: RouteDecision['failed_condition']
   evaluation_order: number
   decision: RouteDecision['decision']
   skip_reason?: RouteDecision['skip_reason']
@@ -127,6 +128,7 @@ function toRouteDecisionSummary(d: BackendRouteDecision) {
     route_name: d.route_name,
     route_name_source: d.route_name_source,
     causal_exclusion: d.causal_exclusion,
+    failed_condition: d.failed_condition,
     evaluation_order: d.evaluation_order,
     decision: d.decision,
     skip_reason: d.skip_reason,

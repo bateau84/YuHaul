@@ -125,11 +125,39 @@ describe('RunDetailView outcome filter (BR-032 AC5)', () => {
     const route = { id: 'r1', route_id: 'r1', route_name: 'First', route_name_source: 'run_snapshot', evaluation_order: 0, decision: 'skipped' as const, skip_reason: 'exclusion' as const, causal_exclusion: { status: 'available', config_version_id: 42, exclusion_index: 2, semantics_version: 1, exclusion_type: 'word', field: 'title', comparison: 'lowercase_substring', configured_value: null, configured_value_status: 'withheld', matched: true, compared_input_status: 'unavailable' } }
     serveVideos([{ ...videoFixture(1, 'v', 'evaluated', 'rejected'), route_decisions: [route, { ...route, id: 'r2', route_id: 'r2', route_name_source: 'current_local', route_name: 'Second', causal_exclusion: null }] }])
     renderView()
-    expect(await screen.findByText('Recorded causal exclusion: configuration 42, exclusion #3.')).toBeInTheDocument()
+    const group = await screen.findByRole('list', { name: 'Route results' })
+    const lines = within(group).getAllByRole('listitem')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toHaveTextContent('First (r1) — excluded: title contains (value unavailable for display), any caseDetails')
+    expect(lines[1]).toHaveTextContent('Second (current name, r2) — excluded: rule unavailable (record incomplete)Details')
+    // The full record is one control away, not on the line.
+    expect(screen.queryByText('Recorded causal exclusion: configuration 42, exclusion #3.')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Details for route First (r1)' }))
+    expect(screen.getByText('Recorded causal exclusion: configuration 42, exclusion #3.')).toBeInTheDocument()
     expect(screen.getByText('Route: First (ID: r1)')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Details for route Second (r2)' }))
     expect(screen.getByText('Route: Second (current/local name; ID: r2)')).toBeInTheDocument()
     expect(screen.getByText('Route exclusion recorded; rule unavailable. This explanation is incomplete.')).toBeInTheDocument()
     expect(within(screen.getByRole('table')).getByText('Rejected')).toBeInTheDocument()
+  })
+
+  it('explains the compact route lines once, and only when a row has them', async () => {
+    const sentence = 'Route results show the recorded rule, not the video value that was compared. Use Details for the full record.'
+    const route = { id: 'r1', route_id: 'r1', route_name: 'First', route_name_source: 'run_snapshot', evaluation_order: 0, decision: 'not_matched' as const }
+    serveVideos([
+      { ...videoFixture(1, 'v1', 'evaluated', 'rejected'), route_decisions: [route] },
+      { ...videoFixture(2, 'v2', 'evaluated', 'rejected'), route_decisions: [{ ...route, id: 'r2', route_id: 'r2' }] },
+    ])
+    const { unmount } = renderView()
+    expect(await screen.findAllByRole('list', { name: 'Route results' })).toHaveLength(2)
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+    expect(screen.queryByText('Compared input unavailable in this rule-reference record.')).not.toBeInTheDocument()
+    unmount()
+
+    serveVideos([videoFixture(3, 'v3', 'evaluated', 'rejected')])
+    renderView()
+    await screen.findByRole('table')
+    expect(screen.queryByText(sentence)).not.toBeInTheDocument()
   })
 
   it('offers every BR-032 outcome category in the filter', async () => {

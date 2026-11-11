@@ -3,15 +3,14 @@ import { useParams, Link, useNavigate, useLocation } from 'react-router-dom'
 import * as api from '../api/client'
 import { Badge } from '../components/Badge'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
-import { CausalExclusion } from '../components/CausalExclusion'
+import { RouteResults } from '../components/RouteResults'
 import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
 import { EndLegacyRunControl } from '../components/EndLegacyRunControl'
 import { runEnding } from '../lib/run-ending'
 import { DiscardRunControl } from '../components/DiscardRunControl'
 import { discardReasonSentence } from '../lib/discard-reason'
 import { useToast } from '../hooks/useToast'
-import { deriveRouteDecision, simulationExplanation, simulationMode, videoOutcomeLabels } from '../lib/outcome'
-import { routeAttribution } from '../lib/route-attribution'
+import { simulationExplanation, simulationMode, videoOutcomeLabels } from '../lib/outcome'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
 import { canOfferStop, isStopping, type PublishedRange, type Run, type RunStatus, type VideoFinalOutcome, type VideoOutcome } from '../types'
 
@@ -706,6 +705,11 @@ function RunDetailContent({ id }: { id?: string }) {
             <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
               Video information is current/local display context, not necessarily the information evaluated by this run.
             </p>
+            {videos.some((v) => v.route_decisions?.length) && (
+              <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+                Route results show the recorded rule, not the video value that was compared. Use Details for the full record.
+              </p>
+            )}
             <table className="table">
               <thead>
                 <tr>
@@ -732,9 +736,15 @@ function RunDetailContent({ id }: { id?: string }) {
                     </td>
                     <td data-label={outcomeLabel}>
                        <Badge state={v.processing_state} finalOutcome={v.final_outcome} mode={run.run_type} />
-                       {v.route_decisions?.map((d) => d.decision === 'skipped' && d.skip_reason === 'exclusion'
-                         ? <CausalExclusion key={d.route_id} decision={d} showRoute />
-                         : <div key={d.route_id} style={{ overflowWrap: 'anywhere' }}><p>{routeAttribution(d)}</p><p>{deriveRouteDecision(d.decision, d.skip_reason).label}</p></div>)}
+                       {v.route_decisions && v.route_decisions.length > 0 && (
+                         <RouteResults
+                           decisions={v.route_decisions}
+                           runId={runId}
+                           videoId={v.video_id}
+                           videoTitle={currentMetadata(v.current_local_metadata, 'title')}
+                           simulation={Boolean(mode)}
+                         />
+                       )}
                       {v.unresolved_mutations?.length ? <p>Playlist outcome unknown</p> : null}
                       {v.final_outcome === 'deferred' && v.deferred_reason === 'authorization_pending' && <p>Waiting for YouTube access</p>}
                     </td>

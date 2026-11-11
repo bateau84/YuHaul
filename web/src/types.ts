@@ -280,6 +280,18 @@ export interface CausalExclusion {
   compared_input_status: string
 }
 
+// List-only summary of why a route did not match. It names the first failed
+// condition as configured in the run's snapshot and never holds the video's
+// compared value. Absent means the list read cannot name one.
+export interface FailedCondition {
+  field: string
+  operator: string
+  value: string | null
+  composition: 'AND' | 'OR' | string
+  condition_count: number
+  further_failed: number
+}
+
 export interface RouteDecisionSummary {
   // Route identity in a decision is the route UUID (ARS-004); the decision
   // row id mirrors it because each route is evaluated at most once per video.
@@ -288,6 +300,7 @@ export interface RouteDecisionSummary {
   route_name: string
   route_name_source?: string
   causal_exclusion?: CausalExclusion | null
+  failed_condition?: FailedCondition | null
   evaluation_order: number
   decision: RouteDecisionType
   skip_reason?: SkipReason
