@@ -2,6 +2,10 @@ import type { DeferredReason, RunType, VideoProcessingState, VideoFinalOutcome, 
 
 export type BadgeVariant = 'accepted' | 'rejected' | 'excluded' | 'deferred' | 'failed' | 'not-evaluated' | 'in-progress'
 
+// deriveBadge alone can return the final, separate unavailable_on_youtube
+// category (BR-032 AC1); route and action badges never do.
+export type OutcomeBadgeVariant = BadgeVariant | 'unavailable'
+
 // Badge/filter labels for the BR-032 outcome-category vocabulary, shared by
 // the Run Detail outcome filter and the outcome badge so the two never drift.
 // unavailable_on_youtube is deliberately not labelled here yet: adding it would
@@ -26,7 +30,7 @@ export function simulationMode(mode: RunType): string | null {
   }
 }
 
-export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFinalOutcome | null | undefined, mode?: RunType): { variant: BadgeVariant; label: string } {
+export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFinalOutcome | null | undefined, mode?: RunType): { variant: OutcomeBadgeVariant; label: string } {
   if (mode && simulationMode(mode)) {
     switch (finalOutcome) {
       case 'accepted': return { variant: 'accepted', label: 'Hypothetical accepted' }
@@ -46,6 +50,10 @@ export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFina
     case 'deferred': return { variant: 'deferred', label: 'Deferred' }
     case 'failed': return { variant: 'failed', label: 'Failed' }
     case 'not_yet_evaluated': return { variant: 'not-evaluated', label: 'Not evaluated' }
+    // Final and its own category (BR-032 AC1): never Rejected or Failed.
+    // Simulations never produce it, so the simulation branch above keeps the
+    // 'Outcome unavailable' fallback.
+    case 'unavailable_on_youtube': return { variant: 'unavailable', label: 'Unavailable on YouTube' }
     default: return { variant: 'not-evaluated', label: 'Outcome unavailable' }
   }
 }

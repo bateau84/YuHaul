@@ -226,6 +226,7 @@ a {
 .badge--deferred { background: var(--color-status-deferred-bg); color: var(--color-status-deferred); }
 .badge--failed { background: var(--color-status-failed-bg); color: var(--color-status-failed); }
 .badge--not-evaluated { background: var(--color-status-not-evaluated-bg); color: var(--color-status-not-evaluated); }
+.badge--unavailable { background: var(--color-status-not-evaluated-bg); color: var(--color-status-not-evaluated); }
 .badge--in-progress { background: var(--color-status-in-progress-bg); color: var(--color-status-in-progress); }
 
 .button {

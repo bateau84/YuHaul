@@ -10,6 +10,7 @@ import {
   FlaskConical,
   History,
   Settings,
+  Search,
 } from 'lucide-react'
 
 const primary = [
@@ -21,6 +22,7 @@ const primary = [
 
 const overflow = [
   { path: '/errors', label: 'Errors', icon: AlertCircle },
+  { path: '/videos', label: 'Videos', icon: Search },
   { path: '/backtest', label: 'Backtest', icon: FlaskConical },
   { path: '/history', label: 'History', icon: History },
   { path: '/settings', label: 'Settings', icon: Settings },

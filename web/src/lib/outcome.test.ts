@@ -123,3 +123,14 @@ describe('formatDuration', () => {
     expect(formatDuration(undefined)).toBe('—')
   })
 })
+
+describe('deriveBadge unavailable_on_youtube (BR-032 AC1)', () => {
+  it('is its own final category for production runs', () => {
+    expect(deriveBadge('completed', 'unavailable_on_youtube', 'scheduled')).toEqual({ variant: 'unavailable', label: 'Unavailable on YouTube' })
+    expect(deriveBadge('evaluated', 'unavailable_on_youtube')).toEqual({ variant: 'unavailable', label: 'Unavailable on YouTube' })
+  })
+
+  it('falls back for a simulation row, which never produces it', () => {
+    expect(deriveBadge('completed', 'unavailable_on_youtube', 'dry_run')).toEqual({ variant: 'not-evaluated', label: 'Outcome unavailable' })
+  })
+})
