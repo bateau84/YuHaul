@@ -2,6 +2,10 @@
 
 **Status: declined by the user on 2026-11-10.** The user's explicit decision, relayed in the specification assignment (Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`), is to leave run 14 as it is: no recovery and no backfill. Its saved unevaluated videos stay unprocessed. Nothing below is authorized or planned. The proposal is kept as history only. Accepted YuHaul requirements are unchanged, and no live operation was or is performed. The original human conversation was not independently inspected.
 
+**Update 2026-11-11:** the user later decided that a stuck legacy run such as run 14 can be marked as ended ([BR-036](../yuhaul/br-036-mark-legacy-run-as-ended.md)). That changes only the run's status to `failed` with a safe reason. Its videos, queues and guards stay as they are, and its backlog stays unprocessed, so the decline above still holds.
+
+**Superseded 2026-11-11:** the user approved re-queuing stranded videos ([BR-037](../yuhaul/br-037-requeue-stranded-videos.md)). This supersedes the decision to leave run 14's backlog alone. After run 14 is marked as ended, its unfinished videos that are not blocked can be put in the deferred queue, and normal runs process them under their own configuration, a day's quota at a time. Videos whose playlist addition may already have been sent stay blocked and are reported. This proposal and its OC-001 stay declined: BR-037 is a different and simpler capability, with no separate batch or request budget and no new discovery.
+
 The text below is the original proposal.
 
 The goal is to make the saved unfinished work recoverable without pretending discovery finished, repeating playlist additions, or spending an unapproved amount of quota. For example, an approved small recovery slice can finish some videos and retain the remainder; run 14 still records its original discovery failure, not a successful run caused by later processing.
