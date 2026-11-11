@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/diag"
@@ -393,4 +394,181 @@ func scanDeferredItems(rows *sql.Rows) ([]DeferredItem, error) {
 		return nil, fmt.Errorf("iterating deferred items: %w", err)
 	}
 	return out, nil
+}
+
+// Errors returned by ListDeferredPage for a malformed query.
+var (
+	ErrInvalidDeferredPage   = errors.New("queue: invalid deferred page query")
+	ErrInvalidDeferredReason = errors.New("queue: invalid deferred reason")
+)
+
+// MaxDeferredPageLimit is the largest page ListDeferredPage serves.
+const MaxDeferredPageLimit = 200
+
+// DeferredPageQuery selects one page of deferred items (ARS-005 §7.1). At most
+// one of AfterID, BeforeID, Page and Last is set.
+type DeferredPageQuery struct {
+	Include  DeferredStatus // "" (all) or DeferredStatusPending
+	Reason   DeferredReason // "" = no filter
+	Limit    int            // 1..MaxDeferredPageLimit
+	AfterID  int64          // 0 = unset
+	BeforeID int64          // 0 = unset
+	Page     int            // 0 = unset; >= 1 = page number
+	Last     bool           // jump to the last page
+}
+
+// DeferredPage is one page of deferred items with the counts around it.
+type DeferredPage struct {
+	Items                       []DeferredItem
+	Total                       int                    // include + reason filter
+	QueueTotal                  int                    // include only
+	ByReason                    map[DeferredReason]int // include only
+	Number                      int
+	TotalPages                  int
+	FirstPosition, LastPosition *int // 1-based positions in the filtered set; nil when Items is empty
+	NextAfterID, PrevBeforeID   *int64
+}
+
+// ListDeferredPage returns one bounded page in ascending id order. Sequential
+// paging uses id cursors; Page and Last jump by position. All reads share one
+// read-only transaction so the counts and the rows agree.
+func (s *Store) ListDeferredPage(ctx context.Context, q DeferredPageQuery) (DeferredPage, error) {
+	var page DeferredPage
+	if q.Limit < 1 || q.Limit > MaxDeferredPageLimit || q.AfterID < 0 || q.BeforeID < 0 || q.Page < 0 {
+		return page, ErrInvalidDeferredPage
+	}
+	selectors := 0
+	for _, set := range []bool{q.AfterID != 0, q.BeforeID != 0, q.Page != 0, q.Last} {
+		if set {
+			selectors++
+		}
+	}
+	if selectors > 1 {
+		return page, ErrInvalidDeferredPage
+	}
+	if q.Include != "" && q.Include != DeferredStatusPending {
+		return page, fmt.Errorf("%w: include %q", ErrInvalidDeferredPage, q.Include)
+	}
+	if q.Reason != "" && !q.Reason.Valid() {
+		return page, ErrInvalidDeferredReason
+	}
+
+	filter, args := "1=1", []any{}
+	if q.Include == DeferredStatusPending {
+		filter = "d.status = 'pending'"
+	}
+	filtered, filteredArgs := filter, args
+	// ordered is the same predicate for queries that walk rows in id order. The
+	// unary + keeps SQLite on the id (rowid) range so LIMIT stops early instead
+	// of sorting every matching row.
+	ordered := strings.ReplaceAll(filter, "d.status", "+d.status")
+	if q.Reason != "" {
+		filtered += " AND d.deferral_reason = ?"
+		ordered += " AND +d.deferral_reason = ?"
+		filteredArgs = []any{string(q.Reason)}
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return page, fmt.Errorf("beginning deferred page read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	count := func(where string, a []any) (int, error) {
+		var n int
+		err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM deferred_item d WHERE `+where, a...).Scan(&n)
+		return n, err
+	}
+	page.ByReason = map[DeferredReason]int{}
+	rows, err := tx.QueryContext(ctx, `SELECT d.deferral_reason, COUNT(*) FROM deferred_item d WHERE `+filter+` GROUP BY d.deferral_reason`, args...)
+	if err != nil {
+		return page, fmt.Errorf("counting deferred reasons: %w", err)
+	}
+	for rows.Next() {
+		var reason DeferredReason
+		var n int
+		if err := rows.Scan(&reason, &n); err != nil {
+			_ = rows.Close()
+			return page, fmt.Errorf("scanning deferred reasons: %w", err)
+		}
+		page.QueueTotal += n
+		if q.Reason == "" || reason == q.Reason {
+			page.Total += n
+		}
+		if reason.Valid() { // legacy rows with unknown text are never echoed
+			page.ByReason[reason] = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return page, fmt.Errorf("iterating deferred reasons: %w", err)
+	}
+	_ = rows.Close()
+
+	page.TotalPages = (page.Total + q.Limit - 1) / q.Limit
+	if page.TotalPages < 1 {
+		page.TotalPages = 1
+	}
+	jump := q.Page
+	if q.Last {
+		jump = page.TotalPages
+	}
+
+	const cols = `SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after,
+		        d.retry_count, d.status, d.created_at, d.retry_run_id
+		 FROM deferred_item d JOIN video v ON v.id = d.video_id WHERE `
+	var itemRows *sql.Rows
+	switch {
+	case jump > page.TotalPages:
+		page.Items = []DeferredItem{}
+		page.Number = jump
+		return page, tx.Commit()
+	case jump > 0:
+		itemRows, err = tx.QueryContext(ctx, cols+ordered+` ORDER BY d.id ASC LIMIT ? OFFSET ?`,
+			append(append([]any{}, filteredArgs...), q.Limit, (jump-1)*q.Limit)...)
+	case q.BeforeID != 0:
+		itemRows, err = tx.QueryContext(ctx, cols+ordered+` AND d.id < ? ORDER BY d.id DESC LIMIT ?`,
+			append(append([]any{}, filteredArgs...), q.BeforeID, q.Limit)...)
+	default:
+		itemRows, err = tx.QueryContext(ctx, cols+ordered+` AND d.id > ? ORDER BY d.id ASC LIMIT ?`,
+			append(append([]any{}, filteredArgs...), q.AfterID, q.Limit)...)
+	}
+	if err != nil {
+		return page, fmt.Errorf("querying deferred page: %w", err)
+	}
+	items, err := scanDeferredItems(itemRows)
+	_ = itemRows.Close()
+	if err != nil {
+		return page, err
+	}
+	if q.BeforeID != 0 {
+		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+			items[i], items[j] = items[j], items[i]
+		}
+	}
+	page.Items = items
+	page.Number = 1
+	if jump > 0 {
+		page.Number = jump
+	}
+	if len(items) > 0 {
+		firstID, lastID := items[0].ID, items[len(items)-1].ID
+		before, err := count(ordered+" AND d.id < ?", append(append([]any{}, filteredArgs...), firstID))
+		if err != nil {
+			return page, fmt.Errorf("locating deferred page: %w", err)
+		}
+		first, last := before+1, before+len(items)
+		page.FirstPosition, page.LastPosition = &first, &last
+		page.Number = before/q.Limit + 1
+		if before > 0 {
+			page.PrevBeforeID = &firstID
+		}
+		if last < page.Total {
+			page.NextAfterID = &lastID
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return page, fmt.Errorf("closing deferred page read: %w", err)
+	}
+	return page, nil
 }

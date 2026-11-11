@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -109,27 +110,96 @@ func (s *Service) handleDismissError(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleListDeferred(w http.ResponseWriter, r *http.Request) {
-	include := r.URL.Query().Get("include")
-	var items []DeferredItem
-	var err error
-
-	switch include {
+	values := r.URL.Query()
+	query := DeferredPageQuery{Limit: defaultDeferredPageLimit}
+	switch values.Get("include") {
 	case "", "pending":
-		items, err = s.ListPendingDeferred(r.Context())
+		query.Include = DeferredStatusPending
 	case "all":
-		items, err = s.ListAllDeferred(r.Context())
 	default:
 		writeError(w, http.StatusBadRequest, "invalid include value; use 'pending' or 'all'")
 		return
 	}
 
+	if !parseDeferredPageParams(values, &query) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid page", "code": "invalid_page"})
+		return
+	}
+	if reason := DeferredReason(values.Get("reason")); reason != "" {
+		if !reason.Valid() {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid reason", "code": "invalid_reason"})
+			return
+		}
+		query.Reason = reason
+	}
+
+	page, err := s.store.ListDeferredPage(r.Context(), query)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list deferred failed", "diagnostic", diag.Encode(err, "unknown", "inspect_queue"))
 		writeError(w, http.StatusInternalServerError, "failed to list deferred queue")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"deferred": publicDeferredItems(items)})
+	byReason := make(map[string]int, len(page.ByReason))
+	for reason, n := range page.ByReason {
+		byReason[string(reason)] = n
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deferred":    publicDeferredItems(page.Items),
+		"total":       page.Total,
+		"queue_total": page.QueueTotal,
+		"by_reason":   byReason,
+		"page": map[string]any{
+			"limit":          query.Limit,
+			"number":         page.Number,
+			"total_pages":    page.TotalPages,
+			"first_position": page.FirstPosition,
+			"last_position":  page.LastPosition,
+			"next_after_id":  page.NextAfterID,
+			"prev_before_id": page.PrevBeforeID,
+		},
+	})
+}
+
+const defaultDeferredPageLimit = 50
+
+// parseDeferredPageParams reads limit, after_id, before_id and page. It
+// reports false for any malformed value or more than one selector.
+func parseDeferredPageParams(values url.Values, q *DeferredPageQuery) bool {
+	if values.Has("limit") {
+		n, err := strconv.Atoi(values.Get("limit"))
+		if err != nil || n < 1 || n > MaxDeferredPageLimit {
+			return false
+		}
+		q.Limit = n
+	}
+	selectors := 0
+	cursor := func(name string, dst *int64) bool {
+		if !values.Has(name) {
+			return true
+		}
+		selectors++
+		id, err := strconv.ParseInt(values.Get(name), 10, 64)
+		if err != nil || id <= 0 {
+			return false
+		}
+		*dst = id
+		return true
+	}
+	if !cursor("after_id", &q.AfterID) || !cursor("before_id", &q.BeforeID) {
+		return false
+	}
+	if values.Has("page") {
+		selectors++
+		if v := values.Get("page"); v == "last" {
+			q.Last = true
+		} else if n, err := strconv.Atoi(v); err != nil || n < 1 {
+			return false
+		} else {
+			q.Page = n
+		}
+	}
+	return selectors <= 1
 }
 
 func (s *Service) handleRetryDeferred(w http.ResponseWriter, r *http.Request) {
