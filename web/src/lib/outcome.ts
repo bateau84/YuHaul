@@ -1,10 +1,12 @@
-import type { RunType, VideoProcessingState, VideoFinalOutcome, RouteDecisionType, SkipReason } from '../types'
+import type { DeferredReason, RunType, VideoProcessingState, VideoFinalOutcome, RouteDecisionType, SkipReason } from '../types'
 
 export type BadgeVariant = 'accepted' | 'rejected' | 'excluded' | 'deferred' | 'failed' | 'not-evaluated' | 'in-progress'
 
 // Badge/filter labels for the BR-032 outcome-category vocabulary, shared by
 // the Run Detail outcome filter and the outcome badge so the two never drift.
-export const videoOutcomeLabels: Record<VideoFinalOutcome, string> = {
+// unavailable_on_youtube is deliberately not labelled here yet: adding it would
+// add a filter option to Run Detail, and the contract change carries no UI.
+export const videoOutcomeLabels: Record<Exclude<VideoFinalOutcome, 'unavailable_on_youtube'>, string> = {
   accepted: 'Accepted',
   rejected: 'Rejected',
   excluded: 'Excluded',
@@ -117,4 +119,15 @@ export function formatDuration(seconds?: number): string {
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return `${m}:${String(s).padStart(2, '0')}`
+}
+
+// Labels for the six stored deferral reasons (ARS-005 §7.3). Used by the
+// Deferred reason filter; unknown stored values render verbatim.
+export const deferredReasonLabels: Record<DeferredReason, string> = {
+  quota_exhausted: 'Quota exhausted',
+  api_rate_limited: 'Rate limited',
+  authorization_pending: 'Waiting for YouTube access',
+  stopped_by_user: 'Stopped by user',
+  discarded_by_user: 'Discarded by user',
+  requeued_by_user: 'Re-queued by user',
 }

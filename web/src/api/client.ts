@@ -40,6 +40,12 @@ export {
   discardDeferred,
 } from './queue'
 
+// Paged deferred queue, stranded-video re-queue and video search (ARS-005,
+// video-search ARS-001). Types and clients only; no view uses them yet.
+export { getDeferredPage } from './deferred-page'
+export { getStrandedPreview, requeueStranded } from './stranded'
+export { searchVideos, getVideo } from './video-search'
+
 // Analytics operations are wired to the real backend.
 export {
   listChannels,

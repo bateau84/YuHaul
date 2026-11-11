@@ -109,6 +109,9 @@ export interface Run {
   videos_excluded: number
   videos_deferred: number
   videos_failed: number
+  // Videos committed as unavailable_on_youtube (ARS-005 §1.3). Absent from
+  // servers that predate re-queue; treat absence as 0 only where a count is shown.
+  videos_unavailable?: number
   videos_not_yet_evaluated: number
   quota_cost: number
   duration_seconds?: number
@@ -180,6 +183,7 @@ export type VideoFinalOutcome =
   | 'excluded'
   | 'deferred'
   | 'failed'
+  | 'unavailable_on_youtube'
   | 'not_yet_evaluated'
 
 export interface VideoOutcome {
@@ -531,6 +535,18 @@ export type DeferredReason =
   | 'authorization_pending'
   | 'stopped_by_user'
   | 'discarded_by_user'
+  | 'requeued_by_user'
+
+// The six stored deferral reasons, in the order the Deferred reason filter
+// offers them (ARS-005 §7.3). There is no "other" value.
+export const deferredReasons: readonly DeferredReason[] = [
+  'quota_exhausted',
+  'api_rate_limited',
+  'authorization_pending',
+  'stopped_by_user',
+  'discarded_by_user',
+  'requeued_by_user',
+]
 
 export interface DeferredItem {
   id: number
@@ -585,3 +601,144 @@ export interface BacktestComparison {
   lost_catches: number
   net_change: number
 }
+
+// ---- Paged deferred queue (run-initiation ARS-005 §7.2) -------------------
+
+export interface DeferredPageInfo {
+  limit: number
+  number: number
+  total_pages: number
+  first_position: number | null
+  last_position: number | null
+  next_after_id: number | null
+  prev_before_id: number | null
+}
+
+export interface DeferredPage {
+  deferred: DeferredItem[]
+  /** Items matching the include and reason filters. */
+  total: number
+  /** Items matching include only (no reason filter). */
+  queue_total: number
+  by_reason: Partial<Record<DeferredReason, number>>
+  page: DeferredPageInfo
+}
+
+// ---- Re-queue stranded videos (ARS-005 §8) ---------------------------------
+
+export type StrandedUnavailableReason = 'startup_recovery_active' | 'production_run_active' | 'shutting_down'
+export type StrandedBlockReason = 'uncertain_addition' | 'unresolved_send_guard' | 'ambiguous_legacy_evidence'
+
+export interface StrandedBlockedVideo {
+  video_id: number
+  youtube_video_id: string
+  reasons: { reason: StrandedBlockReason; run_id: number }[]
+}
+
+export interface StrandedReport {
+  requeue: number
+  already_queued: { videos: number; in_errors_queue: number }
+  removed_by_user: number
+  blocked: {
+    videos: number
+    by_reason: Partial<Record<StrandedBlockReason, number>>
+    items: StrandedBlockedVideo[]
+  }
+  not_ended: { videos: number; runs: { run_id: number; videos: number }[] }
+  no_origin_run: number
+  retained_without_queue_item: { videos: number; removed_by_user: number }
+}
+
+export interface StrandedPreview extends StrandedReport {
+  available: boolean
+  unavailable_reason: StrandedUnavailableReason | null
+}
+
+export interface RequeueResult extends StrandedReport {
+  outcome: 'requeued' | 'nothing_to_requeue'
+  requeued: number
+  skipped_concurrently: number
+  expected_requeue: number | null
+  differs_from_preview: boolean
+}
+
+// Closed refusal codes of POST /api/stranded-videos/requeue (ARS-005 §8.2).
+// They arrive as ApiError.code next to the HTTP status.
+export type RequeueRefusalCode =
+  | 'invalid_body'
+  | 'shutting_down'
+  | 'startup_recovery_active'
+  | 'production_run_active'
+  | 'requeue_failed'
+  | 'requeue_outcome_unknown'
+
+export const requeueRefusalCodes: readonly RequeueRefusalCode[] = [
+  'invalid_body',
+  'shutting_down',
+  'startup_recovery_active',
+  'production_run_active',
+  'requeue_failed',
+  'requeue_outcome_unknown',
+]
+
+// ---- Video search (video-search ARS-001 §4) --------------------------------
+
+export type VideoRecord = 'known' | 'imported_reference' | 'simulation_only'
+export type SearchAvailability = 'current_local' | 'expired' | 'unavailable'
+
+export interface VideoSummary {
+  video_id: string
+  record: VideoRecord
+  title: { text: string | null; availability: SearchAvailability }
+  channel: { name: string | null; name_availability: SearchAvailability; channel_id: string | null }
+  latest_outcome: VideoLatestOutcome
+  queue_state: VideoQueueState
+}
+
+export type VideoLatestOutcome =
+  | { state: 'committed'; outcome: VideoFinalOutcome; run_id: number | null; committed_at: string | null }
+  | { state: 'not_yet_evaluated' }
+  | { state: 'imported_reference' }
+  | { state: 'simulation_only' }
+
+export type VideoQueueState =
+  | { state: 'deferred_claimed'; reason: string; claiming_run_id: number | null }
+  | { state: 'deferred_pending'; reason: string }
+  | { state: 'errors_claimed'; category: string; claiming_run_id: number | null }
+  | { state: 'errors_active'; category: string }
+  | { state: 'removed_by_user' }
+  | { state: 'none' }
+
+export interface VideoRunEntry {
+  run_id: number
+  run_type: RunType
+  mode: 'production' | 'simulation'
+  run_status: RunStatus
+  /** Null: the production run recorded no outcome. Never a negative outcome. */
+  outcome: VideoFinalOutcome | null
+  decision_detail_path: string
+}
+
+export interface VideoView extends VideoSummary {
+  runs: VideoRunEntry[]
+}
+
+export interface VideoSearchPage {
+  items: VideoSummary[]
+  total: number
+  page_size: number
+  number: number
+  total_pages: number
+  first_position: number | null
+  last_position: number | null
+  next_cursor: string | null
+  prev_cursor: string | null
+}
+
+export type VideoSearchResponse =
+  | { kind: 'empty' | 'invalid_text' | 'too_long' | 'unusable_link' | 'too_short' }
+  | { kind: 'video'; video_id: string; from_link: boolean }
+  | { kind: 'id_not_found'; video_id: string; from_link: boolean; results?: VideoSearchPage }
+  | { kind: 'results'; results: VideoSearchPage }
+
+export type VideoSearchKind = VideoSearchResponse['kind']
