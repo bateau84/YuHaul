@@ -227,3 +227,115 @@ func TestE1_StopJourney(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// timeLimitedUnusableRun drives a real Run Now through the HTTP handler until
+// the shortened time limit (the production WithTimeoutCause path) interrupts it
+// mid-actions: V1 sent, V2's POST in flight with its guard kept, V3 untouched.
+// It then deletes the run's config_version row so the run can no longer resume.
+func timeLimitedUnusableRun(t *testing.T, dbPath string, yt *fakeYouTube) (srv *serverProcess, runID int64) {
+	t.Helper()
+	db := openReadDB(t, dbPath)
+	yt.setPostHoldFor("V2", make(chan struct{})) // V2's response never arrives
+	srv = startServer(t, dbPath, yt.srv.URL, childRunTimeLimitEnv+"=6s")
+	srv.waitOverview()
+	waitLog(t, srv, "scheduler started") // the producer gate is open
+	code, body := srv.postJSON("/api/runs")
+	require.Equal(t, 202, code, "%v", body)
+	require.Equal(t, "started", body["admission"])
+	runID = int64(body["run_id"].(float64))
+	eventually(t, runDoneBudget, "the run to hit its time limit", func() bool {
+		return scalar[string](t, db, `SELECT status FROM run WHERE id=?`, runID) == "interrupted"
+	})
+	require.Equal(t, "time_limit", scalar[string](t, db, `SELECT interrupt_cause FROM run WHERE id=?`, runID))
+	require.Equal(t, 1, yt.postCount("V1"))
+	require.Equal(t, 1, yt.postCount("V2"), "V2's POST was in flight when the limit hit")
+	require.Zero(t, yt.postCount("V3"))
+
+	writer, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000&_fk=1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = writer.Close() })
+	_, err = writer.Exec(`DELETE FROM config_version WHERE id=(SELECT config_version_id FROM run WHERE id=?)`, runID)
+	require.NoError(t, err)
+
+	code, body = srv.postJSON("/api/runs")
+	require.Equal(t, 409, code, "%v", body)
+	require.Equal(t, "resume_unavailable", body["code"])
+	require.EqualValues(t, runID, body["run_id"])
+	read := srv.getJSON("/api/runs/" + itoa(runID))
+	require.Equal(t, true, read["discardable"])
+	return srv, runID
+}
+
+// discardAndRunAgain discards the unusable run through srv, checks the handoff,
+// then restarts on the same database and presses Run Now: a started run claims
+// the handed-over videos and sends only what the guard does not block.
+func discardAndRunAgain(t *testing.T, srv *serverProcess, dbPath string, yt *fakeYouTube, runID int64, restartFirst bool) {
+	t.Helper()
+	db := openReadDB(t, dbPath)
+	if restartFirst {
+		// U3: the process starts with the unusable row, and discard still works.
+		srv.sigterm()
+		srv = startServer(t, dbPath, yt.srv.URL, childRunTimeLimitEnv+"=6s")
+		srv.waitOverview()
+		waitLog(t, srv, "scheduler started")
+		require.Contains(t, srv.out.String(), "startup recovery left unusable run")
+	}
+	requests := yt.requestCount()
+	code, body := srv.postJSON("/api/runs/" + itoa(runID) + "/discard")
+	require.Equal(t, 200, code, "%v", body)
+	require.Equal(t, "discarded", body["outcome"])
+	require.Equal(t, requests, yt.requestCount(), "AC18: the discard makes zero provider requests")
+	require.Equal(t, "failed", scalar[string](t, db, `SELECT status FROM run WHERE id=?`, runID))
+
+	// The deferred queue lists the unfinished videos.
+	queue := srv.getJSON("/api/queue/deferred")
+	listed := map[string]string{}
+	for _, it := range queue["deferred"].([]any) {
+		m := it.(map[string]any)
+		listed[m["ExternalVideoID"].(string)] = m["Reason"].(string)
+	}
+	require.Equal(t, map[string]string{"V2": "discarded_by_user", "V3": "discarded_by_user"}, listed)
+	require.Equal(t, 1, scalar[int](t, db, `SELECT count(*) FROM playlist_send_guard`), "V2's guard is untouched")
+	srv.sigterm()
+
+	// Restart (a new process on the same database) and press Run Now.
+	yt.setPostHoldFor("", nil)
+	restarted := startServer(t, dbPath, yt.srv.URL, childRunTimeLimitEnv+"=6s")
+	restarted.waitOverview()
+	waitLog(t, restarted, "scheduler started")
+	code, body = restarted.postJSON("/api/runs")
+	require.Equal(t, 202, code, "%v", body)
+	require.Equal(t, "started", body["admission"], "a discarded run is not a resume candidate")
+	newID := int64(body["run_id"].(float64))
+	require.NotEqual(t, runID, newID)
+	eventually(t, runDoneBudget, "the new run to finish", func() bool {
+		return scalar[string](t, db, `SELECT status FROM run WHERE id=?`, newID) != "running"
+	})
+	require.Equal(t, "completed", scalar[string](t, db, `SELECT status FROM run WHERE id=?`, newID))
+	require.Equal(t, 2, scalar[int](t, db, `SELECT count(*) FROM run_video_outcome WHERE run_id=? AND video_id IN (SELECT id FROM video WHERE video_id IN ('V2','V3'))`, newID),
+		"the new run claimed both handed-over videos")
+	require.Equal(t, 1, yt.postCount("V2"), "the guarded target is never sent again")
+	require.Equal(t, 1, yt.postCount("V3"), "the formerly unsent target is sent once")
+	require.Equal(t, 1, yt.postCount("V1"), "the committed target is not re-sent")
+	require.Zero(t, scalar[int](t, db, `SELECT count(*) FROM deferred_item WHERE status='retrying'`))
+	restarted.sigterm()
+}
+
+// E1 discard journey (ARS-002 §6.4): a real time limit leaves an unusable run;
+// Run Now refuses it, discard hands its videos over without a provider request,
+// and after a restart the next run claims them.
+func TestE1_DiscardJourney(t *testing.T) {
+	for _, restartFirst := range []bool{false, true} {
+		name := "discard_then_restart"
+		if restartFirst {
+			name = "restart_then_discard"
+		}
+		t.Run(name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "yuhaul.db")
+			seedBase(t, dbPath)
+			yt := newFakeYouTube(t, "V1", "V2", "V3")
+			srv, runID := timeLimitedUnusableRun(t, dbPath, yt)
+			discardAndRunAgain(t, srv, dbPath, yt, runID, restartFirst)
+		})
+	}
+}

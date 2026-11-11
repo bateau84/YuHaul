@@ -95,14 +95,14 @@ func TestRunStatusCheckStepIsIdempotent(t *testing.T) {
 	require.Equal(t, v1, schemaVersion(t, db), "second step is a no-op")
 	require.NoError(t, db.Close())
 
-	pre := migrateTo(t, filepath.Join(t.TempDir(), "pre.db"), 24)
+	// Migrate through 025 only (no widening step), so the version delta of
+	// ApplyMigrations is the widening step alone.
+	pre := migrateTo(t, filepath.Join(t.TempDir(), "pre.db"), 25)
 	before := schemaVersion(t, pre)
 	require.NoError(t, store.ApplyMigrations(pre))
-	// 025 itself bumps the version several times (DDL); the step adds exactly one.
-	mid := schemaVersion(t, pre)
+	require.Equal(t, before+1, schemaVersion(t, pre), "the step bumps schema_version by exactly one")
 	require.NoError(t, store.ApplyMigrations(pre))
-	require.Equal(t, mid, schemaVersion(t, pre))
-	require.Greater(t, mid, before)
+	require.Equal(t, before+1, schemaVersion(t, pre), "a second step is a no-op")
 }
 
 // M1: a 024 database with queue rows in every status upgrades unchanged.
@@ -112,10 +112,8 @@ func TestMigration025PreservesDeferredItems(t *testing.T) {
 	db := migrateTo(t, path, 24)
 	_, err := db.Exec(`INSERT INTO run (run_type,status) VALUES ('scheduled','completed')`)
 	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO video (id, youtube_video_id, title) VALUES (1,'a','t')`)
-	if err != nil {
-		t.Skipf("video schema differs: %v", err)
-	}
+	_, err = db.Exec(`INSERT INTO video (id, video_id, channel_id, processing_state) VALUES (1,'a','c','deferred')`)
+	require.NoError(t, err)
 	for i, st := range []string{"pending", "retrying", "completed", "discarded"} {
 		_, err = db.Exec(`INSERT INTO deferred_item (video_id,run_id,deferral_reason,status,retry_count,retry_run_id) VALUES (1,1,'quota_exhausted',?,?,CASE WHEN ?='retrying' THEN 1 END)`, st, i, st)
 		require.NoError(t, err)

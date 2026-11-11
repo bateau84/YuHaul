@@ -38,6 +38,12 @@ type runNowEnv struct {
 
 func newRunNowEnv(t *testing.T) *runNowEnv {
 	t.Helper()
+	return newRunNowEnvOpen(t, nil)
+}
+
+// newRunNowEnvOpen is newRunNowEnv over a database from open (nil: store.Open).
+func newRunNowEnvOpen(t *testing.T, open func(ctx context.Context, path string) (*sql.DB, error)) *runNowEnv {
+	t.Helper()
 	publishedAt := time.Now().UTC().Add(-time.Hour)
 	var videos []mockVideo
 	for i := 1; i <= 3; i++ {
@@ -46,7 +52,7 @@ func newRunNowEnv(t *testing.T) *runNowEnv {
 		videos = append(videos, v)
 	}
 	e := &runNowEnv{
-		idempotencyTestEnv: setupIdempotencyTest(t, videos),
+		idempotencyTestEnv: setupIdempotencyTestOpen(t, videos, open),
 		ctx:                context.Background(),
 		block:              map[string]bool{},
 		blocked:            make(chan string, 16),

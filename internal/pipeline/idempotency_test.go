@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -311,12 +312,23 @@ func itoa(n int) string {
 
 func setupIdempotencyTest(t *testing.T, videos []mockVideo) *idempotencyTestEnv {
 	t.Helper()
+	return setupIdempotencyTestOpen(t, videos, nil)
+}
+
+// setupIdempotencyTestOpen is setupIdempotencyTest with an optional database
+// opener, for tests that need a seam below database/sql. A nil opener uses
+// store.Open.
+func setupIdempotencyTestOpen(t *testing.T, videos []mockVideo, open func(ctx context.Context, path string) (*sql.DB, error)) *idempotencyTestEnv {
+	t.Helper()
 	ctx := context.Background()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "idempotency.db")
 
-	db, err := store.Open(ctx, path)
+	if open == nil {
+		open = store.Open
+	}
+	db, err := open(ctx, path)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = db.Close()

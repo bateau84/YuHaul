@@ -34,21 +34,32 @@ import (
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/pipeline"
 	"github.com/bateau84/YuHaul/internal/router"
+	"github.com/bateau84/YuHaul/internal/server"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
 )
 
 const (
-	childMainEnv  = "YUHAUL_TEST_CHILD_MAIN"
-	childKey      = "01234567890123456789012345678901"
-	runDoneBudget = 40 * time.Second
-	exitBudget    = 25 * time.Second
+	childMainEnv = "YUHAUL_TEST_CHILD_MAIN"
+	// childRunTimeLimitEnv shortens the child's Run Now time limit through
+	// server.WithRunTimeLimit, which keeps the production deadline path.
+	childRunTimeLimitEnv = "YUHAUL_TEST_RUN_TIME_LIMIT"
+	childKey             = "01234567890123456789012345678901"
+	runDoneBudget        = 40 * time.Second
+	exitBudget           = 25 * time.Second
 )
 
 // TestMain turns the test binary into the server when asked to, so the tests
 // run the real main() in its own process.
 func TestMain(m *testing.M) {
 	if os.Getenv(childMainEnv) == "1" {
+		if v := os.Getenv(childRunTimeLimitEnv); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				panic(err)
+			}
+			testServerOptions = append(testServerOptions, server.WithRunTimeLimit(d))
+		}
 		main()
 		os.Exit(0)
 	}
@@ -65,6 +76,8 @@ type fakeYouTube struct {
 	subHold     chan struct{}
 	subReached  chan struct{}
 	postHold    chan struct{}
+	holdVideo   string // when set, only this video's POST is held
+	requests    int    // every request the endpoint received
 	postReached chan string
 	posts       map[string]int
 	quotaVideo  string // POST for this video answers 403 quotaExceeded
@@ -83,7 +96,12 @@ func newFakeYouTube(t *testing.T, videos ...string) *fakeYouTube {
 	})
 	mux.HandleFunc("/playlistItems", f.handlePlaylistItems)
 	mux.HandleFunc("/videos", f.handleVideos)
-	f.srv = httptest.NewServer(mux)
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.requests++
+		f.mu.Unlock()
+		mux.ServeHTTP(w, r)
+	}))
 	t.Cleanup(f.srv.Close)
 	return f
 }
@@ -140,6 +158,9 @@ func (f *fakeYouTube) handlePlaylistItems(w http.ResponseWriter, r *http.Request
 		f.mu.Lock()
 		f.posts[video]++
 		hold := f.postHold
+		if f.holdVideo != "" && f.holdVideo != video {
+			hold = nil
+		}
 		quota := f.quotaVideo == video
 		f.mu.Unlock()
 		f.postReached <- video
@@ -200,6 +221,20 @@ func (f *fakeYouTube) setPostHold(ch chan struct{}) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.postHold = ch
+}
+
+// setPostHoldFor holds only video's playlist POST open until the client gives
+// up; every other POST is answered at once.
+func (f *fakeYouTube) setPostHoldFor(video string, ch chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdVideo, f.postHold = video, ch
+}
+
+func (f *fakeYouTube) requestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests
 }
 
 func (f *fakeYouTube) postCount(video string) int {
@@ -266,7 +301,7 @@ type serverProcess struct {
 	start  time.Time
 }
 
-func startServer(t *testing.T, dbPath, youtubeURL string) *serverProcess {
+func startServer(t *testing.T, dbPath, youtubeURL string, extraEnv ...string) *serverProcess {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -287,6 +322,7 @@ func startServer(t *testing.T, dbPath, youtubeURL string) *serverProcess {
 		"YUHAUL_ENCRYPTION_KEY="+childKey,
 		"YUHAUL_YOUTUBE_BASE_URL="+youtubeURL,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	out := &syncBuffer{}
 	cmd.Stdout, cmd.Stderr = out, out
 	p := &serverProcess{t: t, cmd: cmd, out: out, addr: addr, exited: make(chan struct{}), start: time.Now()}

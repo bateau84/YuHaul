@@ -477,7 +477,7 @@ func TestR1_DoubleStopPress(t *testing.T) {
 // `stopped` with its handoff. Never failed plus deferred items, never
 // Errors-queue sinks plus stopped.
 func TestR2_StopRacesTheRunsOwnEnding(t *testing.T) {
-	for _, mode := range []string{"completion", "time_limit", "shutdown"} {
+	for _, mode := range []string{"completion", "time_limit", "shutdown", "run_failure"} {
 		t.Run(mode, func(t *testing.T) {
 			counts := map[endKind]int{}
 			for i := 0; i < raceIterations; i++ {
@@ -501,6 +501,14 @@ func raceStopAgainstEnding(t *testing.T, mode string, iteration int) endKind {
 		select {
 		case <-release:
 		case <-time.After(30 * time.Second):
+		}
+		if mode == "run_failure" {
+			// V3 is applied but its quota accounting write fails, so the run's
+			// own ending is a failure (ADR-006 §6), not a completion.
+			if _, err := e.db().ExecContext(e.ctx, `CREATE TRIGGER inject_accounting_failure BEFORE INSERT ON quota_ledger
+				BEGIN SELECT RAISE(ABORT,'injected accounting failure'); END`); err != nil {
+				t.Errorf("inject accounting failure: %v", err)
+			}
 		}
 		return 0, "" // V3 is applied: the run's last step succeeds
 	}
@@ -536,15 +544,31 @@ func raceStopAgainstEnding(t *testing.T, mode string, iteration int) endKind {
 	stopped := <-stopErr
 	r := e.run(t, adm.RunID())
 
-	// Invariants shared by every outcome.
-	require.NotEqual(t, state.RunStatusFailed, r.Status, "iteration %d: never failed", iteration)
+	// Invariants shared by every outcome. A run that fails by itself commits
+	// its retention sweep's sinks, so the sink count only constrains the other
+	// endings and every stop.
 	require.Zero(t, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE status='retrying'`))
 	failedOutcomes := e.count(t, `SELECT COUNT(*) FROM run_video_outcome WHERE run_id=? AND final_outcome='failed'`, adm.RunID())
-	require.Equal(t, failedOutcomes, e.count(t, `SELECT COUNT(*) FROM error_entry`), "iteration %d: no sink beyond committed failures", iteration)
+	if stopped == nil || mode != "run_failure" {
+		require.NotEqual(t, state.RunStatusFailed, r.Status, "iteration %d: never failed", iteration)
+		require.Equal(t, failedOutcomes, e.count(t, `SELECT COUNT(*) FROM error_entry`), "iteration %d: no sink beyond committed failures", iteration)
+	}
 
 	if stopped == nil {
 		require.Equal(t, StopAccepted, stopRes.Outcome)
 		e.assertStopped(t, adm.RunID())
+		// BR-035 AC8: the in-flight V3 either succeeded or is uncertain with
+		// its guard kept; it is never silently unguarded.
+		v3, err := e.stateStore.GetVideoByExternalID(e.ctx, "V3")
+		require.NoError(t, err)
+		var outcome, reason string
+		require.NoError(t, e.db().QueryRow(`SELECT outcome, ifnull(outcome_reason,'') FROM executed_action WHERE video_id=? AND run_id=?`, v3.ID, adm.RunID()).Scan(&outcome, &reason),
+			"iteration %d: V3 has an action row", iteration)
+		if outcome != "succeeded" {
+			require.Equal(t, "failed", outcome, "iteration %d", iteration)
+			require.Equal(t, "mutation_application_uncertain", reason, "iteration %d", iteration)
+			require.Equal(t, 1, e.count(t, `SELECT COUNT(*) FROM playlist_send_guard WHERE video_id=?`, v3.ID), "iteration %d: uncertain V3 keeps its guard", iteration)
+		}
 		require.Zero(t, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE deferral_reason<>'stopped_by_user'`))
 		return endStopped
 	}
@@ -554,6 +578,8 @@ func raceStopAgainstEnding(t *testing.T, mode string, iteration int) endKind {
 	require.NotEqual(t, state.RunStatusStopped, r.Status)
 	require.Zero(t, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE deferral_reason='stopped_by_user'`), "iteration %d: refused stop wrote a handoff", iteration)
 	switch mode {
+	case "run_failure":
+		require.Equal(t, state.RunStatusFailed, r.Status, "iteration %d", iteration)
 	case "completion":
 		require.Equal(t, state.RunStatusCompleted, r.Status, "iteration %d", iteration)
 	case "time_limit":
@@ -575,16 +601,45 @@ func TestR3_StopSettleVersusStartsAndDiscard(t *testing.T) {
 		adm, done := e.stalledRunNow(t)
 		var attempts sync.WaitGroup
 		var mu sync.Mutex
-		var admitted *RunNowAdmission
-		attempts.Add(2)
+		// claimed maps a contender to the videos its run owned the moment it
+		// was created: items handed over by the stop can only appear there
+		// once the settle has committed.
+		claimed := map[string][]string{}
+		claimedBy := func(runID int64) []string {
+			rows, err := e.db().QueryContext(e.ctx, `SELECT v.video_id FROM run_video_outcome o JOIN video v ON v.id=o.video_id WHERE o.run_id=? ORDER BY 1`, runID)
+			if err != nil {
+				t.Errorf("iteration %d: read claims: %v", i, err)
+				return nil
+			}
+			defer rows.Close()
+			var out []string
+			for rows.Next() {
+				var v string
+				if err := rows.Scan(&v); err != nil {
+					t.Errorf("iteration %d: scan claim: %v", i, err)
+					return nil
+				}
+				out = append(out, v)
+			}
+			if err := rows.Err(); err != nil {
+				t.Errorf("iteration %d: read claims: %v", i, err)
+			}
+			return out
+		}
+		attempts.Add(3)
 		go func() {
 			defer attempts.Done()
 			for {
 				a, err := e.pipeline.AdmitRunNow(e.ctx)
 				if err == nil {
+					if a.Resumed() {
+						t.Errorf("iteration %d: Run Now resumed a stopped run", i)
+					}
+					got := claimedBy(a.RunID())
 					mu.Lock()
-					admitted = a
+					claimed["run_now"] = got
 					mu.Unlock()
+					a.Release()
 					return
 				}
 				if !errors.Is(err, ErrProductionRunActive) {
@@ -593,6 +648,20 @@ func TestR3_StopSettleVersusStartsAndDiscard(t *testing.T) {
 				}
 				time.Sleep(200 * time.Microsecond)
 			}
+		}()
+		go func() {
+			// The scheduled start waits for productionMu, which the stopping
+			// run holds until its settle commits.
+			defer attempts.Done()
+			run, err := e.pipeline.StartRun(e.ctx, state.RunTypeScheduled)
+			if err != nil {
+				t.Errorf("iteration %d: scheduled start: %v", i, err)
+				return
+			}
+			got := claimedBy(run.ID)
+			mu.Lock()
+			claimed["scheduled"] = got
+			mu.Unlock()
 		}()
 		go func() {
 			defer attempts.Done()
@@ -622,17 +691,18 @@ func TestR3_StopSettleVersusStartsAndDiscard(t *testing.T) {
 		attempts.Wait()
 		e.assertStopped(t, adm.RunID())
 		mu.Lock()
-		a := admitted
+		got := claimed
 		mu.Unlock()
-		require.NotNil(t, a)
-		require.False(t, a.Resumed())
-		// The new run claimed the handed-over items: they are committed before
-		// the lock was released.
-		for _, v := range []string{"V2", "V3"} {
-			vid, err := e.stateStore.GetVideoByExternalID(e.ctx, v)
-			require.NoError(t, err)
-			require.Equal(t, 1, e.count(t, `SELECT COUNT(*) FROM run_video_outcome WHERE run_id=? AND video_id=?`, a.RunID(), vid.ID), "iteration %d: %s claimed", i, v)
+		require.Len(t, got, 2, "iteration %d: both starts ran", i)
+		// The handed-over items are committed before the lock was released, so
+		// whichever start got the lock first claimed both and the other none.
+		winners := 0
+		for who, vids := range got {
+			if len(vids) > 0 {
+				winners++
+				require.Equal(t, []string{"V2", "V3"}, vids, "iteration %d: %s claimed", i, who)
+			}
 		}
-		a.Release()
+		require.Equal(t, 1, winners, "iteration %d: exactly one start claimed the handoff: %v", i, got)
 	}
 }

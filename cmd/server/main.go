@@ -204,6 +204,7 @@ func main() {
 		server.WithPlaylistProvider(&playlistProvider{auth: authSvc, baseURL: cfg.YouTubeBaseURL, ledger: ledger}),
 		server.WithCorpusImportHandler(importHandler),
 		server.WithRunContext(ctx),
+		withTestServerOptions(),
 	)
 	// Queue retries run on the application context and join the run drain
 	// (ADR-007 §3.4); wire before the listener starts.
@@ -422,6 +423,20 @@ func decodeKey(key string) ([]byte, error) {
 		return nil, fmt.Errorf("encryption key must be 32 bytes, got %d", len(decoded))
 	}
 	return decoded, nil
+}
+
+// testServerOptions are extra server options that only this package's tests
+// set, in the child process they re-execute into main(). They let a composition
+// test shorten the Run Now time limit while keeping the production code path.
+// Production leaves it nil.
+var testServerOptions []server.Option
+
+func withTestServerOptions() server.Option {
+	return func(s *server.Server) {
+		for _, o := range testServerOptions {
+			o(s)
+		}
+	}
 }
 
 // envDefault returns the value of envVar if set, otherwise fallback.
