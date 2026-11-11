@@ -96,6 +96,33 @@ function renderView() {
   )
 }
 
+describe('RunDetailView unavailable_on_youtube copy (BR-032 AC1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetRun.mockReset()
+  })
+
+  it('shows row text, filter option and count line', async () => {
+    mockGetRun.mockResolvedValue({ ...runFixture, videos_unavailable: 3 })
+    serveVideos([videoFixture(1, 'v-gone', 'completed', 'unavailable_on_youtube')])
+    renderView()
+    const table = await screen.findByRole('table')
+    expect(within(table).getByText('Unavailable on YouTube')).toBeInTheDocument()
+    expect(within(table).getByText('YouTube did not return this video.')).toBeInTheDocument()
+    expect(within(table).getByText('No routes were evaluated.')).toBeInTheDocument()
+    expect(screen.getByText('Unavailable on YouTube: 3')).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Unavailable on YouTube' })).toBeInTheDocument()
+  })
+
+  it('omits the count line when the count is zero or absent and no filter is active', async () => {
+    mockGetRun.mockResolvedValue(runFixture)
+    serveVideos(allVideos)
+    renderView()
+    await screen.findByRole('table')
+    expect(screen.queryByText(/Unavailable on YouTube:/)).not.toBeInTheDocument()
+  })
+})
+
 describe('RunDetailView outcome filter (BR-032 AC5)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -173,6 +200,7 @@ describe('RunDetailView outcome filter (BR-032 AC5)', () => {
       'Excluded',
       'Deferred',
       'Failed',
+      'Unavailable on YouTube',
       'Not evaluated',
     ])
   })

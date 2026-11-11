@@ -8,15 +8,26 @@ export type OutcomeBadgeVariant = BadgeVariant | 'unavailable'
 
 // Badge/filter labels for the BR-032 outcome-category vocabulary, shared by
 // the Run Detail outcome filter and the outcome badge so the two never drift.
-// unavailable_on_youtube is deliberately not labelled here yet: adding it would
-// add a filter option to Run Detail, and the contract change carries no UI.
-export const videoOutcomeLabels: Record<Exclude<VideoFinalOutcome, 'unavailable_on_youtube'>, string> = {
+export const videoOutcomeLabels: Record<VideoFinalOutcome, string> = {
   accepted: 'Accepted',
   rejected: 'Rejected',
   excluded: 'Excluded',
   deferred: 'Deferred',
   failed: 'Failed',
+  unavailable_on_youtube: 'Unavailable on YouTube',
   not_yet_evaluated: 'Not evaluated',
+}
+
+// BR-032 AC1 copy for a final unavailable_on_youtube outcome (design: "Unavailable
+// on YouTube" outcome copy). Shared by Run Detail, Decision Detail and run summaries.
+export const unavailableRowText = 'YouTube did not return this video.'
+export const unavailableNoRoutesRow = 'No routes were evaluated.'
+export const unavailableDetailText = 'YouTube did not return this video. It may have been deleted or made private. This is final. It is not a rejection or a failure.'
+export const unavailableNoRoutesDetail = 'No routes were evaluated for this video.'
+export const unavailableNoAction = 'No playlist addition was attempted.'
+
+export function unavailableSummary(count: number | undefined): string | null {
+  return count && count > 0 ? `${count} unavailable on YouTube` : null
 }
 
 export const simulationExplanation = 'Simulation only. Results are hypothetical; no playlist actions were executed by this run.'

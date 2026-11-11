@@ -6,6 +6,7 @@ import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/
 import { useToast } from '../hooks/useToast'
 import { canOfferStop, isStopping } from '../types'
 import { runEnding } from '../lib/run-ending'
+import { unavailableSummary } from '../lib/outcome'
 import type { Run, RunStatus, RunType } from '../types'
 
 // Persisted-state polling interval (ARD-001: while a listed run is stored as
@@ -388,7 +389,10 @@ export function RunsView() {
                         <Link to={`/runs/${r.id}`}>{new Date(r.started_at).toLocaleString()}</Link>
                       </td>
                       <td data-label="Type">{runTypeLabels[r.run_type] ?? r.run_type}</td>
-                      <td data-label="Status"><StatusCell run={r} /></td>
+                      <td data-label="Status">
+                        <StatusCell run={r} />
+                        {unavailableSummary(r.videos_unavailable) && <small style={{ display: 'block', marginTop: 4 }}>{unavailableSummary(r.videos_unavailable)}</small>}
+                      </td>
                       <td data-label="Selected">{selectedCountLabel(r)}</td>
                       <td data-label="Evaluated">{r.videos_evaluated ?? '—'}</td>
                       <td data-label="Discovered">{r.videos_discovered}</td>

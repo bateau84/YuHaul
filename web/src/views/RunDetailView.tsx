@@ -10,7 +10,7 @@ import { runEnding } from '../lib/run-ending'
 import { DiscardRunControl } from '../components/DiscardRunControl'
 import { discardReasonSentence } from '../lib/discard-reason'
 import { useToast } from '../hooks/useToast'
-import { simulationExplanation, simulationMode, videoOutcomeLabels } from '../lib/outcome'
+import { simulationExplanation, simulationMode, unavailableNoRoutesRow, unavailableRowText, videoOutcomeLabels } from '../lib/outcome'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
 import { canOfferStop, isStopping, type PublishedRange, type Run, type RunStatus, type VideoFinalOutcome, type VideoOutcome } from '../types'
 
@@ -635,6 +635,9 @@ function RunDetailContent({ id }: { id?: string }) {
           <div className="metric-label">Failed</div>
         </div>
       </div>
+      {!mode && ((run.videos_unavailable ?? 0) > 0 || outcomeFilter === 'unavailable_on_youtube') && (
+        <p style={{ margin: '8px 0 0' }}>Unavailable on YouTube: {run.videos_unavailable ?? 0}</p>
+      )}
       {/* ARD-001: qualify the evaluated count as decision-bearing evidence,
           not proof that every selected video finished evaluation. */}
       <p style={{ margin: '8px 0 16px', color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
@@ -736,7 +739,13 @@ function RunDetailContent({ id }: { id?: string }) {
                     </td>
                     <td data-label={outcomeLabel}>
                        <Badge state={v.processing_state} finalOutcome={v.final_outcome} mode={run.run_type} />
-                       {v.route_decisions && v.route_decisions.length > 0 && (
+                       {v.final_outcome === 'unavailable_on_youtube' && !mode && (
+                         <>
+                           <p>{unavailableRowText}</p>
+                           <p>{unavailableNoRoutesRow}</p>
+                         </>
+                       )}
+                       {v.final_outcome !== 'unavailable_on_youtube' && v.route_decisions && v.route_decisions.length > 0 && (
                          <RouteResults
                            decisions={v.route_decisions}
                            runId={runId}

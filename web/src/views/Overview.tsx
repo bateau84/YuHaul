@@ -10,6 +10,7 @@ import { ApiError } from '../api/core'
 import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
 import { DiscardRunControl } from '../components/DiscardRunControl'
 import { canOfferStop, isStopping } from '../types'
+import { unavailableSummary } from '../lib/outcome'
 
 const RUN_POLL_INTERVAL_MS = 5000
 
@@ -371,6 +372,7 @@ export function Overview() {
           {run && !activeRun && (
             <>
               <p role="status" aria-live="polite" style={{ margin: 0 }}><strong>Run {run.id} — {run.run_type} — {run.status === 'running' && run.endable === true ? 'Marked as running — nothing is executing it' : statusLabel(run.status)}</strong></p>
+              {unavailableSummary(run.videos_unavailable) && <p style={{ margin: '8px 0 0' }}>{unavailableSummary(run.videos_unavailable)}</p>}
               <p style={{ margin: '8px 0' }}><Link to={`/runs/${run.id}`}>View run</Link></p>
             </>
           )}

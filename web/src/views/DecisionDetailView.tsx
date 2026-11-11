@@ -5,7 +5,7 @@ import * as api from '../api/client'
 import { Badge } from '../components/Badge'
 import { CausalExclusion } from '../components/CausalExclusion'
 import { routeAttribution } from '../lib/route-attribution'
-import { deriveRouteDecision, actionOutcomeLabel, actionOutcomeReasonLabel, formatDuration, simulationExplanation, simulationMode, type BadgeVariant } from '../lib/outcome'
+import { deriveRouteDecision, actionOutcomeLabel, actionOutcomeReasonLabel, formatDuration, simulationExplanation, simulationMode, unavailableDetailText, unavailableNoAction, unavailableNoRoutesDetail, type BadgeVariant } from '../lib/outcome'
 import { shortRouteId } from '../lib/route'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
 import type { Run, DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome } from '../types'
@@ -306,6 +306,8 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
 
   const video = detail.video
   const mode = simulationMode(run.run_type)
+  // Simulations never produce this outcome (BR-032 AC1).
+  const unavailable = !mode && detail.final_outcome === 'unavailable_on_youtube'
   const actionTargets = new Set((detail.route_decisions ?? []).flatMap((decision) =>
     decision.actions
       .filter((action) => action.outcome_reason === 'mutation_application_uncertain')
@@ -398,6 +400,7 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
             Processing state: <code>{detail.processing_state}</code>
           </span>}
         </div>
+        {unavailable && <p style={{ marginTop: 8 }}>{unavailableDetailText}</p>}
         {!mode && video.deferred_reason && (
           <p style={{ marginTop: 8, color: 'var(--color-text-muted)' }}>Deferred reason: {video.deferred_reason}</p>
         )}
@@ -412,17 +415,25 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
       </div>
 
       <h2 className="section-title">Layer 2 — Route decisions</h2>
-      <p style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
-        Routes evaluated in order. Numbers show evaluation sequence.
-      </p>
-      {(detail.route_decisions ?? []).map((d, i) => (
-        <DecisionRow key={d.id} decision={d} index={i} simulation={!!mode} />
-      ))}
+      {unavailable ? (
+        <p style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>{unavailableNoRoutesDetail}</p>
+      ) : (
+        <>
+          <p style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
+            Routes evaluated in order. Numbers show evaluation sequence.
+          </p>
+          {(detail.route_decisions ?? []).map((d, i) => (
+            <DecisionRow key={d.id} decision={d} index={i} simulation={!!mode} />
+          ))}
+        </>
+      )}
 
       <div className="card" style={{ marginTop: 16 }}>
         <h2 className="section-title">{mode ? 'Layer 3 — Simulated action outcomes' : 'Layer 3 — Action outcomes'}</h2>
         {mode && <p>These actions were not executed. Accepted means the video matched this simulation's routing rules, not that a playlist was changed.</p>}
-      {(detail.route_decisions ?? []).some((d) => (d.actions ?? []).length > 0) ? (
+      {unavailable ? (
+        <p style={{ color: 'var(--color-text-muted)' }}>{unavailableNoAction}</p>
+      ) : (detail.route_decisions ?? []).some((d) => (d.actions ?? []).length > 0) ? (
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
           {(detail.route_decisions ?? []).flatMap((d) =>
             (d.actions ?? []).map((a) => (
