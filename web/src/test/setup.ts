@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom'
 import { configure } from '@testing-library/react'
 import * as mock from '../api/mock'
+import { deferredReasons } from '../types'
 import type { Route, Settings } from '../types'
 
 // Async queries resolve as soon as the condition holds; the larger ceiling only
@@ -143,7 +144,32 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return jsonResponse(item)
   }
   if (path === '/api/deferred' && method === 'GET') {
-    return jsonResponse({ deferred: await mock.listDeferred(search.get('include') ?? 'pending') })
+    // Same refusals as ARS-005 §7.2.
+    const positions = ['after_id', 'before_id', 'page'].filter((k) => search.has(k))
+    const num = (k: string) => Number(search.get(k))
+    const badNumber = (k: string) => search.has(k) && !(Number.isInteger(num(k)) && num(k) >= 1)
+    const page = search.get('page')
+    const invalidPage =
+      positions.length > 1 ||
+      badNumber('after_id') ||
+      badNumber('before_id') ||
+      badNumber('limit') ||
+      (page !== null && page !== 'last' && badNumber('page'))
+    if (invalidPage) return jsonResponse({ error: 'invalid page', code: 'invalid_page' }, 400)
+    const reason = search.get('reason')
+    if (reason !== null && !(deferredReasons as readonly string[]).includes(reason)) {
+      return jsonResponse({ error: 'invalid reason', code: 'invalid_reason' }, 400)
+    }
+    return jsonResponse(
+      await mock.listDeferredPage({
+        include: search.get('include') ?? 'pending',
+        reason: reason ?? undefined,
+        limit: search.has('limit') ? num('limit') : undefined,
+        afterId: search.has('after_id') ? num('after_id') : undefined,
+        beforeId: search.has('before_id') ? num('before_id') : undefined,
+        page: page === null ? undefined : page === 'last' ? 'last' : Number(page),
+      }),
+    )
   }
   const deferredMatch = path.match(/^\/api\/deferred\/(\d+)\/(retry|discard)$/)
   if (deferredMatch && method === 'POST') {

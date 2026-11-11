@@ -14,11 +14,6 @@ export async function dismissError(id: number): Promise<ErrorEntry> {
   return api<ErrorEntry>(`/api/errors/${id}/dismiss`, { method: 'POST' })
 }
 
-export async function listDeferred(include = 'pending'): Promise<DeferredItem[]> {
-  const data = await api<{ deferred: DeferredItem[] }>(`/api/deferred/?include=${encodeURIComponent(include)}`)
-  return data.deferred ?? []
-}
-
 export async function retryDeferred(id: number): Promise<DeferredItem> {
   return api<DeferredItem>(`/api/deferred/${id}/retry`, { method: 'POST' })
 }

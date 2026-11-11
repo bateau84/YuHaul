@@ -35,7 +35,6 @@ export {
   listErrors,
   retryError,
   dismissError,
-  listDeferred,
   retryDeferred,
   discardDeferred,
 } from './queue'

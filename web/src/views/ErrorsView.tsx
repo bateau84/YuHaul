@@ -1,33 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import * as api from '../api/client'
-import { ConfirmDialog } from '../components/ConfirmDialog'
+import { DeferredQueue } from '../components/DeferredQueue'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
-import type { ErrorEntry, DeferredItem } from '../types'
-
-// Items handed over by a discard (BR-017) or a stop (BR-035) wait for the next
-// run. Other reasons render as the API supplies them.
-function isHandedOver(d: DeferredItem): boolean {
-  return d.deferral_reason === 'stopped_by_user' || d.deferral_reason === 'discarded_by_user'
-}
-
-function deferredReasonLabel(d: DeferredItem): string {
-  if (d.deferred_reason_unavailable) return 'Waiting for the next run.'
-  if (isHandedOver(d)) {
-    const what = d.deferral_reason === 'stopped_by_user' ? 'stopped by user' : 'discarded'
-    return `Waiting for the next run. Run ${d.run_id} was ${what}.`
-  }
-  return d.deferral_reason
-}
+import type { ErrorEntry } from '../types'
 
 export function ErrorsView() {
   // "View deferred queue" links open the Deferred tab with ?tab=deferred.
-  const [searchParams] = useSearchParams()
-  const [tab, setTab] = useState<'errors' | 'deferred'>(searchParams.get('tab') === 'deferred' ? 'deferred' : 'errors')
-  const [confirmDismiss, setConfirmDismiss] = useState<DeferredItem | null>(null)
+  // The tab, the Deferred page position and its reason filter live in the URL
+  // (design: "The paged Deferred tab"), so reload, Back and shared links restore them.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tab: 'errors' | 'deferred' = searchParams.get('tab') === 'deferred' ? 'deferred' : 'errors'
+  const setTab = (next: 'errors' | 'deferred') => setSearchParams(next === 'deferred' ? { tab: 'deferred' } : {})
   const [errors, setErrors] = useState<ErrorEntry[]>([])
-  const [deferred, setDeferred] = useState<DeferredItem[]>([])
+  const [queueTotal, setQueueTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState(false)
   const [retrying, setRetrying] = useState(false)
@@ -38,11 +25,10 @@ export function ErrorsView() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([api.listErrors(), api.listDeferred()])
-      .then(([e, d]) => {
+    api.listErrors()
+      .then((e) => {
         if (cancelled) return
         setErrors(e)
-        setDeferred(d)
         setFetchError(false)
         setLoading(false)
       })
@@ -72,9 +58,7 @@ export function ErrorsView() {
   async function handleRetry() {
     setRetrying(true)
     try {
-      const [e, d] = await Promise.all([api.listErrors(), api.listDeferred()])
-      setErrors(e)
-      setDeferred(d)
+      setErrors(await api.listErrors())
       setFetchError(false)
       recoveredRef.current = true
     } catch {
@@ -104,26 +88,6 @@ export function ErrorsView() {
     }
   }
 
-  async function retryDeferred(id: number) {
-    try {
-      await api.retryDeferred(id)
-      setDeferred((prev) => prev.filter((d) => d.id !== id))
-      addToast('Deferred item queued for retry', 'success')
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : 'Failed to retry deferred item', 'error')
-    }
-  }
-
-  async function discardDeferred(id: number) {
-    try {
-      await api.discardDeferred(id)
-      setDeferred((prev) => prev.filter((d) => d.id !== id))
-      addToast('Deferred item dismissed', 'success')
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : 'Failed to discard deferred item', 'error')
-    }
-  }
-
   if (loading) return <div className="empty-state">Loading queue...</div>
 
   return (
@@ -149,7 +113,7 @@ export function ErrorsView() {
           aria-selected={tab === 'deferred'}
           disabled={fetchError}
         >
-          {fetchError ? 'Deferred' : `Deferred (${deferred.length})`}
+          {fetchError || queueTotal === null ? 'Deferred' : `Deferred (${queueTotal.toLocaleString()})`}
         </button>
       </div>
 
@@ -200,72 +164,9 @@ export function ErrorsView() {
             </div>
           )}
 
-          {tab === 'deferred' && (
-            <div className="card">
-              {deferred.length === 0 ? (
-                <div className="empty-state">No deferred work. All pending items have been processed.</div>
-              ) : (
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th scope="col">Video</th>
-                      <th scope="col">Reason</th>
-                      <th scope="col">Retry after</th>
-                      <th scope="col">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {deferred.map((d, i) => (
-                      <tr key={d.id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
-                        <td data-label="Video">{d.video_title ?? d.video_id}</td>
-                        <td data-label="Reason">{deferredReasonLabel(d)}</td>
-                        <td data-label="Retry after">
-                          {d.retry_after
-                            ? new Date(d.retry_after).toLocaleString()
-                            : isHandedOver(d)
-                              ? 'Eligible for the next run'
-                              : 'Next run'}
-                        </td>
-                        <td data-label="Actions">
-                          <div style={{ display: 'flex', gap: 8 }}>
-                            <button className="button" onClick={() => retryDeferred(d.id)}>
-                              Retry now
-                            </button>
-                            <button
-                              className="button"
-                              aria-label={`Dismiss deferred item: ${d.video_title ?? d.video_id}`}
-                              onClick={() => (isHandedOver(d) ? setConfirmDismiss(d) : discardDeferred(d.id))}
-                            >
-                              Dismiss
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          )}
+          <DeferredQueue active={tab === 'deferred'} onQueueTotal={setQueueTotal} />
         </>
       )}
-
-      {/* A handed-over video waits only for the next run, so dismissing it
-          means nothing will pick it up (design: "Deferred rows handed over"). */}
-      <ConfirmDialog
-        open={confirmDismiss !== null}
-        title="Dismiss this deferred item?"
-        confirmLabel="Dismiss"
-        destructive
-        onConfirm={() => {
-          const item = confirmDismiss
-          setConfirmDismiss(null)
-          if (item) void discardDeferred(item.id)
-        }}
-        onCancel={() => setConfirmDismiss(null)}
-      >
-        It will not be retried, but the historical record will be preserved.
-      </ConfirmDialog>
     </>
   )
 }

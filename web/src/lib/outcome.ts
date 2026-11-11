@@ -144,7 +144,7 @@ export function formatDuration(seconds?: number): string {
 // Deferred reason filter; unknown stored values render verbatim.
 export const deferredReasonLabels: Record<DeferredReason, string> = {
   quota_exhausted: 'Quota exhausted',
-  api_rate_limited: 'Rate limited',
+  api_rate_limited: 'Rate limited by YouTube',
   authorization_pending: 'Waiting for YouTube access',
   stopped_by_user: 'Stopped by user',
   discarded_by_user: 'Discarded by user',

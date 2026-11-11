@@ -18,6 +18,8 @@ import type {
   Settings,
   ErrorEntry,
   DeferredItem,
+  DeferredPage,
+  DeferredReason,
   Advisory,
   RetentionPlaylist,
   Playlist,
@@ -350,20 +352,24 @@ const mockErrors: ErrorEntry[] = [
   },
 ]
 
-const mockDeferred: DeferredItem[] = [
-  {
-    id: 1,
-    video_id: 1003,
-    video_title: 'Pop Hit 2026',
-    channel_name: 'Pop Central',
-    run_id: 1,
-    deferral_reason: 'quota_exhausted',
-    retry_after: '2026-09-09T06:00:00Z',
-    status: 'pending',
-    created_at: '2026-09-08T06:05:00Z',
-    retry_count: 0,
-  },
-]
+function defaultDeferred(): DeferredItem[] {
+  return [
+    {
+      id: 1,
+      video_id: 1003,
+      video_title: 'Pop Hit 2026',
+      channel_name: 'Pop Central',
+      run_id: 1,
+      deferral_reason: 'quota_exhausted',
+      retry_after: '2026-09-09T06:00:00Z',
+      status: 'pending',
+      created_at: '2026-09-08T06:05:00Z',
+      retry_count: 0,
+    },
+  ]
+}
+
+let mockDeferred: DeferredItem[] = defaultDeferred()
 
 let mockRetentionPlaylists: RetentionPlaylist[] = [
   { id: 1, playlist_id: 'PLrotation', playlist_name: 'Rotation', designated_at: '2026-08-01T10:00:00Z', is_active: true },
@@ -634,9 +640,66 @@ export async function dismissError(id: number): Promise<ErrorEntry | undefined> 
   return e
 }
 
-export async function listDeferred(include = 'pending'): Promise<DeferredItem[]> {
+// listDeferredPage mirrors GET /api/deferred (ARS-005 §7.1): one page, exact
+// positions, and totals with and without the reason filter. Request validation
+// (400 invalid_page / invalid_reason) lives in the fetch stub in test/setup.ts.
+export interface MockDeferredQuery {
+  include?: string
+  reason?: string
+  limit?: number
+  afterId?: number
+  beforeId?: number
+  page?: number | 'last'
+}
+
+export async function listDeferredPage(q: MockDeferredQuery = {}): Promise<DeferredPage> {
   await delay()
-  return include === 'all' ? mockDeferred : mockDeferred.filter((d) => d.status === 'pending')
+  const limit = q.limit ?? 50
+  const scope = [...mockDeferred]
+    .filter((d) => q.include === 'all' || d.status === 'pending')
+    .sort((a, b) => a.id - b.id)
+  const filtered = q.reason ? scope.filter((d) => d.deferral_reason === q.reason) : scope
+  const totalPages = Math.max(1, Math.ceil(filtered.length / limit))
+  const byReason: Partial<Record<DeferredReason, number>> = {}
+  for (const d of scope) {
+    const r = d.deferral_reason as DeferredReason
+    byReason[r] = (byReason[r] ?? 0) + 1
+  }
+
+  let start: number
+  let jumpPage: number | null = null
+  if (q.page !== undefined) {
+    jumpPage = q.page === 'last' ? totalPages : q.page
+    start = (jumpPage - 1) * limit
+  } else if (q.beforeId !== undefined) {
+    const end = filtered.filter((d) => d.id < q.beforeId!).length
+    start = Math.max(0, end - limit)
+  } else {
+    start = q.afterId !== undefined ? filtered.filter((d) => d.id <= q.afterId!).length : 0
+  }
+  const items = filtered.slice(start, start + limit)
+  const first = items.length > 0 ? start + 1 : null
+  return {
+    deferred: items.map((d) => ({ ...d })),
+    total: filtered.length,
+    queue_total: scope.length,
+    by_reason: byReason,
+    page: {
+      limit,
+      number: jumpPage ?? (first === null ? 1 : Math.floor(start / limit) + 1),
+      total_pages: totalPages,
+      first_position: first,
+      last_position: first === null ? null : start + items.length,
+      next_after_id: items.length > 0 && start + items.length < filtered.length ? items[items.length - 1].id : null,
+      prev_before_id: items.length > 0 && start > 0 ? items[0].id : null,
+    },
+  }
+}
+
+// resetMockDeferred replaces the mock deferred queue, so paging tests can seed
+// as many items as they need. With no argument it restores the default seed.
+export function resetMockDeferred(items: DeferredItem[] = defaultDeferred()): void {
+  mockDeferred = items.map((d) => ({ ...d }))
 }
 
 export async function retryDeferred(id: number): Promise<DeferredItem | undefined> {

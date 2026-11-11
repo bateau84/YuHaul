@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { render, screen, waitFor, within, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { ErrorsView } from './ErrorsView'
@@ -16,6 +16,8 @@ function renderWithProviders(ui: React.ReactElement) {
 }
 
 describe('ErrorsView', () => {
+  beforeEach(() => mock.resetMockDeferred())
+
   it('renders the server queue contract and sends the returned id to retry and remove', async () => {
     const entry = {
       id: 427,
@@ -29,7 +31,6 @@ describe('ErrorsView', () => {
       retry_count: 0,
     }
     vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([entry])
-    vi.spyOn(queueApi, 'listDeferred').mockResolvedValueOnce([])
     const retry = vi.spyOn(queueApi, 'retryError').mockResolvedValue(entry)
     const dismiss = vi.spyOn(queueApi, 'dismissError').mockResolvedValue(entry)
 
@@ -65,9 +66,8 @@ describe('ErrorsView', () => {
     // Switch to deferred tab.
     fireEvent.click(screen.getByRole('tab', { name: /Deferred/i }))
     await waitFor(() => expect(screen.getByText('Pop Hit 2026')).toBeInTheDocument())
-    expect(screen.getByText('quota_exhausted')).toBeInTheDocument()
-
     const deferredRow = screen.getByText('Pop Hit 2026').closest('tr')
+    expect(within(deferredRow!).getByText('Quota exhausted')).toBeInTheDocument()
     expect(deferredRow).not.toBeNull()
     expect(within(deferredRow!).getByRole('button', { name: /Retry now/i })).toBeInTheDocument()
     expect(within(deferredRow!).getByRole('button', { name: 'Dismiss deferred item: Pop Hit 2026' })).toBeInTheDocument()
@@ -77,7 +77,7 @@ describe('ErrorsView', () => {
   it('labels handed-over deferred items and falls back to the video id for the dismiss name', async () => {
     const base = { video_id: 5, status: 'pending' as const, created_at: '2026-10-01T00:00:00Z', retry_count: 0 }
     vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
-    vi.spyOn(queueApi, 'listDeferred').mockResolvedValueOnce([
+    mock.resetMockDeferred([
       { ...base, id: 1, video_title: 'Stopped One', run_id: 41, deferral_reason: 'stopped_by_user' },
       { ...base, id: 2, video_title: 'Discarded One', run_id: 42, deferral_reason: 'discarded_by_user' },
       { ...base, id: 3, run_id: 43, deferral_reason: 'stopped_by_user', deferred_reason_unavailable: true },
@@ -97,7 +97,7 @@ describe('ErrorsView', () => {
 
   it('opens the Deferred tab from ?tab=deferred', async () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
-    vi.spyOn(queueApi, 'listDeferred').mockResolvedValueOnce([
+    mock.resetMockDeferred([
       { id: 1, video_id: 5, video_title: 'Waiting One', status: 'pending', created_at: '2026-10-01T00:00:00Z', retry_count: 0, run_id: 41, deferral_reason: 'stopped_by_user' },
     ])
     render(
@@ -116,7 +116,7 @@ describe('ErrorsView', () => {
     HTMLDialogElement.prototype.close = function () { this.removeAttribute('open') }
     try {
       vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
-      vi.spyOn(queueApi, 'listDeferred').mockResolvedValueOnce([
+      mock.resetMockDeferred([
         { id: 7, video_id: 5, video_title: 'Handed One', status: 'pending', created_at: '2026-10-01T00:00:00Z', retry_count: 0, run_id: 41, deferral_reason: 'discarded_by_user' },
       ])
       const discard = vi.spyOn(queueApi, 'discardDeferred').mockResolvedValue(undefined as never)
@@ -171,7 +171,7 @@ describe('ErrorsView', () => {
 
   it('renders the empty states only when the fetch succeeds with empty lists', async () => {
     vi.spyOn(mock, 'listErrors').mockResolvedValueOnce([])
-    vi.spyOn(mock, 'listDeferred').mockResolvedValueOnce([])
+    mock.resetMockDeferred([])
 
     renderWithProviders(<ErrorsView />)
 
@@ -199,7 +199,7 @@ describe('ErrorsView', () => {
     vi.spyOn(mock, 'listErrors')
       .mockRejectedValueOnce(new Error('Queue unavailable'))
       .mockResolvedValueOnce([recoveredError])
-    vi.spyOn(mock, 'listDeferred').mockResolvedValueOnce([])
+    mock.resetMockDeferred([])
 
     renderWithProviders(<ErrorsView />)
 
