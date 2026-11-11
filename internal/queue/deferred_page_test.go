@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
+
+	dbstore "github.com/bateau84/YuHaul/internal/store"
 )
 
 // seedDeferredBulk inserts n pending deferred items (one video each). Items
@@ -230,5 +233,155 @@ func TestDeferredPageG3Bounds(t *testing.T) {
 	}
 	if page := getDeferredPage(t, server.URL, ""); page.Total != 299 || page.Deferred[0].ID == id {
 		t.Errorf("discarded item still pending: total=%d", page.Total)
+	}
+}
+
+// G2 (ARS-005 §7): while a client pages, a real run claims 1,000 items and the
+// action inserts 500 new pending items. Every item present throughout is
+// returned exactly once, claimed items disappear, and new items appear only
+// after the original last id.
+func TestDeferredPageG2PagingUnderChange(t *testing.T) {
+	const initial, claimN, insertN, limit = 3000, 1000, 500, 20
+	ctx := context.Background()
+	// A file database, so the walker and the writer use separate connections.
+	db, err := dbstore.Open(ctx, filepath.Join(t.TempDir(), "g2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := seedRun(t, store.db)
+	owner := retryRun(t, store.db)
+	seedDeferredBulk(t, store.db, origin, initial, 7)
+
+	var originalLast int64
+	if err := store.db.QueryRow(`SELECT MAX(id) FROM deferred_item`).Scan(&originalLast); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.db.Query(`SELECT id FROM deferred_item ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claimIDs []int64
+	for n := 0; rows.Next(); n++ {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if n%3 == 0 && len(claimIDs) < claimN {
+			claimIDs = append(claimIDs, id)
+		}
+	}
+	_ = rows.Close()
+	if len(claimIDs) != claimN {
+		t.Fatalf("selected %d items to claim, want %d", len(claimIDs), claimN)
+	}
+
+	server := httptest.NewServer(NewService(store, nil).DeferredHandler())
+	defer server.Close()
+
+	start, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		<-start
+		for i, id := range claimIDs {
+			err := store.WithRetryTx(ctx, func(tx *sql.Tx) error {
+				_, claimed, err := store.ClaimDeferredGroupTx(ctx, tx, id, owner, time.Now())
+				if err == nil && !claimed {
+					err = fmt.Errorf("item %d was not claimed", id)
+				}
+				return err
+			})
+			if err != nil {
+				done <- err
+				return
+			}
+			if i < insertN { // interleave the action's inserts with the claims
+				v := seedVideo(t, store.db, origin, fmt.Sprintf("late-%d", i))
+				if _, err := store.CreateDeferredItem(ctx, &DeferredItem{VideoID: v, RunID: origin,
+					Reason: DeferredReasonAPIRateLimited, Status: DeferredStatusPending, CreatedAt: time.Now().UTC()}); err != nil {
+					done <- err
+					return
+				}
+			}
+		}
+		done <- nil
+	}()
+
+	seen := map[int64]int{}
+	var order []int64
+	query, pages := fmt.Sprintf("limit=%d", limit), 0
+	for {
+		body := getDeferredPage(t, server.URL, query)
+		for _, it := range body.Deferred {
+			seen[it.ID]++
+			order = append(order, it.ID)
+		}
+		if pages++; pages == 3 {
+			close(start)
+		}
+		if body.Page.NextAfterID == nil {
+			break
+		}
+		query = fmt.Sprintf("limit=%d&after_id=%d", limit, *body.Page.NextAfterID)
+	}
+	if pages < 3 {
+		t.Fatalf("walk ended after %d pages before the writer started", pages)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("concurrent claims/inserts: %v", err)
+	}
+
+	for i := 1; i < len(order); i++ {
+		if order[i] <= order[i-1] {
+			t.Fatalf("ids not strictly ascending: %d then %d", order[i-1], order[i])
+		}
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Fatalf("id %d returned %d times", id, n)
+		}
+	}
+	claimed := map[int64]bool{}
+	for _, id := range claimIDs {
+		claimed[id] = true
+	}
+	surv, err := store.db.Query(`SELECT id FROM deferred_item WHERE status='pending' AND id <= ?`, originalLast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer surv.Close()
+	survivors := 0
+	for surv.Next() {
+		var id int64
+		if err := surv.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		survivors++
+		if claimed[id] {
+			t.Fatalf("claimed item %d is still pending", id)
+		}
+		if seen[id] != 1 {
+			t.Fatalf("surviving item %d returned %d times, want exactly once", id, seen[id])
+		}
+	}
+	if survivors != initial-claimN {
+		t.Fatalf("survivors=%d want %d", survivors, initial-claimN)
+	}
+	// New items come only after the original last id, so once one is seen no
+	// original id may follow (ascending order already holds; check the boundary).
+	seenNew := false
+	for _, id := range order {
+		if id > originalLast {
+			seenNew = true
+		} else if seenNew {
+			t.Fatalf("original id %d returned after a new item", id)
+		}
+	}
+	final := getDeferredPage(t, server.URL, "limit=200")
+	if final.Total != initial-claimN+insertN {
+		t.Fatalf("final total=%d want %d", final.Total, initial-claimN+insertN)
 	}
 }
