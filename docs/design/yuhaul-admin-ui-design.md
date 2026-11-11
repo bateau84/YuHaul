@@ -824,7 +824,7 @@ Where the dialog stays open, the message appears inside it with `role="alert"` a
 
 **Capability gaps and limits.** (1) AC22 gives Run Detail the discardable fact. The 409 `resume_unavailable` response still gives only `run_id` and `reason`, so the Overview button follows the five-reason rule above; if the response also carries the discardable fact, use that instead. (2) AC22 says whether a run is discardable, not why. If the run read omits the cause, Run Detail uses the generic sentence above. (3) No discard endpoint, error codes or reason text exist yet; the table above names cases by meaning (AC20) and the architect defines the codes. (4) The count of unfinished videos is not known to the UI, so the dialog does not state a number; add one only if the API supplies it. (5) The 503 case still cannot separate startup recovery from shutdown. No code, browser or accessibility verification is claimed.
 
-**Deferred rows handed over by a discard or a stop.** Each such video has one pending deferred item with no waiting time. On the Deferred tab, show its reason as “Waiting for the next run. Run {id} was discarded.” or “Waiting for the next run. Run {id} was stopped by user.”, and its next-eligibility indicator as “Eligible for the next run”. Use the API-vetted reason, never raw text; if the reason is unavailable, use “Waiting for the next run.” These rows keep the existing “Dismiss” and manual retry controls. Dismissing one keeps the existing copy “It will not be retried”, which is true: the video then waits for nothing.
+**Deferred rows handed over by a discard or a stop.** Each such video has one pending deferred item with no waiting time. On the Deferred tab, show its reason with the stored-reason label “Discarded by user” or “Stopped by user”, followed by “ — run {id}” when the response names the run, and its next-eligibility indicator as “Eligible for the next run”. Use the API-vetted reason, never raw text; if the reason is not one of the six stored reasons, use “Waiting for the next run.” A row created by the re-queue action ([BR-037](/docs/requirements/yuhaul/br-037-requeue-stranded-videos.md) AC6) shows the reason “Re-queued by user” and, while it has no waiting time, the eligibility “Eligible for the next run”. If a run has since claimed it and deferred it again, the stored reason is still “Re-queued by user”: the row then shows the API's current eligibility text and adds “Not eligible yet.” to the reason cell (see the known limitation in “Re-queue Stranded Videos and the Paged Deferred Tab”). This label is never shown for quota, authorization, stop or discard reasons that are stored as such. These rows keep the existing “Dismiss” and manual retry controls. Dismissing one keeps the existing copy “It will not be retried”, which is true: the video then waits for nothing.
 
 #### Stop an Active Run
 
@@ -954,9 +954,9 @@ The word “ended” is only used for this action's button and status. “End ru
 
 **Acknowledgement.** On success, close the dialog and show a persistent inline `role="status"` message with the prefix “Marked as ended:” at the top of Run Detail, above the status region. Move focus to it, because the button disappears.
 
-“Marked as ended: run {id} is now marked failed. You ended it as a legacy run, and it will not be resumed. Its unfinished videos were not processed and were not added to any queue. Nothing was sent to YouTube.”
+“Marked as ended: run {id} is now marked failed. You ended it as a legacy run, and it will not be resumed. Its unfinished videos were not processed and were not added to any queue. Nothing was sent to YouTube. Their videos can be re-queued later from the Deferred tab.”
 
-Link “View runs”. It stays until dismissed or the page is left. The page then re-reads the run and shows the display below.
+Links “View runs” and “Go to the Deferred tab”. It stays until dismissed or the page is left. The page then re-reads the run and shows the display below.
 
 **Run Detail display of a run ended this way.** The saved status is failed. When the run read carries the machine reason for this action (a stand-in for “ended by user (legacy run)”; the UI branches on that value, never on message text):
 
@@ -1000,6 +1000,230 @@ Where the dialog stays open, the message appears inside it with `role="alert"` a
   - Action execution region: per-action results (succeeded/failed/deferred)
   - Evidence trail region: step-by-step route evaluation showing conditions matched/not-matched
 - **Components:** Video metadata, processing outcome badge, route decision row (route name, decision, icon, skip reason if skipped), action execution row (action type, target, result), condition evaluation row (route name, condition, result, icon)
+
+#### Videos — Find a Video by Title or ID
+
+**Status and scope (2026-11-11):** Design for [BR-038](/docs/requirements/yuhaul/br-038-video-search-by-title-or-id.md) AC1–AC17, plus the copy for the *unavailable on YouTube* outcome ([BR-032](/docs/requirements/yuhaul/br-032-processing-outcome-distinction.md) AC1, [BR-037](/docs/requirements/yuhaul/br-037-requeue-stranded-videos.md) AC13, AC18) and the “Re-queued by user” reason ([BR-037](/docs/requirements/yuhaul/br-037-requeue-stranded-videos.md) AC6). Not implemented. It reuses US-013, US-014 and the current/local rules of “Run Video Recognition — Current Local Context”. The re-queue action's own screens and the paged Deferred view ([BR-037](/docs/requirements/yuhaul/br-037-requeue-stranded-videos.md) AC4, AC19) are not designed here.
+
+**Walkthrough:** The administrator remembers a video called “Lofi Beats to Study To (Live Remix)”. They open Videos and type `lofi beats`. Under the box, a permanent notice already says name search finds only videos whose titles YuHaul still holds. The page lists 3 videos, newest discovery first. They open the second. It shows the title labelled as current/local, the channel “ChillHop”, the latest outcome “Rejected” in run 58, the queue state “Not in any queue.”, and two runs: run 58 and run 61, which is marked as a simulation. Each links to its decision detail. For an older video whose title is no longer held, they paste `https://youtu.be/dQw4w9WgXcQ?t=42`. The page opens that video directly: title unavailable, channel ID shown, outcome and runs complete. YouTube is never asked. Observable success: the person finds the video by name when it can be found, by ID or link always, and is never left thinking “not found” means “never seen”.
+
+**Navigation.** Item label “Videos”, URL `/videos`. Desktop sidebar: after Runs, before Analytics. Mobile: in the “More” overflow with Settings and History, because the bottom bar already holds its five daily items; this costs one extra tap. The user confirmed this placement (plan revision 19). The item's accessible name is “Videos”. The page title is “Videos — YuHaul”. A video view is `/videos/{videoId}`; a search is `/videos?q={text}&page={n}`, so reload, Back and a shared link restore the same search or video.
+
+**Page layout, top to bottom.** H1 “Videos”; the search form; the permanent notice; the message or results region. Nothing is listed until a search is made; there is no browse-all list.
+
+**Search box.**
+
+- Label (visible, associated): `Search by video title, video ID or YouTube link`
+- Hint under the label, linked by `aria-describedby`: `For example: lofi beats, dQw4w9WgXcQ, or https://youtu.be/dQw4w9WgXcQ`
+- Button: `Search`. Enter submits. Search runs only on submit, never as the person types. A browser “clear” control is allowed; there is no other clear button.
+- Input attributes: type `search`; `enterkeyhint="search"`; autocapitalize, autocorrect and spellcheck off; no `maxlength` (it would cut text silently; the length rule below explains instead).
+- The text is trimmed at its ends only. Inner spaces are kept. Typed text is always shown as plain text, never as markup. Echoed text in a message is cut to 60 characters with `…`.
+- Pending: the button reads `Searching…` and is disabled; the form and the notice stay visible.
+
+**Permanent notice (BR-038 AC2).** Plain visible text directly below the form, on every state of the search page: empty, results, no results and errors. It is not a tooltip, not dismissible, not collapsed on mobile, and carries no alert role. It is linked to the input by `aria-describedby`.
+
+`Name search finds only videos whose titles YuHaul still holds. Titles are held for a limited time: 30 days without refresh. Searching by video ID or YouTube link always works, even when the title is no longer held. Search reads only YuHaul's own records and never asks YouTube.`
+
+**Input messages.** The UI classifies the trimmed text in this order: empty; URL; video ID (11 characters of `A–Z a–z 0–9 - _`, case-sensitive); other text. Messages sit directly under the notice. Errors set `aria-invalid="true"` on the input and are linked by `aria-describedby`; focus stays in the input.
+
+| Situation | Exact message | Role |
+|---|---|---|
+| Empty, or only spaces (nothing searched, not an error) | `Type part of a video title, a video ID, or paste a YouTube link.` | none; plain text, no error styling |
+| 1 or 2 characters, not an ID | `Type at least 3 characters, or a video ID.` | `alert` |
+| More than 200 characters | `The search text is too long. Use at most 200 characters.` | `alert` |
+| A URL that is not a recognized link, or a recognized form with a missing or invalid ID | `This link does not contain a video ID YuHaul can use. Paste a youtube.com/watch?v=…, youtu.be/… or youtube.com/shorts/… link, or the 11-character video ID.` | `alert` |
+| ID typed, no video with that ID | `YuHaul knows no video with the ID {id}. Video IDs are case-sensitive, so check the letters. YuHaul searched only its own records and did not ask YouTube.` | `status` |
+| ID from a link, no video with that ID | `YuHaul knows no video with the ID {id}, taken from your link. Video IDs are case-sensitive. YuHaul searched only its own records and did not ask YouTube.` | `status` |
+| Name search, no match | `No video with a held title contains “{text}”. Videos whose titles are no longer held can still be found by video ID or YouTube link.` | `status` |
+| Search could not be read | `Could not search. Nothing was changed. Try again.` with the button `Retry search` | `alert` |
+
+A URL is never name-searched. For an ID typed in, and not found, the name results (if any) follow under the message with the heading below. A found ID opens the video at once, with no list. The messages never claim the video “does not exist”, only that YuHaul knows no video with that ID.
+
+**Result list.** Heading (H2, programmatic focus target after paging): `Videos whose titles contain “{text}”`. Directly below, always: `Showing {first}–{last} of {total}. Newest discovery first.` There is no version without a total. When there are 0 matches there is no count line; the no-match message in the table above is shown instead. After a successful search, announce once with `role="status"`: `{n} videos on this page.` or `1 video on this page.` Focus stays in the input after a search.
+
+One result per list item, as a stacked card on mobile and a row on desktop. Each shows, in this order:
+
+- Title as the link to the video view. Results always have a held title. Beside or below it, muted: `Current/local information`.
+- `Video ID: {id}` (secondary text).
+- `Source channel: {name}`, or `Channel ID: {id}` when only the ID is held, or `Source channel name unavailable`.
+- Latest production outcome: the outcome badge and `Run {id}`, as a link, with the date; or `Not yet evaluated`; or `Simulation only`.
+- Queue state, in the short form defined for the video view.
+
+Paging: 50 per page. Controls in a `nav` labelled `Search result pages`: `Previous page` (hidden on page 1), `Page {p}`, `Next page` (hidden on the last page). There is no `Last page` and no `Go to page` control on search results. Paging keeps the search text, moves focus to the results heading and announces `Page {p}, showing {first}–{last}.` If a page is empty because held titles changed since the search began: `This page has no results. Held titles may have changed since this search. Go to page 1.` with `Go to page 1`.
+
+**Video view (`/videos/{videoId}`).** Link at the top: `Back to search` (restores the earlier search when there was one). H1: the held title, or `Video {id}` when none is held. Focus goes to the H1 on arrival. Under it: `Video ID: {id}` and, once: `Shown from YuHaul's own records. YouTube was not asked.` There is no refresh, re-fetch or edit control anywhere on the page.
+
+*Title and channel.* Reuse the existing per-field copy. Held: the title, then `Current/local information — not necessarily the information evaluated by any run.` Not held, cause unknown: `Video title unavailable`; only when expiry is the known cause: `Video title unavailable — local metadata expired`; known never fetched: `Video title not recorded`; withheld: `Video title unavailable for display`. A fingerprint or normalized title is never shown. Channel: `Source channel: {name}` with `Current/local information`; else `Channel ID: {id}`; else `Source channel name unavailable`. Show `Observed at {time}` beside a field only when the response gives a trustworthy time.
+
+*Latest outcome* (heading `Latest production outcome`):
+
+| State | Copy |
+|---|---|
+| Committed outcome | the outcome badge, then `Committed in run {id} on {date and time}.` with `Run {id}` as a link to Run Detail |
+| Known video, no committed outcome | `Not yet evaluated. No production run has committed an outcome for this video.` |
+| Imported reference | `Imported duplicate reference. YuHaul has never processed this video.` |
+| Simulation only | `Simulation only. No production run has decided this video, so there is no production outcome.` |
+
+A simulation result is never shown here as the latest outcome.
+
+*Queue state* (heading `Queue state`); only the production queue, never a simulation:
+
+| State | Copy |
+|---|---|
+| Deferred, pending | `In the deferred queue — pending. Reason: {reason label}.` with link `View deferred queue` |
+| Deferred, claimed | `In the deferred queue — claimed by run {id}. Reason: {reason label}.` with link `View run {id}` |
+| Errors, active | `In the Errors queue — active.` with link `View Errors` |
+| Errors, claimed | `In the Errors queue — claimed by run {id}.` with link `View run {id}` |
+| Removed by the user | `Removed from a queue by you. It will not be retried.` |
+| None | `Not in any queue.` |
+
+Reason labels follow the existing deferred-queue copy. The new one is `Re-queued by user`. It is shown only for items made by the re-queue action, and never for quota, authorization, stop or discard. The short form in the result list is the first clause only: `Deferred — pending`, `Deferred — claimed by run {id}`, `Errors — active`, `Errors — claimed by run {id}`, `Removed by you`, `Not in a queue`.
+
+*Runs that decided this video* (heading `Runs that decided this video`, newest first). One list item per run: `Run {id} · {mode label} · {outcome badge} · {date}` and the link `Open decision detail for run {id}`, which opens that run's Decision Detail for this video. Mode labels: `Run Now`, `Scheduled`, `Queue retry`; for simulations, `Dry run (simulation)`, `Replay (simulation)`, `Backtest (simulation)`. A simulation run shows the hypothetical badge from the existing simulation table (for example `Hypothetical accepted`), never a production badge. When any simulation run is listed, show once above the list: `Simulation runs are what-if results. They never change the latest outcome or the queue state.` Show the first 10 runs, then `Show {n} more runs`, so every run is reachable. If none: `No run has recorded a decision for this video.` Decision Detail's existing `Back to run` is unchanged; browser Back returns here.
+
+*Failure and not found.* Whole read fails: `Could not load this video. Nothing was changed.` with `Retry`. Unknown ID: `YuHaul knows no video with the ID {id}.` with `Back to search`. A malformed ID in the URL: `“{text}” is not a valid video ID. A video ID has 11 characters: letters, digits, - or _.`
+
+**“Unavailable on YouTube” outcome copy (BR-032 AC1).** It is final and its own category. It is not a rejection or a failure, appears in no Errors entry, and has no Retry control. Use the same badge text everywhere an outcome category appears.
+
+| Where | Exact copy |
+|---|---|
+| Badge | `Unavailable on YouTube` (neutral slate, circle-with-slash icon; text and icon always) |
+| Run Detail row, beside the badge | `YouTube did not return this video.` and, in place of route lines, `No routes were evaluated.` |
+| Decision Detail, under the badge | `YouTube did not return this video. It may have been deleted or made private. This is final. It is not a rejection or a failure.` |
+| Decision Detail, route decisions region | `No routes were evaluated for this video.` |
+| Decision Detail, action region | `No playlist addition was attempted.` |
+| Run Detail outcome filter | `Unavailable on YouTube` |
+| Run Detail summary count (shown when the count is above 0, or the filter is active) | `Unavailable on YouTube: {n}` |
+| Run list outcome summary and Overview last-run line (only when above 0) | `{n} unavailable on YouTube` |
+| Overview errors count | unchanged; these videos are never counted as errors |
+| Videos result list and video view, latest outcome | the badge, then `Run {id}` |
+| Videos view queue state | `Not in any queue.` unless another item exists |
+
+Do not infer why YouTube did not return the video: “deleted or made private” is hedged by “may have”. Simulations do not produce this outcome; if a simulation row ever carried it, use the existing `Outcome unavailable` fallback rather than this badge.
+
+**Mobile.** Single column at every width up to 640 CSS px. The form is full width, with the button below the input. Results are stacked cards; the title wraps; paging buttons are full width and stacked, `Next page` last. The notice is shown in full, not collapsed. Run entries in the video view are cards. Targets are at least 44 CSS px for touch (24 CSS px minimum, SC 2.5.8). Videos is reached through “More”; the direct video link works without it. The bottom bar is not changed.
+
+**Accessibility.** Target WCAG 2.2 AA. The form is a `role="search"` landmark; the input has a visible label (SC 1.3.1, 3.3.2) and the notice and hint are text, not placeholder (SC 3.3.2). Errors are identified in text, tied to the input and not shown by color alone (SC 3.3.1, 1.4.1); focus stays in the input. Counts and “no results” are announced once, politely (`role="status"`, SC 4.1.3); keystrokes announce nothing, because search runs on submit. After paging, focus moves to the results heading; after opening a video, to its H1 (SC 2.4.3). Every result and run link has a meaningful name: the title, or `Open decision detail for run {id}`; run links name the run (SC 2.4.4, 2.5.3). Badges are text plus icon (SC 1.4.1). Contrast 4.5:1 for text and 3:1 for controls and focus (SC 1.4.3, 1.4.11). Focus is visible and unobscured (SC 2.4.7, 2.4.11). Content wraps at 320 CSS px and 200% zoom with no horizontal page scroll (SC 1.4.4, 1.4.10). Titles are shown as text, never markup. Reduced motion needs no animation. This is a design target, not a certification.
+
+**Acceptance observations:** With a real server. Page load: the notice is visible with no action, at desktop and 320 px. Inputs: empty, spaces only, `lo`, 3 and 200 and 201 characters, a known ID, the same ID in other letter case, an unknown 11-character ID that is also a title word, each link form with extra parameters, `?list=` with no `v`, `/embed/`, a non-YouTube URL, and `100%`, `_` and quotes: each gives its message, none an unexplained error. Name results: newest discovery first, 50 per page, 130 matches give 50, 50 and 30 with no repeats; focus and announcement after paging. Video view: held title, expired title, never-fetched, imported reference, simulation-only video, every queue state, a video with production and simulation runs (simulations marked, never the latest outcome or queue state), and each run link. A video with the outcome “Unavailable on YouTube” in Run Detail (row, filter, count), Decision Detail, Overview line and Videos. A deferred item made by the re-queue action shows “Re-queued by user” and no other item does. Network log shows no YouTube request and no write. Keyboard, screen reader and 320 px passes.
+
+**Decision and capability gaps.** Rejected: live search on each keystroke (announcement noise, needless requests), a browsable all-videos list (about 100,000 rows, no task), and a Videos item in the mobile bottom bar (it would break the five-item pattern for an occasional task). (1) No endpoint or response shape exists. The architect defines the search and video reads, the page parameters, the paging token and the `total` that every result page must carry (the list copy now always shows it). (2) Each of the 50 results needs its latest outcome and queue state in the same read, not one request per row. (3) The API must say whether a title is expired, never fetched or withheld; without it the UI uses `Video title unavailable`. (4) The processing-state value for “unavailable on YouTube” is not defined; the UI must branch on a committed-outcome category, never on missing data. (5) Mobile “More” placement: confirmed by the user (plan revision 19). (6) No code, browser or accessibility verification is claimed.
+
+#### Re-queue Stranded Videos and the Paged Deferred Tab
+
+**Status and scope (2026-11-11):** Design for [BR-037](/docs/requirements/yuhaul/br-037-requeue-stranded-videos.md) AC4, AC5, AC14, AC15 and AC19, with the refusals of AC2, AC3, AC9, AC10 and AC16. Not implemented. It reuses US-020 and extends “Error Queue and Deferred Work”. The “Re-queued by user” reason label and the “Unavailable on YouTube” outcome are defined in “Videos — Find a Video by Title or ID”. This design adds no bulk dismiss, no per-video re-queue and no way to override a block.
+
+**Walkthrough:** The administrator has marked run 14 as ended. They open Errors, then the Deferred tab, which shows “Deferred (70,000)” and the first 50 items. They choose “Re-queue stranded videos”. A preview page counts what would happen: 69,000 videos will be re-queued, 41 are blocked, 12 are held by run 52, 3 were removed by them, 2 are in the Errors queue, and 150 already have a deferred or failed result. They read the blocked list, then choose “Re-queue 69,000 videos” and confirm. The page says 69,000 videos are now in the deferred queue with the reason “Re-queued by user”, that nothing was sent to YouTube and no run was started, and repeats the blocked list. The next run processes them as far as quota allows. Observable success: the person knew the counts and the quota consequence before confirming, can see which videos were left out and why, and can find the new items in the Deferred tab.
+
+**Where the control lives.** The Deferred tab of Errors, not Overview. Reasons: the action only creates deferred-queue items, so it belongs beside the queue it fills and the list the person checks afterwards; it is rare and has a long preview, which does not fit Overview's thirty-second health glance; and Overview needs no new button. The button is in the Deferred toolbar, above the list: `Re-queue stranded videos`. It is not shown until the Deferred tab is paged (BR-037 AC19). It opens the preview page; opening it changes nothing and makes no YouTube call.
+
+**Preview page** (`/errors/deferred/requeue`, a page, not a dialog, because it holds tables and a paged list). Page title “Re-queue stranded videos — YuHaul”. Focus goes to the H1 on arrival. Link at the top: `Back to Deferred`. While counting: `Counting videos…`. When ready, announce once politely: `Preview ready: {n} videos will be re-queued.`
+
+- H1: `Re-queue stranded videos`
+- Introduction: `A stranded video was found by YuHaul, has no final outcome, is in no queue, and every run that touched it has ended. Re-queuing adds each one to the deferred queue so the next run processes it. Nothing is sent to YouTube now and no run is started.`
+- Headline: `{n} videos will be re-queued.` or `1 video will be re-queued.`
+- Quota notice, visible before the button: `The next new run, from Run Now or the schedule, will use as much of each day's quota as these videos need. Newly uploaded videos may wait. This can take more than one day.`
+- Freshness: `Counts read at {time}. They are checked again when you confirm.` with the button `Refresh counts` (changes nothing).
+- Button: `Re-queue {n} videos` (`Re-queue 1 video`), which opens the confirmation.
+
+**Preview counts.** A table with caption `Preview counts`, row headers, and one helper line under each label. At 320 px it becomes a stacked list. The categories are not claimed to add up to a total.
+
+| Row | Label | Helper line |
+|---|---|---|
+| 1 | `Will be re-queued: {n}` | (headline above) |
+| 2 | `Blocked: {b}` | `YuHaul will not re-queue these, because sending them again could add a video to a playlist twice.` |
+| 2a | `Unresolved send guard: {b1}` | none |
+| 2b | `Uncertain playlist addition: {b2}` | none |
+| 2c | `Unclear history from an older version of YuHaul: {b3}` | none |
+| 3 | `Held by a run that has not ended: {h}` | `These videos belong to a run that has not ended. Re-queue them after it ends.` |
+| 3a | one line per run, below | below |
+| 4 | `Removed by you: {r}` | `You dismissed these from a queue. They stay out.` |
+| 5 | `Already in a queue: {q}` | `Videos in the deferred queue are already waiting. Videos in the Errors queue stay there until you retry them.` |
+| 5a | `In the deferred queue: {q1}` | none |
+| 5b | `In the Errors queue: {q2}` | none |
+| 6 | `Deferred or failed earlier, in no queue: {c}` | `Counted only. These already have a deferred or failed result, and re-queue does not change them.` |
+
+*Held by a run, one line per run* (show the first 10, then `Show {k} more runs`):
+
+- A stuck run that can be ended (its read says `endable` is true): `Run {id}: {n} videos. End run {id} first.` then `Run {id} is stuck as {running | interrupted}. Open it and choose “Mark run {id} as ended”, then come back.` and the link `Open run {id}`. Run 14 reads: `Run 14: 19,615 videos. End run 14 first.`
+- Any other run that has not ended: `Run {id}: {n} videos. Run {id} has not ended and can still continue them.` and the link `Open run {id}`.
+
+When a row's count is 0, keep the row and show `0`; do not hide it, so the person sees that the category was checked.
+
+**Blocked videos** (H2 `Blocked videos ({b})`, shown only when {b} is above 0). Intro: `YuHaul will not re-queue these videos, and this screen cannot override that. Each stays blocked until its evidence is resolved under the existing playlist safety rules.` A table, 50 per page, with `Previous page` and `Next page`. Columns: title, video, reason, evidence. Each row:
+
+- Title as a link to that video's page, or `Video title unavailable`; muted `Current/local information` when a title is shown.
+- `Video ID: {id}`
+- Reason: `Unresolved send guard` with `A playlist addition may already have been sent.`; or `Uncertain playlist addition` with `A playlist addition was sent and its outcome is not known.`; or `Unclear history from an older version of YuHaul` with `An older run may have sent an addition and left no clear result.`
+- `Evidence from run {id}` as a link, or `Run unavailable` when the response gives none.
+
+**Confirmation dialog.** Modal, from `Re-queue {n} videos`. Nothing changes until the person confirms.
+
+- Title: `Re-queue {n} videos?` (`Re-queue 1 video?`)
+- Opening: `YuHaul will add {n} videos to the deferred queue. Each will be eligible for the next run at once.`
+- Facts, as a list:
+  - `The next new run, from Run Now or the schedule, will process them as far as each day's quota allows. It may use the whole day's quota, so newly uploaded videos may wait, and this can take more than one day.`
+  - `Nothing is sent to YouTube now, and no run is started.`
+  - `Blocked videos, videos held by a run that has not ended, videos you removed, and videos already in a queue are not re-queued.`
+  - `The counts are checked again when you confirm. If they have changed, you will be told.`
+  - `There is no undo for the whole batch. Each item can be dismissed on its own from the Deferred tab.`
+- Buttons: `Re-queue {n} videos` (primary) and `Cancel`. Initial focus is on `Cancel`. Escape, `Cancel` and clicking outside close it and change nothing; focus returns to the `Re-queue {n} videos` button on the page.
+- While pending: the confirm button reads `Re-queuing…`, both buttons are disabled and the dialog is marked busy. A second press cannot be sent.
+
+**Acknowledgement.** On success the dialog closes and a persistent `role="status"` panel replaces the button area on the same page, with focus moved to it. It also shows the actual categories (same rows as the preview), now as the result, and the blocked list from the result (BR-037 AC15). The preview's headline and button are gone.
+
+When the number matches the preview: `Re-queued {n} videos. Each is now in the deferred queue with the reason “Re-queued by user”, eligible for the next run. The next new run will process them as far as quota allows. Nothing was sent to YouTube and no run was started.`
+
+When it differs: `Re-queued {actual} videos. The preview showed {previewed}, because the videos changed between the preview and your confirmation. Each is now in the deferred queue with the reason “Re-queued by user”. Nothing was sent to YouTube and no run was started.`
+
+Links: `View deferred queue` and `Preview again`. A repeat is harmless: it re-queues only videos that have become stranded since.
+
+**Nothing to re-queue.** At preview, when {n} is 0, replace the headline, quota notice and button with: `Nothing to re-queue. There are no stranded videos right now. Nothing was changed.` The count table and blocked list stay visible. After a confirmation whose set has become empty, the acknowledgement reads: `Nothing to re-queue. The stranded videos in the preview are no longer stranded. Nothing was changed.`
+
+**Refusals.** Prefix `Re-queue did nothing.` Each says nothing was changed and no YouTube call was made. The UI branches on status and code, never message text. Where the dialog stays open the message appears inside it with `role="alert"` and the buttons re-enable. If the preview read already says re-queue is unavailable, show the same sentence as plain text under the headline and mark the button `aria-disabled` with that sentence as its description.
+
+| Case | Dialog | Message |
+|---|---|---|
+| A production run is active | stays open | `Re-queue did nothing. A production run is running, so no videos were re-queued. Nothing was changed. Wait for it to finish, then try again.` Link `View runs`. |
+| Startup recovery in progress | stays open | `Re-queue did nothing. YuHaul is starting up and recovering runs, so no videos were re-queued. Nothing was changed. Try again in a minute.` |
+| Shutdown has begun | stays open | `Re-queue did nothing. YuHaul is shutting down, so no videos were re-queued. Nothing was changed. Try again after it has started again.` |
+| 503 without a code | stays open | `Re-queue did nothing. YuHaul can't re-queue videos right now. It may be starting up or shutting down. Nothing was changed. Try again in a minute.` |
+| Could not be saved | stays open | `Re-queue did nothing. The videos could not be saved to the deferred queue, so none was re-queued. Nothing was changed. You can try again.` |
+| Other error, or no response | closes | `Could not confirm whether the videos were re-queued. Open the deferred queue to check. If no items show “Re-queued by user”, you can try again; repeating it is safe.` Link `View deferred queue`. No automatic retry. |
+
+An active simulation does not cause a refusal. A production run starting, a Discard, a Mark as ended, or a queue Dismiss or retry happening between the preview and the confirmation either changes the counts, which the acknowledgement reports, or causes one of the refusals above. The page never shows a mixture.
+
+**The paged Deferred tab (BR-037 AC19).**
+
+- Tab label: `Deferred ({queue_total})` with thousands separators, for example `Deferred (70,000)`. It always shows the whole queue, never the filtered count. The count updates after a Dismiss or a re-queue.
+- Page size: 50 items. One bounded page is read on open. The list is never loaded whole.
+- Count line above the list: `Showing {first}–{last} of {total} items.` With a filter, `{total}` is the number of matching items and the line adds the whole queue: `Showing {first}–{last} of {total} items with this reason. {queue_total} items in the deferred queue.`
+- Navigation, in a `nav` labelled `Deferred queue pages`: `First page`, `Previous page`, `Page {p} of {pages}`, `Next page`, `Last page`, and a labelled number field `Go to page` with the button `Go`. An invalid page number gives: `Enter a page from 1 to {pages}.` Controls that cannot apply are hidden, not disabled. After any paging action focus moves to the list heading and the status announces `Page {p} of {pages}, showing {first}–{last}.` The URL holds the position exactly as the API defines it (`page`, or the `after_id` cursor) and the filter by its stored reason value, for example `?page=2&reason=requeued_by_user`, so reload, Back and a shared link restore the same view.
+- Order: the order the server returns, stable between pages. The UI makes no claim about the order in which a run takes items.
+- Reason filter: useful, because a queue of 70,000 re-queued items would hide 51 quota-deferred ones. A labelled select `Reason` with `All reasons` and exactly the six stored reasons below, in this order, and the buttons `Apply filter` and `Clear filter`. There is no `Other` option. It applies only on `Apply filter`, never on change, and applying or clearing it resets to page 1. It filters on the server across the whole queue; the UI never filters one page in the browser, because the counts would be false. Empty result: `No deferred items have this reason.`
+
+  | Stored value (used in the URL and the request) | Option and row label |
+  |---|---|
+  | `requeued_by_user` | `Re-queued by user` |
+  | `quota_exhausted` | `Quota exhausted` |
+  | `authorization_pending` | `Waiting for YouTube access` |
+  | `stopped_by_user` | `Stopped by user` |
+  | `discarded_by_user` | `Discarded by user` |
+  | `api_rate_limited` | `Rate limited by YouTube` |
+
+  A row whose stored reason is not one of these six shows `Waiting for the next run.` and is never echoed raw. A `reason` value in the URL that is not one of the six shows `Unknown reason filter. Showing all reasons.` and is ignored. The label `Rate limited by YouTube` is a short, plain statement of the cause; it makes no promise about when the item will be tried, which the row's eligibility column states.
+- Rows: unchanged (title, channel, reason, next eligibility, manual retry, `Dismiss`). A video with no held title shows `Video title unavailable` with `Video ID: {id}` beside it. The reason for a re-queued row is `Re-queued by user`.
+- `Dismiss` and its confirmation are unchanged: `Dismiss this deferred item? It will not be retried, but the historical record will be preserved.`, the toast `Deferred item dismissed`, and Cancel closes without change. After a dismissal the same position is read again, with the same `after_id` or the same `page` and the same filter, so the person stays where they were. The total and the tab count fall by one, and focus moves to the row that took the dismissed row's place, or to the list heading when that page is now empty. If the position is now past the end, go to the last page.
+- Empty queue: `No deferred work. All pending items have been processed.`
+- Loading: `Loading deferred items…`. Read failure: the existing failed-fetch state, `Could not load the deferred queue. Nothing was changed.` with `Retry`. A page past the end because the queue changed: `This page no longer exists. The queue has changed.` with `Go to the last page`.
+
+**Mobile.** Single column. The preview table becomes stacked rows (label, count, helper). The blocked list and the deferred rows become cards. Paging buttons stack at full width, with `Previous page` and `Next page` first and `First page`, `Last page` and `Go to page` below. Touch targets are at least 44 CSS px (24 CSS px minimum, SC 2.5.8). The confirmation dialog scrolls inside itself and keeps its buttons reachable.
+
+**Accessibility.** Target WCAG 2.2 AA. The preview counts are a real table with a caption and row headers (SC 1.3.1). Meaning is in text, not color or position alone (SC 1.4.1). Focus goes to the H1 on arrival and to the acknowledgement after the action, and to the list heading after paging (SC 2.4.3). The dialog is modal, with an accessible name `Re-queue {n} videos?` and description (opening line and facts), trapped focus, Escape to exit, and return of focus (SC 2.1.2, 2.4.3). The status announcements for “Preview ready”, the result and paging are polite and once; counting and polling announce nothing (SC 4.1.3). Errors use `role="alert"` and do not move focus. Page-number errors are in text, tied to the field (SC 3.3.1). Every control's label contains its target, for example `Re-queue 69,000 videos` and `Open run 14` (SC 2.5.3, 2.4.4). Numbers use the person's thousands separator. Content reflows at 320 CSS px and 200% zoom (SC 1.4.4, 1.4.10). Focus is visible and unobscured (SC 2.4.7, 2.4.11). Design target, not certification.
+
+**Acceptance observations:** With a real server and about 70,000 seeded items: opening the Deferred tab loads one page of 50, shows the total, and every item is reachable by paging, `Last page` and `Go to page`; Dismiss and its confirmation work on a middle page and on the last item of the last page. The reason filter lists the six stored reasons and no `Other`, counts across the whole queue, resets to page 1 when changed, and keeps its stored value in the URL; a dismissal on a filtered page stays on the same page of the same filter. Preview: each count matches the seeded categories; run 14 reads “End run 14 first.” until it is marked as ended and “Run 52 has not ended…” for a live run; the blocked list names each video's reason and run and links to the video page and run. Confirm: cancel by every route changes nothing; confirming gives the acknowledgement with the actual count, and a seeded change between preview and confirm gives the “preview showed” wording. Repeat: a second confirm re-queues nothing new. Refusals: a Run Now run, a scheduled run, a queue-retry run, a resumed run, startup recovery and shutdown each give their message; an active dry run does not. Nothing-to-re-queue at preview and after confirm. Keyboard, screen-reader and 320 px passes.
+
+**Decision and capability gaps.** Rejected: an Overview button (wrong place for a rare, long-preview action), a dialog-only preview (cannot hold two tables and a paged list), per-category “Re-queue” buttons and any “override block” control (BR-037 AC15), and filtering one page in the browser. (1) No endpoint, shape or error codes exist; the architect defines the preview, the action, the paged `GET /api/deferred` (position by `page` or `after_id`, `total`, `queue_total` and a `reason` filter over the six stored reasons), and the blocked-list paging. *Updated by the architect's reconciliation, plan revision 19:* these shapes are agreed in principle; the exact fields follow the architect's contract. (2) The preview must say, per listed run, whether it is stuck and can be ended (`endable`) and its saved status; without that the UI shows the “has not ended” wording for every run and never “End run {id} first.” (3) The preview must supply sub-counts for blocked reasons and for the two queues. (4) The 503 causes are still not separable; the fallback row covers them. (5) There is no bulk undo or bulk dismiss, which BR-037 does not ask for; with 70,000 items the dialog says so plainly, and a bulk action would be a requirements decision. (6) Resolved: the reason filter exists, with the six stored reasons and no `Other`. (7) Resolved: the option labels are in the table above; `Rate limited by YouTube` is new. (8) *Known limitation: a stale `requeued_by_user` reason.* An item re-queued by the user keeps the stored reason `requeued_by_user` even after a run claims it, runs out of quota and defers it again. The reason says how the item came to be queued, not why it waits now, and the stored value is not updated. The design handles this without changing the stored reason. A row labelled `Re-queued by user` always shows the API's current eligibility, never a fixed “Eligible for the next run”. When the item is not eligible now, the reason cell adds `Not eligible yet.` beside the label, and the eligibility text states when. The label never claims the item has not been attempted. The limit that remains: the filter `Re-queued by user` includes such items, and the row does not say that quota is the cause. If the architect later records the new reason on re-defer, the row will show it without any design change. No code, browser or accessibility verification is claimed.
 
 #### Run Video Recognition — Current Local Context
 
@@ -1266,7 +1490,8 @@ For Deferred/Failed in simulations, visible adjacent explanation is respectively
   - Tab region: "Errors" tab, "Deferred" tab
   - Error list region: failed items with reasons
   - Error detail region (on selection): full error context
-  - Deferred list region: quota-deferred items with next-eligibility indicator
+  - Deferred list region: deferred items (quota, authorization, stop, discard and re-queue reasons) with next-eligibility indicator, shown one page at a time with the total, paging controls and a reason filter over the six stored reasons (see “Re-queue Stranded Videos and the Paged Deferred Tab”)
+  - Deferred toolbar: the “Re-queue stranded videos” button
   - Deferred detail region (on selection): deferral context and manual retry option
 - **Components:** Tab selector, error row (video title, channel, error type, timestamp, retry button, remove button), error detail panel, deferred row (video title, channel, deferral reason, next-eligibility indicator, manual retry button, “Dismiss” button), deferred detail panel
 
@@ -1378,6 +1603,7 @@ A video in YuHaul has three independent outcome layers. The summary badge on vid
 - If processing state is `deferred` → badge shows "Deferred"
 - If processing state is `not-yet-evaluated` → badge shows "Not evaluated"
 - If processing state is `discovered` or `evaluating` → badge shows "In progress" (transient)
+- If the video's committed outcome is *unavailable on YouTube* ([BR-032](/docs/requirements/yuhaul/br-032-processing-outcome-distinction.md) AC1) → badge shows "Unavailable on YouTube". It is final, its own category, and is never shown as "Rejected" or "Failed". Where it appears and its copy are defined in “Videos — Find a Video by Title or ID”.
 
 #### Quota Ledger
 
@@ -1447,6 +1673,7 @@ Advisories are system-generated suggestions based on channel and route performan
 - acted (failed): red badge with alert icon
 - not-yet-evaluated: gray badge with dash icon (only for videos where execution did not reach routing)
 - discovered/evaluating: blue badge with spinner icon (transient states)
+- unavailable on YouTube: neutral slate badge with a circle-with-slash icon and the text “Unavailable on YouTube”; distinct from the gray dash of not-yet-evaluated by icon and text
 
 **Video outcome row interaction — click:**
 - System: navigates to Decision Detail view
@@ -1597,7 +1824,7 @@ Advisories are system-generated suggestions based on channel and route performan
 
 #### Layout Constraint
 
-**Sidebar navigation:** Must be the first landmark on desktop. On mobile, it collapses to a bottom navigation bar with 5 items (Overview, Routes, Runs, Analytics, Errors) plus a "More" overflow for Settings and History.
+**Sidebar navigation:** Must be the first landmark on desktop. On mobile, it collapses to a bottom navigation bar with 5 items (Overview, Routes, Runs, Analytics, Errors) plus a "More" overflow for Videos, Settings and History. On desktop the sidebar lists Videos directly after Runs (see “Videos — Find a Video by Title or ID”).
 
 **Main content area:** Must be scrollable independently of sidebar on desktop. On mobile, full-width.
 
@@ -1630,7 +1857,7 @@ Advisories are system-generated suggestions based on channel and route performan
 - Route editor: single-column layout
 
 **Viewport < 768px (mobile):**
-- Sidebar navigation: collapses to bottom navigation bar (5 primary items + "More" overflow)
+- Sidebar navigation: collapses to bottom navigation bar (5 primary items + "More" overflow, which holds Videos, Settings and History)
 - Content area: full width, single column
 - Tables: convert to card layout (each row becomes a card with stacked fields)
 - Charts: full width, stacked vertically, allow horizontal scroll if minimum width not met
@@ -1656,7 +1883,7 @@ Advisories are system-generated suggestions based on channel and route performan
 
 **Component/interaction: Video outcome badges**
 - Standard: WCAG 2.2 SC 1.4.1 Use of Color (A), SC 1.1.1 Non-text Content (A)
-- Requirement: Each outcome badge must use: (1) color (green/red/yellow/gray/blue), (2) icon (check/X/clock/alert/dash/spinner), AND (3) text label ("Accepted"/"Rejected"/"Deferred"/"Failed"/"Not evaluated"/"In progress"). Never rely on color alone. Each badge must have an accessible name combining the outcome text.
+- Requirement: Each outcome badge must use: (1) color (green/red/yellow/gray/blue), (2) icon (check/X/clock/alert/dash/spinner/circle-slash), AND (3) text label ("Accepted"/"Rejected"/"Deferred"/"Failed"/"Not evaluated"/"In progress"/"Unavailable on YouTube"). Never rely on color alone. Each badge must have an accessible name combining the outcome text.
 - Verification: Manual: disable color (CSS filter or grayscale) and confirm outcomes remain distinguishable by icon and text.
 
 **Component/interaction: Drag-to-reorder routes**
@@ -1783,7 +2010,7 @@ Advisories are system-generated suggestions based on channel and route performan
 ### Design Decisions
 
 **DD-1: Task-based navigation over entity-based navigation**
-- Decision: Navigation is organized around user tasks (Overview, Routes, Runs, Analytics, Errors, Settings) rather than system entities (Videos, Channels, Playlists, Conditions, Actions).
+- Decision: Navigation is organized around user tasks (Overview, Routes, Runs, Analytics, Errors, Settings) rather than system entities (Videos, Channels, Playlists, Conditions, Actions). *Amended 2026-11-11:* a “Videos” item is added for one task, finding a known video by title or ID ([BR-038](/docs/requirements/yuhaul/br-038-video-search-by-title-or-id.md)). It is a search page, not a browsable entity list: with no search text it shows no videos. The other entities stay unlisted.
 - Rationale: Users approach YuHaul with goals ("check if system is working", "tune a route", "investigate a rejection"), not with entity queries ("show me all conditions"). Task-based grouping matches mental model and reduces navigation steps for common workflows.
 - Alternatives considered: Entity-based navigation (Videos, Channels, Routes, Statistics) — rejected because it fragments related information (a run's video outcomes span entities) and doesn't match user task patterns.
 - Trade-off accepted: Some information appears in multiple contexts (a video appears in run detail AND channel analysis). This is intentional polyhierarchy, not duplication.
