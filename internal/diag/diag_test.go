@@ -269,3 +269,33 @@ func TestStopAndDiscardReasonsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// ARS-005 §1.3: video_unavailable is valid only for routing/load_metadata with
+// no other fact, and requeued_by_user is an admitted queue_reason.
+func TestVideoUnavailableAndRequeueVocabulary(t *testing.T) {
+	const s = "diag:v1 phase=routing operation=load_metadata code=video_unavailable"
+	if got, ok := AdmitStored(s); !ok || got != s {
+		t.Errorf("AdmitStored(%q) = %q, %v", s, got, ok)
+	}
+	if g := GuardErrorText(s); g != s {
+		t.Errorf("GuardErrorText(%q) = %q", s, g)
+	}
+	for _, f := range []Facts{
+		{Phase: "unknown", Operation: "load_metadata", Code: "video_unavailable"},
+		{Phase: "routing", Operation: "evaluate_video", Code: "video_unavailable"},
+		{Phase: "routing", Operation: "requeue_stranded", Code: "video_unavailable"},
+		{Phase: "routing", Operation: "load_metadata", Code: "video_unavailable", Status: "404"},
+		{Phase: "routing", Operation: "load_metadata", Code: "video_unavailable", Reason: "videoNotFound"},
+		{Phase: "routing", Operation: "load_metadata", Code: "video_unavailable", SQLite: "SQLITE_BUSY"},
+	} {
+		if f.Valid() {
+			t.Errorf("Facts %+v must be invalid", f)
+		}
+	}
+	if !(Facts{Phase: "unknown", Operation: "requeue_stranded", Code: "unknown_error"}).Valid() {
+		t.Error("requeue_stranded must be a registered operation")
+	}
+	if v, ok := GuardDisposition("requeued_by_user", "queue_reason"); !ok || v != "requeued_by_user" {
+		t.Errorf("queue_reason requeued_by_user = %q, %v", v, ok)
+	}
+}

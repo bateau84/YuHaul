@@ -36,7 +36,7 @@ func TestMigration022ExclusionReferenceShape(t *testing.T) {
 	require.NoError(t, err)
 	var schemaVersion int
 	require.NoError(t, db.QueryRow(`SELECT version FROM schema_migrations`).Scan(&schemaVersion))
-	require.Equal(t, 25, schemaVersion)
+	require.Equal(t, 26, schemaVersion)
 	var count int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM route_decision`).Scan(&count))
 	require.Equal(t, 3, count)

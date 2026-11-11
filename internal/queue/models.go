@@ -36,6 +36,9 @@ const (
 	DeferredReasonAuthorizationPending DeferredReason = "authorization_pending"
 	DeferredReasonStoppedByUser        DeferredReason = "stopped_by_user"
 	DeferredReasonDiscardedByUser      DeferredReason = "discarded_by_user"
+	// DeferredReasonRequeuedByUser marks a stranded video the user re-queued
+	// (ARS-005). HandOffUnfinishedTx never writes it.
+	DeferredReasonRequeuedByUser DeferredReason = "requeued_by_user"
 )
 
 // DeferredStatus records the lifecycle of a deferred work item.
@@ -100,7 +103,7 @@ func (s ErrorStatus) Valid() bool {
 func (r DeferredReason) Valid() bool {
 	switch r {
 	case DeferredReasonQuotaExhausted, DeferredReasonAPIRateLimited, DeferredReasonAuthorizationPending,
-		DeferredReasonStoppedByUser, DeferredReasonDiscardedByUser:
+		DeferredReasonStoppedByUser, DeferredReasonDiscardedByUser, DeferredReasonRequeuedByUser:
 		return true
 	}
 	return false

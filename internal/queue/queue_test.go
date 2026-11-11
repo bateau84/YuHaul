@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -627,4 +628,16 @@ func TestHandlerInvalidID(t *testing.T) {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
+}
+
+// ARS-005 §1.3: the re-queue reason is valid, but the stop/discard handoff
+// still refuses to write it.
+func TestRequeuedByUserReasonIsValidButNotAHandoffReason(t *testing.T) {
+	if !DeferredReasonRequeuedByUser.Valid() || DeferredReasonRequeuedByUser != "requeued_by_user" {
+		t.Fatalf("DeferredReasonRequeuedByUser = %q, valid=%v", DeferredReasonRequeuedByUser, DeferredReasonRequeuedByUser.Valid())
+	}
+	_, err := (&Store{}).HandOffUnfinishedTx(context.Background(), nil, 1, DeferredReasonRequeuedByUser, nil)
+	if err == nil || !strings.Contains(err.Error(), "not a user handoff reason") {
+		t.Fatalf("handoff accepted the re-queue reason: %v", err)
+	}
 }

@@ -37,6 +37,9 @@ const (
 	FinalOutcomeDeferred        VideoFinalOutcome = "deferred"
 	FinalOutcomeFailed          VideoFinalOutcome = "failed"
 	FinalOutcomeNotYetEvaluated VideoFinalOutcome = "not_yet_evaluated"
+	// FinalOutcomeUnavailableOnYouTube marks a video YouTube no longer returns
+	// (ARS-005 §6). It is its own category, never folded into another.
+	FinalOutcomeUnavailableOnYouTube VideoFinalOutcome = "unavailable_on_youtube"
 )
 
 // RouteDecisionType records the result of evaluating a route against a video.
@@ -107,6 +110,7 @@ type Run struct {
 	VideosDeferred        int        `json:"videos_deferred"`
 	VideosFailed          int        `json:"videos_failed"`
 	VideosNotYetEvaluated int        `json:"videos_not_yet_evaluated"`
+	VideosUnavailable     int        `json:"videos_unavailable"`
 	// VideosSelected is the input count captured when the run's selector
 	// established its input set. NULL means selection was never captured
 	// (unknown, including all pre-migration runs); 0 means selection
@@ -280,7 +284,8 @@ func (s VideoProcessingState) Valid() bool {
 func (o VideoFinalOutcome) Valid() bool {
 	switch o {
 	case FinalOutcomeAccepted, FinalOutcomeRejected, FinalOutcomeExcluded,
-		FinalOutcomeDeferred, FinalOutcomeFailed, FinalOutcomeNotYetEvaluated:
+		FinalOutcomeDeferred, FinalOutcomeFailed, FinalOutcomeNotYetEvaluated,
+		FinalOutcomeUnavailableOnYouTube:
 		return true
 	}
 	return false

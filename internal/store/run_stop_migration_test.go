@@ -95,14 +95,14 @@ func TestRunStatusCheckStepIsIdempotent(t *testing.T) {
 	require.Equal(t, v1, schemaVersion(t, db), "second step is a no-op")
 	require.NoError(t, db.Close())
 
-	// Migrate through 025 only (no widening step), so the version delta of
-	// ApplyMigrations is the widening step alone.
-	pre := migrateTo(t, filepath.Join(t.TempDir(), "pre.db"), 25)
+	// Migrate through 026 only (no widening steps). ApplyMigrations then runs
+	// widenRunStatusCheck and widenFinalOutcomeChecks, one bump each.
+	pre := migrateTo(t, filepath.Join(t.TempDir(), "pre.db"), 26)
 	before := schemaVersion(t, pre)
 	require.NoError(t, store.ApplyMigrations(pre))
-	require.Equal(t, before+1, schemaVersion(t, pre), "the step bumps schema_version by exactly one")
+	require.Equal(t, before+2, schemaVersion(t, pre), "each widening step bumps schema_version by exactly one")
 	require.NoError(t, store.ApplyMigrations(pre))
-	require.Equal(t, before+1, schemaVersion(t, pre), "a second step is a no-op")
+	require.Equal(t, before+2, schemaVersion(t, pre), "a second step is a no-op")
 }
 
 // M1: a 024 database with queue rows in every status upgrades unchanged.

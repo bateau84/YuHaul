@@ -377,6 +377,11 @@ func TestAttemptMigrationPreservesLegacyRows(t *testing.T) {
 		// needs those tables, and run with its status CHECK for the 025 schema step.
 		`CREATE TABLE run (id INTEGER PRIMARY KEY, run_type TEXT, status TEXT CHECK(status IN ('running', 'completed', 'interrupted', 'failed')))`,
 		`CREATE TABLE deferred_item (id INTEGER PRIMARY KEY, video_id INTEGER, run_id INTEGER, deferral_reason TEXT, retry_after TIMESTAMP, retry_count INTEGER, status TEXT, created_at TIMESTAMP, retry_run_id INTEGER)`,
+		// Migration 026 indexes error_entry and its schema step widens the final_outcome
+		// CHECKs of video and run_video_outcome, so the fixture needs all three.
+		`CREATE TABLE error_entry (id INTEGER PRIMARY KEY, video_id INTEGER, status TEXT)`,
+		`CREATE TABLE video (id INTEGER PRIMARY KEY, final_outcome TEXT CHECK(final_outcome IN ('accepted', 'rejected', 'excluded', 'deferred', 'failed', 'not_yet_evaluated')))`,
+		`CREATE TABLE run_video_outcome (run_id INTEGER, video_id INTEGER, final_outcome TEXT CHECK (final_outcome IS NULL OR final_outcome IN ('accepted','rejected','excluded','deferred','failed','not_yet_evaluated')))`,
 		`CREATE TABLE quota_ledger (id INTEGER PRIMARY KEY, date TEXT, operation_type TEXT, units_consumed INTEGER, call_count INTEGER, run_id INTEGER, recorded_at DATETIME)`,
 		`INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, recorded_at) VALUES ('2020-01-01', 'videos_list', 3, 3, '2020-01-01T00:00:00Z')`,
 	} {
