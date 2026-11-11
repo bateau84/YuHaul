@@ -59,6 +59,7 @@ func (s *Store) GetRunStats(ctx context.Context, runID int64) (*RunStats, error)
 		VideosDeferred:        r.VideosDeferred,
 		VideosFailed:          r.VideosFailed,
 		VideosNotYetEvaluated: r.VideosNotYetEvaluated,
+		VideosUnavailable:     r.VideosUnavailable,
 		RejectionByReason:     rejectionReasons,
 		QuotaByOperation:      quotaOps,
 		DurationSeconds:       r.DurationSeconds,
@@ -70,7 +71,7 @@ func (s *Store) loadRun(ctx context.Context, runID int64) (*state.Run, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase
 		 FROM run WHERE id = ?;`, runID)
 	r, err := scanRun(row)
@@ -381,7 +382,7 @@ func (s *Store) IncrementChannelRouted(ctx context.Context, channelIDText string
 func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granularity string) ([]TemporalBucket, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT started_at, videos_discovered, videos_accepted, videos_rejected,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable
 		 FROM run
 		 WHERE started_at >= ? AND started_at < ? AND status = 'completed'
 		 ORDER BY started_at;`, from.UTC().Format(state.RunTimestampLayout), to.UTC().Format(state.RunTimestampLayout))
@@ -395,7 +396,7 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 		var startedAt string
 		var b TemporalBucket
 		if err := rows.Scan(&startedAt, &b.VideosDiscovered, &b.VideosAccepted,
-			&b.VideosRejected, &b.VideosDeferred, &b.VideosFailed, &b.VideosNotYetEvaluated); err != nil {
+			&b.VideosRejected, &b.VideosDeferred, &b.VideosFailed, &b.VideosNotYetEvaluated, &b.VideosUnavailable); err != nil {
 			return nil, fmt.Errorf("scan temporal row: %w", err)
 		}
 		t, err := time.Parse(time.RFC3339Nano, startedAt)
@@ -414,6 +415,7 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 			existing.VideosDeferred += b.VideosDeferred
 			existing.VideosFailed += b.VideosFailed
 			existing.VideosNotYetEvaluated += b.VideosNotYetEvaluated
+			existing.VideosUnavailable += b.VideosUnavailable
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1254,7 +1256,7 @@ func scanRun(sc scanner) (*state.Run, error) {
 	var configVersionID sql.NullInt64
 	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
-		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
+		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.VideosUnavailable,
 		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase)
 	if err != nil {
 		return nil, err

@@ -288,6 +288,7 @@ func (p *Pipeline) completeHistoricalRun(ctx context.Context, runID int64) {
 		VideosDeferred:        run.VideosDeferred,
 		VideosFailed:          run.VideosFailed,
 		VideosNotYetEvaluated: run.VideosNotYetEvaluated,
+		VideosUnavailable:     run.VideosUnavailable,
 		QuotaCost:             run.QuotaCost,
 	}))
 }

@@ -19,6 +19,7 @@ type RunStats struct {
 	VideosDeferred        int            `json:"videos_deferred"`
 	VideosFailed          int            `json:"videos_failed"`
 	VideosNotYetEvaluated int            `json:"videos_not_yet_evaluated"`
+	VideosUnavailable     int            `json:"videos_unavailable"`
 	RejectionByReason     map[string]int `json:"rejection_by_reason"`
 	QuotaByOperation      map[string]int `json:"quota_by_operation"`
 	DurationSeconds       *float64       `json:"duration_seconds,omitempty"`
@@ -79,6 +80,7 @@ type TemporalBucket struct {
 	VideosDeferred        int    `json:"videos_deferred"`
 	VideosFailed          int    `json:"videos_failed"`
 	VideosNotYetEvaluated int    `json:"videos_not_yet_evaluated"`
+	VideosUnavailable     int    `json:"videos_unavailable"`
 }
 
 // DuplicateProvenance describes one distinct-pair duplicate match anchored at

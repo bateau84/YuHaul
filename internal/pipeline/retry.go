@@ -242,7 +242,7 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 			}
 			return qs.RequeueRetryReceiptTx(ctx, tx, receipt)
 		}
-		if outcome != state.FinalOutcomeAccepted && outcome != state.FinalOutcomeRejected && outcome != state.FinalOutcomeExcluded {
+		if outcome != state.FinalOutcomeAccepted && outcome != state.FinalOutcomeRejected && outcome != state.FinalOutcomeExcluded && outcome != state.FinalOutcomeUnavailableOnYouTube {
 			return fmt.Errorf("retry video %d has no durable disposition: %s", videoID, outcome)
 		}
 		return acknowledgeRetryReceiptTx(ctx, tx, receipt, owned)

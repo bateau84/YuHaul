@@ -378,7 +378,7 @@ func unfinishedRunMembersTx(ctx context.Context, tx *sql.Tx, runID int64) ([]unf
 	   OR v.id IN (SELECT video_id FROM error_entry WHERE retry_run_id=?1))
 	  AND v.processing_state <> 'completed'
 	  AND NOT EXISTS(SELECT 1 FROM run_video_outcome o WHERE o.run_id=?1 AND o.video_id=v.id
-	   AND o.final_outcome IN ('accepted','rejected','excluded','deferred','failed'))
+	   AND o.final_outcome IN ('accepted','rejected','excluded','deferred','failed','unavailable_on_youtube'))
 	 ORDER BY v.id`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("select unfinished videos: %w", err)

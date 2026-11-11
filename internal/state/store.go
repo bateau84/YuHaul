@@ -123,7 +123,7 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
@@ -155,7 +155,7 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
@@ -188,7 +188,7 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable, quota_cost,
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
@@ -963,7 +963,8 @@ func recomputeRunCounters(ctx context.Context, db execer, runID int64) error {
 		  videos_excluded = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
 		  videos_deferred = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
 		  videos_failed = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
-		  videos_not_yet_evaluated = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?)
+		  videos_not_yet_evaluated = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
+		  videos_unavailable = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?)
 		 WHERE id = ?;`,
 		runID, runID, FinalOutcomeAccepted,
 		runID, FinalOutcomeRejected,
@@ -971,6 +972,7 @@ func recomputeRunCounters(ctx context.Context, db execer, runID int64) error {
 		runID, FinalOutcomeDeferred,
 		runID, FinalOutcomeFailed,
 		runID, FinalOutcomeNotYetEvaluated,
+		runID, FinalOutcomeUnavailableOnYouTube,
 		runID)
 	if err != nil {
 		return fmt.Errorf("recomputing run %d counters: %w", runID, err)
@@ -1043,7 +1045,8 @@ func recomputeRunCountersFromDecisions(ctx context.Context, db execer, runID int
 		  ),
 		  videos_deferred = 0,
 		  videos_failed = 0,
-		  videos_not_yet_evaluated = 0
+		  videos_not_yet_evaluated = 0,
+		  videos_unavailable = 0
 		 WHERE id = ?;`,
 		runID, runID, RouteDecisionMatched,
 		runID, RouteDecisionNotMatched, runID, RouteDecisionMatched,
@@ -1081,7 +1084,7 @@ func scanRun(sc interface {
 	var selectedVideoCount sql.NullInt64
 	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
-		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
+		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.VideosUnavailable,
 		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion,
 		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &stopRequestedAt, &r.VideosEvaluated)
 	if err != nil {
