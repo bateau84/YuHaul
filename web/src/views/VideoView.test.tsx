@@ -55,7 +55,7 @@ describe('VideoView', () => {
           runs: [
             run(61, { run_type: 'dry_run', mode: 'simulation', outcome: 'accepted', decision_detail_path: '/runs/61/video/dQw4w9WgXcQ' }),
             run(58),
-            run(40, { run_type: 'manual' }),
+            run(40, { run_type: 'manual', initiated_by: 'run_now' }),
           ],
         })
       )
@@ -80,10 +80,41 @@ describe('VideoView', () => {
     const runs = screen.getByRole('region', { name: 'Runs that decided this video' })
     const items = within(runs).getAllByRole('listitem')
     expect(items).toHaveLength(3)
-    expect(items[0]).toHaveTextContent('Run 61 · Dry run (simulation) · Hypothetical accepted')
-    expect(items[1]).toHaveTextContent('Run 58 · Scheduled · Rejected')
-    expect(items[2]).toHaveTextContent('Run 40 · Run Now · Rejected')
+    // Expected dates use the same formatter as the app, so the test does not depend on the locale.
+    const when = new Date('2026-11-10T08:00:00Z').toLocaleString()
+    expect(items[0]).toHaveTextContent(`Run 61 · Dry run (simulation) · Hypothetical accepted · ${when}`)
+    expect(items[1]).toHaveTextContent(`Run 58 · Scheduled · Rejected · ${when}`)
+    expect(items[2]).toHaveTextContent(`Run 40 · Run Now · Rejected · ${when}`)
     expect(within(runs).getByRole('link', { name: 'Open decision detail for run 61' })).toHaveAttribute('href', '/runs/61/video/dQw4w9WgXcQ')
+  })
+
+  it('labels production runs from initiated_by only and never guesses a null initiator', async () => {
+    fetchMock.mockResolvedValue(
+      json(
+        base({
+          runs: [
+            run(4, { run_type: 'manual', initiated_by: null }),
+            run(3, { run_type: 'scheduled', initiated_by: null }),
+            run(2, { run_type: 'manual', initiated_by: 'queue_retry' }),
+            run(1, { run_type: 'replay', mode: 'simulation', initiated_by: null, outcome: 'accepted' }),
+          ],
+        })
+      )
+    )
+    renderAt('/videos/dQw4w9WgXcQ')
+    const region = await screen.findByRole('region', { name: 'Runs that decided this video' })
+    const items = within(region).getAllByRole('listitem')
+    expect(items[0]).toHaveTextContent('Run 4 · Production run · Rejected')
+    expect(items[1]).toHaveTextContent('Run 3 · Production run · Rejected')
+    expect(items[2]).toHaveTextContent('Run 2 · Queue retry · Rejected')
+    expect(items[3]).toHaveTextContent('Run 1 · Replay (simulation) · Hypothetical accepted')
+  })
+
+  it('leaves the date out of the run line when started_at is null', async () => {
+    fetchMock.mockResolvedValue(json(base({ runs: [run(5, { started_at: null })] })))
+    renderAt('/videos/dQw4w9WgXcQ')
+    const region = await screen.findByRole('region', { name: 'Runs that decided this video' })
+    expect(within(region).getAllByRole('listitem')[0].textContent).toMatch(/Run 5 · Scheduled · Rejected\s*Open decision detail/)
   })
 
   it('renders Unavailable on YouTube as its own badge, never Rejected or Failed', async () => {

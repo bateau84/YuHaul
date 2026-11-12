@@ -9,12 +9,23 @@ import type { RunType, VideoLatestOutcome, VideoQueueState, VideoRunEntry, Video
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/
 const RUNS_SHOWN = 10
 
-const modeLabels: Record<RunType, string> = {
-  manual: 'Run Now',
-  scheduled: 'Scheduled',
+const simulationLabels: Partial<Record<RunType, string>> = {
   dry_run: 'Dry run (simulation)',
   replay: 'Replay (simulation)',
   backtest: 'Backtest (simulation)',
+}
+
+const initiatorLabels = {
+  run_now: 'Run Now',
+  schedule: 'Scheduled',
+  queue_retry: 'Queue retry',
+} as const
+
+// Production runs are labelled from initiated_by only. A null initiator
+// (runs before migration 024) is never guessed from run_type.
+function modeLabel(run: VideoRunEntry): string {
+  if (run.mode === 'simulation') return simulationLabels[run.run_type] ?? run.run_type
+  return (run.initiated_by && initiatorLabels[run.initiated_by]) || 'Production run'
 }
 
 type Load =
@@ -87,11 +98,13 @@ function QueueState({ state }: { state: VideoQueueState }) {
 
 function RunItem({ run }: { run: VideoRunEntry }) {
   const simulation = run.mode === 'simulation'
+  const when = formatWhen(run.started_at)
   return (
     <li className="card" style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
       <span>
-        <RunLink id={run.run_id} /> · {modeLabels[run.run_type] ?? run.run_type} ·{' '}
+        <RunLink id={run.run_id} /> · {modeLabel(run)} ·{' '}
         <OutcomeBadge outcome={run.outcome} mode={simulation ? run.run_type : undefined} />
+        {when && <> · {when}</>}
       </span>
       <Link to={run.decision_detail_path} style={{ display: 'inline-block', minHeight: 24 }}>
         Open decision detail for {runLabel(run.run_id).toLowerCase()}
