@@ -58,7 +58,7 @@ The Videos page lets the user find a video YuHaul knows ([BR-038](../../requirem
 | F8 | Option C's speed is an estimate `[unverified]`. | Coder | Gate: P1–P4 rerun on the indexed path (ARS-001 §9.2). | Release |
 | F9 | Page-level remnants and the connection-wide `secure_delete` pragma (ADR-001 O2, now a compliance decision with options), and the sweep running only at run start (ADR-001 O3). | Compliance owner | Routed. Parity with `transient_metadata` today. | No |
 | O4 | P3's run-duration budget (1.15×) and the 1 s sweep-transaction limit are architecture defaults. | Requirements owner | May change them. | No |
-| O5 | If the spike fails, choose among the secure-delete alternatives S1–S4 (ARS-001 §10.10). | Compliance owner with the user | Open until the spike runs. | Building, if the spike fails |
+| O5 | If the spike fails, choose among the secure-delete alternatives S1–S4 (ARS-001 §10.10). | Compliance owner with the user | Open. The spike ran on 2026-11-12 and failed with secure-delete on (ARS-001 §10.10 "Spike result"). | Building |
 | O1 | AC16 is read as allowing a copy whose lifetime is bounded by the source title (ADR-001 O1). | Requirements owner | The user agreed that option C applies. Record it in BR-038 if desired. | No |
 
 Specification choices within BR-038, which the user may change: a link longer than 200 characters is `too_long`; a `watch` link with more than one `v` is unusable; ports and userinfo make a link unusable; character counts are Unicode code points; full case folding (`STRASSE` finds `Straße`).

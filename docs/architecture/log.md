@@ -10,6 +10,8 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-12
 
+**Video-search write-cost spike (task fts-spike, Plan revision 20): FAIL with secure-delete on.** Measured on 150,000 generated multi-script titles, and recorded in [ARS-001 §10.10](video-search/specifications/ars-001-video-search-api-and-queries.md). A purge costs about 5–7 ms with `secure-delete = 1` and about 0.2 ms with it off. A 200-row `Expire` transaction has p95 1.25 s (tmpfs) or 2.45 s (disk), above the 1 s limit. Expiring 5,000 rows takes 27–29 s on tmpfs and 38–52 s on disk, against the 30 s limit, and smaller batches make the total worse. Decision O5 (S1–S4) is open and blocks building. `IndexWriteBatch` is unchanged.
+
 **Send-guard owner review of ARS-006 §7.3 (task b39-sendguard-review, Plan revision 20):** The `DecisionRunID` clause of `ClaimPlaylistSend` is approved with conditions C1–C5, recorded in [ARS-006 §7.4](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) and noted in [authorization ARS-001](youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md). The checks were made against `playlist_guard.go` and `send_predicates.go` at `a83ab51`:
 
 - equivalence at 0;

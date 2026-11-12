@@ -909,6 +909,44 @@ The critic measured about 3 ms per secure-delete purge in a dense test index of 
 
   Otherwise, lower `IndexWriteBatch` until the batch limit holds. If even 50 rows per batch exceed 1 s, or 5,000 rows exceed 30 s, secure-delete is too costly. Then the options below go to a decision.
 
+**Spike result (2026-11-12): FAIL with `secure-delete = 1`.** Decision O5 is now open (ADR-001 O5). `IndexWriteBatch` stays 200 until O5 is decided.
+
+Setup. Throwaway code outside the repository, not committed. Bundled `modernc.org/sqlite` v1.58.0, WAL, the production DSN. The schema is the §10.2 DDL and the real `transient_metadata` columns. Host: i7-10510U (4 cores, 8 threads), 14 GB RAM. The host was shared with other Go build and test jobs (load average 1.6–4.7), so wall times are noisy and best read as upper bounds. Data: 150,000 rows, each indexed under `lower(title)`, an approximation of `Key`, because `titlekey` is internal.
+- **Titles.** Generated, not copied. Vocabulary of about 150,000 pseudo-words with Zipf frequencies, 20–100 code points (p5/p50/p95 = 21/57/94). Scripts: Latin 75%, Cyrillic 8%, Han 6%, kana 4%, Greek 3%, Arabic 3%. About 20% end with an emoji. They also contain digits, separators such as ` - ` and ` | `, and mixed-in Latin words. This sample is not drawn from real held titles.
+- **Runs.** Expiry runs `Expire`'s `UPDATE` (clears title and sets `expired_at` and `is_active`) on random rows, so the update trigger purges each entry. Each rep starts from a fresh copy of the backfilled database. "tmpfs" is `/tmp`, so commits cost no fsync. "Disk" is ext4 on LVM, the realistic case.
+
+| Measure | `secure-delete = 1` | `secure-delete = 0` |
+|---|---|---|
+| Backfill, 150,000 rows, batches of 200 | 9.3 s tmpfs; 22.9 s disk | 10.1 s tmpfs; 21.7 s disk |
+| Database after backfill | 140.9 MB (88.1 MB without the index, so the index adds 52.9 MB) | same |
+| WAL after backfill / after `wal_checkpoint(TRUNCATE)` | 5.8 MB / 0 MB | same |
+| Purge cost per row, p50 / p95 | 4.8 / 11.3 ms (tmpfs, quiet); 6.6 / 16.7 ms (disk) | 0.15 / 0.5 ms (tmpfs); 0.20 / 0.67 ms (disk) |
+| Add, `INSERT` + doc + FTS, per row, p50 / p95 | 0.13 / 0.48 ms (tmpfs); 0.17 / 0.62 ms (disk) | 0.12 / 0.48 ms; 0.18 / 0.63 ms |
+| 200-row `Expire` transaction, p50 / p95 / max | 1.10 / **1.25** / 1.43 s (tmpfs, 3 reps); 1.78 / **2.45** / 3.51 s (disk, 5 reps) | 48 / 214 / 303 ms (tmpfs); 129 / 479 / 735 ms (disk) |
+| Expiring 5,000 rows | 26.8, 27.4, 29.3 s (tmpfs); **37.6–51.6 s** (disk, 5 reps) | 2.5 s (tmpfs); 5.0–5.6 s (disk) |
+| WAL peak during expiry | 28.7 MB | 11.9 MB |
+
+Batch size against `secure-delete = 1`, on the shared host (tmpfs rows are the first run; the other rows were run later under heavier load):
+
+| Rows per transaction | Transaction p95 | 5,000 rows in total |
+|---|---|---|
+| 200 | 1.25 s tmpfs; 2.45 s disk | 27–29 s tmpfs; 38–52 s disk |
+| 150 | 1.44 s (tmpfs, loaded) | 33–50 s (tmpfs, loaded) |
+| 100 | 1.06 s disk; 1.73 s tmpfs (loaded) | 45–47 s disk |
+| 50 | 0.86 s disk; 0.78 s tmpfs (loaded) | 64–79 s disk |
+
+Reading against the pass rule:
+- **Per-transaction limit (≤ 1 s at p95).** Not met at 200 rows. Only 50 rows per transaction meets it on every run, at about 0.8 s.
+- **Total limit (5,000 rows in ≤ 30 s).** Not met on disk at any batch size, in any rep. It is met on tmpfs only at 200 rows, by 0.7–3 s, and only on the quietest run. Smaller batches do not help: the per-row cost rises as batches shrink (about 5 ms at 200, about 10 ms at 50), so 50-row batches take 52–79 s.
+- **Cause.** Secure-delete costs about 5 ms of CPU per purged row, against about 0.15 ms with it off. That is about 30× more than a plain delete. 5,000 purges therefore need about 25–30 s of write-lock time even with no I/O wait, which is the whole budget.
+- **Comparison with the critic's figure.** The critic measured about 3 ms per purge in a dense index. Realistic titles measure 5–7 ms, so they are not cheaper here.
+- **Confidence.** The numbers are noisy, but the disk failure is not a close call, and the tmpfs pass is not robust. A rerun on a quiet gate host could move the totals, so it should confirm the decision, not reopen it.
+
+Consequences:
+- The §10.10 pass rule is not met, so the "otherwise lower `IndexWriteBatch`" step cannot rescue it: the 5,000-row limit fails at every size, and 50 rows per transaction already takes 52–79 s in total. Secure-delete is too costly as specified, and S1–S4 below go to a decision (O5).
+- `secure-delete = 0` passes by a wide margin (2.5–5.6 s for 5,000 rows, 200-row p95 ≤ 0.48 s). Backfill, size and add cost do not depend on the setting.
+- Not measured: S1's `optimize` and S2's drop-and-recreate (the backfill time above is S2's rebuild cost, 9–23 s with search on the scan path meanwhile). S3 and S4 are decisions, not measurements. Measure S1 before choosing it.
+
 **Alternatives if secure-delete is too costly.** These are recorded for a decision, not chosen. Each one changes when a removed title's trigrams leave the index structures, so the compliance owner decides together with the user (ADR-001 O5).
 
 | # | Option | What changes | Cost |
