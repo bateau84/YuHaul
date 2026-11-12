@@ -554,13 +554,13 @@ func TestDeferredQueueWithholdsInvalidLegacyReason(t *testing.T) {
 		t.Fatalf("deferred items=%d want 1", len(body.Deferred))
 	}
 	item := body.Deferred[0]
-	if _, leaked := item["Reason"]; leaked {
+	if _, leaked := item["deferral_reason"]; leaked {
 		t.Fatalf("invalid legacy reason serialized: %#v", item)
 	}
 	if item["deferred_reason_unavailable"] != true {
 		t.Fatalf("missing unavailable flag: %#v", item)
 	}
-	if item["Status"] != string(DeferredStatusPending) {
+	if item["status"] != string(DeferredStatusPending) {
 		t.Fatalf("status changed: %#v", item)
 	}
 	if bytes.Contains(mustJSON(t, item), []byte(secret)) {
@@ -639,5 +639,82 @@ func TestRequeuedByUserReasonIsValidButNotAHandoffReason(t *testing.T) {
 	_, err := (&Store{}).HandOffUnfinishedTx(context.Background(), nil, 1, DeferredReasonRequeuedByUser, nil)
 	if err == nil || !strings.Contains(err.Error(), "not a user handoff reason") {
 		t.Fatalf("handoff accepted the re-queue reason: %v", err)
+	}
+}
+
+// spaDeferredItem mirrors DeferredItem in web/src/types.ts. The SPA reads
+// these snake_case names, so the handler must emit exactly them.
+type spaDeferredItem struct {
+	ID                        int64  `json:"id"`
+	VideoID                   int64  `json:"video_id"`
+	VideoTitle                string `json:"video_title"`
+	ChannelName               string `json:"channel_name"`
+	RunID                     int64  `json:"run_id"`
+	DeferralReason            string `json:"deferral_reason"`
+	DeferredReasonUnavailable bool   `json:"deferred_reason_unavailable"`
+	RetryAfter                string `json:"retry_after"`
+	Status                    string `json:"status"`
+	CreatedAt                 string `json:"created_at"`
+	RetryCount                int    `json:"retry_count"`
+}
+
+func TestDeferredListUsesSPAShapeAndDismissWorksWithItsID(t *testing.T) {
+	store := newTestStore(t)
+	runID := seedRun(t, store.db)
+	vidID := seedVideo(t, store.db, runID, "yt-shape")
+	retryAfter := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	if _, err := store.CreateDeferredItem(context.Background(), &DeferredItem{
+		VideoID: vidID, RunID: runID, Reason: DeferredReasonQuotaExhausted, RetryAfter: &retryAfter,
+		RetryCount: 3, Status: DeferredStatusPending, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewService(store, nil).DeferredHandler())
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var raw struct {
+		Deferred []json.RawMessage `json:"deferred"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil || len(raw.Deferred) != 1 {
+		t.Fatalf("decode list: err=%v items=%d", err, len(raw.Deferred))
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(raw.Deferred[0], &generic); err != nil {
+		t.Fatal(err)
+	}
+	for k := range generic {
+		if k != strings.ToLower(k) {
+			t.Errorf("non snake_case key %q in %v", k, generic)
+		}
+	}
+	var item spaDeferredItem
+	if err := json.Unmarshal(raw.Deferred[0], &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.ID == 0 || item.VideoID != vidID || item.RunID != runID || item.DeferralReason != "quota_exhausted" ||
+		item.Status != "pending" || item.RetryCount != 3 || item.CreatedAt == "" ||
+		item.RetryAfter != retryAfter.Format(time.RFC3339) {
+		t.Fatalf("SPA shape mismatch: %+v (raw %v)", item, generic)
+	}
+
+	resp2, err := http.Post(fmt.Sprintf("%s/%d/discard", server.URL, item.ID), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("discard with SPA id status=%d want 200", resp2.StatusCode)
+	}
+	var discarded spaDeferredItem
+	if err := json.NewDecoder(resp2.Body).Decode(&discarded); err != nil {
+		t.Fatal(err)
+	}
+	if discarded.ID != item.ID || discarded.Status != "discarded" {
+		t.Fatalf("discard response %+v", discarded)
 	}
 }

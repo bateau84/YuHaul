@@ -312,16 +312,37 @@ func publicErrorEntry(e *ErrorEntry) errorEntryView {
 	return view
 }
 
+// deferredItemView is the wire shape of a deferred item. It matches
+// DeferredItem in web/src/types.ts; video_title and channel_name are optional
+// there and are not supplied by the queue store.
 type deferredItemView struct {
-	*DeferredItem
-	Reason                    *DeferredReason `json:"Reason,omitempty"`
+	RetryRunID                *int64          `json:"retry_run_id,omitempty"`
+	ID                        int64           `json:"id"`
+	VideoID                   int64           `json:"video_id"`
+	ExternalVideoID           string          `json:"external_video_id"`
+	RunID                     int64           `json:"run_id"`
+	Reason                    *DeferredReason `json:"deferral_reason,omitempty"`
 	DeferredReasonUnavailable bool            `json:"deferred_reason_unavailable,omitempty"`
+	RetryAfter                *time.Time      `json:"retry_after,omitempty"`
+	RetryCount                int             `json:"retry_count"`
+	Status                    DeferredStatus  `json:"status"`
+	CreatedAt                 time.Time       `json:"created_at"`
 }
 
 func publicDeferredItem(item *DeferredItem) deferredItemView {
-	view := deferredItemView{DeferredItem: item}
 	if item == nil {
-		return view
+		return deferredItemView{}
+	}
+	view := deferredItemView{
+		RetryRunID:      item.RetryRunID,
+		ID:              item.ID,
+		VideoID:         item.VideoID,
+		ExternalVideoID: item.ExternalVideoID,
+		RunID:           item.RunID,
+		RetryAfter:      item.RetryAfter,
+		RetryCount:      item.RetryCount,
+		Status:          item.Status,
+		CreatedAt:       item.CreatedAt,
 	}
 	if item.Reason == "" {
 		return view

@@ -90,7 +90,14 @@ func TestDeferredPageG1Paging(t *testing.T) {
 	if testing.Short() {
 		t.Skip("70,000-row paging walk skipped in -short mode")
 	}
-	const total = 70000
+	// The full 70,000-row walk runs by default. Under -race every request is
+	// far slower (the walk took ~30 minutes), so it uses 7,000 rows; all
+	// assertions below are derived from total.
+	total := 70000
+	if raceEnabled {
+		total = 7000
+	}
+	totalPages, pages200 := total/50, total/200
 	store := newTestStore(t)
 	runID := seedRun(t, store.db)
 	// every 1,372nd id is quota_exhausted: 51 of 70,000 are not guaranteed by
@@ -113,7 +120,7 @@ func TestDeferredPageG1Paging(t *testing.T) {
 	if first.ByReason["quota_exhausted"] != quota || first.ByReason["quota_exhausted"]+first.ByReason["api_rate_limited"] != total {
 		t.Fatalf("by_reason=%v", first.ByReason)
 	}
-	if first.Page.TotalPages != 1400 || first.Page.PrevBeforeID != nil || first.Page.NextAfterID == nil {
+	if first.Page.TotalPages != totalPages || first.Page.PrevBeforeID != nil || first.Page.NextAfterID == nil {
 		t.Fatalf("first page meta %+v", first.Page)
 	}
 	expectPos(t, "first", first, 1, 1, 50)
@@ -138,12 +145,12 @@ func TestDeferredPageG1Paging(t *testing.T) {
 		}
 		body = getDeferredPage(t, server.URL, fmt.Sprintf("limit=200&after_id=%d", *body.Page.NextAfterID))
 	}
-	if seen != total || pages != 350 {
+	if seen != total || pages != pages200 {
 		t.Fatalf("forward walk saw %d items over %d pages", seen, pages)
 	}
 
 	// Backward from the last page by cursor.
-	expectPos(t, "last", getDeferredPage(t, server.URL, "page=last"), 1400, 69951, 70000)
+	expectPos(t, "last", getDeferredPage(t, server.URL, "page=last"), totalPages, total-49, total)
 	seen, body = 0, getDeferredPage(t, server.URL, "limit=200&page=last")
 	for {
 		seen += len(body.Deferred)
@@ -161,9 +168,9 @@ func TestDeferredPageG1Paging(t *testing.T) {
 		t.Fatalf("backward walk saw %d items", seen)
 	}
 
-	expectPos(t, "page=700", getDeferredPage(t, server.URL, "page=700"), 700, 34951, 35000)
-	past := getDeferredPage(t, server.URL, "page=1401")
-	if len(past.Deferred) != 0 || past.Page.Number != 1401 || past.Page.FirstPosition != nil || past.Page.LastPosition != nil {
+	expectPos(t, "middle page", getDeferredPage(t, server.URL, fmt.Sprintf("page=%d", totalPages/2)), totalPages/2, (totalPages/2-1)*50+1, totalPages/2*50)
+	past := getDeferredPage(t, server.URL, fmt.Sprintf("page=%d", totalPages+1))
+	if len(past.Deferred) != 0 || past.Page.Number != totalPages+1 || past.Page.FirstPosition != nil || past.Page.LastPosition != nil {
 		t.Fatalf("page past the end: %+v", past)
 	}
 
