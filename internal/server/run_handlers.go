@@ -164,6 +164,7 @@ type conditionAuditDetail struct {
 // (for example an already_completed no-attempt) and is optional evidence, not
 // an outcome category (ARD-001).
 type executedActionDetail struct {
+	ID                       int64   `json:"id"`
 	ActionType               string  `json:"action_type"`
 	TargetPlaylistID         string  `json:"target_playlist_id"`
 	Outcome                  string  `json:"outcome"`
@@ -210,6 +211,9 @@ type videoDetail struct {
 	CurrentLocalMetadata    *metadata.LocalDisplay     `json:"current_local_metadata"`
 	MetadataContextStatus   string                     `json:"metadata_context_status"`
 	UnresolvedMutations     []unresolvedMutationDetail `json:"unresolved_mutations"`
+	// ContinuedActions lists this run's sends under earlier runs' decisions;
+	// always an array, empty when there are none (ARS-006 §8.1).
+	ContinuedActions []continuedActionDetail `json:"continued_actions"`
 }
 
 // videoDetailResponse is the response body for GET /api/runs/:id/videos/:videoId.
@@ -552,6 +556,15 @@ func (s *Server) buildVideoDetail(ctx context.Context, runID int64, video state.
 		return videoDetail{}, fmt.Errorf("loading unresolved mutations: %w", err)
 	}
 
+	continuedItems, err := s.runVideoStore.ListContinuedActions(ctx, runID, video.ID)
+	if err != nil {
+		return videoDetail{}, fmt.Errorf("loading continued actions: %w", err)
+	}
+	continued, err := s.projectContinuedActions(ctx, continuedItems, evidence)
+	if err != nil {
+		return videoDetail{}, err
+	}
+
 	decisionDetails := make([]routeDecisionDetail, 0, len(decisions))
 	for _, d := range decisions {
 		audits, err := s.runVideoStore.GetConditionAuditsForDecision(ctx, d.ID)
@@ -581,7 +594,73 @@ func (s *Server) buildVideoDetail(ctx context.Context, runID int64, video state.
 		CompletedAt:               video.CompletedAt,
 		RouteDecisions:            decisionDetails,
 		UnresolvedMutations:       projectUnresolvedMutations(mutations[video.ID]),
+		ContinuedActions:          continued,
 	}, nil
+}
+
+func toExecutedActionDetail(a state.ExecutedAction) executedActionDetail {
+	actionMsg, withheld := safeErrorMessage(a.ErrorMessage)
+	outcomeReason, outcomeUnavailable := safeDispositionReason(a.OutcomeReason, "action_reason")
+	return executedActionDetail{
+		ID:                       a.ID,
+		ActionType:               router.ToPublicActionType(a.ActionType),
+		TargetPlaylistID:         a.TargetPlaylistID,
+		Outcome:                  string(a.Outcome),
+		OutcomeReason:            outcomeReason,
+		OutcomeReasonUnavailable: outcomeUnavailable,
+		ErrorMessage:             actionMsg,
+		ErrorMessageUnavailable:  withheld,
+		ExecutedAt:               a.ExecutedAt,
+	}
+}
+
+// continuedActionDetail is an action this run sent under a decision made by an
+// earlier run (ARS-006 §8.1). RouteName comes from the decision run's
+// snapshot and is null when that snapshot cannot be read.
+type continuedActionDetail struct {
+	executedActionDetail
+	DecisionRunID   int64   `json:"decision_run_id"`
+	RouteDecisionID int64   `json:"route_decision_id"`
+	RouteID         string  `json:"route_id"`
+	RouteName       *string `json:"route_name"`
+}
+
+func (s *Server) projectContinuedActions(ctx context.Context, items []state.ContinuedAction,
+	evidence *runRouteEvidence) ([]continuedActionDetail, error) {
+
+	out := make([]continuedActionDetail, 0, len(items))
+	snapshots := make(map[int64]map[int64]config.SnapshotRoute)
+	for _, c := range items {
+		publicID, err := evidence.publicID(c.RouteID)
+		if err != nil {
+			return nil, err
+		}
+		routes, seen := snapshots[c.DecisionRunID]
+		if !seen {
+			decisionRun, err := s.runVideoStore.GetRun(ctx, c.DecisionRunID)
+			if err != nil {
+				return nil, fmt.Errorf("loading decision run %d: %w", c.DecisionRunID, err)
+			}
+			routes, err = s.snapshotRoutes(ctx, decisionRun)
+			if err != nil {
+				return nil, err
+			}
+			snapshots[c.DecisionRunID] = routes
+		}
+		var name *string
+		if r, ok := routes[c.RouteID]; ok && r.Name != "" {
+			n := r.Name
+			name = &n
+		}
+		out = append(out, continuedActionDetail{
+			executedActionDetail: toExecutedActionDetail(c.ExecutedAction),
+			DecisionRunID:        c.DecisionRunID,
+			RouteDecisionID:      c.RouteDecisionID,
+			RouteID:              publicID,
+			RouteName:            name,
+		})
+	}
+	return out, nil
 }
 
 func projectUnresolvedMutations(items []state.UnresolvedMutation) []unresolvedMutationDetail {
@@ -656,18 +735,7 @@ func toRouteDecisionDetail(d state.RouteDecision, audits []state.ConditionAudit,
 		if a.RouteDecisionID != d.ID {
 			continue
 		}
-		actionMsg, withheld := safeErrorMessage(a.ErrorMessage)
-		outcomeReason, outcomeUnavailable := safeDispositionReason(a.OutcomeReason, "action_reason")
-		actionDetails = append(actionDetails, executedActionDetail{
-			ActionType:               router.ToPublicActionType(a.ActionType),
-			TargetPlaylistID:         a.TargetPlaylistID,
-			Outcome:                  string(a.Outcome),
-			OutcomeReason:            outcomeReason,
-			OutcomeReasonUnavailable: outcomeUnavailable,
-			ErrorMessage:             actionMsg,
-			ErrorMessageUnavailable:  withheld,
-			ExecutedAt:               a.ExecutedAt,
-		})
+		actionDetails = append(actionDetails, toExecutedActionDetail(a))
 	}
 
 	return routeDecisionDetail{

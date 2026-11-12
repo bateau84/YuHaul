@@ -214,7 +214,8 @@ export interface VideoOutcome {
 export interface ContinuedAction extends ActionOutcome {
   decision_run_id: number
   route_decision_id: number
-  route_id: number
+  // Stable public route UUID; the internal integer key never leaves the server.
+  route_id: string
   // From the decision run's snapshot; null when it cannot be read.
   route_name: string | null
 }

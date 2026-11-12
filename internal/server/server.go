@@ -97,6 +97,7 @@ type RunVideoStore interface {
 	ListFailedConditionIndexes(ctx context.Context, decisionIDs []int64) (map[int64][]int, error)
 	GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.ExecutedAction, error)
 	ListUnresolvedMutations(ctx context.Context, runID int64, videoIDs []int64) (map[int64][]state.UnresolvedMutation, error)
+	ListContinuedActions(ctx context.Context, runID, videoID int64) ([]state.ContinuedAction, error)
 }
 
 // ConfigVersionStore is the subset of config.Store used by the run handlers.
@@ -485,6 +486,9 @@ func (noopRunVideoStore) ListFailedConditionIndexes(context.Context, []int64) (m
 	return nil, errors.New("run video store not configured")
 }
 func (noopRunVideoStore) GetExecutedActionsForVideoInRun(context.Context, int64, int64) ([]state.ExecutedAction, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) ListContinuedActions(context.Context, int64, int64) ([]state.ContinuedAction, error) {
 	return nil, errors.New("run video store not configured")
 }
 func (noopRunVideoStore) ListUnresolvedMutations(context.Context, int64, []int64) (map[int64][]state.UnresolvedMutation, error) {

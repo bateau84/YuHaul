@@ -277,7 +277,9 @@ func (s *Store) enrichRouteStats(ctx context.Context, runID, routeKey int64, rs 
 		return fmt.Errorf("iterate route skip: %w", err)
 	}
 
-	// Action outcomes for matched decisions. ActionsExecuted counts actual
+	// Action outcomes are attributed to the run that attempted them
+	// (ea.run_id), under the decision's route; a continuation attempt counts
+	// for the sending run, not the decision's run (ARS-006 §8.2). ActionsExecuted counts actual
 	// external attempts only: succeeded and failed rows (the producer writes
 	// failed only after an attempted request). Deferred and not_attempted
 	// dispositions — quota deferrals, idempotency suppressions, skipped
@@ -288,9 +290,9 @@ func (s *Store) enrichRouteStats(ctx context.Context, runID, routeKey int64, rs 
 		`SELECT COALESCE(SUM(CASE WHEN ea.outcome = 'succeeded' THEN 1 ELSE 0 END), 0),
 		        COALESCE(SUM(CASE WHEN ea.outcome = 'failed' THEN 1 ELSE 0 END), 0),
 		        COALESCE(SUM(CASE WHEN ea.outcome IN ('succeeded', 'failed') THEN 1 ELSE 0 END), 0)
-		 FROM route_decision rd
-		 LEFT JOIN executed_action ea ON ea.route_decision_id = rd.id
-		 WHERE rd.run_id = ? AND rd.route_id = ? AND rd.decision = 'matched';`, runID, routeKey)
+		 FROM executed_action ea
+		 JOIN route_decision rd ON rd.id = ea.route_decision_id
+		 WHERE ea.run_id = ? AND rd.route_id = ? AND rd.decision = 'matched';`, runID, routeKey)
 	if err != nil {
 		return fmt.Errorf("route action outcomes: %w", err)
 	}
