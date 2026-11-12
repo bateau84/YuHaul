@@ -468,7 +468,8 @@ func (s *Store) RetryGroupReceiptForRunVideo(ctx context.Context, runID, videoID
 // video, in FIFO order. A claim rechecks eligibility and owners; this list is not
 // authority. Track attempted videos for the execution even after requeueing.
 func (s *Store) ListDeferredRetryCandidates(ctx context.Context, now time.Time) ([]DeferredItem, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after, d.retry_count, d.status, d.created_at, d.retry_run_id
+	rows, err := s.db.QueryContext(ctx, `SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after, d.retry_count, d.status, d.created_at, d.retry_run_id,
+	 d.closed_reason, CASE WHEN d.closed_reason IS NOT NULL THEN v.final_outcome END
 	 FROM deferred_item d JOIN video v ON v.id = d.video_id
 	 WHERE d.id = (SELECT x.id FROM deferred_item x WHERE x.video_id = d.video_id AND x.status IN ('pending','retrying') ORDER BY x.created_at, x.id LIMIT 1)
 	 AND EXISTS (SELECT 1 FROM deferred_item x LEFT JOIN run r ON r.id = x.retry_run_id WHERE x.video_id = d.video_id AND

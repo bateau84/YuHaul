@@ -53,14 +53,16 @@ func (s *Store) ListErrorEntries(ctx context.Context, status ErrorStatus) ([]Err
 	if status == "" {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT e.id, e.video_id, v.video_id, e.run_id, e.error_category, e.error_message,
-			        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id
+			        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id,
+			        e.closed_reason, CASE WHEN e.closed_reason IS NOT NULL THEN v.final_outcome END
 			 FROM error_entry e
 			 JOIN video v ON v.id = e.video_id
 			 ORDER BY e.created_at DESC;`)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT e.id, e.video_id, v.video_id, e.run_id, e.error_category, e.error_message,
-			        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id
+			        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id,
+			        e.closed_reason, CASE WHEN e.closed_reason IS NOT NULL THEN v.final_outcome END
 			 FROM error_entry e
 			 JOIN video v ON v.id = e.video_id
 			 WHERE e.status = ?
@@ -78,7 +80,8 @@ func (s *Store) ListErrorEntries(ctx context.Context, status ErrorStatus) ([]Err
 func (s *Store) GetErrorEntry(ctx context.Context, id int64) (*ErrorEntry, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT e.id, e.video_id, v.video_id, e.run_id, e.error_category, e.error_message,
-		        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id
+		        e.error_detail, e.status, e.created_at, e.resolved_at, e.retry_count, e.retry_run_id,
+			        e.closed_reason, CASE WHEN e.closed_reason IS NOT NULL THEN v.final_outcome END
 		 FROM error_entry e
 		 JOIN video v ON v.id = e.video_id
 		 WHERE e.id = ?;`, id)
@@ -225,14 +228,16 @@ func (s *Store) ListDeferredItems(ctx context.Context, status DeferredStatus) ([
 	if status == "" {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after,
-			        d.retry_count, d.status, d.created_at, d.retry_run_id
+			        d.retry_count, d.status, d.created_at, d.retry_run_id,
+			        d.closed_reason, CASE WHEN d.closed_reason IS NOT NULL THEN v.final_outcome END
 			 FROM deferred_item d
 			 JOIN video v ON v.id = d.video_id
 			 ORDER BY d.created_at ASC;`)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after,
-			        d.retry_count, d.status, d.created_at, d.retry_run_id
+			        d.retry_count, d.status, d.created_at, d.retry_run_id,
+			        d.closed_reason, CASE WHEN d.closed_reason IS NOT NULL THEN v.final_outcome END
 			 FROM deferred_item d
 			 JOIN video v ON v.id = d.video_id
 			 WHERE d.status = ?
@@ -250,7 +255,8 @@ func (s *Store) ListDeferredItems(ctx context.Context, status DeferredStatus) ([
 func (s *Store) GetDeferredItem(ctx context.Context, id int64) (*DeferredItem, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after,
-		        d.retry_count, d.status, d.created_at, d.retry_run_id
+		        d.retry_count, d.status, d.created_at, d.retry_run_id,
+			        d.closed_reason, CASE WHEN d.closed_reason IS NOT NULL THEN v.final_outcome END
 		 FROM deferred_item d
 		 JOIN video v ON v.id = d.video_id
 		 WHERE d.id = ?;`, id)
@@ -337,7 +343,8 @@ func scanErrorEntry(sc interface{ Scan(dest ...any) error }) (*ErrorEntry, error
 	e := &ErrorEntry{}
 	var detail, resolvedAt sql.NullString
 	err := sc.Scan(&e.ID, &e.VideoID, &e.ExternalVideoID, &e.RunID, &e.Category, &e.Message,
-		&detail, &e.Status, &e.CreatedAt, &resolvedAt, &e.RetryCount, &e.RetryRunID)
+		&detail, &e.Status, &e.CreatedAt, &resolvedAt, &e.RetryCount, &e.RetryRunID,
+		&e.ClosedReason, &e.VideoFinalOutcome)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +377,8 @@ func scanDeferredItem(sc interface{ Scan(dest ...any) error }) (*DeferredItem, e
 	d := &DeferredItem{}
 	var retryAfter sql.NullString
 	err := sc.Scan(&d.ID, &d.VideoID, &d.ExternalVideoID, &d.RunID, &d.Reason, &retryAfter,
-		&d.RetryCount, &d.Status, &d.CreatedAt, &d.RetryRunID)
+		&d.RetryCount, &d.Status, &d.CreatedAt, &d.RetryRunID,
+		&d.ClosedReason, &d.VideoFinalOutcome)
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +523,8 @@ func (s *Store) ListDeferredPage(ctx context.Context, q DeferredPageQuery) (Defe
 	}
 
 	const cols = `SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after,
-		        d.retry_count, d.status, d.created_at, d.retry_run_id
+		        d.retry_count, d.status, d.created_at, d.retry_run_id,
+			        d.closed_reason, CASE WHEN d.closed_reason IS NOT NULL THEN v.final_outcome END
 		 FROM deferred_item d JOIN video v ON v.id = d.video_id WHERE `
 	var itemRows *sql.Rows
 	switch {

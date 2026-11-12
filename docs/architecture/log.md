@@ -10,6 +10,8 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-12
 
+**BR-039 foundation implemented (Coder):** [ARS-006](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) §1.1, §1.3 and §2 exist in code (migration 027, queue and diag vocabulary, `state` classification predicates) with tests F1, F3, F5 and the OriginalDecisionTx parts of F4. Deviation recorded in ARS-006 §12: `FinalVideo` uses `COALESCE` so a NULL outcome is not final and the predicates stay two-valued. Migration 028, claims, filter, continuation and inspection are not implemented.
+
 **Video search index revised after critique (Architect):** Source: critic review of [ARS-001](video-search/specifications/ars-001-video-search-api-and-queries.md) §10, verdict CHANGES REQUIRED (session `ses_e2e61920affeUTLBU835PmTm85`, probe data in `/tmp/ftsprobe`). [ADR-001](video-search/decisions/adr-001-held-title-search-by-request-time-scan.md) and the topic index are updated to match.
 
 - **F1:** the migration is renumbered to `029_title_search_index`, because BR-039 owns 028. Search releases only after BR-039's 028.

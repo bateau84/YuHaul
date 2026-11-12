@@ -61,6 +61,7 @@ var outcomeInventory = []outcomeSite{
 	{"internal/state/store.go", `THEN 'accepted'|THEN 'rejected'|THEN 'excluded'|ELSE 'not_yet_evaluated'`, inventoryNotApplicable, "derives dry-run/replay/backtest outcomes from decisions; production runs read run_video_outcome as-is"},
 	{"internal/state/store.go", `runID, FinalOutcome`, inventoryHandled, "run counters include videos_unavailable"},
 	{"internal/state/send_predicates.go", `final_outcome IN|final_outcome IS NULL|Only unresolved outcomes`, inventoryHandled, "final outcome does not veto; only NULL, not_yet_evaluated and failed do"},
+	{"internal/state/final_outcome.go", `const FinalOutcomes = `, inventoryHandled, "the BR-039 final list (accepted, rejected, excluded, unavailable_on_youtube) that every classification predicate reuses"},
 
 	// internal/pipeline
 	{"internal/pipeline/authority.go", `final_outcome IN`, inventoryHandled, "final-outcome list includes the value"},

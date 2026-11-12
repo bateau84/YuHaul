@@ -299,3 +299,27 @@ func TestVideoUnavailableAndRequeueVocabulary(t *testing.T) {
 		t.Errorf("queue_reason requeued_by_user = %q, %v", v, ok)
 	}
 }
+
+// ARS-006 §1.3: original_decision_unavailable is valid only for
+// action_execution/load_run with no other fact.
+func TestOriginalDecisionUnavailableVocabulary(t *testing.T) {
+	const s = "diag:v1 phase=action_execution operation=load_run code=original_decision_unavailable"
+	if got, ok := AdmitStored(s); !ok || got != s {
+		t.Errorf("AdmitStored(%q) = %q, %v", s, got, ok)
+	}
+	if g := GuardErrorText(s); g != s {
+		t.Errorf("GuardErrorText(%q) = %q", s, g)
+	}
+	for _, f := range []Facts{
+		{Phase: "unknown", Operation: "load_run", Code: "original_decision_unavailable"},
+		{Phase: "routing", Operation: "load_run", Code: "original_decision_unavailable"},
+		{Phase: "action_execution", Operation: "execute_action", Code: "original_decision_unavailable"},
+		{Phase: "action_execution", Operation: "load_run", Code: "original_decision_unavailable", Status: "500"},
+		{Phase: "action_execution", Operation: "load_run", Code: "original_decision_unavailable", Reason: "videoNotFound"},
+		{Phase: "action_execution", Operation: "load_run", Code: "original_decision_unavailable", SQLite: "SQLITE_BUSY"},
+	} {
+		if f.Valid() {
+			t.Errorf("Facts %+v must be invalid", f)
+		}
+	}
+}

@@ -209,6 +209,22 @@ export interface VideoOutcome {
   route_decisions?: RouteDecisionSummary[]
 }
 
+// An action this run sent for a video whose routing decision was made by an
+// earlier run (BR-039 partly done video; run-initiation ARS-006 §8.1).
+export interface ContinuedAction extends ActionOutcome {
+  decision_run_id: number
+  route_decision_id: number
+  route_id: number
+  // From the decision run's snapshot; null when it cannot be read.
+  route_name: string | null
+}
+
+// GET /api/runs/{id}/videos/{videoId}. continued_actions is an empty array
+// when the run continued no earlier decision.
+export interface RunVideoDetail extends VideoOutcome {
+  continued_actions: ContinuedAction[]
+}
+
 export interface UnresolvedMutation {
   action_type: RouteActionType
   target_playlist_id: string
@@ -527,6 +543,10 @@ export interface ErrorEntry {
   status: 'active' | 'retrying' | 'dismissed' | 'resolved'
   created_at: string
   retry_count: number
+  // 'final_outcome' when the entry was closed because its video already has a
+  // final outcome (BR-039); video_final_outcome is then set.
+  closed_reason?: 'final_outcome' | null
+  video_final_outcome?: VideoFinalOutcome
 }
 
 export type DeferredReason =
@@ -563,6 +583,8 @@ export interface DeferredItem {
   status: 'pending' | 'retrying' | 'completed' | 'discarded'
   created_at: string
   retry_count: number
+  closed_reason?: 'final_outcome' | null
+  video_final_outcome?: VideoFinalOutcome
 }
 
 export type ToastType = 'success' | 'error' | 'info'

@@ -6,7 +6,7 @@ tags: [architecture, specification, outcomes, lifecycle, retry, deferred-queue, 
 timestamp: 2026-11-12T00:00:00Z
 ---
 
-**Status:** accepted — exact implementation contract, not implemented. It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
+**Status:** accepted — exact implementation contract; step 1 (§1.1, §1.3, §2) implemented, the rest not (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
 
 It amends:
 
@@ -101,7 +101,7 @@ Alias `v` is a `video` row. "Production" means `run_type IN ('manual','scheduled
 
 ```go
 const FinalOutcomes = `'accepted','rejected','excluded','unavailable_on_youtube'`
-const FinalVideo = `(v.final_outcome IN (` + FinalOutcomes + `))`
+const FinalVideo = `(COALESCE(v.final_outcome, '') IN (` + FinalOutcomes + `))` // COALESCE: a NULL outcome is not final, and NOT FinalVideo is never NULL
 
 // productionSuccess(s) — s is an executed_action alias
 const prodSuccess = `s.action_type = 'playlist_insert' AND s.outcome = 'succeeded'
@@ -443,4 +443,14 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
 
 ## 12. Implementation record and deviations
 
-Not implemented.
+**Step 1 (foundation) — implemented 2026-11-12**, with tests F1, F3, F5 and the OriginalDecisionTx parts of F4:
+
+- §1.1 migration 027 (`internal/store/migrations/027_final_outcome_closing.up.sql`, no triggers);
+- §1.3 vocabulary: `queue.ClosedReasonFinalOutcome`, `ErrVideoAlreadyFinal`, `AlreadyFinalError`, `ClosedReason` and `VideoFinalOutcome` on `ErrorEntry` and `DeferredItem` (read by every queue select, `video_final_outcome` only when `closed_reason` is set), the queue JSON views, the `diag` code `original_decision_unavailable`, and `ClosedReason`, `VideoFinalOutcome`, `RunVideoDetail.continued_actions` in `web/src/types.ts`;
+- §2 `state.FinalVideo`, `PartlyDoneVideo`, `RoutableByRun`, `ClassifyVideoTx`, `OriginalDecisionTx` (`internal/state/final_outcome.go`).
+
+Not implemented: §1.2 migration 028, §3–§8, the `continued_actions` projection, `decisionAuthority`, F2, F4's `decisionAuthority` parts, K-series tests.
+
+**Deviation.** `FinalVideo` wraps the column in `COALESCE(v.final_outcome, '')`. `video.final_outcome` is nullable, and without it a NULL outcome makes `FinalVideo`, `NOT FinalVideo` and `PartlyDoneVideo` NULL, so `RoutableByRun` would drop every video with a NULL outcome. Classification is otherwise as specified.
+
+`ClassifyVideoTx` returns the stored `final_outcome` as its second value for every class (`""` when NULL), not only for `final`.

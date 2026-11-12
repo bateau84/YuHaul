@@ -287,22 +287,26 @@ type errorEntryView struct {
 	ResolvedAt        *time.Time    `json:"resolved_at,omitempty"`
 	RetryCount        int           `json:"retry_count"`
 	ReasonUnavailable bool          `json:"error_message_unavailable,omitempty"`
+	ClosedReason      *string       `json:"closed_reason"`
+	VideoFinalOutcome *string       `json:"video_final_outcome,omitempty"`
 }
 
 // unsafeText returns text unchanged when it is safe to expose, and "" plus an
 // unavailable flag when non-empty stored text fails vetting.
 func publicErrorEntry(e *ErrorEntry) errorEntryView {
 	view := errorEntryView{
-		RetryRunID:      e.RetryRunID,
-		ID:              e.ID,
-		VideoID:         e.VideoID,
-		ExternalVideoID: e.ExternalVideoID,
-		RunID:           e.RunID,
-		Category:        e.Category,
-		Status:          e.Status,
-		CreatedAt:       e.CreatedAt,
-		ResolvedAt:      e.ResolvedAt,
-		RetryCount:      e.RetryCount,
+		RetryRunID:        e.RetryRunID,
+		ID:                e.ID,
+		VideoID:           e.VideoID,
+		ExternalVideoID:   e.ExternalVideoID,
+		RunID:             e.RunID,
+		Category:          e.Category,
+		Status:            e.Status,
+		CreatedAt:         e.CreatedAt,
+		ResolvedAt:        e.ResolvedAt,
+		RetryCount:        e.RetryCount,
+		ClosedReason:      e.ClosedReason,
+		VideoFinalOutcome: e.VideoFinalOutcome,
 	}
 	var unavailable bool
 	view.Message, unavailable = diag.AdmitErrorText(e.Message)
@@ -327,6 +331,8 @@ type deferredItemView struct {
 	RetryCount                int             `json:"retry_count"`
 	Status                    DeferredStatus  `json:"status"`
 	CreatedAt                 time.Time       `json:"created_at"`
+	ClosedReason              *string         `json:"closed_reason"`
+	VideoFinalOutcome         *string         `json:"video_final_outcome,omitempty"`
 }
 
 func publicDeferredItem(item *DeferredItem) deferredItemView {
@@ -334,15 +340,17 @@ func publicDeferredItem(item *DeferredItem) deferredItemView {
 		return deferredItemView{}
 	}
 	view := deferredItemView{
-		RetryRunID:      item.RetryRunID,
-		ID:              item.ID,
-		VideoID:         item.VideoID,
-		ExternalVideoID: item.ExternalVideoID,
-		RunID:           item.RunID,
-		RetryAfter:      item.RetryAfter,
-		RetryCount:      item.RetryCount,
-		Status:          item.Status,
-		CreatedAt:       item.CreatedAt,
+		RetryRunID:        item.RetryRunID,
+		ID:                item.ID,
+		VideoID:           item.VideoID,
+		ExternalVideoID:   item.ExternalVideoID,
+		RunID:             item.RunID,
+		RetryAfter:        item.RetryAfter,
+		RetryCount:        item.RetryCount,
+		Status:            item.Status,
+		CreatedAt:         item.CreatedAt,
+		ClosedReason:      item.ClosedReason,
+		VideoFinalOutcome: item.VideoFinalOutcome,
 	}
 	if item.Reason == "" {
 		return view
