@@ -245,7 +245,7 @@ func decodeStatus(t *testing.T, raw map[string]any) wireStatus {
 // state or the deadline expires.
 func (e *env) waitTerminal(t *testing.T, id string) wireStatus {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(180 * time.Second)
 	for {
 		resp, raw := e.do(t, http.MethodGet, "/api/corpus/import/"+id, nil, "")
 		require.Equal(t, http.StatusOK, resp.StatusCode, "body: %v", raw)

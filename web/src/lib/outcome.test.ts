@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deriveBadge, deriveRouteDecision, deriveActionOutcome, formatDuration } from './outcome'
+import { deriveBadge, deriveRouteDecision, deriveActionOutcome, actionOutcomeReasonLabel, formatDuration } from './outcome'
 
 describe('deriveBadge', () => {
   it.each(['backtest', 'replay', 'dry_run'] as const)('uses requested-run outcomes for %s', (mode) => {
@@ -68,8 +68,8 @@ describe('deriveRouteDecision', () => {
     })
     expect(deriveRouteDecision('skipped', 'exclusion')).toEqual({
       variant: 'not-evaluated',
-      label: 'Skipped',
-      reason: 'This video matched a route-scoped exclusion rule',
+      label: 'Skipped — excluded from this route.',
+      reason: 'Route exclusion recorded; specific rule and compared input unavailable.',
     })
     expect(deriveRouteDecision('skipped', 'disabled')).toEqual({
       variant: 'not-evaluated',
@@ -92,6 +92,26 @@ describe('deriveActionOutcome', () => {
   })
 })
 
+describe('actionOutcomeReasonLabel', () => {
+  it('renders the recorded no-attempt reasons as run-scoped evidence', () => {
+    expect(actionOutcomeReasonLabel('already_completed')).toBe(
+      'Not attempted in this run — already completed by an earlier run',
+    )
+    expect(actionOutcomeReasonLabel('quota_exhausted')).toBe(
+      'Not attempted — the daily quota was exhausted before this action could run',
+    )
+    expect(actionOutcomeReasonLabel('prior_action_failed')).toBe(
+      'Not attempted in this run — an earlier action on this video failed',
+    )
+  })
+
+  // Unknown reasons are server-vetted safe text: render verbatim, never
+  // invent an interpretation.
+  it('renders an unknown reason verbatim', () => {
+    expect(actionOutcomeReasonLabel('some_future_reason')).toBe('some_future_reason')
+  })
+})
+
 describe('formatDuration', () => {
   it('formats seconds as m:ss', () => {
     expect(formatDuration(184)).toBe('3:04')
@@ -101,5 +121,16 @@ describe('formatDuration', () => {
 
   it('returns em dash for missing values', () => {
     expect(formatDuration(undefined)).toBe('—')
+  })
+})
+
+describe('deriveBadge unavailable_on_youtube (BR-032 AC1)', () => {
+  it('is its own final category for production runs', () => {
+    expect(deriveBadge('completed', 'unavailable_on_youtube', 'scheduled')).toEqual({ variant: 'unavailable', label: 'Unavailable on YouTube' })
+    expect(deriveBadge('evaluated', 'unavailable_on_youtube')).toEqual({ variant: 'unavailable', label: 'Unavailable on YouTube' })
+  })
+
+  it('falls back for a simulation row, which never produces it', () => {
+    expect(deriveBadge('completed', 'unavailable_on_youtube', 'dry_run')).toEqual({ variant: 'not-evaluated', label: 'Outcome unavailable' })
   })
 })

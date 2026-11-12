@@ -3,13 +3,196 @@ package quota
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/store"
 )
+
+func TestAdmitIfRevalidatesAfterScheduleRead(t *testing.T) {
+	for _, scenario := range []string{"expired", "replaced", "valid"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			l, db := newTestLedger(t)
+			if err := l.SetDailyLimit(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+			before := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+			var clock atomic.Int64
+			clock.Store(before.UnixNano())
+			l.now = func() time.Time { return time.Unix(0, clock.Load()) }
+			h, err := l.Acquire(ctx, OpVideosList)
+			if err != nil || h == nil {
+				t.Fatalf("acquire: %v, %v", h, err)
+			}
+			db.SetMaxOpenConns(1)
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waits := db.Stats().WaitCount
+			var generation atomic.Int64
+			generation.Store(1)
+			refused := errors.New("authority invalid")
+			done := make(chan error, 1)
+			go func() {
+				done <- h.AdmitIf(ctx, func(at time.Time) error {
+					if !at.Before(before.Add(time.Second)) || generation.Load() != 1 {
+						return refused
+					}
+					return nil
+				})
+			}()
+			for db.Stats().WaitCount == waits {
+				select {
+				case <-ctx.Done():
+					_ = conn.Close()
+					t.Fatal("admission did not reach schedule read")
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+			if scenario == "expired" {
+				clock.Store(before.Add(time.Second).UnixNano())
+			}
+			if scenario == "replaced" {
+				generation.Store(2)
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			err = <-done
+			if scenario != "valid" {
+				if !errors.Is(err, refused) {
+					t.Fatalf("admit error = %v", err)
+				}
+				if err := h.Cancel(); err != nil {
+					t.Fatal(err)
+				}
+				consumed, err := l.ConsumedOn(ctx, "2026-01-02")
+				if err != nil || consumed != 0 {
+					t.Fatalf("consumed = %d, %v", consumed, err)
+				}
+				next, err := l.Acquire(ctx, OpVideosList)
+				if err != nil || next == nil {
+					t.Fatalf("capacity not released: %v, %v", next, err)
+				}
+				if err := next.Cancel(); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !h.AdmissionTime().Equal(before) {
+				t.Fatalf("admission time = %v", h.AdmissionTime())
+			}
+			if err := h.Cancel(); err == nil {
+				t.Fatal("admitted hold was cancelled")
+			}
+			if next, err := l.Acquire(ctx, OpVideosList); err != nil || next != nil {
+				t.Fatalf("admitted capacity not held: %v, %v", next, err)
+			}
+			if err := h.Finalize(ctx, sql.NullInt64{}, OutcomeSuccess, sql.NullInt64{}); err != nil {
+				t.Fatal(err)
+			}
+			if next, err := l.Acquire(ctx, OpVideosList); err != nil || next != nil {
+				t.Fatalf("committed capacity not held: %v, %v", next, err)
+			}
+			consumed, err := l.ConsumedOn(ctx, "2026-01-02")
+			if err != nil || consumed != 1 {
+				t.Fatalf("consumed = %d, %v", consumed, err)
+			}
+		})
+	}
+}
+
+func TestAdmitIfCancellationDuringValidation(t *testing.T) {
+	l, _ := newTestLedger(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h, err := l.Acquire(ctx, OpVideosList)
+	if err != nil || h == nil {
+		t.Fatalf("acquire: %v, %v", h, err)
+	}
+	err = h.AdmitIf(ctx, func(time.Time) error { cancel(); return nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("admission error = %v, want context.Canceled", err)
+	}
+	if err := h.Cancel(); err != nil {
+		t.Fatalf("cancel provisional hold: %v", err)
+	}
+}
+
+func TestAdmitScheduleReadCrossesReset(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	l, db := newTestLedger(t)
+	if err := l.SetResetSchedule(ctx, "UTC", "06:00"); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Date(2026, 1, 2, 5, 59, 59, 0, time.UTC)
+	after := before.Add(2 * time.Second)
+	var clock atomic.Int64
+	clock.Store(before.UnixNano())
+	l.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	h, err := l.Acquire(ctx, OpVideosList)
+	if err != nil || h == nil {
+		t.Fatalf("acquire: hold=%v err=%v", h, err)
+	}
+
+	// Occupy the only connection so the real schedule read waits across reset.
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waits := db.Stats().WaitCount
+	done := make(chan error, 1)
+	go func() { done <- h.Admit(ctx) }()
+	for db.Stats().WaitCount == waits {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+			t.Fatal("admission did not reach the SQLite read")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	clock.Store(after.UnixNano())
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("admitted a hold from the previous bucket")
+	}
+	if err := h.Cancel(); err != nil {
+		t.Fatalf("refused hold must remain cancellable: %v", err)
+	}
+	h, err = l.Acquire(ctx, OpVideosList)
+	if err != nil || h == nil {
+		t.Fatalf("acquire current bucket: hold=%v err=%v", h, err)
+	}
+	if err := h.Admit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !h.AdmissionTime().Equal(after) {
+		t.Fatalf("admission time = %v, want %v", h.AdmissionTime(), after)
+	}
+	if err := h.Finalize(ctx, sql.NullInt64{}, OutcomeSuccess, sql.NullInt64{}); err != nil {
+		t.Fatal(err)
+	}
+	consumed, err := l.ConsumedOn(ctx, "2026-01-02")
+	if err != nil || consumed != 1 {
+		t.Fatalf("current bucket consumed = %d, err = %v", consumed, err)
+	}
+}
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -91,6 +274,143 @@ func TestRecordCalls(t *testing.T) {
 	}
 	if consumed != 5 {
 		t.Errorf("consumed = %d, want 5", consumed)
+	}
+}
+
+func TestRecordAttempt(t *testing.T) {
+	ctx := context.Background()
+	l, db := newTestLedger(t)
+	if err := l.SetResetSchedule(ctx, "UTC", "06:00"); err != nil {
+		t.Fatal(err)
+	}
+	// This is before the reset, so completion on a later day must not move it
+	// to the current bucket.
+	admitted := time.Date(2020, 1, 2, 5, 59, 0, 123, time.UTC)
+	runID := seedRun(t, db)
+	categories := []OutcomeCategory{OutcomeSuccess, OutcomeQuota, OutcomeTransient, OutcomeAuth, OutcomePermanent}
+	for i, category := range categories {
+		status := sql.NullInt64{Int64: 401, Valid: i != 2}
+		if err := l.RecordAttempt(ctx, sql.NullInt64{Int64: runID, Valid: true}, OpVideosList, admitted, category, status); err != nil {
+			t.Fatalf("record %s: %v", category, err)
+		}
+	}
+	if err := l.RecordCalls(ctx, sql.NullInt64{}, OpVideosList, 2); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.QueryContext(ctx, `SELECT date, operation_type, units_consumed, call_count, run_id, recorded_at, outcome_category, http_status FROM quota_ledger ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for i, category := range categories {
+		if !rows.Next() {
+			t.Fatalf("missing row %d: %v", i, rows.Err())
+		}
+		var date, operation string
+		var units, count int
+		var gotRun, status sql.NullInt64
+		var at time.Time
+		var gotCategory sql.NullString
+		if err := rows.Scan(&date, &operation, &units, &count, &gotRun, &at, &gotCategory, &status); err != nil {
+			t.Fatal(err)
+		}
+		if date != "2020-01-01" || operation != string(OpVideosList) || units != 1 || count != 1 || !gotRun.Valid || gotRun.Int64 != runID || !at.Equal(admitted) || !gotCategory.Valid || gotCategory.String != string(category) || status.Valid != (i != 2) || (status.Valid && status.Int64 != 401) {
+			t.Fatalf("unexpected attempt %d: %s %s %d %d %+v %s %+v %+v", i, date, operation, units, count, gotRun, at, gotCategory, status)
+		}
+	}
+	if !rows.Next() {
+		t.Fatal("missing legacy-style record")
+	}
+	var date, operation string
+	var units, count int
+	var gotRun, status sql.NullInt64
+	var at time.Time
+	var category sql.NullString
+	if err := rows.Scan(&date, &operation, &units, &count, &gotRun, &at, &category, &status); err != nil {
+		t.Fatal(err)
+	}
+	if category.Valid || status.Valid || units != 2 || count != 2 {
+		t.Fatalf("legacy-style record: category=%+v status=%+v units=%d count=%d", category, status, units, count)
+	}
+	if rows.Next() || rows.Err() != nil {
+		t.Fatalf("unexpected extra rows: %v", rows.Err())
+	}
+	if got, err := l.ConsumedOn(ctx, "2020-01-01"); err != nil || got != len(categories) {
+		t.Fatalf("historical consumption = %d, %v", got, err)
+	}
+	if got, err := l.ConsumedByRun(ctx, runID); err != nil || got != len(categories) {
+		t.Fatalf("run consumption = %d, %v", got, err)
+	}
+}
+
+func TestRecordAttemptRejectsInvalidAndCanceled(t *testing.T) {
+	l, db := newTestLedger(t)
+	ctx := context.Background()
+	if err := l.RecordAttempt(ctx, sql.NullInt64{}, OpVideosList, time.Time{}, OutcomeSuccess, sql.NullInt64{}); err == nil {
+		t.Fatal("zero admission time accepted")
+	}
+	if err := l.RecordAttempt(ctx, sql.NullInt64{}, OpVideosList, time.Now(), "invalid", sql.NullInt64{}); err == nil {
+		t.Fatal("invalid category accepted")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := l.RecordAttempt(canceled, sql.NullInt64{}, OpVideosList, time.Now(), OutcomeTransient, sql.NullInt64{}); err == nil {
+		t.Fatal("canceled recording accepted")
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM quota_ledger`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("row count = %d, %v", count, err)
+	}
+}
+
+func TestAttemptMigrationPreservesLegacyRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, statement := range []string{
+		`CREATE TABLE schema_migrations (version uint64, dirty bool)`,
+		`INSERT INTO schema_migrations VALUES (22, false)`,
+		// Migrations 024 and 025 alter run and rebuild deferred_item; the fixture
+		// needs those tables, and run with its status CHECK for the 025 schema step.
+		`CREATE TABLE run (id INTEGER PRIMARY KEY, run_type TEXT, status TEXT CHECK(status IN ('running', 'completed', 'interrupted', 'failed')))`,
+		`CREATE TABLE deferred_item (id INTEGER PRIMARY KEY, video_id INTEGER, run_id INTEGER, deferral_reason TEXT, retry_after TIMESTAMP, retry_count INTEGER, status TEXT, created_at TIMESTAMP, retry_run_id INTEGER)`,
+		// Migration 026 indexes error_entry and its schema step widens the final_outcome
+		// CHECKs of video and run_video_outcome, so the fixture needs all three.
+		`CREATE TABLE error_entry (id INTEGER PRIMARY KEY, video_id INTEGER, status TEXT)`,
+		`CREATE TABLE video (id INTEGER PRIMARY KEY, final_outcome TEXT CHECK(final_outcome IN ('accepted', 'rejected', 'excluded', 'deferred', 'failed', 'not_yet_evaluated')))`,
+		`CREATE TABLE run_video_outcome (run_id INTEGER, video_id INTEGER, final_outcome TEXT CHECK (final_outcome IS NULL OR final_outcome IN ('accepted','rejected','excluded','deferred','failed','not_yet_evaluated')))`,
+		`CREATE TABLE quota_ledger (id INTEGER PRIMARY KEY, date TEXT, operation_type TEXT, units_consumed INTEGER, call_count INTEGER, run_id INTEGER, recorded_at DATETIME)`,
+		`INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, recorded_at) VALUES ('2020-01-01', 'videos_list', 3, 3, '2020-01-01T00:00:00Z')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var category sql.NullString
+	var status sql.NullInt64
+	var units int
+	if err := db.QueryRow(`SELECT outcome_category, http_status, units_consumed FROM quota_ledger`).Scan(&category, &status, &units); err != nil {
+		t.Fatal(err)
+	}
+	if category.Valid || status.Valid || units != 3 {
+		t.Fatalf("legacy row: category=%+v status=%+v units=%d", category, status, units)
+	}
+	if got, err := New(db).ConsumedOn(context.Background(), "2020-01-01"); err != nil || got != 3 {
+		t.Fatalf("legacy consumption = %d, %v", got, err)
 	}
 }
 
@@ -380,5 +700,125 @@ func TestCanAffordUnlimited(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Errorf("remaining = %d, want 0", remaining)
+	}
+}
+
+func TestReservationsLastUnitAndCancellation(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newTestLedger(t)
+	if err := l.SetDailyLimit(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	const n = 20
+	results := make(chan *Hold, n)
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() { h, err := l.Acquire(ctx, OpVideosList); results <- h; errs <- err }()
+	}
+	var winner *Hold
+	for i := 0; i < n; i++ {
+		h := <-results
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+		if h != nil {
+			if winner != nil {
+				t.Fatal("multiple reservations")
+			}
+			winner = h
+		}
+	}
+	if winner == nil {
+		t.Fatal("no reservation")
+	}
+	if ok, _, err := l.CanAfford(ctx, 1); err != nil || ok {
+		t.Fatalf("held preflight: %v %v", ok, err)
+	}
+	if err := winner.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	h, err := l.Acquire(ctx, OpVideosList)
+	if err != nil || h == nil {
+		t.Fatalf("acquire after cancel: %v", err)
+	}
+	if err := h.Admit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Cancel(); err == nil {
+		t.Fatal("cancel admitted")
+	}
+	if err := h.Finalize(ctx, sql.NullInt64{}, OutcomeTransient, sql.NullInt64{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Finalize(ctx, sql.NullInt64{}, OutcomeTransient, sql.NullInt64{}); err == nil {
+		t.Fatal("duplicate finalize")
+	}
+	if n, err := l.ConsumedToday(ctx); err != nil || n != 1 {
+		t.Fatalf("consumed %d: %v", n, err)
+	}
+}
+
+func TestReservationRecordingFailureKeepsDebit(t *testing.T) {
+	ctx := context.Background()
+	l, db := newTestLedger(t)
+	if err := l.SetDailyLimit(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	h, err := l.Acquire(ctx, OpVideosList)
+	if err != nil || h == nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := h.Admit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_quota BEFORE INSERT ON quota_ledger BEGIN SELECT RAISE(FAIL, 'failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Finalize(ctx, sql.NullInt64{}, OutcomeSuccess, sql.NullInt64{}); err == nil {
+		t.Fatal("expected recording failure")
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_quota`); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Finalize(ctx, sql.NullInt64{}, OutcomeSuccess, sql.NullInt64{}); err == nil {
+		t.Fatal("unsafe retry")
+	}
+	next, err := l.Acquire(ctx, OpVideosList)
+	if err != nil || next != nil {
+		t.Fatalf("failed debit lost: %v %v", next, err)
+	}
+	if n, err := l.ConsumedToday(ctx); err != nil || n != 0 {
+		t.Fatalf("fabricated row %d: %v", n, err)
+	}
+}
+
+func TestReservationRetainsBucketAfterRollover(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newTestLedger(t)
+	if err := l.SetDailyLimit(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 1, 1, 23, 59, 0, 0, time.UTC)
+	l.now = func() time.Time { return now }
+	h, err := l.Acquire(ctx, OpVideosList)
+	if err != nil || h == nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := h.Admit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Minute)
+	next, err := l.Acquire(ctx, OpVideosList)
+	if err != nil || next == nil {
+		t.Fatalf("new bucket: %v", err)
+	}
+	if err := next.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Finalize(ctx, sql.NullInt64{}, OutcomeSuccess, sql.NullInt64{}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := l.ConsumedOn(ctx, "2026-01-01"); err != nil || n != 1 {
+		t.Fatalf("original bucket %d: %v", n, err)
 	}
 }

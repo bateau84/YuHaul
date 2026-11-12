@@ -7,15 +7,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/diag"
+	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/pipeline"
+	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 )
@@ -26,14 +31,20 @@ import (
 // to internal integer keys in its single proposal-ingest transaction
 // (ADR-012).
 type Pipeline interface {
-	StartRun(ctx context.Context, runType state.RunType) (*state.Run, error)
-	Execute(ctx context.Context, runID int64)
+	AdmitRunNow(ctx context.Context) (*pipeline.RunNowAdmission, error)
 	DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error)
 	ExecuteDryRun(ctx context.Context, runID int64)
-	Replay(ctx context.Context, configVersionID *int64) (*state.Run, error)
+	Replay(ctx context.Context, configVersionID *int64, rng state.PublishedRange) (*state.Run, error)
 	ExecuteReplay(ctx context.Context, runID int64)
-	Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error)
+	Backtest(ctx context.Context, proposed *config.ProposalSnapshot, rng state.PublishedRange) (*state.Run, error)
 	ExecuteBacktest(ctx context.Context, runID int64)
+	StopRun(ctx context.Context, runID int64) (*pipeline.StopResult, error)
+	DiscardRun(ctx context.Context, runID int64) (*pipeline.DiscardResult, error)
+	DiscardableRun(ctx context.Context) (runID int64, cause string, ok bool, err error)
+	PrecheckEndLegacyRun(ctx context.Context, runID int64) error
+	EndLegacyRun(ctx context.Context, runID int64) (*pipeline.EndResult, error)
+	EndableRuns(ctx context.Context) (map[int64]bool, error)
+	ExecutingRuns() map[int64]bool
 }
 
 // ConfigHandler is the subset of config.Handler used by the server.
@@ -83,7 +94,10 @@ type RunVideoStore interface {
 	GetVideoByExternalIDInRun(ctx context.Context, runID int64, videoID string) (*state.Video, error)
 	GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.RouteDecision, error)
 	GetConditionAuditsForDecision(ctx context.Context, decisionID int64) ([]state.ConditionAudit, error)
+	ListFailedConditionIndexes(ctx context.Context, decisionIDs []int64) (map[int64][]int, error)
 	GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.ExecutedAction, error)
+	ListUnresolvedMutations(ctx context.Context, runID int64, videoIDs []int64) (map[int64][]state.UnresolvedMutation, error)
+	ListContinuedActions(ctx context.Context, runID, videoID int64) ([]state.ContinuedAction, error)
 }
 
 // ConfigVersionStore is the subset of config.Store used by the run handlers.
@@ -128,20 +142,136 @@ type Playlist struct {
 
 // Server serves the YuHaul REST API and SSE endpoints.
 type Server struct {
-	pipeline            Pipeline
-	broadcast           *pipeline.Broadcaster
-	configHandler       ConfigHandler
-	analyticsHandler    AnalyticsHandler
-	advisoryHandler     AnalyticsHandler
-	queueHandler        QueueHandler
-	routeStore          RouteStore
-	runStore            RunStore
-	runVideoStore       RunVideoStore
+	pipeline         Pipeline
+	broadcast        *pipeline.Broadcaster
+	configHandler    ConfigHandler
+	analyticsHandler AnalyticsHandler
+	advisoryHandler  AnalyticsHandler
+	queueHandler     QueueHandler
+	routeStore       RouteStore
+	runStore         RunStore
+	runVideoStore    RunVideoStore
+	videoSearch      VideoSearcher
+	metadataReader   interface {
+		ReadLocalDisplay(context.Context, []string) (map[string]metadata.LocalDisplay, error)
+	}
 	configVersionStore  ConfigVersionStore
 	overviewProvider    OverviewProvider
 	playlistProvider    PlaylistProvider
 	corpusImportHandler CorpusImportHandler
 	logger              *slog.Logger
+
+	// runBase parents every manual production run (ADR-007 §3.4). Cancelling
+	// it interrupts the runs; WaitRuns waits for them to stop.
+	runBase context.Context
+	// runTimeLimit bounds one Run Now execution (defaultRunTimeLimit).
+	runTimeLimit time.Duration
+	runMu        sync.Mutex
+	runWG        sync.WaitGroup
+	closing      bool
+}
+
+// WithRunContext derives manual production runs from ctx so process shutdown
+// interrupts them. The default is context.Background().
+func WithRunContext(ctx context.Context) Option {
+	return func(s *Server) {
+		if ctx != nil {
+			s.runBase = ctx
+		}
+	}
+}
+
+// defaultRunTimeLimit is how long one Run Now execution may run before it is
+// interrupted with the time-limit cause.
+const defaultRunTimeLimit = 30 * time.Minute
+
+// WithRunTimeLimit overrides the Run Now execution time limit. It exists so
+// tests can reach the real expiry path; production uses defaultRunTimeLimit.
+func WithRunTimeLimit(d time.Duration) Option {
+	return func(s *Server) {
+		if d > 0 {
+			s.runTimeLimit = d
+		}
+	}
+}
+
+// trackRun registers one manual run goroutine. It reports false once shutdown
+// has begun (the run context is cancelled or WaitRuns has started), so no new
+// run starts during shutdown.
+func (s *Server) trackRun() bool {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if s.closing || s.runBase.Err() != nil {
+		return false
+	}
+	s.runWG.Add(1)
+	return true
+}
+
+// shuttingDown reports, without registering a run, whether trackRun would
+// refuse because shutdown has begun.
+func (s *Server) shuttingDown() bool {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.closing || s.runBase.Err() != nil
+}
+
+// WaitRuns stops accepting manual runs and waits until the active ones return
+// or ctx ends.
+func (s *Server) WaitRuns(ctx context.Context) error {
+	s.runMu.Lock()
+	s.closing = true
+	s.runMu.Unlock()
+	done := make(chan struct{})
+	go func() { s.runWG.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// RetryCoordinator wraps inner so a queue retry joins the shutdown lifecycle
+// of manual runs (ADR-007 §3.4). The retry runs on a context derived from the
+// run context, not from the request: a client disconnect does not stop it,
+// while process shutdown interrupts it and WaitRuns waits for it. Once
+// shutdown has begun, a new retry is refused with queue.ErrShuttingDown.
+func (s *Server) RetryCoordinator(inner queue.RetryCoordinator) queue.RetryCoordinator {
+	return trackedRetries{s: s, inner: inner}
+}
+
+type trackedRetries struct {
+	s     *Server
+	inner queue.RetryCoordinator
+}
+
+func (t trackedRetries) RetryQueueEntry(_ context.Context, id int64, errorQueue bool) error {
+	if !t.s.trackRun() {
+		return queue.ErrShuttingDown
+	}
+	defer t.s.runWG.Done()
+	ctx, cancel := context.WithTimeout(t.s.runBase, 30*time.Minute)
+	defer cancel()
+	err := t.inner.RetryQueueEntry(ctx, id, errorQueue)
+	if err != nil && t.s.runBase.Err() != nil {
+		// Shutdown cancelled the retry (possibly before it created its run).
+		// Report the same refusal as a retry that arrives during the drain, not
+		// a server failure; any run it created is already `interrupted`.
+		return queue.ErrShuttingDown
+	}
+	return err
+}
+
+// WithMetadataReader enables best-effort current/local Store A display context.
+func WithMetadataReader(reader interface {
+	ReadLocalDisplay(context.Context, []string) (map[string]metadata.LocalDisplay, error)
+}) Option {
+	return func(s *Server) {
+		if reader != nil {
+			s.metadataReader = reader
+		}
+	}
 }
 
 // Option configures a Server.
@@ -270,11 +400,14 @@ func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Optio
 		routeStore:          noopRouteStore{},
 		runStore:            noopRunStore{},
 		runVideoStore:       noopRunVideoStore{},
+		videoSearch:         noopVideoSearcher{},
 		configVersionStore:  noopConfigVersionStore{},
 		overviewProvider:    noopOverviewProvider{},
 		playlistProvider:    noopPlaylistProvider{},
 		corpusImportHandler: noopCorpusImportHandler{},
 		logger:              slog.Default(),
+		runBase:             context.Background(),
+		runTimeLimit:        defaultRunTimeLimit,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -349,7 +482,16 @@ func (noopRunVideoStore) GetRouteDecisionsForVideoInRun(context.Context, int64, 
 func (noopRunVideoStore) GetConditionAuditsForDecision(context.Context, int64) ([]state.ConditionAudit, error) {
 	return nil, errors.New("run video store not configured")
 }
+func (noopRunVideoStore) ListFailedConditionIndexes(context.Context, []int64) (map[int64][]int, error) {
+	return nil, errors.New("run video store not configured")
+}
 func (noopRunVideoStore) GetExecutedActionsForVideoInRun(context.Context, int64, int64) ([]state.ExecutedAction, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) ListContinuedActions(context.Context, int64, int64) ([]state.ContinuedAction, error) {
+	return nil, errors.New("run video store not configured")
+}
+func (noopRunVideoStore) ListUnresolvedMutations(context.Context, int64, []int64) (map[int64][]state.UnresolvedMutation, error) {
 	return nil, errors.New("run video store not configured")
 }
 
@@ -406,6 +548,9 @@ func (noopQueueHandler) DeferredHandler() http.Handler {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/runs", s.handleStartRun)
+	mux.HandleFunc("POST /api/runs/{id}/stop", s.handleStopRun)
+	mux.HandleFunc("POST /api/runs/{id}/discard", s.handleDiscardRun)
+	mux.HandleFunc("POST /api/runs/{id}/end", s.handleEndRun)
 	mux.HandleFunc("POST /api/runs/dry-run", s.handleDryRun)
 	mux.HandleFunc("POST /api/runs/replay", s.handleReplay)
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
@@ -414,6 +559,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/videos", s.handleListRunVideos)
 	mux.HandleFunc("GET /api/runs/{id}/videos/{videoId}", s.handleGetRunVideo)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
+	mux.HandleFunc("GET /api/videos/search", s.handleVideoSearch)
+	mux.HandleFunc("GET /api/videos/{videoId}", s.handleGetVideo)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/playlists", s.handleListPlaylists)
 
@@ -489,25 +636,53 @@ func stripPrefix(prefix string, h http.Handler) http.Handler {
 	})
 }
 
+// handleStartRun is Run Now. One press either resumes the oldest Run Now run
+// that stopped at its time limit, starts a new run, or is refused with a
+// reason (run-initiation ADR-001, ARS-001 §3.1). A refusal changes nothing.
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
-	run, err := s.pipeline.StartRun(r.Context(), state.RunTypeManual)
+	if !s.trackRun() {
+		writeError(w, http.StatusServiceUnavailable, "server is shutting down")
+		return
+	}
+	admission, err := s.pipeline.AdmitRunNow(r.Context())
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to start run", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to start run")
+		s.runWG.Done()
+		var unavailable *pipeline.ResumeUnavailableError
+		switch {
+		case errors.Is(err, pipeline.ErrStartupRecoveryActive):
+			writeError(w, http.StatusServiceUnavailable, pipeline.ErrStartupRecoveryActive.Error())
+		case errors.Is(err, pipeline.ErrProductionRunActive):
+			writeErrorCode(w, http.StatusConflict, "production_run_active", pipeline.ErrProductionRunActive.Error(), nil)
+		case errors.As(err, &unavailable):
+			s.logger.WarnContext(r.Context(), "run now refused", "code", "resume_unavailable", "run_id", unavailable.RunID, "reason", unavailable.Reason)
+			writeErrorCode(w, http.StatusConflict, "resume_unavailable",
+				fmt.Sprintf("run %d stopped at its time limit but cannot be resumed safely; no new run was started", unavailable.RunID),
+				map[string]any{"run_id": unavailable.RunID, "reason": unavailable.Reason})
+		default:
+			s.logger.ErrorContext(r.Context(), "failed to start run", "diagnostic", diag.Encode(err, "unknown", "start_run"))
+			writeError(w, http.StatusInternalServerError, "failed to start run")
+		}
 		return
 	}
 
 	// Execute the pipeline asynchronously so the HTTP response returns
-	// immediately with the run ID.
+	// immediately with the run ID. The admission holds the production lock
+	// until Execute returns.
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer s.runWG.Done()
+		ctx, cancel := context.WithTimeoutCause(s.runBase, s.runTimeLimit, pipeline.ErrRunTimeLimit)
 		defer cancel()
-		s.pipeline.Execute(ctx, run.ID)
+		admission.Execute(ctx)
 	}()
 
+	outcome := "started"
+	if admission.Resumed() {
+		outcome = "resumed"
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"run_id": run.ID,
-		"status": string(run.Status),
+		"run_id":    admission.RunID(),
+		"status":    string(state.RunStatusRunning),
+		"admission": outcome,
 	})
 }
 
@@ -516,7 +691,7 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		DraftConfiguration *proposalRequest `json:"draft_configuration"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
-		s.logger.ErrorContext(r.Context(), "failed to decode dry-run body", "error", err)
+		s.logger.ErrorContext(r.Context(), "failed to decode dry-run body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -541,7 +716,13 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 
 	run, err := s.pipeline.DryRun(r.Context(), draft)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to start dry-run", "error", err)
+		if errors.Is(err, pipeline.ErrInvalidProposal) {
+			// Fixed classification only: the error text is never logged or returned.
+			s.logger.WarnContext(r.Context(), "rejected invalid dry-run proposal", "class", "invalid_proposal", "operation", "start_run")
+			writeError(w, http.StatusBadRequest, "invalid proposal configuration")
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "failed to start dry-run", "diagnostic", diag.Encode(err, "unknown", "start_run"))
 		writeError(w, http.StatusInternalServerError, "failed to start dry-run")
 		return
 	}
@@ -560,30 +741,45 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
-	var cfgID *int64
+	// The range is accepted only in the body, so it is never silently ignored.
+	q := r.URL.Query()
+	if q.Has("published_from") || q.Has("published_to") {
+		writeInvalidDateRange(w, "invalid date range: send published_from/published_to in the request body", nil)
+		return
+	}
 
-	if q := r.URL.Query().Get("config_version_id"); q != "" {
+	var body struct {
+		ConfigVersionID *int64   `json:"config_version_id"`
+		PublishedFrom   dayField `json:"published_from"`
+		PublishedTo     dayField `json:"published_to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		s.logger.ErrorContext(r.Context(), "failed to decode replay body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	rng, ok := parseRequestedRange(w, body.PublishedFrom, body.PublishedTo)
+	if !ok {
+		return
+	}
+
+	cfgID := body.ConfigVersionID
+	if q := q.Get("config_version_id"); q != "" {
 		id, err := strconv.ParseInt(q, 10, 64)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid config_version_id")
 			return
 		}
 		cfgID = &id
-	} else {
-		var body struct {
-			ConfigVersionID *int64 `json:"config_version_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
-			s.logger.ErrorContext(r.Context(), "failed to decode replay body", "error", err)
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-		cfgID = body.ConfigVersionID
 	}
 
-	run, err := s.pipeline.Replay(r.Context(), cfgID)
+	run, err := s.pipeline.Replay(r.Context(), cfgID, rng)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to start replay", "error", err)
+		if errors.Is(err, pipeline.ErrInvalidDateRange) {
+			writeInvalidDateRange(w, "invalid date range", nil)
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "failed to start replay", "diagnostic", diag.Encode(err, "unknown", "start_run"))
 		if errors.Is(err, state.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "config version not found")
 			return
@@ -608,10 +804,16 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ProposedConfiguration *proposalRequest `json:"proposed_configuration"`
+		PublishedFrom         dayField         `json:"published_from"`
+		PublishedTo           dayField         `json:"published_to"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to decode backtest body", "error", err)
+		s.logger.ErrorContext(r.Context(), "failed to decode backtest body", "diagnostic", diag.Encode(err, "unknown", "select_inputs"))
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	rng, ok := parseRequestedRange(w, body.PublishedFrom, body.PublishedTo)
+	if !ok {
 		return
 	}
 
@@ -637,9 +839,19 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.pipeline.Backtest(r.Context(), proposed)
+	run, err := s.pipeline.Backtest(r.Context(), proposed, rng)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "failed to start backtest", "error", err)
+		if errors.Is(err, pipeline.ErrInvalidDateRange) {
+			writeInvalidDateRange(w, "invalid date range", nil)
+			return
+		}
+		if errors.Is(err, pipeline.ErrInvalidProposal) {
+			// Fixed classification only: the error text is never logged or returned.
+			s.logger.WarnContext(r.Context(), "rejected invalid backtest proposal", "class", "invalid_proposal", "operation", "start_run")
+			writeError(w, http.StatusBadRequest, "invalid proposal configuration")
+			return
+		}
+		s.logger.ErrorContext(r.Context(), "failed to start backtest", "diagnostic", diag.Encode(err, "unknown", "start_run"))
 		writeError(w, http.StatusInternalServerError, "failed to start backtest")
 		return
 	}
@@ -660,14 +872,19 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	runs, err := s.runStore.ListRuns(r.Context())
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "list runs failed", "error", err)
+		s.logger.ErrorContext(r.Context(), "list runs failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to list runs")
 		return
 	}
 	if runs == nil {
 		runs = []state.Run{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+	d := s.readView(r.Context())
+	projected := make([]any, 0, len(runs))
+	for _, run := range runs {
+		projected = append(projected, s.projectRun(r.Context(), run, d))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": projected})
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
@@ -683,21 +900,21 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
-		s.logger.ErrorContext(r.Context(), "get run failed", "error", err, "id", id)
+		s.logger.ErrorContext(r.Context(), "get run failed", "run_id", id, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load run")
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	writeJSON(w, http.StatusOK, s.projectRun(r.Context(), *run, s.readView(r.Context())))
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	overview, err := s.overviewProvider.Overview(r.Context())
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "overview failed", "error", err)
+		s.logger.ErrorContext(r.Context(), "overview failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load overview")
 		return
 	}
-	writeJSON(w, http.StatusOK, overview)
+	writeJSON(w, http.StatusOK, s.projectOverview(r.Context(), overview))
 }
 
 func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
@@ -746,11 +963,11 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := writeSSE(w, ev); err != nil {
-				s.logger.DebugContext(r.Context(), "sse write failed", "error", err)
+				s.logger.DebugContext(r.Context(), "sse write failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 				return
 			}
 			flusher.Flush()
-			if ev.Type == pipeline.EventRunCompleted || ev.Type == pipeline.EventRunError {
+			if ev.Type == pipeline.EventRunCompleted || ev.Type == pipeline.EventRunError || ev.Type == pipeline.EventRunStopped {
 				return
 			}
 		case <-ticker.C:
@@ -1483,4 +1700,51 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// dayField is an optional JSON calendar-day member: absent or null means
+// unbounded. A string is validated by state.ParsePublishedRange; any other
+// JSON type is kept as an empty string, which that parser rejects, so the
+// error names the right field in the right order.
+type dayField struct{ Value *string }
+
+func (d *dayField) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
+	var v string
+	if err := json.Unmarshal(b, &v); err != nil {
+		v = ""
+	}
+	d.Value = &v
+	return nil
+}
+
+// parseRequestedRange validates the request's range and answers 400
+// invalid_date_range itself when it is invalid, before anything is created.
+func parseRequestedRange(w http.ResponseWriter, from, to dayField) (state.PublishedRange, bool) {
+	rng, rerr := state.ParsePublishedRange(from.Value, to.Value)
+	if rerr != nil {
+		var field *string
+		if rerr.Field != "" {
+			field = &rerr.Field
+		}
+		writeInvalidDateRange(w, "invalid date range: "+rerr.Error(), field)
+		return state.PublishedRange{}, false
+	}
+	return rng, true
+}
+
+func writeInvalidDateRange(w http.ResponseWriter, message string, field *string) {
+	writeErrorCode(w, http.StatusBadRequest, "invalid_date_range", message, map[string]any{"field": field})
+}
+
+// writeErrorCode is writeError plus a stable machine-readable code and any
+// extra closed fields (never raw error text).
+func writeErrorCode(w http.ResponseWriter, status int, code, message string, extra map[string]any) {
+	body := map[string]any{"error": message, "code": code}
+	for k, v := range extra {
+		body[k] = v
+	}
+	writeJSON(w, status, body)
 }

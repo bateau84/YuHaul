@@ -32,6 +32,7 @@ const (
 	EventRunQuotaWarning EventType = "run.quota.warning"
 	EventRunCompleted    EventType = "run.completed"
 	EventRunError        EventType = "run.error"
+	EventRunStopped      EventType = "run.stopped"
 )
 
 // Event is a single SSE event for run progress.
@@ -69,6 +70,7 @@ type completedPayload struct {
 	VideosDeferred        int    `json:"videos_deferred"`
 	VideosFailed          int    `json:"videos_failed"`
 	VideosNotYetEvaluated int    `json:"videos_not_yet_evaluated"`
+	VideosUnavailable     int    `json:"videos_unavailable"`
 	QuotaCost             int    `json:"quota_cost"`
 }
 

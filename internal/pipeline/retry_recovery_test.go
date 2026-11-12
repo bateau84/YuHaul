@@ -5,9 +5,11 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
@@ -27,8 +29,15 @@ func reopenRetryPipeline(t *testing.T, p *Pipeline) *Pipeline {
 	var seq int
 	var name, path string
 	require.NoError(t, p.db.QueryRowContext(ctx, `PRAGMA database_list`).Scan(&seq, &name, &path))
-	factory := p.executor.(*Executor).factory
+	baseURL := p.executor.(*Executor).baseURL
 	require.NoError(t, p.db.Close())
+	return openRetryPipeline(t, path, baseURL, p.logger)
+}
+
+// openRetryPipeline builds every dependency fresh over the SQLite file at path.
+func openRetryPipeline(t *testing.T, path, baseURL string, logger *slog.Logger) *Pipeline {
+	t.Helper()
+	ctx := context.Background()
 	db, err := store.Open(ctx, path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -40,7 +49,45 @@ func reopenRetryPipeline(t *testing.T, p *Pipeline) *Pipeline {
 	machine := state.NewMachine(ss)
 	rs := router.NewStore(db)
 	cs := config.NewStore(db)
-	return NewPipeline(db, machine, ss, nil, duplicate.NewDetector(db), router.NewEngine(rs), NewExecutor(db, ledger, &fakeTokenSource{}, WithYouTubeFactory(factory)), ledger, metadata.NewManager(metadata.NewStore(db), &fakeMetadataFetcher{}, ledger), nil, nil, WithQueueStore(qs), WithConfigStore(cs), WithVersioner(config.NewService(rs, cs)), WithLogger(p.logger))
+	key := []byte("01234567890123456789012345678901")
+	tokens, err := auth.NewSQLiteTokenStore(db, key)
+	require.NoError(t, err)
+	service, err := auth.NewService(&auth.ServiceConfig{ClientID: "test", ClientSecret: "test", RedirectURL: "http://localhost/callback", EncryptionKey: string(key)}, tokens, auth.NewInMemoryStateStore())
+	require.NoError(t, err)
+	return NewPipeline(db, machine, ss, nil, duplicate.NewDetector(db), router.NewEngine(rs), NewExecutor(db, ledger, service, WithYouTubeBaseURL(baseURL)), ledger, metadata.NewManager(metadata.NewStore(db), &fakeMetadataFetcher{}, ledger), service, nil, WithQueueStore(qs), WithConfigStore(cs), WithVersioner(config.NewService(rs, cs)), WithLogger(logger))
+}
+
+func TestRetryQueueEntryGuardedProduction(t *testing.T) {
+	ctx := context.Background()
+	env := setupIdempotencyTest(t, []mockVideo{makeJazzVideo("V1", time.Now().UTC().Add(-time.Hour))})
+	p := env.pipeline
+	qs, err := queue.NewStore(p.db)
+	require.NoError(t, err)
+	p.queueStore = qs
+	require.NoError(t, p.ledger.SetDailyLimit(ctx, 4))
+	origin, err := p.StartRun(ctx, state.RunTypeManual)
+	require.NoError(t, err)
+	p.Execute(ctx, origin.ID)
+	items, err := qs.ListDeferredItems(ctx, queue.DeferredStatusPending)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.NoError(t, p.ledger.SetDailyLimit(ctx, 1000000))
+	_, err = p.db.ExecContext(ctx, `UPDATE deferred_item SET retry_after=NULL WHERE id=?`, items[0].ID)
+	require.NoError(t, err)
+	require.NoError(t, p.RetryQueueEntry(ctx, items[0].ID, false))
+	var runID int64
+	var version int
+	require.NoError(t, p.db.QueryRowContext(ctx, `SELECT max(id) FROM run`).Scan(&runID))
+	require.NotEqual(t, origin.ID, runID)
+	require.NoError(t, p.db.QueryRowContext(ctx, `SELECT mutation_safety_version FROM run WHERE id=?`, runID).Scan(&version))
+	require.Equal(t, 1, version)
+	run, err := p.stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusCompleted, run.Status)
+	require.Len(t, env.server.Insertions(), 1)
+	var calls int
+	require.NoError(t, p.db.QueryRowContext(ctx, `SELECT count(*) FROM quota_ledger WHERE run_id=? AND operation_type=?`, runID, quota.OpPlaylistItemsInsert).Scan(&calls))
+	require.Equal(t, 1, calls)
 }
 
 func TestRetryRecovery_ReopenBeforeDecisionAndBeforeAcknowledgement(t *testing.T) {
@@ -69,7 +116,7 @@ func TestRetryRecovery_ReopenBeforeDecisionAndBeforeAcknowledgement(t *testing.T
 				receiving, err = p.prepareProductionRun(ctx, state.RunTypeManual)
 				require.NoError(t, err)
 				require.NoError(t, qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
-					id, err := p.stateStore.CreateRunTx(ctx, tx, receiving)
+					id, err := p.stateStore.CreateGuardedMutationRunTx(ctx, tx, receiving, true)
 					if err != nil {
 						return err
 					}

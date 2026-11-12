@@ -315,6 +315,18 @@ func validateRouteDecision(d *RouteDecision) error {
 	if d.Decision == RouteDecisionSkipped && d.SkipReason == nil {
 		return errors.New("state: skipped decision requires a SkipReason")
 	}
+	return validateExclusionReference(d)
+}
+
+func validateExclusionReference(d *RouteDecision) error {
+	if (d.ExclusionIndex == nil) != (d.ExclusionSemanticsVersion == nil) {
+		return errors.New("state: exclusion reference requires both index and semantics version")
+	}
+	if d.ExclusionIndex != nil {
+		if *d.ExclusionIndex < 0 || *d.ExclusionSemanticsVersion <= 0 || d.Decision != RouteDecisionSkipped || d.SkipReason == nil || *d.SkipReason != SkipReasonExclusion {
+			return errors.New("state: invalid exclusion reference shape")
+		}
+	}
 	return nil
 }
 
@@ -329,19 +341,33 @@ func (m *Machine) RecordRouteEvaluation(ctx context.Context, d *RouteDecision, a
 		return nil, fmt.Errorf("begin route evaluation: %w", err)
 	}
 	defer tx.Rollback()
-	existing, err := scanRouteDecision(tx.QueryRowContext(ctx,
-		`SELECT id, video_id, run_id, route_id, evaluation_order, decision, skip_reason, rejection_reason
-		 FROM route_decision WHERE video_id = ? AND run_id = ? AND route_id = ?`, d.VideoID, d.RunID, d.RouteID))
-	if err == nil {
+	recorded := *d
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order,
+		                             decision, skip_reason, rejection_reason, exclusion_index, exclusion_semantics_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	 ON CONFLICT (video_id, run_id, route_id) DO NOTHING;`,
+		recorded.VideoID, recorded.RunID, recorded.RouteID, recorded.EvaluationOrder,
+		recorded.Decision, recorded.SkipReason, recorded.RejectionReason, recorded.ExclusionIndex, recorded.ExclusionSemanticsVersion)
+	if err != nil {
+		return nil, fmt.Errorf("creating route decision: %w", err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("checking route decision insert: %w", err)
+	}
+	if inserted == 0 {
+		existing, err := scanRouteDecision(tx.QueryRowContext(ctx,
+			`SELECT id, video_id, run_id, route_id, evaluation_order, decision, skip_reason, rejection_reason, exclusion_index, exclusion_semantics_version
+			 FROM route_decision WHERE video_id = ? AND run_id = ? AND route_id = ?`, d.VideoID, d.RunID, d.RouteID))
+		if err != nil {
+			return nil, fmt.Errorf("load route evaluation: %w", err)
+		}
 		return existing, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("load route evaluation: %w", err)
-	}
-	recorded := *d
-	recorded.ID, err = createRouteDecision(ctx, tx, &recorded)
+	recorded.ID, err = res.LastInsertId()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading route decision id: %w", err)
 	}
 	for _, audit := range audits {
 		if audit.Field == "" || audit.Operator == "" {
@@ -358,7 +384,11 @@ func (m *Machine) RecordRouteEvaluation(ctx context.Context, d *RouteDecision, a
 	return &recorded, nil
 }
 
-// RecordExecutedAction persists a per-action outcome.
+// RecordExecutedAction persists a per-action outcome. ExecutedAt is
+// caller-owned: it is stored as supplied and stays NULL unless the producer
+// actually attempted the YouTube action (ARD-001). The machine never fabricates
+// an attempt timestamp for a quota deferral, a simulated action, or an
+// idempotent no-attempt.
 func (m *Machine) RecordExecutedAction(ctx context.Context, a *ExecutedAction) (*ExecutedAction, error) {
 	if a.RouteDecisionID == 0 {
 		return nil, errors.New("state: RouteDecisionID is required")
@@ -378,9 +408,6 @@ func (m *Machine) RecordExecutedAction(ctx context.Context, a *ExecutedAction) (
 	if !a.Outcome.Valid() {
 		return nil, fmt.Errorf("state: invalid action outcome %q", a.Outcome)
 	}
-
-	now := m.now().UTC()
-	a.ExecutedAt = &now
 
 	id, err := m.store.CreateExecutedAction(ctx, a)
 	if err != nil {
@@ -419,7 +446,7 @@ func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 		return nil, err
 	}
 
-	quotaCost, err := m.runQuotaCost(ctx, runID)
+	quotaCost, err := m.RunQuotaCost(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +473,7 @@ func (m *Machine) FailRun(ctx context.Context, runID int64, reason string) (*Run
 		return nil, err
 	}
 
-	quotaCost, err := m.runQuotaCost(ctx, runID)
+	quotaCost, err := m.RunQuotaCost(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -461,6 +488,33 @@ func (m *Machine) FailRun(ctx context.Context, runID int64, reason string) (*Run
 	return m.store.GetRun(ctx, runID)
 }
 
+// FailHistoricalRun marks a dry-run/replay/backtest run as terminally failed.
+// It mirrors CompleteHistoricalRun — simulation counters are recomputed from
+// the run's route decisions before the terminal status is written — so a
+// failed simulation keeps its partial evaluation evidence instead of being
+// finalized as completed (ADR-002: unrecoverable phase failure is failed).
+func (m *Machine) FailHistoricalRun(ctx context.Context, runID int64, reason string) (*Run, error) {
+	started := m.now().UTC()
+	run, err := m.store.GetRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	quotaCost, err := m.RunQuotaCost(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := started.Sub(run.StartedAt).Seconds()
+	if err := m.store.RecomputeRunCountersFromDecisions(ctx, runID); err != nil {
+		return nil, err
+	}
+	if err := m.store.FailRun(ctx, runID, reason, duration, quotaCost); err != nil {
+		return nil, err
+	}
+	return m.store.GetRun(ctx, runID)
+}
+
 // CompleteHistoricalRun finalizes a replay/backtest run and recomputes its
 // counters from route decisions rather than discovered_in_run_id.
 func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run, error) {
@@ -470,7 +524,7 @@ func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run,
 		return nil, err
 	}
 
-	quotaCost, err := m.runQuotaCost(ctx, runID)
+	quotaCost, err := m.RunQuotaCost(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -487,10 +541,10 @@ func (m *Machine) CompleteHistoricalRun(ctx context.Context, runID int64) (*Run,
 	return m.store.GetRun(ctx, runID)
 }
 
-// runQuotaCost returns the quota units consumed on behalf of runID. When no
+// RunQuotaCost returns the quota units consumed on behalf of runID. When no
 // ledger is configured it returns 0 so tests and offline tools are not forced
 // to provide one.
-func (m *Machine) runQuotaCost(ctx context.Context, runID int64) (int, error) {
+func (m *Machine) RunQuotaCost(ctx context.Context, runID int64) (int, error) {
 	if m.ledger == nil {
 		return 0, nil
 	}

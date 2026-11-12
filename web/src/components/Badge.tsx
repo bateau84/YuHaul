@@ -1,4 +1,4 @@
-import { Check, X, Clock, AlertTriangle, Minus, Loader2, Ban } from 'lucide-react'
+import { Check, X, Clock, AlertTriangle, Minus, Loader2, Ban, CircleSlash } from 'lucide-react'
 import type { RunType, VideoProcessingState, VideoFinalOutcome } from '../types'
 import { deriveBadge, simulationMode } from '../lib/outcome'
 
@@ -10,6 +10,7 @@ const icons = {
   failed: AlertTriangle,
   'not-evaluated': Minus,
   'in-progress': Loader2,
+  unavailable: CircleSlash,
 }
 
 interface BadgeProps {

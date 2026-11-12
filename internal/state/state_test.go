@@ -94,6 +94,136 @@ func TestDiscoverVideoSetsNotYetEvaluated(t *testing.T) {
 	}
 }
 
+func TestRouteDecisionExclusionReferencePersistsAndLegacyStaysUnavailable(t *testing.T) {
+	m := newTestMachine(t)
+	ctx := context.Background()
+	runID := seedRun(t, m)
+	routeID := seedRoute(t, m.store.db)
+	video, err := m.DiscoverVideo(ctx, runID, "yt-causal", "UC-causal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip := SkipReasonExclusion
+	idx, version := 0, 1
+	decision, err := m.RecordRouteEvaluation(ctx, &RouteDecision{
+		VideoID: video.ID, RunID: runID, RouteID: routeID, EvaluationOrder: 1,
+		Decision: RouteDecisionSkipped, SkipReason: &skip,
+		ExclusionIndex: &idx, ExclusionSemanticsVersion: &version,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.store.GetRouteDecisionsForVideoInRun(ctx, video.ID, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != decision.ID || got[0].ExclusionIndex == nil || *got[0].ExclusionIndex != 0 || got[0].ExclusionSemanticsVersion == nil || *got[0].ExclusionSemanticsVersion != 1 {
+		t.Fatalf("stored exclusion reference = %#v", got)
+	}
+	// Legacy generic-only exclusion rows remain null rather than being
+	// reconstructed from a potentially plausible current rule.
+	res, err := m.store.db.ExecContext(ctx,
+		`INSERT INTO route (name, evaluation_order, condition_composition, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		"legacy-route", 2, "AND", timeNow(), timeNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRouteID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := m.RecordRouteEvaluation(ctx, &RouteDecision{
+		VideoID: video.ID, RunID: runID, RouteID: legacyRouteID, EvaluationOrder: 2,
+		Decision: RouteDecisionSkipped, SkipReason: &skip,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ExclusionIndex != nil || legacy.ExclusionSemanticsVersion != nil {
+		t.Fatalf("legacy reference unexpectedly populated: %#v", legacy)
+	}
+	if _, err := m.store.db.ExecContext(ctx, `UPDATE route_decision SET exclusion_index=1 WHERE id=?`, legacy.ID); err == nil {
+		t.Fatal("database accepted a half-populated reference")
+	}
+}
+
+func TestRecordRouteEvaluationWaitsForCompetingWriterWithoutPartialEvidence(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "contention.db")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	st, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewMachine(st)
+	runID := seedRun(t, m)
+	routeID := seedRoute(t, db)
+	video, err := m.DiscoverVideo(ctx, runID, "contention-video", "channel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	lock, err := other.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lock.ExecContext(ctx, `INSERT INTO route (name, evaluation_order, condition_composition, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, "lock-holder", 2, "AND", timeNow(), timeNow()); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.RecordRouteEvaluation(ctx, &RouteDecision{VideoID: video.ID, RunID: runID, RouteID: routeID, Decision: RouteDecisionNotMatched}, []ConditionAudit{{Field: "title", Operator: "equals", ExpectedValue: "x"}})
+		done <- err
+	}()
+	// Ensure the competing writer is released only after the evaluation has
+	// started; the write-first statement must wait rather than upgrade a read tx.
+	time.Sleep(50 * time.Millisecond)
+	if err := lock.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("recording after competing writer: %v", err)
+	}
+	decisions, err := m.store.GetRouteDecisionsForVideo(ctx, video.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 1 {
+		t.Fatalf("decisions=%d, want 1", len(decisions))
+	}
+	if _, err := m.RecordRouteEvaluation(ctx, &RouteDecision{VideoID: video.ID, RunID: runID, RouteID: routeID, Decision: RouteDecisionNotMatched}, []ConditionAudit{{Field: "title", Operator: "equals", ExpectedValue: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err = m.store.GetRouteDecisionsForVideo(ctx, video.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 1 {
+		t.Fatalf("idempotent recovery created duplicate decisions: %d", len(decisions))
+	}
+	var audits int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM condition_audit WHERE route_decision_id = ?`, decisions[0].ID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("audits=%d, want 1", audits)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM condition_audit WHERE route_decision_id = ?`, decisions[0].ID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("idempotent recovery duplicated audits: %d", audits)
+	}
+}
+
 func TestStateTransitions(t *testing.T) {
 	m := newTestMachine(t)
 	runID := seedRun(t, m)
@@ -288,8 +418,10 @@ func TestRouteDecisionAndExecutedAction(t *testing.T) {
 	if action.ID == 0 {
 		t.Error("expected executed action to receive an ID")
 	}
-	if action.ExecutedAt == nil {
-		t.Error("expected ExecutedAt to be set")
+	// The machine must not fabricate an attempt timestamp: executed_at is
+	// set only by a producer that actually attempted the YouTube action.
+	if action.ExecutedAt != nil {
+		t.Errorf("ExecutedAt = %v, want nil for a record with no supplied attempt time", action.ExecutedAt)
 	}
 
 	decisions, err := m.store.GetRouteDecisionsForVideo(context.Background(), v.ID)
@@ -306,6 +438,88 @@ func TestRouteDecisionAndExecutedAction(t *testing.T) {
 	}
 	if len(actions) != 1 {
 		t.Fatalf("got %d actions, want 1", len(actions))
+	}
+}
+
+// TestRecordExecutedActionTimestampSemantics proves ARD-001's attempt-time
+// rule at the machine boundary: a caller-supplied executed_at for an actually
+// attempted action is preserved, while deferral/no-attempt rows record no
+// attempt timestamp and keep their bounded outcome reason.
+func TestRecordExecutedActionTimestampSemantics(t *testing.T) {
+	m := newTestMachine(t)
+	db := m.store.db
+	runID := seedRun(t, m)
+	routeID := seedRoute(t, db)
+
+	v, err := m.DiscoverVideo(context.Background(), runID, "yt-video-timestamp", "UCchannel")
+	if err != nil {
+		t.Fatalf("DiscoverVideo failed: %v", err)
+	}
+	decision, err := m.RecordRouteDecision(context.Background(), &RouteDecision{
+		VideoID:         v.ID,
+		RunID:           runID,
+		RouteID:         routeID,
+		EvaluationOrder: 1,
+		Decision:        RouteDecisionMatched,
+	})
+	if err != nil {
+		t.Fatalf("RecordRouteDecision failed: %v", err)
+	}
+
+	attempt := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	attempted, err := m.RecordExecutedAction(context.Background(), &ExecutedAction{
+		RouteDecisionID:  decision.ID,
+		RunID:            runID,
+		VideoID:          v.ID,
+		ActionType:       "playlist_insert",
+		TargetPlaylistID: "PLattempted",
+		Outcome:          ActionOutcomeFailed,
+		ExecutedAt:       &attempt,
+	})
+	if err != nil {
+		t.Fatalf("RecordExecutedAction with attempt time failed: %v", err)
+	}
+	if attempted.ExecutedAt == nil || !attempted.ExecutedAt.Equal(attempt) {
+		t.Errorf("ExecutedAt = %v, want the caller-supplied attempt time %v", attempted.ExecutedAt, attempt)
+	}
+
+	reason := "quota_exhausted"
+	deferred, err := m.RecordExecutedAction(context.Background(), &ExecutedAction{
+		RouteDecisionID:  decision.ID,
+		RunID:            runID,
+		VideoID:          v.ID,
+		ActionType:       "playlist_insert",
+		TargetPlaylistID: "PLdeferred",
+		Outcome:          ActionOutcomeDeferred,
+		OutcomeReason:    &reason,
+	})
+	if err != nil {
+		t.Fatalf("RecordExecutedAction deferral failed: %v", err)
+	}
+	if deferred.ExecutedAt != nil {
+		t.Errorf("ExecutedAt = %v, want nil for a quota deferral", deferred.ExecutedAt)
+	}
+
+	// The machine persists the stored rows with their supplied semantics.
+	stored, err := m.store.GetExecutedActionsForVideoInRun(context.Background(), v.ID, runID)
+	if err != nil {
+		t.Fatalf("GetExecutedActionsForVideoInRun failed: %v", err)
+	}
+	if len(stored) != 2 {
+		t.Fatalf("got %d actions, want 2", len(stored))
+	}
+	byTarget := make(map[string]ExecutedAction, len(stored))
+	for _, a := range stored {
+		byTarget[a.TargetPlaylistID] = a
+	}
+	if got := byTarget["PLattempted"].ExecutedAt; got == nil || !got.Equal(attempt) {
+		t.Errorf("stored attempted ExecutedAt = %v, want %v", got, attempt)
+	}
+	if got := byTarget["PLdeferred"].ExecutedAt; got != nil {
+		t.Errorf("stored deferred ExecutedAt = %v, want nil", got)
+	}
+	if got := byTarget["PLdeferred"].OutcomeReason; got == nil || *got != "quota_exhausted" {
+		t.Errorf("stored deferred OutcomeReason = %v, want quota_exhausted", got)
 	}
 }
 
@@ -503,15 +717,15 @@ func TestFailRunMarksRunFailed(t *testing.T) {
 	m := newTestMachine(t)
 	runID := seedRun(t, m)
 
-	run, err := m.FailRun(context.Background(), runID, "discovery: no active token")
+	run, err := m.FailRun(context.Background(), runID, "plainASCII-secret-token-9081")
 	if err != nil {
 		t.Fatalf("FailRun failed: %v", err)
 	}
 	if run.Status != RunStatusFailed {
 		t.Errorf("status = %q, want %q", run.Status, RunStatusFailed)
 	}
-	if run.InterruptReason == nil || *run.InterruptReason != "discovery: no active token" {
-		t.Errorf("interrupt_reason = %v, want discovery: no active token", run.InterruptReason)
+	if run.InterruptReason == nil || *run.InterruptReason != "diag:v1 phase=unknown operation=unknown code=unknown_error" {
+		t.Errorf("interrupt_reason = %v, want safe unknown diagnostic", run.InterruptReason)
 	}
 	if run.CompletedAt == nil {
 		t.Error("expected CompletedAt to be set after failure")
@@ -622,28 +836,51 @@ func TestFailRunRecordsQuotaCost(t *testing.T) {
 	}
 }
 
-func TestListInterruptedRunsExcludesFailed(t *testing.T) {
+func TestListInterruptedRunsSelectsOnlyGuardedNonterminalOldestFirst(t *testing.T) {
+	ctx := context.Background()
 	m := newTestMachine(t)
-
-	runInterrupted := seedRun(t, m)
-	if err := m.store.InterruptRun(context.Background(), runInterrupted, "crash"); err != nil {
-		t.Fatalf("interrupting run: %v", err)
+	if _, err := m.store.db.Exec(`INSERT INTO config_version (id, snapshot) VALUES (1, '{}')`); err != nil {
+		t.Fatal(err)
 	}
-
-	runFailed := seedRun(t, m)
-	if _, err := m.FailRun(context.Background(), runFailed, "phase error"); err != nil {
-		t.Fatalf("failing run: %v", err)
+	insert := func(started, kind, status string, safety, authority int, completed any) int64 {
+		t.Helper()
+		res, err := m.store.db.Exec(`INSERT INTO run (started_at, run_type, status, config_version_id,
+			mutation_safety_version, action_authority_version, completed_at) VALUES (?,?,?,1,?,?,?)`,
+			started, kind, status, safety, authority, completed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
 	}
+	later := insert("2026-01-02T00:00:00Z", "manual", "interrupted", 1, 1, nil)
+	earlier := insert("2026-01-01T00:00:00Z", "scheduled", "interrupted", 1, 1, nil)
+	tieA := insert("2026-01-03T00:00:00Z", "manual", "interrupted", 1, 1, nil)
+	tieB := insert("2026-01-03T00:00:00Z", "manual", "interrupted", 1, 1, nil)
+	insert("2026-01-01T00:00:00Z", "manual", "interrupted", 0, 0, nil)  // legacy
+	insert("2026-01-01T00:00:00Z", "manual", "interrupted", 0, 1, nil)  // legacy safety
+	insert("2026-01-01T00:00:00Z", "dry_run", "interrupted", 1, 1, nil) // simulation
+	insert("2026-01-01T00:00:00Z", "manual", "failed", 1, 1, "2026-01-01T01:00:00Z")
+	insert("2026-01-01T00:00:00Z", "manual", "completed", 1, 1, "2026-01-01T01:00:00Z")
+	insert("2026-01-01T00:00:00Z", "manual", "interrupted", 1, 1, "2026-01-01T01:00:00Z") // contradictory
+	insert("2026-01-01T00:00:00Z", "manual", "running", 1, 1, nil)
 
-	runs, err := m.store.ListInterruptedRuns(context.Background())
+	runs, err := m.store.ListInterruptedRuns(ctx)
 	if err != nil {
 		t.Fatalf("ListInterruptedRuns failed: %v", err)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("got %d interrupted runs, want 1", len(runs))
+	var got []int64
+	for _, r := range runs {
+		got = append(got, r.ID)
 	}
-	if runs[0].ID != runInterrupted {
-		t.Errorf("interrupted run id = %d, want %d", runs[0].ID, runInterrupted)
+	want := []int64{earlier, later, tieA, tieB}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
 	}
 }
 

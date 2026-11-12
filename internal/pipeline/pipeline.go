@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
@@ -19,6 +21,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
+	"github.com/bateau84/YuHaul/internal/youtube"
 )
 
 // RouteMatch pairs a route decision with its route for action execution.
@@ -55,16 +58,30 @@ type ConfigStore interface {
 
 // Pipeline orchestrates the five-phase run lifecycle.
 type Pipeline struct {
-	productionMu      sync.Mutex
-	db                *sql.DB
-	machine           *state.Machine
-	stateStore        *state.Store
-	discovery         *discovery.Engine
-	detector          *duplicate.Detector
-	router            *router.Engine
-	executor          ActionExecutor
-	ledger            *quota.Ledger
-	meta              *metadata.Manager
+	productionMu sync.Mutex
+	// initiationMu serializes the decision section of Run Now admission and
+	// Discard. Lock order: initiationMu, then productionMu (ARS-002 §2.3).
+	initiationMu sync.Mutex
+	// runsMu guards runs, the per-run stop controls (ARS-003 §3.1).
+	runsMu sync.Mutex
+	runs   map[int64]*runControl
+	// discardTx runs DiscardRun's transaction. Nil means the queue store's
+	// WithRetryTx; tests substitute it to simulate commit failures.
+	discardTx func(context.Context, func(*sql.Tx) error) error
+	// endTx is the same seam for EndLegacyRun (ARS-004 §2.2).
+	endTx      func(context.Context, func(*sql.Tx) error) error
+	db         *sql.DB
+	machine    *state.Machine
+	stateStore *state.Store
+	discovery  *discovery.Engine
+	detector   *duplicate.Detector
+	router     *router.Engine
+	executor   ActionExecutor
+	ledger     *quota.Ledger
+	meta       interface {
+		GetDisplayMetadata(context.Context, string) (*metadata.TransientMetadata, error)
+		RunLifecycle(context.Context) error
+	}
 	auth              *auth.Service
 	broadcast         *Broadcaster
 	versioner         Versioner
@@ -72,7 +89,36 @@ type Pipeline struct {
 	configStore       ConfigStore
 	advisoryGenerator AdvisoryGenerator
 	logger            *slog.Logger
+	executionBinding  *auth.AuthorizationBinding
+	// producerGate is the one-way startup-recovery gate (ADR-007 §2). It is
+	// producersUngated for a Pipeline that never began startup recovery.
+	producerGate atomic.Int32
 }
+
+// ErrStartupRecoveryActive is returned by the production producers while
+// startup recovery has not finished (ADR-007 §2). It is the queue package's
+// sentinel so the queue HTTP handlers can map it without importing pipeline.
+var ErrStartupRecoveryActive = queue.ErrStartupRecoveryActive
+
+const (
+	producersUngated int32 = iota
+	producersGated
+	producersOpen
+)
+
+// refuseWhileRecovering reports ErrStartupRecoveryActive while the gate is
+// closed. It runs before any configuration capture, run creation, claim or
+// wait on productionMu.
+func (p *Pipeline) refuseWhileRecovering() error {
+	if p.producerGate.Load() == producersGated {
+		return ErrStartupRecoveryActive
+	}
+	return nil
+}
+
+// OpenProducers opens the startup-recovery gate. The transition is one-way:
+// once opened the gate is never closed again for the life of the process.
+func (p *Pipeline) OpenProducers() { p.producerGate.Store(producersOpen) }
 
 // Option configures a Pipeline.
 type Option func(*Pipeline)
@@ -136,7 +182,10 @@ func NewPipeline(
 	router *router.Engine,
 	executor ActionExecutor,
 	ledger *quota.Ledger,
-	meta *metadata.Manager,
+	meta interface {
+		GetDisplayMetadata(context.Context, string) (*metadata.TransientMetadata, error)
+		RunLifecycle(context.Context) error
+	},
 	auth *auth.Service,
 	broadcast *Broadcaster,
 	opts ...Option,
@@ -158,6 +207,9 @@ func NewPipeline(
 	for _, opt := range opts {
 		opt(p)
 	}
+	if p.router != nil {
+		p.router.WithRunRoutesValidator(p.ValidateRunRoutes)
+	}
 	return p
 }
 
@@ -169,25 +221,40 @@ type StartResult struct {
 // StartRun creates and starts a new run of the given type. It returns the run
 // immediately; the caller should run Execute in a goroutine.
 func (p *Pipeline) StartRun(ctx context.Context, runType state.RunType) (*state.Run, error) {
+	if err := p.refuseWhileRecovering(); err != nil {
+		return nil, err
+	}
 	run, err := p.prepareProductionRun(ctx, runType)
 	if err != nil {
 		return nil, err
 	}
+	initiator := state.InitiatedByRunNow
+	if runType == state.RunTypeScheduled {
+		initiator = state.InitiatedBySchedule
+	}
+	run.InitiatedBy = &initiator
 	p.productionMu.Lock()
 	defer p.productionMu.Unlock()
-	qs := p.queueStore
-	if qs == nil {
-		qs, err = queue.NewStore(p.db)
-		if err != nil {
-			return nil, err
-		}
+	if err := p.createClaimedRunLocked(ctx, run); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+// createClaimedRunLocked persists run and claims the deferred retry work it
+// receives in one transaction, then announces it. It sets run.ID and requires
+// productionMu to be held by the caller.
+func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) error {
+	qs, err := p.retryStore()
+	if err != nil {
+		return err
 	}
 	items, err := qs.ListDeferredRetryCandidates(ctx, time.Now())
 	if err != nil {
-		return nil, err
+		return err
 	}
 	err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
-		id, err := p.stateStore.CreateRunTx(ctx, tx, run)
+		id, err := p.stateStore.CreateGuardedMutationRunTx(ctx, tx, run, true)
 		if err != nil {
 			return err
 		}
@@ -200,10 +267,11 @@ func (p *Pipeline) StartRun(ctx context.Context, runType state.RunType) (*state.
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: create and claim run: %w", err)
+		return fmt.Errorf("pipeline: create and claim run: %w", err)
 	}
+	p.registerRun(run.ID)
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
-	return run, nil
+	return nil
 }
 
 // Capture is deliberately outside the execution gate: waiting cannot change
@@ -242,28 +310,62 @@ func (p *Pipeline) prepareProductionRun(ctx context.Context, runType state.RunTy
 func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 	p.productionMu.Lock()
 	defer p.productionMu.Unlock()
+	p.executeHeld(ctx, runID, false)
+}
+
+// executeHeld is the Execute body; the caller holds productionMu. resumeAdmitted
+// marks a run Run Now admission already moved from interrupted to running: it
+// is a resume (its start phase comes from the saved checkpoint) although its
+// status no longer says interrupted.
+func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted bool) {
 	logger := p.logger.With("run_id", runID)
 	logger.InfoContext(ctx, "pipeline execute started")
 
+	// The run control outlives this function's other defers: finishRun settles
+	// a stop only after every terminal path has returned, still under
+	// productionMu (ARS-003 §3.3).
+	ctl := p.registerRun(runID)
+	defer p.finishRun(ctx, runID)
+
 	defer func() {
 		if r := recover(); r != nil {
-			logger.ErrorContext(ctx, "pipeline panic", "recover", r)
-			reason := fmt.Sprintf("panic: %v", r)
-			if _, ferr := p.machine.FailRun(ctx, runID, reason); ferr != nil {
-				logger.ErrorContext(ctx, "fail run failed after panic", "run_id", runID, "error", ferr)
-				_ = p.stateStore.InterruptRun(ctx, runID, reason)
-			}
-			p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: reason}))
+			reason := (diag.Facts{Phase: "unknown", Operation: "unknown", Code: "panic"}).String()
+			logger.ErrorContext(ctx, "pipeline panic", "diagnostic", reason)
+			p.retainThenFail(ctx, runID, reason, func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
+				return sweepStrandedWork(retainCtx, qs, tx, runID, reason)
+			})
 		}
 	}()
 
 	run, err := p.stateStore.GetRun(ctx, runID)
 	if err != nil {
-		logger.ErrorContext(ctx, "load run failed", "error", err)
+		logger.ErrorContext(ctx, "load run failed", "diagnostic", diag.Encode(err, "unknown", "load_run"))
 		return
 	}
+	// Completed and failed runs are terminal. Reject re-entry before binding
+	// credentials: a disconnected account must not turn an existing outcome
+	// into a new authorization failure. Interrupted runs remain resumable below.
+	if run.Status == state.RunStatusCompleted || run.Status == state.RunStatusFailed || run.Status == state.RunStatusStopped {
+		logger.WarnContext(ctx, "pipeline execute rejected for terminal run", "status", run.Status)
+		return
+	}
+	// A stop that arrived before this point settles without any provider call.
+	ctx, stopped := ctl.attach(ctx)
+	if stopped {
+		logger.InfoContext(ctx, "pipeline execute skipped: run stopped before it started")
+		return
+	}
+	if p.isProductionRun(run.RunType) && p.auth != nil {
+		binding, bindErr := p.auth.Bind(ctx)
+		if bindErr != nil {
+			p.failRun(ctx, runID, "authorization binding failed", bindErr)
+			return
+		}
+		p.executionBinding = &binding
+		defer func() { p.executionBinding = nil }()
+	}
 	if _, _, err := productionAuthority(ctx, p.db, p.configStore, runID); err != nil {
-		logger.ErrorContext(ctx, "production authority rejected", "error", err)
+		logger.ErrorContext(ctx, "production authority rejected", "diagnostic", diag.Encode(err, "unknown", "load_run"))
 		if p.isProductionRun(run.RunType) && (run.Status == state.RunStatusRunning || run.Status == state.RunStatusInterrupted) {
 			if candidates, loadErr := p.listRunVideos(ctx, runID); loadErr == nil {
 				p.retainAuthorityFailure(ctx, runID, candidates, err)
@@ -288,16 +390,23 @@ func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 			return
 		}
 	}
+	isResume := run.Status == state.RunStatusInterrupted || resumeAdmitted
+	if run.Status == state.RunStatusInterrupted {
+		if err := p.stateStore.ResumeRun(ctx, runID); err != nil {
+			p.failRun(ctx, runID, "resume run failed", err)
+			return
+		}
+		run.Status = state.RunStatusRunning
+	}
 
 	startPhase := PhaseDiscovery
-	isResume := run.Status == state.RunStatusInterrupted
 	if isResume && run.CurrentPhase != nil {
 		startPhase = Phase(*run.CurrentPhase)
 	}
 
 	if p.meta != nil {
 		if err := p.meta.RunLifecycle(ctx); err != nil {
-			logger.WarnContext(ctx, "metadata lifecycle failed", "error", err)
+			logger.WarnContext(ctx, "metadata lifecycle failed", "diagnostic", diag.Encode(err, "unknown", "load_metadata"))
 		}
 	}
 
@@ -326,6 +435,13 @@ func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 			return
 		}
 	}
+
+	// The run-owned input set — this run's discoveries plus its claimed retry
+	// work — is established here, before the exclusion gate or routing can
+	// remove anything from it. Capture it write-once (ARD-001) so a later
+	// phase failure keeps the known selection; a run that never reaches this
+	// point keeps a NULL (unknown) count.
+	p.captureSelectedCount(ctx, runID, len(videos))
 
 	videos, err = p.withoutRetryVideos(ctx, runID, videos)
 	if err != nil {
@@ -393,11 +509,22 @@ func (p *Pipeline) Execute(ctx context.Context, runID int64) {
 }
 
 func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
+	if !p.mayFinalize(runID) {
+		return
+	}
 	run, err := p.machine.CompleteRun(ctx, runID)
 	if err != nil {
-		p.logger.ErrorContext(ctx, "complete run failed", "run_id", runID, "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
-		run, _ = p.stateStore.GetRun(ctx, runID)
+		p.logger.ErrorContext(ctx, "complete run failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+		// All execution phases returned successfully. Retry only terminal
+		// bookkeeping under its own bound; never convert an incomplete run to
+		// completed or misclassify this bookkeeping failure as interrupted.
+		finalizeCtx, cancel := runFinalizationContext(ctx)
+		run, err = p.machine.CompleteRun(finalizeCtx, runID)
+		cancel()
+		if err != nil {
+			p.logger.ErrorContext(ctx, "complete run finalization failed", "run_id", runID, "reason", diag.Reason(err, "run completion failed"))
+			return
+		}
 	}
 	if run == nil {
 		return
@@ -405,7 +532,7 @@ func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
 
 	if p.isProductionRun(run.RunType) && p.advisoryGenerator != nil {
 		if err := p.advisoryGenerator.GenerateAdvisories(ctx); err != nil {
-			p.logger.WarnContext(ctx, "advisory generation failed", "run_id", runID, "error", err)
+			p.logger.WarnContext(ctx, "advisory generation failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "generate_advisory"))
 		}
 	}
 
@@ -419,36 +546,85 @@ func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
 		VideosDeferred:        run.VideosDeferred,
 		VideosFailed:          run.VideosFailed,
 		VideosNotYetEvaluated: run.VideosNotYetEvaluated,
+		VideosUnavailable:     run.VideosUnavailable,
 		QuotaCost:             run.QuotaCost,
 	}))
 }
 
 func (p *Pipeline) failRun(ctx context.Context, runID int64, message string, err error) {
-	p.logger.ErrorContext(ctx, message, "run_id", runID, "error", err)
+	reason := diag.Reason(err, message)
+	var mutation *mutationFailure
+	if errors.As(err, &mutation) {
+		attrs := []any{"run_id", runID, "diagnostic", reason}
+		if mutation.accounting != nil {
+			attrs = append(attrs, "accounting_diagnostic", diag.Encode(mutation.accounting, "action_execution", "account_quota"))
+		}
+		if mutation.renewal != nil {
+			attrs = append(attrs, "renewal_category", auth.RenewalFailureCategory(mutation.renewal))
+		}
+		p.logger.ErrorContext(ctx, "pipeline phase failed", attrs...)
+	} else {
+		p.logger.ErrorContext(ctx, "pipeline phase failed", "run_id", runID, "diagnostic", reason)
+	}
 	var authority *authorityError
 	if errors.As(err, &authority) {
 		videos, loadErr := p.listRunVideos(ctx, runID)
 		if loadErr != nil {
-			_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
+			p.finalizeFailedRun(ctx, runID, reason)
 			return
 		}
 		p.retainAuthorityFailure(ctx, runID, videos, err)
 		return
 	}
-	if _, ferr := p.machine.FailRun(ctx, runID, err.Error()); ferr != nil {
-		p.logger.ErrorContext(ctx, "fail run failed", "run_id", runID, "error", ferr)
-		_ = p.stateStore.InterruptRun(ctx, runID, err.Error())
+	if ctx.Err() != nil {
+		// The execution context ended (shutdown or deadline): the run is
+		// resumable, not failed (ADR-007 §3.1, ADR-006 §2.1). No sweep runs;
+		// current_phase and every committed disposition stay. The reason
+		// carries only the registered canceled/timeout code.
+		p.interruptRunWithCause(ctx, runID, diag.InterruptReason(err, ctx.Err(), message), interruptCauseFor(ctx))
+		return
 	}
-	p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: err.Error()}))
+	p.retainThenFail(ctx, runID, reason, func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
+		return sweepStrandedWork(retainCtx, qs, tx, runID, reason)
+	})
+}
+
+// runFinalizationContext detaches terminal bookkeeping from execution
+// cancellation while imposing a strict upper bound on store work.
+func runFinalizationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+}
+
+func (p *Pipeline) finalizeFailedRun(ctx context.Context, runID int64, reason string) {
+	if !p.mayFinalize(runID) {
+		return
+	}
+	finalizeCtx, cancel := runFinalizationContext(ctx)
+	defer cancel()
+	if _, err := p.machine.FailRun(finalizeCtx, runID, reason); err != nil {
+		p.logger.ErrorContext(ctx, "fail run finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+	}
 }
 
 func (p *Pipeline) isProductionRun(runType state.RunType) bool {
 	return runType == state.RunTypeScheduled || runType == state.RunTypeManual
 }
 
+// captureSelectedCount persists the number of inputs a run's selector
+// established. SetRunSelectedCount is write-once, so the first capture wins:
+// a resumed execution cannot overwrite it and a run that never reaches its
+// selector keeps NULL (unknown) instead of a guessed zero. A capture failure
+// is diagnostic only and must not abort the run.
+func (p *Pipeline) captureSelectedCount(ctx context.Context, runID int64, count int) {
+	if err := p.stateStore.SetRunSelectedCount(ctx, runID, count); err != nil {
+		p.logger.WarnContext(ctx, "record selected input count failed",
+			"run_id", runID, "count", count, "diagnostic", diag.Encode(err, "unknown", "capture_selection"))
+	}
+}
+
 func (p *Pipeline) setPhase(ctx context.Context, runID int64, phase Phase) {
 	if err := p.stateStore.SetRunPhase(ctx, runID, string(phase)); err != nil {
-		p.logger.WarnContext(ctx, "failed to record run phase", "run_id", runID, "phase", phase, "error", err)
+		p.logger.WarnContext(ctx, "failed to record run phase", "run_id", runID, "phase", phase, "diagnostic", diag.Encode(err, "unknown", "record_phase"))
 	}
 }
 
@@ -456,7 +632,13 @@ func (p *Pipeline) phaseDiscovery(ctx context.Context, runID int64) ([]*state.Vi
 	p.setPhase(ctx, runID, PhaseDiscovery)
 	p.broadcastPhase(runID, PhaseDiscovery)
 
-	result, err := p.discovery.Run(ctx, runID)
+	var result *discovery.Result
+	var err error
+	if p.executionBinding != nil {
+		result, err = p.discovery.RunBound(ctx, runID, *p.executionBinding)
+	} else {
+		result, err = p.discovery.Run(ctx, runID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -501,7 +683,7 @@ func (p *Pipeline) detectVideos(ctx context.Context, runID int64, videos []*stat
 
 		meta, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
 		if err != nil {
-			p.logger.DebugContext(ctx, "duplicate detection using degraded metadata", "video_id", v.VideoID, "error", err)
+			p.logger.DebugContext(ctx, "duplicate detection using degraded metadata", "diagnostic", diag.Encode(err, "duplicate_detection", "load_metadata"))
 			meta = &metadata.TransientMetadata{VideoID: v.VideoID}
 		}
 		title := ""
@@ -565,7 +747,7 @@ func (p *Pipeline) routeVideos(ctx context.Context, runID int64, videos []*state
 
 		meta, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
 		if err != nil {
-			p.logger.DebugContext(ctx, "routing using degraded metadata", "video_id", v.VideoID, "error", err)
+			p.logger.DebugContext(ctx, "routing using degraded metadata", "diagnostic", diag.Encode(err, "routing", "load_metadata"))
 			meta = &metadata.TransientMetadata{VideoID: v.VideoID}
 		}
 
@@ -675,27 +857,24 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 	if len(matched) == 0 {
 		return state.FinalOutcomeRejected, nil
 	}
+	if v.ProcessingState == state.VideoStateFailed {
+		// A failed disposition committed with its sink in an earlier pass of
+		// this run (ADR-006 §1). A resumed run must not act on it again.
+		var recorded sql.NullString
+		err := p.db.QueryRowContext(ctx, `SELECT final_outcome FROM run_video_outcome WHERE run_id=? AND video_id=?`, runID, v.ID).Scan(&recorded)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return state.FinalOutcomeFailed, fmt.Errorf("read run outcome for video %d: %w", v.ID, err)
+		}
+		if err == nil && recorded.String == string(state.FinalOutcomeFailed) {
+			return state.FinalOutcomeFailed, nil
+		}
+	}
 	if v.ProcessingState == state.VideoStateCompleted {
 		// Completion is a veto only after current-run admission. Reconcile a
 		// finished video without repeating its terminal transition/counters.
-		allComplete := true
-		for _, m := range matched {
-			r := findRoute(routes, m.RouteID)
-			if r == nil || !r.IsEnabled || len(r.Actions) == 0 {
-				allComplete = false
-				break
-			}
-			for _, a := range r.Actions {
-				if a.ActionType != "playlist_insert" || a.TargetPlaylistID == "" {
-					allComplete = false
-					break
-				}
-				done, err := actionCompleted(ctx, p.db, v.ID, action{m.RouteDecisionID, a.ActionType, a.TargetPlaylistID})
-				if err != nil {
-					return state.FinalOutcomeFailed, err
-				}
-				allComplete = allComplete && done
-			}
+		allComplete, err := p.matchedActionsComplete(ctx, v.ID, matched, routes)
+		if err != nil {
+			return state.FinalOutcomeFailed, err
 		}
 		if allComplete {
 			return state.FinalOutcomeAccepted, nil
@@ -710,18 +889,98 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 	case state.VideoStateActed, state.VideoStateDeferred:
 		fromState = v.ProcessingState
 	}
-	if _, err := p.machine.TransitionVideoState(ctx, v.ID, fromState, state.VideoStateActed); err != nil {
-		return state.FinalOutcomeFailed, fmt.Errorf("transition video %d to acted: %w", v.ID, err)
+	// A video already in acted was interrupted mid-action; it is already acted,
+	// so no transition is made (acted->acted is deliberately not an edge).
+	if v.ProcessingState != state.VideoStateActed {
+		if _, err := p.machine.TransitionVideoState(ctx, v.ID, fromState, state.VideoStateActed); err != nil {
+			return state.FinalOutcomeFailed, fmt.Errorf("transition video %d to acted: %w", v.ID, err)
+		}
 	}
 
-	outcome, err := p.executor.Execute(ctx, runID, v.ID, matched)
-	if err != nil {
-		message := err.Error()
-		if _, terr := p.machine.TransitionRunVideoState(ctx, runID, v.ID,
-			state.VideoStateActed, state.VideoStateFailed, state.FinalOutcomeFailed, nil, &message); terr != nil {
-			return state.FinalOutcomeFailed, fmt.Errorf("execute actions for video %d: %w", v.ID, terr)
+	// A fresh-origin failure is recorded here, atomically with its sink. A
+	// retry's failure disposition belongs to processRetryVideo's receipt.
+	_, isRetry := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt)
+	execCtx := ctx
+	if !isRetry {
+		execCtx = context.WithValue(ctx, pipelineOwnsFailureSinkKey{}, struct{}{})
+	}
+
+	var outcome state.VideoFinalOutcome
+	guardedDeferredCommitted := false
+	if bound, ok := p.executor.(interface {
+		ExecuteBound(context.Context, int64, int64, []RouteMatch, auth.AuthorizationBinding) (state.VideoFinalOutcome, error)
+	}); ok && p.executionBinding != nil {
+		handoff := func(tx *sql.Tx, reason queue.DeferredReason) error {
+			qs := p.queueStore
+			if qs == nil {
+				var err error
+				qs, err = queue.NewStore(p.db)
+				if err != nil {
+					return err
+				}
+			}
+			if retryReceipt, isRetry := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt); isRetry {
+				owned, err := qs.ValidateRetryReceiptTx(ctx, tx, retryReceipt)
+				if err != nil {
+					return err
+				}
+				if len(owned.Deferred) == 0 && len(owned.Errors) == 0 {
+					return queue.ErrWorkRemoved
+				}
+				if len(owned.Deferred) == 0 {
+					// An owned error-only retry still needs a durable pending sink
+					// before its exact source rows are resolved.
+					if _, err := qs.CreateDeferredItemTx(ctx, tx, &queue.DeferredItem{VideoID: v.ID, RunID: runID, Reason: reason, Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC()}); err != nil {
+						return err
+					}
+				}
+			} else {
+				if _, err := qs.CreateDeferredItemTx(ctx, tx, &queue.DeferredItem{VideoID: v.ID, RunID: runID, Reason: reason, Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC()}); err != nil {
+					return err
+				}
+			}
+			reasonText := string(reason)
+			if _, err := p.machine.TransitionRunVideoStateTx(ctx, tx, runID, v.ID, state.VideoStateActed, state.VideoStateDeferred, state.FinalOutcomeDeferred, &reasonText, nil); err != nil {
+				return err
+			}
+			return nil
 		}
-		return state.FinalOutcomeFailed, fmt.Errorf("execute actions for video %d: %w", v.ID, err)
+		outcome, err = bound.ExecuteBound(withGuardedDeferral(execCtx, handoff), runID, v.ID, matched, *p.executionBinding)
+		guardedDeferredCommitted = outcome == state.FinalOutcomeDeferred && err == nil
+	} else {
+		outcome, err = p.executor.Execute(execCtx, runID, v.ID, matched)
+	}
+	if err != nil {
+		var accountingErr *postCommitAccountingError
+		if errors.As(err, &accountingErr) {
+			// The executor already committed the deferred disposition and handoff.
+			// Propagate the accounting failure without changing either one.
+			return outcome, diag.At(err, "action_execution", "account_quota")
+		}
+		stopErr := fmt.Errorf("execute actions for video %d: %w", v.ID, err)
+		if isRetry {
+			// processRetryVideo owns the exact receipt and records both lifecycle
+			// and queue disposition in its single failure transaction.
+			return state.FinalOutcomeFailed, stopErr
+		}
+		if ctx.Err() != nil || !isHandledVideoFailure(err) {
+			// Run-stopping (ADR-006 §2): write no failed lifecycle without its
+			// sink. The video stays unfinished and the run's retention sweep
+			// hands it to the queue. A known success is the one disposition
+			// that is already committed, so finish it first.
+			var successAccounting *successAccountingError
+			if errors.As(err, &successAccounting) {
+				if aerr := p.acceptFullyCompletedVideo(ctx, runID, v, matched, routes); aerr != nil {
+					return state.FinalOutcomeFailed, fmt.Errorf("%w; accept completed video: %v", stopErr, aerr)
+				}
+			}
+			return state.FinalOutcomeFailed, stopErr
+		}
+		if ferr := p.recordHandledVideoFailure(ctx, runID, v, err); ferr != nil {
+			return state.FinalOutcomeFailed, fmt.Errorf("%w; record failed disposition: %v", stopErr, ferr)
+		}
+		p.broadcastVideo(runID, v, state.FinalOutcomeFailed, true)
+		return state.FinalOutcomeFailed, nil
 	}
 
 	switch outcome {
@@ -734,19 +993,92 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 		}
 	case state.FinalOutcomeDeferred:
 		reason := "quota_exhausted"
-		if err := p.deferRunVideo(ctx, runID, v.ID, reason); err != nil {
-			return outcome, fmt.Errorf("transition video %d to deferred: %w", v.ID, err)
+		if !guardedDeferredCommitted {
+			if err := p.deferRunVideo(ctx, runID, v.ID, reason); err != nil {
+				return outcome, fmt.Errorf("transition video %d to deferred: %w", v.ID, err)
+			}
 		}
 	case state.FinalOutcomeFailed:
-		message := "action execution failed"
-		if _, err := p.machine.TransitionRunVideoState(ctx, runID, v.ID,
-			state.VideoStateActed, state.VideoStateFailed, state.FinalOutcomeFailed, nil, &message); err != nil {
+		if isRetry {
+			return outcome, nil
+		}
+		if err := p.recordHandledVideoFailure(ctx, runID, v, errors.New("action execution failed")); err != nil {
 			return outcome, fmt.Errorf("transition video %d to failed: %w", v.ID, err)
 		}
 	}
 
 	p.broadcastVideo(runID, v, outcome, len(matched) > 0)
 	return outcome, nil
+}
+
+// matchedActionsComplete reports whether every action of every matched route
+// has already succeeded in some production run.
+func (p *Pipeline) matchedActionsComplete(ctx context.Context, videoID int64, matched []RouteMatch, routes []router.Route) (bool, error) {
+	for _, m := range matched {
+		r := findRoute(routes, m.RouteID)
+		if r == nil || !r.IsEnabled || len(r.Actions) == 0 {
+			return false, nil
+		}
+		for _, a := range r.Actions {
+			if a.ActionType != "playlist_insert" || a.TargetPlaylistID == "" {
+				return false, nil
+			}
+			done, err := actionCompleted(ctx, p.db, videoID, action{m.RouteDecisionID, a.ActionType, a.TargetPlaylistID})
+			if err != nil {
+				return false, err
+			}
+			if !done {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// acceptFullyCompletedVideo commits the accepted disposition of a video whose
+// every action has a confirmed success, when a later auxiliary failure stops
+// the run. A video with an action still outstanding stays unfinished.
+func (p *Pipeline) acceptFullyCompletedVideo(ctx context.Context, runID int64, v *state.Video, matched []RouteMatch, routes []router.Route) error {
+	complete, err := p.matchedActionsComplete(ctx, v.ID, matched, routes)
+	if err != nil || !complete {
+		return err
+	}
+	if err := p.markVideoAccepted(ctx, runID, v); err != nil {
+		return err
+	}
+	p.broadcastVideo(runID, v, state.FinalOutcomeAccepted, true)
+	return nil
+}
+
+// recordHandledVideoFailure commits a video's failed lifecycle and outcome and
+// its one active retained error entry in a single writer transaction
+// (ADR-006 §1). An existing active entry for (video, run) is reused.
+func (p *Pipeline) recordHandledVideoFailure(ctx context.Context, runID int64, v *state.Video, cause error) error {
+	qs := p.queueStore
+	if qs == nil {
+		var err error
+		if qs, err = queue.NewStore(p.db); err != nil {
+			return err
+		}
+	}
+	message := diag.Reason(cause, "playlist action failed")
+	category := queue.ErrorCategoryAPIError
+	var apiErr *youtube.APIError
+	if !errors.As(cause, &apiErr) {
+		category = queue.ErrorCategoryRuntime
+	}
+	return qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		if _, err := p.machine.TransitionRunVideoStateTx(ctx, tx, runID, v.ID,
+			state.VideoStateActed, state.VideoStateFailed, state.FinalOutcomeFailed, nil, &message); err != nil {
+			return err
+		}
+		// Headline and detail carry the same vetted bounded summary (ARD-001),
+		// so a registered code such as mutation_application_uncertain is kept
+		// instead of the generic literal reading as unknown_error.
+		detail := diag.Reason(cause, "playlist insertion failed")
+		_, err := qs.RetainRunSinkTx(ctx, tx, v.ID, runID, category, detail, detail)
+		return err
+	})
 }
 
 func (p *Pipeline) deferRunVideo(ctx context.Context, runID, videoID int64, reason string) error {

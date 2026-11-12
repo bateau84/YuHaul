@@ -36,7 +36,7 @@ func TestE2E_CompletedProductionImmediatelyAcceptsProposal(t *testing.T) {
 					server.WithConfigHandler(config.NewHandler(env.configSvc, nil)))
 				srv := httptest.NewServer(api.Handler())
 				defer srv.Close()
-				client := srv.Client()
+				client := guardClient(t, srv.Client())
 				// Poll only while work is genuinely running, with no sleeps or
 				// assertion retries. Completed responses are themselves checked.
 				wait := func(id int64) state.Run {
@@ -80,8 +80,8 @@ func TestE2E_CompletedProductionImmediatelyAcceptsProposal(t *testing.T) {
 					proposalID := start(path, map[string]any{key: map[string]any{
 						"duplicate_threshold": .5,
 						"routes": []map[string]any{{"id": e3ProposalUUID, "name": "ProposalRock", "evaluation_order": 1, "is_enabled": true, "condition_composition": "AND",
-							"conditions": []map[string]any{{"field": "title", "operator": "contains", "value": "rock"}},
-							"actions":    []map[string]any{{"action_type": "add_to_playlist", "target_playlist_id": "PLproposal"}}}},
+							"conditions": []map[string]any{{"field": "title", "operator": "contains", "value": "rock", "condition_index": 0}},
+							"actions":    []map[string]any{{"action_type": "add_to_playlist", "target_playlist_id": "PLproposal", "action_index": 0}}}},
 					}})
 					require.Equal(t, 1, production.VideosDiscovered, "final counters must be present in the first completed response")
 					require.Equal(t, 1, production.VideosAccepted)

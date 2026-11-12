@@ -81,7 +81,11 @@ export type RunType =
   | 'replay'
   | 'backtest'
 
-export type RunStatus = 'running' | 'completed' | 'interrupted'
+// The persisted run lifecycle (System Architecture §Run Recovery / ADR-002):
+// `failed` is a terminal state distinct from the resumable `interrupted`.
+// `stopped` is the terminal state of a run the user stopped (ARS-003). A run
+// that is `running` with a non-null stop_requested_at is "stopping".
+export type RunStatus = 'running' | 'completed' | 'failed' | 'interrupted' | 'stopped'
 
 export interface Run {
   id: number
@@ -91,16 +95,76 @@ export interface Run {
   status: RunStatus
   config_version_id?: number
   videos_discovered: number
+  // videos_selected mirrors the persisted selected_video_count: null (or an
+  // absent field from a pre-diagnostics server) means the selection was never
+  // captured and is unknown; 0 means selection completed with no inputs.
+  // Unknown must never be presented as zero (ARD-001 / BR-020).
+  videos_selected?: number | null
+  // videos_evaluated counts distinct videos with persisted route-decision
+  // evidence for this run (ARD-001). It is decision evidence, not proof that
+  // every selected video finished evaluation.
+  videos_evaluated?: number
   videos_accepted: number
   videos_rejected: number
   videos_excluded: number
   videos_deferred: number
   videos_failed: number
+  // Videos committed as unavailable_on_youtube (ARS-005 §1.3). Absent from
+  // servers that predate re-queue; treat absence as 0 only where a count is shown.
+  videos_unavailable?: number
   videos_not_yet_evaluated: number
   quota_cost: number
   duration_seconds?: number
-  interrupt_reason?: string
+  // Always present in server JSON: null when no reason was recorded. Rendered
+  // only when non-null — the server has already vetted it for safety.
+  interrupt_reason?: string | null
+  // Set by the server when a stored interrupt/failure reason existed but was
+  // withheld by safe-diagnostic vetting; the raw text is never sent (ARD-001).
+  failure_reason_unavailable?: boolean
+  // Closed-set provenance, always present in server JSON and null when unknown
+  // or legacy. Run Detail uses both only to tell a manual Run Now run that
+  // stopped at its time limit apart from every other interrupted run.
+  initiated_by?: 'run_now' | 'schedule' | 'queue_retry' | null
+  interrupt_cause?: 'time_limit' | 'shutdown' | null
   current_phase?: string
+  // RFC 3339 UTC instant a stop was recorded; null when none. status
+  // 'running' with this set means stopping (ARS-003 §4.2).
+  stop_requested_at?: string | null
+  // true only for the one run Discard would currently accept; null when the
+  // server could not decide (every item then). Absent from older servers.
+  discardable?: boolean | null
+  // Present only when discardable is true.
+  discard_cause?: DiscardCause
+  // true for a stuck legacy production run the user may mark as ended (BR-036);
+  // false for every other run; null on every item when the server could not
+  // decide. Absent from older servers, which never offer the action.
+  endable?: boolean | null
+  // true only while this server process is executing the run (the in-process
+  // run control). A saved status of 'running' does not imply it: a stuck legacy
+  // run is saved as running and is not executing.
+  executing?: boolean
+  // Backtest/Replay only: the saved UTC-day range of YouTube published dates
+  // (null bound = none). Both null means no date filter was applied. Absent
+  // or null for every other run type.
+  published_range?: PublishedRange | null
+}
+
+export type DiscardCause = 'snapshot_unavailable' | 'snapshot_unreadable' | 'checkpoint_unrecognized'
+
+// A run is stopping while it still runs but a stop has been recorded.
+// The one predicate for offering Stop: the run is saved as running and this
+// server is actually executing it. Absent or false means no Stop button.
+export function canOfferStop(run: Pick<Run, 'status' | 'executing'>): boolean {
+  return run.status === 'running' && run.executing === true
+}
+
+export function isStopping(run: Pick<Run, 'status' | 'stop_requested_at'>): boolean {
+  return run.status === 'running' && !!run.stop_requested_at
+}
+
+export interface PublishedRange {
+  from: string | null
+  to: string | null
 }
 
 export type VideoProcessingState =
@@ -119,6 +183,7 @@ export type VideoFinalOutcome =
   | 'excluded'
   | 'deferred'
   | 'failed'
+  | 'unavailable_on_youtube'
   | 'not_yet_evaluated'
 
 export interface VideoOutcome {
@@ -133,7 +198,52 @@ export interface VideoOutcome {
   processing_state: VideoProcessingState
   final_outcome: VideoFinalOutcome | null
   deferred_reason?: string
+  deferred_reason_unavailable?: boolean
   error_message?: string
+  // Set when a stored error message exists but was withheld by safe-diagnostic
+  // vetting; the raw text is never sent (ARD-001).
+  error_message_unavailable?: boolean
+  current_local_metadata?: CurrentLocalMetadata | null
+  metadata_context_status?: 'available' | 'context_read_failed' | string
+  unresolved_mutations?: UnresolvedMutation[]
+  route_decisions?: RouteDecisionSummary[]
+}
+
+// An action this run sent for a video whose routing decision was made by an
+// earlier run (BR-039 partly done video; run-initiation ARS-006 §8.1).
+export interface ContinuedAction extends ActionOutcome {
+  decision_run_id: number
+  route_decision_id: number
+  // Stable public route UUID; the internal integer key never leaves the server.
+  route_id: string
+  // From the decision run's snapshot; null when it cannot be read.
+  route_name: string | null
+}
+
+// GET /api/runs/{id}/videos/{videoId}. continued_actions is an empty array
+// when the run continued no earlier decision.
+export interface RunVideoDetail extends VideoOutcome {
+  continued_actions: ContinuedAction[]
+}
+
+export interface UnresolvedMutation {
+  action_type: RouteActionType
+  target_playlist_id: string
+  prepared_at?: string
+  application_state: 'unknown'
+}
+
+export type MetadataAvailability = 'current_local' | 'known_expired' | 'withheld' | 'unknown'
+
+export interface CurrentLocalMetadata {
+  attribution: 'current_local_not_necessarily_evaluated' | string
+  source_fetched_at?: string | null
+  title?: string | null
+  title_availability: MetadataAvailability
+  channel_name?: string | null
+  channel_name_availability: MetadataAvailability
+  duration_seconds?: number | null
+  duration_availability: MetadataAvailability
 }
 
 export type RouteDecisionType =
@@ -162,19 +272,63 @@ export interface ActionOutcome {
   action_type: RouteActionType
   target_playlist_id: string
   outcome: 'succeeded' | 'failed' | 'deferred' | 'not_attempted'
+  // Optional explanatory evidence for a recorded outcome — for example the
+  // already_completed idempotency suppression. It is not an outcome category;
+  // the server has vetted it for safe display (ARD-001).
+  outcome_reason?: string
+  outcome_reason_unavailable?: boolean
   error_message?: string
+  // Set when a stored error message exists but was withheld by
+  // safe-diagnostic vetting; the raw text is never sent (ARD-001).
+  error_message_unavailable?: boolean
+  // Present only when a YouTube action was actually attempted. A quota
+  // deferral, simulation, or idempotency suppression has no attempt
+  // timestamp (ARD-001).
+  executed_at?: string
 }
 
-export interface RouteDecision {
+export interface CausalExclusion {
+  status: string
+  config_version_id: number | null
+  exclusion_index: number | null
+  semantics_version: number | null
+  exclusion_type: string | null
+  field: string | null
+  comparison: string | null
+  configured_value: string | null
+  configured_value_status: string
+  matched: boolean | null
+  compared_input_status: string
+}
+
+// List-only summary of why a route did not match. It names the first failed
+// condition as configured in the run's snapshot and never holds the video's
+// compared value. Absent means the list read cannot name one.
+export interface FailedCondition {
+  field: string
+  operator: string
+  value: string | null
+  composition: 'AND' | 'OR' | string
+  condition_count: number
+  further_failed: number
+}
+
+export interface RouteDecisionSummary {
   // Route identity in a decision is the route UUID (ARS-004); the decision
   // row id mirrors it because each route is evaluated at most once per video.
   id: string
   route_id: string
   route_name: string
+  route_name_source?: string
+  causal_exclusion?: CausalExclusion | null
+  failed_condition?: FailedCondition | null
   evaluation_order: number
   decision: RouteDecisionType
   skip_reason?: SkipReason
   rejection_reason?: string
+}
+
+export interface RouteDecision extends RouteDecisionSummary {
   condition_audits: ConditionAudit[]
   actions: ActionOutcome[]
 }
@@ -309,6 +463,9 @@ export interface Settings {
   duplicate_threshold: number
   duplicate_behavior: string
   account_connected: boolean
+  /** Truthful account state; prefer this over account_connected for display. */
+  authorization_state?: string
+  authorization_reason?: string | null
   account_email?: string
 }
 
@@ -382,22 +539,53 @@ export interface ErrorEntry {
   run_id: number
   error_category: 'api_error' | 'authorization' | 'runtime'
   error_message: string
+  error_message_unavailable?: boolean
+  external_video_id?: string
   status: 'active' | 'retrying' | 'dismissed' | 'resolved'
   created_at: string
   retry_count: number
+  // 'final_outcome' when the entry was closed because its video already has a
+  // final outcome (BR-039); video_final_outcome is then set.
+  closed_reason?: 'final_outcome' | null
+  video_final_outcome?: VideoFinalOutcome
 }
+
+export type DeferredReason =
+  | 'quota_exhausted'
+  | 'api_rate_limited'
+  | 'authorization_pending'
+  | 'stopped_by_user'
+  | 'discarded_by_user'
+  | 'requeued_by_user'
+
+// The six stored deferral reasons, in the order the Deferred reason filter
+// offers them: the order of the admin UI design's reason table. There is no
+// "other" value.
+export const deferredReasons: readonly DeferredReason[] = [
+  'requeued_by_user',
+  'quota_exhausted',
+  'authorization_pending',
+  'stopped_by_user',
+  'discarded_by_user',
+  'api_rate_limited',
+]
 
 export interface DeferredItem {
   id: number
   video_id: number
+  external_video_id?: string
   video_title?: string
   channel_name?: string
   run_id: number
-  deferral_reason: string
+  retry_run_id?: number
+  deferral_reason: DeferredReason | (string & {})
+  deferred_reason_unavailable?: boolean
   retry_after?: string
   status: 'pending' | 'retrying' | 'completed' | 'discarded'
   created_at: string
   retry_count: number
+  closed_reason?: 'final_outcome' | null
+  video_final_outcome?: VideoFinalOutcome
 }
 
 export type ToastType = 'success' | 'error' | 'info'
@@ -439,3 +627,148 @@ export interface BacktestComparison {
   lost_catches: number
   net_change: number
 }
+
+// ---- Paged deferred queue (run-initiation ARS-005 §7.2) -------------------
+
+export interface DeferredPageInfo {
+  limit: number
+  number: number
+  total_pages: number
+  first_position: number | null
+  last_position: number | null
+  next_after_id: number | null
+  prev_before_id: number | null
+}
+
+export interface DeferredPage {
+  deferred: DeferredItem[]
+  /** Items matching the include and reason filters. */
+  total: number
+  /** Items matching include only (no reason filter). */
+  queue_total: number
+  by_reason: Partial<Record<DeferredReason, number>>
+  page: DeferredPageInfo
+}
+
+// ---- Re-queue stranded videos (ARS-005 §8) ---------------------------------
+
+export type StrandedUnavailableReason = 'startup_recovery_active' | 'production_run_active' | 'shutting_down'
+export type StrandedBlockReason = 'uncertain_addition' | 'unresolved_send_guard' | 'ambiguous_legacy_evidence'
+
+export interface StrandedBlockedVideo {
+  video_id: number
+  youtube_video_id: string
+  reasons: { reason: StrandedBlockReason; run_id: number }[]
+}
+
+export interface StrandedReport {
+  requeue: number
+  already_queued: { videos: number; in_errors_queue: number }
+  removed_by_user: number
+  blocked: {
+    videos: number
+    by_reason: Partial<Record<StrandedBlockReason, number>>
+    items: StrandedBlockedVideo[]
+  }
+  not_ended: { videos: number; runs: { run_id: number; videos: number }[] }
+  no_origin_run: number
+  retained_without_queue_item: { videos: number; removed_by_user: number }
+}
+
+export interface StrandedPreview extends StrandedReport {
+  available: boolean
+  unavailable_reason: StrandedUnavailableReason | null
+}
+
+export interface RequeueResult extends StrandedReport {
+  outcome: 'requeued' | 'nothing_to_requeue'
+  requeued: number
+  skipped_concurrently: number
+  expected_requeue: number | null
+  differs_from_preview: boolean
+}
+
+// Closed refusal codes of POST /api/stranded-videos/requeue (ARS-005 §8.2).
+// They arrive as ApiError.code next to the HTTP status.
+export type RequeueRefusalCode =
+  | 'invalid_body'
+  | 'shutting_down'
+  | 'startup_recovery_active'
+  | 'production_run_active'
+  | 'requeue_failed'
+  | 'requeue_outcome_unknown'
+
+export const requeueRefusalCodes: readonly RequeueRefusalCode[] = [
+  'invalid_body',
+  'shutting_down',
+  'startup_recovery_active',
+  'production_run_active',
+  'requeue_failed',
+  'requeue_outcome_unknown',
+]
+
+// ---- Video search (video-search ARS-001 §4) --------------------------------
+
+export type VideoRecord = 'known' | 'imported_reference' | 'simulation_only'
+export type SearchAvailability = 'current_local' | 'expired' | 'unavailable'
+
+export interface VideoSummary {
+  video_id: string
+  record: VideoRecord
+  title: { text: string | null; availability: SearchAvailability }
+  channel: { name: string | null; name_availability: SearchAvailability; channel_id: string | null }
+  latest_outcome: VideoLatestOutcome
+  queue_state: VideoQueueState
+}
+
+export type VideoLatestOutcome =
+  | { state: 'committed'; outcome: VideoFinalOutcome; run_id: number | null; committed_at: string | null }
+  | { state: 'not_yet_evaluated' }
+  | { state: 'imported_reference' }
+  | { state: 'simulation_only' }
+
+export type VideoQueueState =
+  | { state: 'deferred_claimed'; reason: string; claiming_run_id: number | null }
+  | { state: 'deferred_pending'; reason: string }
+  | { state: 'errors_claimed'; category: string; claiming_run_id: number | null }
+  | { state: 'errors_active'; category: string }
+  | { state: 'removed_by_user' }
+  | { state: 'none' }
+
+export interface VideoRunEntry {
+  run_id: number
+  run_type: RunType
+  mode: 'production' | 'simulation'
+  /** RFC 3339 UTC; null when the stored value does not parse. */
+  started_at: string | null
+  /** Stored run.initiated_by. Null for runs before migration 024 and for simulations; never guess a value. */
+  initiated_by: 'run_now' | 'queue_retry' | 'schedule' | null
+  run_status: RunStatus
+  /** Null: the production run recorded no outcome. Never a negative outcome. */
+  outcome: VideoFinalOutcome | null
+  decision_detail_path: string
+}
+
+export interface VideoView extends VideoSummary {
+  runs: VideoRunEntry[]
+}
+
+export interface VideoSearchPage {
+  items: VideoSummary[]
+  total: number
+  page_size: number
+  number: number
+  total_pages: number
+  first_position: number | null
+  last_position: number | null
+  next_cursor: string | null
+  prev_cursor: string | null
+}
+
+export type VideoSearchResponse =
+  | { kind: 'empty' | 'invalid_text' | 'too_long' | 'unusable_link' | 'too_short' }
+  | { kind: 'video'; video_id: string; from_link: boolean }
+  | { kind: 'id_not_found'; video_id: string; from_link: boolean; results?: VideoSearchPage }
+  | { kind: 'results'; results: VideoSearchPage }
+
+export type VideoSearchKind = VideoSearchResponse['kind']

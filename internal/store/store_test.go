@@ -35,7 +35,7 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	err := db.QueryRowContext(context.Background(),
 		"SELECT version FROM schema_migrations LIMIT 1;").Scan(&version)
 	require.NoError(t, err)
-	require.Equal(t, 15, version)
+	require.Equal(t, 27, version)
 }
 
 func TestMigration011NormalizesLegacyRunTimestamps(t *testing.T) {
@@ -138,7 +138,7 @@ func TestMigration013UpgradeSeedsNullTimestampAndPreservesCorpus(t *testing.T) {
 
 	var version int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM schema_migrations LIMIT 1;`).Scan(&version))
-	require.Equal(t, 15, version)
+	require.Equal(t, 27, version)
 
 	// Exactly one singleton row, seeded NULL: no backfill, no sentinel date.
 	var rowCount, nullCount int
@@ -209,6 +209,111 @@ func TestMigration013UpgradeSeedsNullTimestampAndPreservesCorpus(t *testing.T) {
 	}
 	require.NoError(t, cols.Err())
 	require.Equal(t, []string{"singleton_id", "last_successful_corpus_import_at"}, names)
+}
+
+// TestMigration016AddsNullableDiagnosticColumnsWithoutBackfill proves the
+// ARD-001 additive contract: a populated version-015 database gains a NULL
+// run.selected_video_count and a NULL executed_action.outcome_reason without
+// backfilling either, while pre-migration rows stay readable and new rows can
+// record a captured count and reason.
+func TestMigration016AddsNullableDiagnosticColumnsWithoutBackfill(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v15.db")
+
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+
+	// Pin the database at the pre-migration schema version 015.
+	src, err := iofs.New(os.DirFS("migrations"), ".")
+	require.NoError(t, err)
+	driver, err := migrationsqlite.WithInstance(db, &migrationsqlite.Config{})
+	require.NoError(t, err)
+	m, err := migrate.NewWithInstance("iofs", src, "sqlite", driver)
+	require.NoError(t, err)
+	require.NoError(t, m.Migrate(15))
+
+	// A pre-change run with one video, one route decision, and one action.
+	_, err = db.Exec(`INSERT INTO route (name, evaluation_order, condition_composition)
+		VALUES ('Music', 1, 'AND');`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO run (started_at, run_type, status, videos_discovered)
+		VALUES ('2026-01-01T00:00:00.000000000Z', 'manual', 'completed', 1);`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO video (video_id, channel_id, discovered_in_run_id, processing_state, final_outcome)
+		VALUES ('v-old', 'c1', 1, 'completed', 'accepted');`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order, decision)
+		VALUES (1, 1, 1, 1, 'matched');`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO executed_action (route_decision_id, run_id, video_id, action_type, target_playlist_id, outcome)
+		VALUES (1, 1, 1, 'playlist_insert', 'PL-old', 'succeeded');`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Real startup path: store.Open applies migration 016 before serving.
+	db, err = store.Open(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	var version int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM schema_migrations LIMIT 1;`).Scan(&version))
+	require.Equal(t, 27, version)
+
+	// Historical rows stay NULL — unknown, never guessed as zero.
+	var selected sql.NullInt64
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT selected_video_count FROM run WHERE id = 1;`).Scan(&selected))
+	assert.Equal(t, sql.NullInt64{}, selected, "old runs must keep a NULL selected count")
+
+	var reason sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT outcome_reason FROM executed_action WHERE id = 1;`).Scan(&reason))
+	assert.Equal(t, sql.NullString{}, reason, "old actions must keep a NULL outcome reason")
+
+	// Pre-migration evidence is preserved unchanged.
+	var outcome, target string
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT outcome, target_playlist_id FROM executed_action WHERE id = 1;`).Scan(&outcome, &target))
+	assert.Equal(t, "succeeded", outcome)
+	assert.Equal(t, "PL-old", target)
+
+	// Post-migration rows can record a captured count (including a known
+	// zero) and an explanatory outcome reason.
+	_, err = db.Exec(`INSERT INTO run (started_at, run_type, status) VALUES ('2026-02-01T00:00:00.000000000Z', 'backtest', 'running');`)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE run SET selected_video_count = 0 WHERE id = 2;`)
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT selected_video_count FROM run WHERE id = 2;`).Scan(&selected))
+	assert.Equal(t, sql.NullInt64{Int64: 0, Valid: true}, selected, "a captured empty selection must store 0, not NULL")
+
+	_, err = db.Exec(`INSERT INTO video (video_id, channel_id, discovered_in_run_id, processing_state)
+		VALUES ('v-new', 'c1', 2, 'not_yet_evaluated');`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order, decision)
+		VALUES (2, 2, 1, 1, 'matched');`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO executed_action (route_decision_id, run_id, video_id, action_type, target_playlist_id, outcome, outcome_reason)
+		VALUES (2, 2, 2, 'playlist_insert', 'PL-new', 'not_attempted', 'already_completed');`)
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT outcome_reason FROM executed_action WHERE run_id = 2;`).Scan(&reason))
+	assert.Equal(t, sql.NullString{String: "already_completed", Valid: true}, reason)
+
+	// No date-bound selection metadata was added while date semantics are
+	// an open user decision.
+	cols, err := db.QueryContext(ctx,
+		`SELECT name FROM pragma_table_info('run') WHERE name LIKE '%date%' OR name LIKE '%selected%';`)
+	require.NoError(t, err)
+	defer cols.Close()
+	var runDiagCols []string
+	for cols.Next() {
+		var name string
+		require.NoError(t, cols.Scan(&name))
+		runDiagCols = append(runDiagCols, name)
+	}
+	require.NoError(t, cols.Err())
+	assert.Equal(t, []string{"selected_video_count"}, runDiagCols)
 }
 
 func TestSchemaContainsAllEntities(t *testing.T) {

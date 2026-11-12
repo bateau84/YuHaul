@@ -17,5 +17,9 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
+    // The test fetch mock adds ~300ms of simulated latency per call, so under
+    // CPU contention the 5s test and 1s findBy/waitFor defaults are too tight.
+    testTimeout: 30000,
+    hookTimeout: 30000,
   },
 })

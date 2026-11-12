@@ -40,6 +40,7 @@ func setupReplayPipeline(t *testing.T) (*replayDeps, func()) {
 		meta:        metaMgr,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	p.router.WithRunRoutesValidator(p.ValidateRunRoutes)
 
 	return &replayDeps{
 		db:          db,
@@ -120,7 +121,7 @@ func TestReplay_EvaluatesRetainedVideosWithoutMutations(t *testing.T) {
 
 	video := createRetainedVideo(t, ctx, deps, prodRunID, "vid1", "ch1", "cool jazz live")
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	require.Equal(t, state.RunTypeReplay, run.RunType)
 
@@ -129,6 +130,9 @@ func TestReplay_EvaluatesRetainedVideosWithoutMutations(t *testing.T) {
 	loaded, err := deps.stateStore.GetRun(ctx, run.ID)
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
+	require.NotNil(t, loaded.VideosSelected, "the retained selector's input set is captured")
+	assert.Equal(t, 1, *loaded.VideosSelected)
+	assert.Equal(t, 1, loaded.VideosEvaluated, "evaluated counts decision evidence, distinct from selected")
 	assert.Equal(t, 1, loaded.VideosDiscovered)
 	assert.Equal(t, 1, loaded.VideosAccepted)
 	assert.Equal(t, 0, loaded.VideosRejected)
@@ -179,7 +183,7 @@ func TestReplay_UsesAllRetainedVideosNotJustPending(t *testing.T) {
 		state.WithFinalOutcome(state.FinalOutcomeAccepted))
 	require.NoError(t, err)
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteReplay(ctx, run.ID)
 
@@ -195,6 +199,9 @@ func TestReplay_UsesAllRetainedVideosNotJustPending(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, loaded.VideosDiscovered)
 	assert.Equal(t, 2, loaded.VideosAccepted)
+	require.NotNil(t, loaded.VideosSelected)
+	assert.Equal(t, 2, *loaded.VideosSelected,
+		"replay selects all retained observations, not only the pending ones")
 }
 
 func TestReplay_DoesNotChangeDuplicateReferenceCorpus(t *testing.T) {
@@ -214,7 +221,7 @@ func TestReplay_DoesNotChangeDuplicateReferenceCorpus(t *testing.T) {
 		 VALUES (?, 'fp', 'fp', ?, 'api_discovery', 1);`, video.VideoID, video.ChannelID)
 	require.NoError(t, err)
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteReplay(ctx, run.ID)
 
@@ -238,7 +245,7 @@ func TestReplay_NoSucceededActions(t *testing.T) {
 
 	video := createRetainedVideo(t, ctx, deps, prodRunID, "vid1", "ch1", "cool jazz live")
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteReplay(ctx, run.ID)
 
@@ -289,7 +296,7 @@ func TestBacktest_UsesProposedConfig(t *testing.T) {
 		},
 	}
 
-	run, err := deps.pipeline.Backtest(ctx, &proposed)
+	run, err := deps.pipeline.Backtest(ctx, &proposed, state.PublishedRange{})
 	require.NoError(t, err)
 	require.Equal(t, state.RunTypeBacktest, run.RunType)
 	require.NotNil(t, run.ConfigVersionID)
@@ -315,6 +322,8 @@ func TestBacktest_UsesProposedConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, loaded.VideosDiscovered)
 	assert.Equal(t, 1, loaded.VideosAccepted)
+	require.NotNil(t, loaded.VideosSelected)
+	assert.Equal(t, 1, *loaded.VideosSelected, "the backtest selects all retained observations")
 }
 
 // ADR-007: previously stored configuration snapshots keep the internal action
@@ -359,7 +368,7 @@ func TestReplay_OlderStoredConfigKeepsInternalActionType(t *testing.T) {
 	}, "legacy snapshot")
 	require.NoError(t, err)
 
-	run, err := deps.pipeline.Replay(ctx, &versionID)
+	run, err := deps.pipeline.Replay(ctx, &versionID, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteReplay(ctx, run.ID)
 
@@ -402,7 +411,7 @@ func TestReplay_DetectsDuplicatesAgainstRetainedCorpus(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, match, "fixture must independently prove a distinct duplicate")
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteReplay(ctx, run.ID)
 
@@ -445,7 +454,7 @@ func TestReplay_DoesNotSkipSelfMatchedVideo(t *testing.T) {
 
 	deps.pipeline.detector = duplicate.NewDetector(deps.db)
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteReplay(ctx, run.ID)
 
@@ -473,7 +482,7 @@ func TestReplay_SkipsDuplicateDetectionWhenDetectorNil(t *testing.T) {
 
 	deps.pipeline.detector = nil
 
-	run, err := deps.pipeline.Replay(ctx, nil)
+	run, err := deps.pipeline.Replay(ctx, nil, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteReplay(ctx, run.ID)
 
@@ -517,7 +526,7 @@ func TestReplay_HistoricalConfigVersion(t *testing.T) {
 
 	video := createRetainedVideo(t, ctx, deps, prodRunID, "vid_jazz", "ch1", "cool jazz live")
 
-	run, err := deps.pipeline.Replay(ctx, &historicalCfgID)
+	run, err := deps.pipeline.Replay(ctx, &historicalCfgID, state.PublishedRange{})
 	require.NoError(t, err)
 	require.Equal(t, state.RunTypeReplay, run.RunType)
 	require.NotNil(t, run.ConfigVersionID)
@@ -542,7 +551,7 @@ func TestReplay_UnknownConfigVersionReturnsError(t *testing.T) {
 	defer cleanup()
 
 	unknownID := int64(9999)
-	_, err := deps.pipeline.Replay(ctx, &unknownID)
+	_, err := deps.pipeline.Replay(ctx, &unknownID, state.PublishedRange{})
 	require.Error(t, err)
 }
 
@@ -552,7 +561,7 @@ func TestBacktest_RequiresConfigStore(t *testing.T) {
 	defer cleanup()
 
 	deps.pipeline.configStore = nil
-	_, err := deps.pipeline.Backtest(ctx, &config.ProposalSnapshot{})
+	_, err := deps.pipeline.Backtest(ctx, &config.ProposalSnapshot{}, state.PublishedRange{})
 	require.Error(t, err)
 }
 
@@ -579,7 +588,7 @@ func TestBacktest_DoesNotChangeChannelCounters(t *testing.T) {
 		DuplicateThreshold: 0.5,
 		DuplicateBehavior:  "skip",
 		Routes:             []config.ProposalRoute{},
-	})
+	}, state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteBacktest(ctx, run.ID)
 

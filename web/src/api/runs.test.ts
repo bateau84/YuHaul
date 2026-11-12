@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { startDryRun, startBacktest } from './runs'
+import { startDryRun, startBacktest, getRun } from './runs'
+import { getRunVideos } from './run-videos'
 import type { Route, BacktestComparison } from '../types'
 
 // One route already in the registry and one proposal-only UUID that has never
@@ -92,5 +93,27 @@ describe('proposal route identity (ADR-012 / ARS-004)', () => {
     expect(rawBody).toContain(`"id":"${ACTIVE_ROUTE_UUID}"`)
     expect(rawBody).toContain(`"id":"${PROPOSAL_ONLY_UUID}"`)
     expect(rawBody).not.toMatch(/"id":\s*\d/)
+  })
+})
+
+describe('unavailable_on_youtube contract (ARS-005 §1.3)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('getRun keeps videos_unavailable', async () => {
+    const body = { id: 1, started_at: 'x', run_type: 'manual', status: 'completed', videos_discovered: 0, videos_accepted: 0, videos_rejected: 0, videos_excluded: 0, videos_deferred: 0, videos_failed: 0, videos_unavailable: 2, videos_not_yet_evaluated: 0, quota_cost: 0 }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(body)))
+    const run = await getRun(1)
+    expect(run?.videos_unavailable).toBe(2)
+  })
+
+  it('getRunVideos filters by the new outcome and keeps it on the row', async () => {
+    const f = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      videos: [{ id: 1, video_id: 'v', channel_id: 'c', processing_state: 'evaluated', final_outcome: 'unavailable_on_youtube' }],
+      pagination: { page: 1, page_size: 50, total: 2, total_pages: 1 },
+    })))
+    const page = await getRunVideos(9, { outcome: 'unavailable_on_youtube' })
+    expect(f).toHaveBeenCalledWith('/api/runs/9/videos?outcome=unavailable_on_youtube', expect.anything())
+    expect(page.videos[0].final_outcome).toBe('unavailable_on_youtube')
+    expect(page.total).toBe(2)
   })
 })

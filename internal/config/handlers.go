@@ -298,6 +298,8 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load settings")
 		return
 	}
+	// The response embeds live account state; never let the browser reuse it.
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -394,6 +396,8 @@ func (h *Handler) settingsResponse(ctx context.Context) (map[string]any, error) 
 	}
 
 	accountConnected := false
+	authorizationState := "not_configured"
+	var authorizationReason *string
 	if h.authProvider != nil {
 		status, err := h.authProvider.Status(ctx)
 		if err != nil {
@@ -401,6 +405,8 @@ func (h *Handler) settingsResponse(ctx context.Context) (map[string]any, error) 
 		}
 		if status != nil {
 			accountConnected = status.Connected
+			authorizationState = status.AuthorizationState
+			authorizationReason = status.AuthorizationReason
 		}
 	}
 
@@ -410,6 +416,10 @@ func (h *Handler) settingsResponse(ctx context.Context) (map[string]any, error) 
 		"duplicate_threshold": threshold,
 		"duplicate_behavior":  behavior,
 		"account_connected":   accountConnected,
+		// authorization_state is the truthful account state; account_connected
+		// is only a convenience boolean derived from it.
+		"authorization_state":  authorizationState,
+		"authorization_reason": authorizationReason,
 	}, nil
 }
 

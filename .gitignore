@@ -8,3 +8,10 @@ k8s/secret.yaml
 
 # Root release-tool dependencies (independent from the SPA).
 /node_modules/
+
+# Local test databases and built server binary.
+*.db
+*.db-shm
+*.db-wal
+/yuhaul-server
+web/.vitest/

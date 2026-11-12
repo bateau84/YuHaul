@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { act, render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
-import { RunsView } from './RunsView'
+import { RunsView, RUN_POLL_INTERVAL_MS } from './RunsView'
 import { ToastProvider } from '../components/ToastProvider'
 import * as mock from '../api/mock'
 import type { Run } from '../types'
@@ -39,6 +39,10 @@ describe('RunsView', () => {
     vi.clearAllMocks()
   })
 
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('renders run rows when runs are returned', async () => {
     vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([runFixture()])
 
@@ -49,6 +53,17 @@ describe('RunsView', () => {
     const table = screen.getByRole('table')
     expect(within(table).getByText('Scheduled')).toBeInTheDocument()
     expect(within(table).getByText('42')).toBeInTheDocument()
+  })
+
+  it('offers Stop run N only in rows of running runs', async () => {
+    vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([
+      runFixture({ id: 41, status: 'running', executing: true }),
+      runFixture({ id: 40, status: 'completed' }),
+      runFixture({ id: 39, status: 'stopped' }),
+    ])
+    renderView()
+    expect(await screen.findByRole('button', { name: 'Stop run 41' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^Stop run/ })).toHaveLength(1)
   })
 
   it('renders empty state when the fetch succeeds with an empty list', async () => {
@@ -132,6 +147,115 @@ describe('RunsView', () => {
 
     await waitFor(() => expect(screen.getByText(/No runs yet/i)).toBeInTheDocument())
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  describe('persisted lifecycle, counts, and refresh', () => {
+    // Deterministic async control under fake timers: the clock only moves when
+    // the test says so, and `flush` drains the promise chain, so no assertion
+    // depends on wall-clock auto-advance.
+    async function flush() {
+      await act(async () => {
+        for (let i = 0; i < 25; i++) await Promise.resolve()
+        await vi.advanceTimersByTimeAsync(0)
+      })
+    }
+
+    function advance(ms: number) {
+      return act(async () => {
+        await vi.advanceTimersByTimeAsync(ms)
+        for (let i = 0; i < 25; i++) await Promise.resolve()
+      })
+    }
+
+    it('renders the failed status label and offers Failed in the status filter', async () => {
+      vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([runFixture({ id: 1, status: 'failed' })])
+
+      renderView()
+      await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument())
+
+      expect(within(screen.getByRole('table')).getByText('Failed')).toBeInTheDocument()
+      const statusSelect = screen.getByLabelText('Status')
+      expect(within(statusSelect).getByRole('option', { name: 'Failed' })).toBeInTheDocument()
+    })
+
+    it('distinguishes selected, evaluated, and discovered counts, keeping null selected as Unknown', async () => {
+      vi.spyOn(mock, 'listRuns').mockResolvedValueOnce([
+        runFixture({ id: 1, status: 'completed', videos_selected: 12, videos_evaluated: 7, videos_discovered: 42 }),
+        runFixture({ id: 2, status: 'completed', videos_selected: 0, videos_evaluated: 4, videos_discovered: 6 }),
+        runFixture({ id: 3, status: 'completed', videos_selected: null, videos_discovered: 5 }),
+      ])
+
+      renderView()
+      await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument())
+
+      const table = screen.getByRole('table')
+      expect(within(table).getByRole('columnheader', { name: 'Selected' })).toBeInTheDocument()
+      expect(within(table).getByRole('columnheader', { name: 'Evaluated' })).toBeInTheDocument()
+      expect(within(table).getByRole('columnheader', { name: 'Discovered' })).toBeInTheDocument()
+
+      const [, row1, row2, row3] = within(table).getAllByRole('row')
+      // Known counts render as numbers.
+      expect(within(row1).getByText('12')).toBeInTheDocument()
+      expect(within(row1).getByText('7')).toBeInTheDocument()
+      expect(within(row1).getByText('42')).toBeInTheDocument()
+      // A captured empty selection is 0, not Unknown.
+      expect(within(row2).getByText('0')).toBeInTheDocument()
+      // A never-captured selection is Unknown, not 0; an absent evaluated
+      // count is an em dash, not a fabricated number.
+      expect(within(row3).getByText('Unknown')).toBeInTheDocument()
+      expect(within(row3).getByText('—')).toBeInTheDocument()
+      expect(within(row3).getByText('5')).toBeInTheDocument()
+    })
+
+    it('polls a running run and adopts the stored terminal status, then stops polling', async () => {
+      vi.useFakeTimers()
+      const listSpy = vi
+        .spyOn(mock, 'listRuns')
+        .mockResolvedValueOnce([runFixture({ id: 1, status: 'running' })])
+        .mockResolvedValueOnce([runFixture({ id: 1, status: 'failed' })])
+
+      renderView()
+      await flush()
+      const table = () => screen.getByRole('table')
+      expect(within(table()).getByText('Running')).toBeInTheDocument()
+      expect(within(table()).queryByText('Failed')).not.toBeInTheDocument()
+
+      await advance(RUN_POLL_INTERVAL_MS)
+
+      expect(within(table()).getByText('Failed')).toBeInTheDocument()
+      expect(within(table()).queryByText('Running')).not.toBeInTheDocument()
+      expect(listSpy).toHaveBeenCalledTimes(2)
+
+      // Terminal: no further refreshes are scheduled.
+      await advance(RUN_POLL_INTERVAL_MS * 2)
+      expect(listSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('keeps the last loaded list and offers a visible retry when a background refresh fails', async () => {
+      vi.useFakeTimers()
+      const running = runFixture({ id: 1, status: 'running' })
+      vi.spyOn(mock, 'listRuns')
+        .mockResolvedValueOnce([running])
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValueOnce([running])
+
+      renderView()
+      await flush()
+      expect(screen.getByRole('table')).toBeInTheDocument()
+
+      await advance(RUN_POLL_INTERVAL_MS)
+
+      const alert = screen.getByRole('alert')
+      expect(alert).toHaveTextContent('Could not refresh run status. The list below may be out of date.')
+      // The stale-but-truthful list stays visible instead of being cleared or
+      // replaced by an empty state.
+      expect(within(screen.getByRole('table')).getByText('Running')).toBeInTheDocument()
+
+      fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
+      await flush()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(within(screen.getByRole('table')).getByText('Running')).toBeInTheDocument()
+    })
   })
 
   describe('filters', () => {
@@ -228,6 +352,71 @@ describe('RunsView', () => {
       expect(await screen.findByText(/No runs yet/i)).toBeInTheDocument()
       expect(screen.queryByText(/No runs match the current filters/i)).not.toBeInTheDocument()
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    describe('stopping and stopped runs', () => {
+      const stopRuns = (): Run[] => [
+        runFixture({ id: 1, status: 'completed', videos_discovered: 11 }),
+        runFixture({ id: 2, status: 'failed', videos_discovered: 22 }),
+        runFixture({ id: 3, status: 'running', videos_discovered: 33 }),
+        runFixture({ id: 4, status: 'running', executing: true, stop_requested_at: '2026-09-08T06:05:00Z', videos_discovered: 44 }),
+        runFixture({ id: 5, status: 'stopped', stop_requested_at: '2026-09-08T06:05:00Z', videos_discovered: 55 }),
+      ]
+
+      const visible = () =>
+        ['11', '22', '33', '44', '55'].filter((n) => screen.queryByText(n) !== null)
+
+      it('shows neutral Stopping and Stopped by user badges with an icon and text', async () => {
+        await renderWithRuns(stopRuns())
+
+        const rows = within(screen.getByRole('table')).getAllByRole('row')
+        const stopping = within(rows[4]).getByText('Stopping')
+        const stopped = within(rows[5]).getByText('Stopped by user')
+        for (const badge of [stopping, stopped]) {
+          expect(badge).toHaveClass('badge', 'badge--not-evaluated')
+          expect(badge).not.toHaveClass('badge--failed')
+          expect(badge.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
+        }
+        // A plain running run is not marked as stopping.
+        expect(within(rows[3]).getByText('Running')).toBeInTheDocument()
+        expect(within(rows[3]).queryByText('Stopping')).not.toBeInTheDocument()
+      })
+
+      it('offers both statuses in the status filter', async () => {
+        await renderWithRuns(stopRuns())
+
+        const select = screen.getByLabelText('Status')
+        expect(within(select).getByRole('option', { name: 'Stopping' })).toBeInTheDocument()
+        expect(within(select).getByRole('option', { name: 'Stopped by user' })).toBeInTheDocument()
+      })
+
+      it('Stopping filter shows only stopping runs', async () => {
+        await renderWithRuns(stopRuns())
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'stopping' } })
+        await waitFor(() => expect(visible()).toEqual(['44']))
+      })
+
+      it('Running filter also shows a stopping run, because it is still running', async () => {
+        await renderWithRuns(stopRuns())
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'running' } })
+        await waitFor(() => expect(visible()).toEqual(['33', '44']))
+      })
+
+      it('Stopped by user filter shows only stopped runs', async () => {
+        await renderWithRuns(stopRuns())
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'stopped' } })
+        await waitFor(() => expect(visible()).toEqual(['55']))
+      })
+
+      it('counts a stopped run as neither failed nor completed', async () => {
+        await renderWithRuns(stopRuns())
+
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'failed' } })
+        await waitFor(() => expect(visible()).toEqual(['22']))
+
+        fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'completed' } })
+        await waitFor(() => expect(visible()).toEqual(['11']))
+      })
     })
 
     it('disables the filter controls while the list is in the fetch-error state', async () => {

@@ -27,6 +27,29 @@ type TransientMetadata struct {
 	IsActive        bool
 }
 
+// LocalDisplay is current Store A display context, never evidence of what a run evaluated.
+type LocalDisplay struct {
+	Attribution             string     `json:"attribution"`
+	Title                   *string    `json:"title"`
+	TitleAvailability       string     `json:"title_availability"`
+	ChannelName             *string    `json:"channel_name"`
+	ChannelNameAvailability string     `json:"channel_name_availability"`
+	DurationSeconds         *int       `json:"duration_seconds"`
+	DurationAvailability    string     `json:"duration_availability"`
+	SourceFetchedAt         *time.Time `json:"source_fetched_at"`
+}
+
+// LocalRow is the minimal transient_metadata projection used for local
+// eligibility. Time columns are scanned as `any` because the schema has stored
+// several layouts.
+type LocalRow struct {
+	VideoID                         string
+	Title, ChannelName              *string
+	DurationSeconds                 *int
+	FetchedAt, ExpiresAt, ExpiredAt any
+	IsActive                        bool
+}
+
 // RefreshCandidate is an active record eligible for refresh.
 type RefreshCandidate struct {
 	VideoID   string

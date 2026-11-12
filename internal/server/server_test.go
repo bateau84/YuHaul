@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -53,7 +54,7 @@ func setupServerTest(t *testing.T) (*sql.DB, *state.Store, *state.Machine, func(
 }
 
 type fakePipeline struct {
-	started          bool
+	admitErr         error
 	run              *state.Run
 	execute          int64
 	dryRun           *state.Run
@@ -62,24 +63,46 @@ type fakePipeline struct {
 	replayConfigID   *int64
 	backtest         *state.Run
 	backtestProposed config.ProposalSnapshot
+	replayRange      state.PublishedRange
+	backtestRange    state.PublishedRange
+	replayCalls      int
+	backtestCalls    int
 	done             chan struct{}
+	proposalErr      error
+
+	stopRes        *pipeline.StopResult
+	stopErr        error
+	discardRes     *pipeline.DiscardResult
+	discardErr     error
+	discardableID  int64
+	discardCause   string
+	discardableOK  bool
+	discardableEr  error
+	endPrecheckErr error
+	endRes         *pipeline.EndResult
+	endErr         error
+	endable        map[int64]bool
+	endableErr     error
+	executing      map[int64]bool
 }
 
 func newFakePipeline(run *state.Run) *fakePipeline {
 	return &fakePipeline{run: run, done: make(chan struct{})}
 }
 
-func (f *fakePipeline) StartRun(ctx context.Context, runType state.RunType) (*state.Run, error) {
-	f.started = true
-	return f.run, nil
-}
-
-func (f *fakePipeline) Execute(ctx context.Context, runID int64) {
-	f.execute = runID
-	close(f.done)
+// AdmitRunNow can only refuse: a *pipeline.RunNowAdmission is built solely by
+// the real pipeline. Accepted presses are covered in e2e with the real one.
+func (f *fakePipeline) AdmitRunNow(ctx context.Context) (*pipeline.RunNowAdmission, error) {
+	if f.admitErr != nil {
+		return nil, f.admitErr
+	}
+	return nil, errors.New("fake pipeline cannot admit a run")
 }
 
 func (f *fakePipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error) {
+	if f.proposalErr != nil {
+		return nil, f.proposalErr
+	}
 	f.draft = draft
 	if f.dryRun == nil {
 		f.dryRun = f.run
@@ -92,7 +115,9 @@ func (f *fakePipeline) ExecuteDryRun(ctx context.Context, runID int64) {
 	close(f.done)
 }
 
-func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64) (*state.Run, error) {
+func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64, rng state.PublishedRange) (*state.Run, error) {
+	f.replayCalls++
+	f.replayRange = rng
 	f.replayConfigID = configVersionID
 	if f.replay == nil {
 		f.replay = f.run
@@ -105,7 +130,12 @@ func (f *fakePipeline) ExecuteReplay(ctx context.Context, runID int64) {
 	close(f.done)
 }
 
-func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error) {
+func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot, rng state.PublishedRange) (*state.Run, error) {
+	f.backtestCalls++
+	f.backtestRange = rng
+	if f.proposalErr != nil {
+		return nil, f.proposalErr
+	}
 	if proposed != nil {
 		f.backtestProposed = *proposed
 	}
@@ -119,6 +149,32 @@ func (f *fakePipeline) ExecuteBacktest(ctx context.Context, runID int64) {
 	f.execute = runID
 	close(f.done)
 }
+
+func (f *fakePipeline) StopRun(ctx context.Context, runID int64) (*pipeline.StopResult, error) {
+	return f.stopRes, f.stopErr
+}
+
+func (f *fakePipeline) DiscardRun(ctx context.Context, runID int64) (*pipeline.DiscardResult, error) {
+	return f.discardRes, f.discardErr
+}
+
+func (f *fakePipeline) DiscardableRun(ctx context.Context) (int64, string, bool, error) {
+	return f.discardableID, f.discardCause, f.discardableOK, f.discardableEr
+}
+
+func (f *fakePipeline) PrecheckEndLegacyRun(ctx context.Context, runID int64) error {
+	return f.endPrecheckErr
+}
+
+func (f *fakePipeline) EndLegacyRun(ctx context.Context, runID int64) (*pipeline.EndResult, error) {
+	return f.endRes, f.endErr
+}
+
+func (f *fakePipeline) EndableRuns(ctx context.Context) (map[int64]bool, error) {
+	return f.endable, f.endableErr
+}
+
+func (f *fakePipeline) ExecutingRuns() map[int64]bool { return f.executing }
 
 type fakeOverviewProvider struct {
 	overview *Overview
@@ -255,37 +311,8 @@ func TestHandleQueueEndpointsMounted(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"errors":`)
-	assert.Contains(t, rec.Body.String(), `"test error"`)
-}
-
-func TestHandleStartRun(t *testing.T) {
-	ctx := context.Background()
-	_, stateStore, _, cleanup := setupServerTest(t)
-	defer cleanup()
-
-	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
-	runID, err := stateStore.CreateRun(ctx, run)
-	require.NoError(t, err)
-	run.ID = runID
-
-	fp := newFakePipeline(run)
-	broadcast := pipeline.NewBroadcaster()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := NewServer(fp, broadcast, WithServerLogger(logger))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/runs", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusAccepted, rec.Code)
-	assert.True(t, fp.started)
-	select {
-	case <-fp.done:
-		assert.Equal(t, runID, fp.execute)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for pipeline Execute")
-	}
-	assert.Contains(t, rec.Body.String(), "\"run_id\":")
+	assert.Contains(t, rec.Body.String(), `"diag:v1 phase=unknown operation=unknown code=unknown_error"`)
+	assert.Contains(t, rec.Body.String(), `"error_message_unavailable":true`)
 }
 
 func TestHandleRunStream(t *testing.T) {
@@ -737,7 +764,7 @@ func TestHandleListRoutes_Empty(t *testing.T) {
 
 func TestHandleListRoutes_MatchCount(t *testing.T) {
 	ctx := context.Background()
-	db, routerStore, _, cleanup := setupRouteHandlerTest(t)
+	db, routerStore, versioner, cleanup := setupRouteHandlerTest(t)
 	defer cleanup()
 
 	stateStore, err := state.NewStore(db)
@@ -760,13 +787,18 @@ func TestHandleListRoutes_MatchCount(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	run := &state.Run{RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	versionID, err := versioner.ActiveVersionID(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, versionID)
+	run := &state.Run{RunType: state.RunTypeManual, Status: state.RunStatusRunning, ConfigVersionID: versionID}
 	runID, err := stateStore.CreateRun(ctx, run)
 	require.NoError(t, err)
 	video, err := machine.DiscoverVideo(ctx, runID, "v1", "ch1")
 	require.NoError(t, err)
 
 	engine := router.NewEngine(routerStore)
+	pipeline.NewPipeline(db, machine, stateStore, nil, nil, engine, nil, nil, nil, nil, nil,
+		pipeline.WithConfigStore(config.NewStore(db)), pipeline.WithVersioner(versioner))
 	_, err = engine.Evaluate(ctx, runID, video.ID, router.VideoContext{VideoID: "v1", ChannelID: "ch1", Title: "music video"}, machine)
 	require.NoError(t, err)
 
@@ -1224,6 +1256,7 @@ func TestHandleSettingsRoot(t *testing.T) {
 			srv.Handler().ServeHTTP(rec, req)
 
 			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 			body := rec.Body.String()
 			assert.Contains(t, body, `"schedule":"0 6 * * *"`)
 			assert.Contains(t, body, `"quota_limit":1234`)
@@ -1362,7 +1395,32 @@ func TestHandleQueueErrorsNewPath(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, rec.Code)
 			assert.Contains(t, rec.Body.String(), `"errors":`)
-			assert.Contains(t, rec.Body.String(), `"test error"`)
+			assert.Contains(t, rec.Body.String(), `"diag:v1 phase=unknown operation=unknown code=unknown_error"`)
+			assert.Contains(t, rec.Body.String(), `"error_message_unavailable":true`)
+		})
+	}
+}
+
+func TestProposalValidationErrorIsBadRequest(t *testing.T) {
+	const secret = "SECRET-RAW-INPUT"
+	for _, tc := range []struct{ name, path, body string }{
+		{"dry-run", "/api/runs/dry-run", `{"draft_configuration":{"duplicate_threshold":0.5,"routes":[]}}`},
+		{"backtest", "/api/backtest", `{"proposed_configuration":{"duplicate_threshold":0.5,"routes":[]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			fp := &fakePipeline{proposalErr: fmt.Errorf("%w: route 0: missing required route field %s", pipeline.ErrInvalidProposal, secret)}
+			srv := NewServer(fp, pipeline.NewBroadcaster(), WithServerLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.JSONEq(t, `{"error":"invalid proposal configuration"}`, rec.Body.String())
+			assert.Contains(t, logs.String(), "invalid_proposal")
+			assert.NotContains(t, logs.String(), secret)
+			assert.NotContains(t, logs.String(), "unknown_error")
+			assert.NotContains(t, rec.Body.String(), secret)
 		})
 	}
 }

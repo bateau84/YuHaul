@@ -1,9 +1,10 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { render, screen, waitFor, within, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { ErrorsView } from './ErrorsView'
 import { ToastProvider } from '../components/ToastProvider'
 import * as mock from '../api/mock'
+import * as queueApi from '../api/queue'
 import type { ErrorEntry } from '../types'
 
 function renderWithProviders(ui: React.ReactElement) {
@@ -15,6 +16,39 @@ function renderWithProviders(ui: React.ReactElement) {
 }
 
 describe('ErrorsView', () => {
+  beforeEach(() => mock.resetMockDeferred())
+
+  it('renders the server queue contract and sends the returned id to retry and remove', async () => {
+    const entry = {
+      id: 427,
+      video_id: 12,
+      external_video_id: 'yt-safe-id',
+      run_id: 9,
+      error_category: 'api_error' as const,
+      error_message: 'quotaExceeded',
+      status: 'active' as const,
+      created_at: '2026-10-01T00:00:00Z',
+      retry_count: 0,
+    }
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([entry])
+    const retry = vi.spyOn(queueApi, 'retryError').mockResolvedValue(entry)
+    const dismiss = vi.spyOn(queueApi, 'dismissError').mockResolvedValue(entry)
+
+    renderWithProviders(<ErrorsView />)
+    const row = await waitFor(() => screen.getByText('yt-safe-id').closest('tr'))
+    expect(within(row!).getByText('api_error')).toBeInTheDocument()
+    expect(within(row!).getByText('quotaExceeded')).toBeInTheDocument()
+    fireEvent.click(within(row!).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(retry).toHaveBeenCalledWith(427))
+
+    // Reload the same real-shaped row to exercise the independent dismiss action.
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([entry])
+    renderWithProviders(<ErrorsView />)
+    const secondRow = await waitFor(() => screen.getByText('yt-safe-id').closest('tr'))
+    fireEvent.click(within(secondRow!).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(dismiss).toHaveBeenCalledWith(427))
+  })
+
   it('renders errors and deferred queues with retry/dismiss actions', async () => {
     renderWithProviders(<ErrorsView />)
 
@@ -32,12 +66,75 @@ describe('ErrorsView', () => {
     // Switch to deferred tab.
     fireEvent.click(screen.getByRole('tab', { name: /Deferred/i }))
     await waitFor(() => expect(screen.getByText('Pop Hit 2026')).toBeInTheDocument())
-    expect(screen.getByText('quota_exhausted')).toBeInTheDocument()
-
     const deferredRow = screen.getByText('Pop Hit 2026').closest('tr')
+    expect(within(deferredRow!).getByText('Quota exhausted')).toBeInTheDocument()
     expect(deferredRow).not.toBeNull()
     expect(within(deferredRow!).getByRole('button', { name: /Retry now/i })).toBeInTheDocument()
-    expect(within(deferredRow!).getByRole('button', { name: /Discard/i })).toBeInTheDocument()
+    expect(within(deferredRow!).getByRole('button', { name: 'Dismiss deferred item: Pop Hit 2026' })).toBeInTheDocument()
+    expect(within(deferredRow!).queryByRole('button', { name: /Discard/i })).not.toBeInTheDocument()
+  })
+
+  it('labels handed-over deferred items and falls back to the video id for the dismiss name', async () => {
+    const base = { video_id: 5, status: 'pending' as const, created_at: '2026-10-01T00:00:00Z', retry_count: 0 }
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
+    mock.resetMockDeferred([
+      { ...base, id: 1, video_title: 'Stopped One', run_id: 41, deferral_reason: 'stopped_by_user' },
+      { ...base, id: 2, video_title: 'Discarded One', run_id: 42, deferral_reason: 'discarded_by_user' },
+      { ...base, id: 3, run_id: 43, deferral_reason: 'stopped_by_user', deferred_reason_unavailable: true },
+    ])
+    renderWithProviders(<ErrorsView />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Deferred/i })).toBeEnabled())
+    fireEvent.click(screen.getByRole('tab', { name: /Deferred/i }))
+
+    const stopped = (await screen.findByText('Stopped One')).closest('tr')!
+    expect(within(stopped).getByText('Waiting for the next run. Run 41 was stopped by user.')).toBeInTheDocument()
+    expect(within(stopped).getByText('Eligible for the next run')).toBeInTheDocument()
+    const discarded = screen.getByText('Discarded One').closest('tr')!
+    expect(within(discarded).getByText('Waiting for the next run. Run 42 was discarded.')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for the next run.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dismiss deferred item: 5' })).toBeInTheDocument()
+  })
+
+  it('opens the Deferred tab from ?tab=deferred', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
+    mock.resetMockDeferred([
+      { id: 1, video_id: 5, video_title: 'Waiting One', status: 'pending', created_at: '2026-10-01T00:00:00Z', retry_count: 0, run_id: 41, deferral_reason: 'stopped_by_user' },
+    ])
+    render(
+      <MemoryRouter initialEntries={['/errors?tab=deferred']}>
+        <ToastProvider><ErrorsView /></ToastProvider>
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('Waiting One')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Deferred/ })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('warns that a handed-over item will not be retried and dismisses only after confirming', async () => {
+    const show = HTMLDialogElement.prototype.showModal
+    const close = HTMLDialogElement.prototype.close
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
+    HTMLDialogElement.prototype.close = function () { this.removeAttribute('open') }
+    try {
+      vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([])
+      mock.resetMockDeferred([
+        { id: 7, video_id: 5, video_title: 'Handed One', status: 'pending', created_at: '2026-10-01T00:00:00Z', retry_count: 0, run_id: 41, deferral_reason: 'discarded_by_user' },
+      ])
+      const discard = vi.spyOn(queueApi, 'discardDeferred').mockResolvedValue(undefined as never)
+      render(
+        <MemoryRouter initialEntries={['/errors?tab=deferred']}>
+          <ToastProvider><ErrorsView /></ToastProvider>
+        </MemoryRouter>,
+      )
+      fireEvent.click(await screen.findByRole('button', { name: 'Dismiss deferred item: Handed One' }))
+      const dialog = screen.getByRole('dialog', { name: 'Dismiss this deferred item?' })
+      expect(dialog).toHaveTextContent('It will not be retried, but the historical record will be preserved.')
+      expect(discard).not.toHaveBeenCalled()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss' }))
+      await waitFor(() => expect(discard).toHaveBeenCalledWith(7))
+    } finally {
+      HTMLDialogElement.prototype.showModal = show
+      HTMLDialogElement.prototype.close = close
+    }
   })
 
   it('dismisses an error and removes it from the list', async () => {
@@ -74,7 +171,7 @@ describe('ErrorsView', () => {
 
   it('renders the empty states only when the fetch succeeds with empty lists', async () => {
     vi.spyOn(mock, 'listErrors').mockResolvedValueOnce([])
-    vi.spyOn(mock, 'listDeferred').mockResolvedValueOnce([])
+    mock.resetMockDeferred([])
 
     renderWithProviders(<ErrorsView />)
 
@@ -102,7 +199,7 @@ describe('ErrorsView', () => {
     vi.spyOn(mock, 'listErrors')
       .mockRejectedValueOnce(new Error('Queue unavailable'))
       .mockResolvedValueOnce([recoveredError])
-    vi.spyOn(mock, 'listDeferred').mockResolvedValueOnce([])
+    mock.resetMockDeferred([])
 
     renderWithProviders(<ErrorsView />)
 

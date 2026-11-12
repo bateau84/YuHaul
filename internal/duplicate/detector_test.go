@@ -1,11 +1,14 @@
 package duplicate
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +16,31 @@ import (
 
 	"github.com/bateau84/YuHaul/internal/store"
 )
+
+func TestDetectDebugLogsDoNotExposeProviderIDs(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	const inputID = "providerVideoPrivateAscii9081"
+	const matchedID = "providerReferencePrivateAscii7742"
+	require.NoError(t, saveReference(ctx, db, matchedID, "Jazz Live Session"))
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	previous := slog.Default()
+	slog.SetDefault(logger)
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	detector := NewDetector(db)
+	if _, err := detector.Detect(ctx, inputID, "!!!"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := detector.Detect(ctx, inputID, "Live Jazz Session"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{inputID, matchedID} {
+		if strings.Contains(output.String(), id) {
+			t.Fatalf("provider ID %q leaked in debug logs: %s", id, output.String())
+		}
+	}
+}
 
 // openTestDB creates an isolated SQLite database with the canonical schema.
 func openTestDB(t *testing.T) *sql.DB {

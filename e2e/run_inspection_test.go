@@ -39,7 +39,7 @@ func inspectionServer(env *testEnv) *httptest.Server {
 
 func inspectList(t *testing.T, api *httptest.Server, runID int64, query string, total int, ids ...string) {
 	t.Helper()
-	status, body := getJSON(t, api.Client(), fmt.Sprintf("%s/api/runs/%d/videos%s", api.URL, runID, query))
+	status, body := getJSON(t, guardClient(t, api.Client()), fmt.Sprintf("%s/api/runs/%d/videos%s", api.URL, runID, query))
 	require.Equal(t, http.StatusOK, status, string(body))
 	var response struct {
 		Videos     []inspectedVideo `json:"videos"`
@@ -60,7 +60,7 @@ func inspectList(t *testing.T, api *httptest.Server, runID int64, query string, 
 
 func inspectDetail(t *testing.T, api *httptest.Server, runID int64, videoID, outcome, decision, target, actionOutcome string) {
 	t.Helper()
-	status, body := getJSON(t, api.Client(), fmt.Sprintf("%s/api/runs/%d/videos/%s", api.URL, runID, videoID))
+	status, body := getJSON(t, guardClient(t, api.Client()), fmt.Sprintf("%s/api/runs/%d/videos/%s", api.URL, runID, videoID))
 	require.Equal(t, http.StatusOK, status, string(body))
 	var response struct {
 		Video inspectedVideo `json:"video"`
@@ -105,15 +105,15 @@ func TestRunInspection_HistoricalHTTP(t *testing.T) {
 			path, payload := "/api/runs/replay", map[string]any{}
 			if mode == "backtest" {
 				path = "/api/backtest"
-				payload["proposed_configuration"] = map[string]any{"duplicate_threshold": .9, "routes": activeRoutes(t, api.Client(), api.URL)}
+				payload["proposed_configuration"] = map[string]any{"duplicate_threshold": .9, "routes": activeRoutes(t, guardClient(t, api.Client()), api.URL)}
 			}
-			status, body := postJSON(t, api.Client(), api.URL+path, payload)
+			status, body := postJSON(t, guardClient(t, api.Client()), api.URL+path, payload)
 			require.Equal(t, http.StatusAccepted, status, string(body))
 			var started struct {
 				RunID int64 `json:"run_id"`
 			}
 			require.NoError(t, json.Unmarshal(body, &started))
-			waitForRunCompleted(t, api.Client(), api.URL, started.RunID)
+			waitForRunCompleted(t, guardClient(t, api.Client()), api.URL, started.RunID)
 			run, err := env.stateStore.GetRun(ctx, started.RunID)
 			require.NoError(t, err)
 			require.Equal(t, 2, run.VideosAccepted)
@@ -128,7 +128,7 @@ func TestRunInspection_HistoricalHTTP(t *testing.T) {
 			inspectDetail(t, api, original.ID, "classical", "accepted", "matched", "PLoriginal", "succeeded")
 			unrelated, err := env.stateStore.CreateRun(ctx, &state.Run{StartedAt: now, RunType: state.RunTypeReplay, Status: state.RunStatusCompleted})
 			require.NoError(t, err)
-			status, body = getJSON(t, api.Client(), fmt.Sprintf("%s/api/runs/%d/videos/jazz1", api.URL, unrelated))
+			status, body = getJSON(t, guardClient(t, api.Client()), fmt.Sprintf("%s/api/runs/%d/videos/jazz1", api.URL, unrelated))
 			require.Equal(t, http.StatusNotFound, status, string(body))
 			inspectList(t, api, unrelated, "", 0)
 			after, err := env.stateStore.ListRetainedVideos(ctx)

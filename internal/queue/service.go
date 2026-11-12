@@ -2,8 +2,11 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/bateau84/YuHaul/internal/diag"
 )
 
 // RetryHandler is invoked when a queue entry is manually retried. It performs
@@ -110,11 +113,10 @@ func (s *Service) RetryError(ctx context.Context, id int64) (*ErrorEntry, error)
 	if err := s.handler.HandleErrorRetry(ctx, entry.VideoID, entry.ExternalVideoID); err != nil {
 		s.logger.WarnContext(ctx, "error retry handler failed, re-recording failure",
 			"error_entry_id", id,
-			"video_id", entry.ExternalVideoID,
-			"error", err,
+			"diagnostic", diag.Encode(err, "unknown", "retry"),
 		)
-		if uerr := s.store.UpdateErrorEntryFailure(ctx, id, err.Error()); uerr != nil {
-			return nil, fmt.Errorf("handler failed (%v) and status update failed: %w", err, uerr)
+		if uerr := s.store.UpdateErrorEntryFailure(ctx, id, diag.Reason(err, "retry handler failed")); uerr != nil {
+			return nil, fmt.Errorf("retry handler failed (%s); status update failed: %w", diag.Encode(err, "unknown", "retry"), uerr)
 		}
 		return s.store.GetErrorEntry(ctx, id)
 	}
@@ -165,11 +167,10 @@ func (s *Service) RetryDeferred(ctx context.Context, id int64) (*DeferredItem, e
 	if err := s.handler.HandleDeferredRetry(ctx, item.VideoID, item.ExternalVideoID); err != nil {
 		s.logger.WarnContext(ctx, "deferred retry handler failed, returning to pending",
 			"deferred_item_id", id,
-			"video_id", item.ExternalVideoID,
-			"error", err,
+			"diagnostic", diag.Encode(err, "unknown", "retry"),
 		)
 		if uerr := s.store.MarkDeferredPending(ctx, id); uerr != nil {
-			return nil, fmt.Errorf("handler failed (%v) and status update failed: %w", err, uerr)
+			return nil, fmt.Errorf("retry handler failed (%s); status update failed: %w", diag.Encode(err, "unknown", "retry"), uerr)
 		}
 		return s.store.GetDeferredItem(ctx, id)
 	}
@@ -191,3 +192,13 @@ func (s *Service) DiscardDeferred(ctx context.Context, id int64) (*DeferredItem,
 // ErrInvalidState indicates that a requested operation is incompatible with the
 // current queue entry status.
 var ErrInvalidState = fmt.Errorf("queue: invalid entry state")
+
+// ErrStartupRecoveryActive is returned by a retry coordinator that refuses new
+// production work while startup recovery runs (ADR-007 §2). The retry
+// endpoints answer it with 503 and a fixed body.
+var ErrStartupRecoveryActive = errors.New("startup recovery in progress")
+
+// ErrShuttingDown is returned by a retry coordinator that refuses new
+// production work once process shutdown has begun (ADR-007 §3.4). The retry
+// endpoints answer it with 503 and a fixed body.
+var ErrShuttingDown = errors.New("server is shutting down")

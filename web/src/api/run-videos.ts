@@ -24,6 +24,11 @@ interface BackendVideoOutcome {
   final_outcome: VideoOutcome['final_outcome']
   deferred_reason?: string
   error_message?: string
+  error_message_unavailable?: boolean
+  current_local_metadata?: VideoOutcome['current_local_metadata']
+  metadata_context_status?: VideoOutcome['metadata_context_status']
+  unresolved_mutations?: VideoOutcome['unresolved_mutations']
+  route_decisions?: BackendRouteDecision[] | null
 }
 
 interface VideoDetailResponse {
@@ -37,12 +42,15 @@ interface BackendRouteDecision {
   // internal integer route key is never emitted on this surface.
   route_id: string
   route_name: string
+  route_name_source?: string
+  causal_exclusion?: RouteDecision['causal_exclusion']
+  failed_condition?: RouteDecision['failed_condition']
   evaluation_order: number
   decision: RouteDecision['decision']
   skip_reason?: RouteDecision['skip_reason']
   rejection_reason?: string
-  condition_audits: BackendConditionAudit[]
-  executed_actions: BackendExecutedAction[]
+  condition_audits?: BackendConditionAudit[] | null
+  executed_actions?: BackendExecutedAction[] | null
 }
 
 interface BackendConditionAudit {
@@ -58,7 +66,11 @@ interface BackendExecutedAction {
   action_type: RouteActionType
   target_playlist_id: string
   outcome: ActionOutcome['outcome']
+  outcome_reason?: string
+  outcome_reason_unavailable?: boolean
   error_message?: string
+  error_message_unavailable?: boolean
+  executed_at?: string
 }
 
 function toVideoOutcome(v: BackendVideoOutcome): VideoOutcome {
@@ -75,6 +87,11 @@ function toVideoOutcome(v: BackendVideoOutcome): VideoOutcome {
     final_outcome: v.final_outcome,
     deferred_reason: v.deferred_reason,
     error_message: v.error_message,
+    error_message_unavailable: v.error_message_unavailable,
+    current_local_metadata: v.current_local_metadata,
+    metadata_context_status: v.metadata_context_status,
+    unresolved_mutations: v.unresolved_mutations,
+    route_decisions: v.route_decisions?.map(toRouteDecisionSummary),
   }
 }
 
@@ -96,29 +113,44 @@ function toActionOutcomes(actions: BackendExecutedAction[] | null | undefined): 
     action_type: a.action_type,
     target_playlist_id: a.target_playlist_id,
     outcome: a.outcome,
+    outcome_reason: a.outcome_reason,
+    outcome_reason_unavailable: a.outcome_reason_unavailable,
     error_message: a.error_message,
+    error_message_unavailable: a.error_message_unavailable,
+    executed_at: a.executed_at,
   }))
 }
 
-function toRouteDecisions(decisions: BackendRouteDecision[] | null | undefined): RouteDecision[] {
-  return (decisions ?? []).map((d) => ({
+function toRouteDecisionSummary(d: BackendRouteDecision) {
+  return {
     id: d.route_id,
     route_id: d.route_id,
     route_name: d.route_name,
+    route_name_source: d.route_name_source,
+    causal_exclusion: d.causal_exclusion,
+    failed_condition: d.failed_condition,
     evaluation_order: d.evaluation_order,
     decision: d.decision,
     skip_reason: d.skip_reason,
     rejection_reason: d.rejection_reason,
+  }
+}
+
+function toRouteDecisions(decisions: BackendRouteDecision[] | null | undefined): RouteDecision[] {
+  return (decisions ?? []).map((d) => ({
+    ...toRouteDecisionSummary(d),
     condition_audits: toConditionAudits(d.condition_audits),
     actions: toActionOutcomes(d.executed_actions),
   }))
 }
 
 // RunVideoPage is one page of a run's video outcomes plus the server-side
-// total for that (possibly outcome-filtered) set.
+// total and page bounds for that (possibly outcome-filtered) set.
 export interface RunVideoPage {
   videos: VideoOutcome[]
   total: number
+  /** Total pages available for the current filter and page size. */
+  totalPages: number
 }
 
 export interface RunVideoQuery {
@@ -126,17 +158,21 @@ export interface RunVideoQuery {
   outcome?: VideoOutcome['final_outcome']
   /** page size requested from the server (server max is 100). */
   pageSize?: number
+  /** 1-based page to fetch; omitted means the server default (page 1). */
+  page?: number
 }
 
 export async function getRunVideos(id: number, query: RunVideoQuery = {}): Promise<RunVideoPage> {
   const params = new URLSearchParams()
   if (query.outcome) params.set('outcome', query.outcome)
   if (query.pageSize) params.set('page_size', String(query.pageSize))
+  if (query.page && query.page > 1) params.set('page', String(query.page))
   const search = params.toString()
   const data = await api<VideoListResponse>(`/api/runs/${id}/videos${search ? `?${search}` : ''}`)
   return {
     videos: data.videos.map(toVideoOutcome),
     total: data.pagination?.total ?? data.videos.length,
+    totalPages: data.pagination?.total_pages ?? 1,
   }
 }
 

@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/bateau84/YuHaul/internal/diag"
 )
 
 // Store persists and queries the three-tier outcome model.
@@ -78,14 +81,33 @@ func (s *Store) CreateRunTx(ctx context.Context, tx *sql.Tx, run *Run) (int64, e
 	return s.createRun(ctx, tx, run)
 }
 
+// CreateGuardedMutationRunTx stages a production run as eligible for guarded
+// playlist mutations. Callers must only pass true after wiring the complete
+// guarded dispatch path.
+func (s *Store) CreateGuardedMutationRunTx(ctx context.Context, tx *sql.Tx, run *Run, guardedDispatchReady bool) (int64, error) {
+	return s.createRunWithGuard(ctx, tx, run, guardedDispatchReady)
+}
+
 func (s *Store) createRun(ctx context.Context, db execer, run *Run) (int64, error) {
+	return s.createRunWithGuard(ctx, db, run, false)
+}
+
+func (s *Store) createRunWithGuard(ctx context.Context, db execer, run *Run, guardedDispatchReady bool) (int64, error) {
 	if run.ActionAuthorityVersion == 1 && ((run.RunType != RunTypeManual && run.RunType != RunTypeScheduled) || run.ConfigVersionID == nil) {
 		return 0, errors.New("action authority version 1 requires a production run linked to its snapshot")
 	}
+	mutationSafetyVersion := 0
+	if guardedDispatchReady {
+		if (run.RunType != RunTypeManual && run.RunType != RunTypeScheduled) || run.ConfigVersionID == nil {
+			return 0, errors.New("mutation safety version 1 requires a production run linked to its snapshot")
+		}
+		mutationSafetyVersion = 1
+	}
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO run (started_at, run_type, status, config_version_id, action_authority_version)
-		 VALUES (?, ?, ?, ?, ?);`,
-		formatRunTime(run.StartedAt), run.RunType, run.Status, run.ConfigVersionID, run.ActionAuthorityVersion)
+		`INSERT INTO run (started_at, run_type, status, config_version_id, action_authority_version, mutation_safety_version, initiated_by, published_from, published_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		formatRunTime(run.StartedAt), run.RunType, run.Status, run.ConfigVersionID, run.ActionAuthorityVersion, mutationSafetyVersion, run.InitiatedBy,
+		run.PublishedFrom, run.PublishedTo)
 	if err != nil {
 		return 0, fmt.Errorf("creating run: %w", err)
 	}
@@ -101,8 +123,11 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
-		        duration_seconds, interrupt_reason, current_phase, action_authority_version
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable, quota_cost,
+		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
+		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
+		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run ORDER BY started_at DESC;`)
 	if err != nil {
 		return nil, fmt.Errorf("listing runs: %w", err)
@@ -123,14 +148,22 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	return out, nil
 }
 
-// ListInterruptedRuns returns all runs with status interrupted, oldest first.
+// ListInterruptedRuns returns automatically resumable runs, oldest first: interrupted,
+// nonterminal manual/scheduled runs with mutation-safety and authority version 1.
+// Version-0 history and simulations are never selected (ADR-005).
 func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
-		        duration_seconds, interrupt_reason, current_phase, action_authority_version
-		 FROM run WHERE status = ? ORDER BY started_at ASC;`, RunStatusInterrupted)
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable, quota_cost,
+		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
+		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
+		         WHERE rd.run_id = run.id) AS videos_evaluated
+		 FROM run WHERE status = ? AND completed_at IS NULL
+		   AND run_type IN ('manual','scheduled')
+		   AND mutation_safety_version = 1 AND action_authority_version = 1
+		 ORDER BY started_at ASC, id ASC;`, RunStatusInterrupted)
 	if err != nil {
 		return nil, fmt.Errorf("listing interrupted runs: %w", err)
 	}
@@ -155,8 +188,11 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
-		        duration_seconds, interrupt_reason, current_phase, action_authority_version
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable, quota_cost,
+		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
+		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
+		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
+		         WHERE rd.run_id = run.id) AS videos_evaluated
 		 FROM run WHERE id = ?;`, id)
 	r, err := scanRun(row)
 	if err != nil {
@@ -168,12 +204,44 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 	return r, nil
 }
 
+// SetRunSelectedCount records the number of inputs a run's selector
+// established, capturing the known-zero/unknown distinction: a completed
+// empty selection stores 0, while a run whose selection was never captured
+// stays NULL. Capture is write-once — a later call for the same run is a
+// no-op, so the first capture cannot be silently overwritten and historical
+// NULLs are only replaced by a real selector's count. Returns ErrNotFound
+// when the run does not exist.
+func (s *Store) SetRunSelectedCount(ctx context.Context, runID int64, count int) error {
+	if count < 0 {
+		return errors.New("state: selected video count cannot be negative")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE run SET selected_video_count = ? WHERE id = ? AND selected_video_count IS NULL;`,
+		count, runID)
+	if err != nil {
+		return fmt.Errorf("setting run %d selected video count: %w", runID, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	// Nothing written: either the run does not exist or its count is already
+	// captured. Distinguish those so a missing run is never a silent success.
+	var one int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM run WHERE id = ?;`, runID).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("run %d: %w", runID, ErrNotFound)
+		}
+		return fmt.Errorf("checking run %d selected video count: %w", runID, err)
+	}
+	return nil
+}
+
 // CompleteRun marks a run as completed and records final counters and quota cost.
 func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float64, quotaCost int) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE run
 		 SET status = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
-		 WHERE id = ?;`,
+		 WHERE id = ? AND stop_requested_at IS NULL;`,
 		RunStatusCompleted, formatRunTime(time.Now()), durationSeconds, quotaCost, id)
 	if err != nil {
 		return fmt.Errorf("completing run %d: %w", id, err)
@@ -188,10 +256,11 @@ func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float
 // quota cost. It reuses the interrupt_reason column to explain why the run did
 // not reach a normal terminal state.
 func (s *Store) FailRun(ctx context.Context, id int64, reason string, durationSeconds float64, quotaCost int) error {
+	reason = diag.GuardErrorText(reason)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE run
 		 SET status = ?, interrupt_reason = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
-		 WHERE id = ?;`,
+		 WHERE id = ? AND stop_requested_at IS NULL;`,
 		RunStatusFailed, reason, formatRunTime(time.Now()), durationSeconds, quotaCost, id)
 	if err != nil {
 		return fmt.Errorf("failing run %d: %w", id, err)
@@ -204,14 +273,48 @@ func (s *Store) FailRun(ctx context.Context, id int64, reason string, durationSe
 
 // InterruptRun marks a run as interrupted with a reason.
 func (s *Store) InterruptRun(ctx context.Context, id int64, reason string) error {
+	reason = diag.GuardErrorText(reason)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE run SET status = ?, interrupt_reason = ? WHERE id = ?;`,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = NULL WHERE id = ? AND stop_requested_at IS NULL;`,
 		RunStatusInterrupted, reason, id)
 	if err != nil {
 		return fmt.Errorf("interrupting run %d: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("run %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// InterruptRunWithCause marks a run as interrupted and records why
+// (InterruptCauseTimeLimit or InterruptCauseShutdown). Status, reason and
+// cause are written in one UPDATE so a cause never outlives its interruption
+// state. Use InterruptRun when the cause is not proven.
+func (s *Store) InterruptRunWithCause(ctx context.Context, id int64, reason, cause string) error {
+	reason = diag.GuardErrorText(reason)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = ? WHERE id = ? AND stop_requested_at IS NULL;`,
+		RunStatusInterrupted, reason, cause, id)
+	if err != nil {
+		return fmt.Errorf("interrupting run %d with cause: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// ResumeRun restores action authority only for a run currently marked interrupted.
+// Terminal runs are deliberately not eligible for this transition.
+func (s *Store) ResumeRun(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE run SET status = ?, interrupt_reason = NULL, interrupt_cause = NULL WHERE id = ? AND status = ?;`,
+		RunStatusRunning, id, RunStatusInterrupted)
+	if err != nil {
+		return fmt.Errorf("resuming run %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run %d is not interrupted", id)
 	}
 	return nil
 }
@@ -259,6 +362,17 @@ func (s *Store) RecordRunVideoOutcomeTx(ctx context.Context, tx *sql.Tx, runID, 
 	}
 	if (outcome != nil && *outcome == FinalOutcomeFailed) != (errorMessage != nil && *errorMessage != "") {
 		return errors.New("recording run video outcome: failed outcome requires only a nonempty error message")
+	}
+	if deferredReason != nil {
+		value, ok := diag.GuardDisposition(*deferredReason, "video_reason")
+		if !ok {
+			return errors.New("recording run video outcome: invalid deferred reason")
+		}
+		deferredReason = &value
+	}
+	if errorMessage != nil {
+		value := diag.GuardErrorText(*errorMessage)
+		errorMessage = &value
 	}
 	var status string
 	if err := tx.QueryRowContext(ctx, `SELECT status FROM run WHERE id=? AND run_type IN ('manual','scheduled')`, runID).Scan(&status); err != nil {
@@ -310,6 +424,17 @@ func (s *Store) RecordRunVideoOutcomeTx(ctx context.Context, tx *sql.Tx, runID, 
 }
 
 func (s *Store) createVideo(ctx context.Context, exec execer, v *Video) (int64, error) {
+	if v.ErrorMessage != nil {
+		safe := diag.GuardErrorText(*v.ErrorMessage)
+		v.ErrorMessage = &safe
+	}
+	if v.DeferredReason != nil {
+		safe, ok := diag.GuardDisposition(*v.DeferredReason, "video_reason")
+		if !ok {
+			return 0, errors.New("creating video: invalid deferred reason")
+		}
+		v.DeferredReason = &safe
+	}
 	res, err := exec.ExecContext(ctx,
 		`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id,
 		                   processing_state, final_outcome, deferred_reason, error_message, completed_at)
@@ -386,8 +511,20 @@ func (s *Store) updateVideoState(ctx context.Context, exec execer, id int64, sta
 	outcome VideoFinalOutcome, deferredReason, errorMessage *string) error {
 
 	var completedAt *time.Time
+	if errorMessage != nil {
+		safe := diag.GuardErrorText(*errorMessage)
+		errorMessage = &safe
+	}
+	if deferredReason != nil {
+		safe, ok := diag.GuardDisposition(*deferredReason, "video_reason")
+		if !ok {
+			return errors.New("updating video: invalid deferred reason")
+		}
+		deferredReason = &safe
+	}
 	if outcome == FinalOutcomeAccepted || outcome == FinalOutcomeRejected ||
-		outcome == FinalOutcomeExcluded || outcome == FinalOutcomeFailed {
+		outcome == FinalOutcomeExcluded || outcome == FinalOutcomeFailed ||
+		outcome == FinalOutcomeUnavailableOnYouTube {
 		now := time.Now().UTC()
 		completedAt = &now
 	}
@@ -413,11 +550,14 @@ func (s *Store) CreateRouteDecision(ctx context.Context, d *RouteDecision) (int6
 }
 
 func createRouteDecision(ctx context.Context, db execer, d *RouteDecision) (int64, error) {
+	if err := validateExclusionReference(d); err != nil {
+		return 0, err
+	}
 	res, err := db.ExecContext(ctx,
 		`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order,
-		                             decision, skip_reason, rejection_reason)
-		 VALUES (?, ?, ?, ?, ?, ?, ?);`,
-		d.VideoID, d.RunID, d.RouteID, d.EvaluationOrder, d.Decision, d.SkipReason, d.RejectionReason)
+		                             decision, skip_reason, rejection_reason, exclusion_index, exclusion_semantics_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		d.VideoID, d.RunID, d.RouteID, d.EvaluationOrder, d.Decision, d.SkipReason, d.RejectionReason, d.ExclusionIndex, d.ExclusionSemanticsVersion)
 	if err != nil {
 		return 0, fmt.Errorf("creating route decision: %w", err)
 	}
@@ -433,7 +573,7 @@ func createRouteDecision(ctx context.Context, db execer, d *RouteDecision) (int6
 func (s *Store) GetRouteDecisionsForVideo(ctx context.Context, videoID int64) ([]RouteDecision, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, video_id, run_id, route_id, evaluation_order, decision,
-		        skip_reason, rejection_reason
+		        skip_reason, rejection_reason, exclusion_index, exclusion_semantics_version
 		 FROM route_decision WHERE video_id = ? ORDER BY evaluation_order;`, videoID)
 	if err != nil {
 		return nil, fmt.Errorf("querying route decisions: %w", err)
@@ -459,7 +599,7 @@ func (s *Store) GetRouteDecisionsForVideo(ctx context.Context, videoID int64) ([
 func (s *Store) GetRouteDecisionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]RouteDecision, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, video_id, run_id, route_id, evaluation_order, decision,
-		        skip_reason, rejection_reason
+		        skip_reason, rejection_reason, exclusion_index, exclusion_semantics_version
 		 FROM route_decision WHERE video_id = ? AND run_id = ? ORDER BY evaluation_order;`,
 		videoID, runID)
 	if err != nil {
@@ -507,6 +647,19 @@ func (s *Store) ListRetainedVideos(ctx context.Context) ([]Video, error) {
 	return out, nil
 }
 
+// RunVideoOutcomeCase is the per-run outcome classification (ARS-001 video
+// search §6.4 and run-video inspection): a simulation run's outcome comes from
+// its route decisions, a production run's from run_video_outcome. It refers to
+// the aliases r (run), e (aggregated route_decision evidence with matched,
+// not_matched and excluded) and o (run_video_outcome). Shared so the run
+// detail and the video view cannot drift.
+const RunVideoOutcomeCase = `CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN
+          CASE WHEN e.matched = 1 THEN 'accepted'
+               WHEN e.not_matched = 1 THEN 'rejected'
+               WHEN e.excluded = 1 THEN 'excluded'
+               ELSE 'not_yet_evaluated' END
+          ELSE o.final_outcome END`
+
 // runVideoInspection projects read-only run membership and simulation outcomes.
 // Discovery ownership is retained; decisions also establish membership for
 // historical evaluation and receiving runs. Aggregated evidence avoids multiplying
@@ -524,12 +677,7 @@ const runVideoInspection = `WITH requested_run AS (
 ), inspection AS (
  SELECT v.id, v.video_id, v.channel_id, v.discovered_at, v.discovered_in_run_id,
         v.processing_state,
-        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN
-          CASE WHEN e.matched = 1 THEN 'accepted'
-               WHEN e.not_matched = 1 THEN 'rejected'
-               WHEN e.excluded = 1 THEN 'excluded'
-               ELSE 'not_yet_evaluated' END
-          ELSE o.final_outcome END AS final_outcome,
+        ` + RunVideoOutcomeCase + ` AS final_outcome,
         CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.deferred_reason END AS deferred_reason,
         CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.error_message END AS error_message,
         CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.completed_at END AS completed_at,
@@ -637,12 +785,24 @@ func (s *Store) ListPendingVideos(ctx context.Context) ([]Video, error) {
 
 // CreateExecutedAction persists an executed action.
 func (s *Store) CreateExecutedAction(ctx context.Context, a *ExecutedAction) (int64, error) {
+	if a.ErrorMessage != nil {
+		safe := diag.GuardErrorText(*a.ErrorMessage)
+		a.ErrorMessage = &safe
+	}
+	if a.OutcomeReason != nil {
+		safe, ok := diag.GuardDisposition(*a.OutcomeReason, "action_reason")
+		if !ok {
+			a.OutcomeReason = nil
+		} else {
+			a.OutcomeReason = &safe
+		}
+	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO executed_action (route_decision_id, run_id, video_id, action_type,
-		                              target_playlist_id, outcome, error_message, executed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
+		                              target_playlist_id, outcome, outcome_reason, error_message, executed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		a.RouteDecisionID, a.RunID, a.VideoID, a.ActionType,
-		a.TargetPlaylistID, a.Outcome, a.ErrorMessage, a.ExecutedAt)
+		a.TargetPlaylistID, a.Outcome, a.OutcomeReason, a.ErrorMessage, a.ExecutedAt)
 	if err != nil {
 		return 0, fmt.Errorf("creating executed action: %w", err)
 	}
@@ -657,7 +817,7 @@ func (s *Store) CreateExecutedAction(ctx context.Context, a *ExecutedAction) (in
 func (s *Store) GetExecutedActionsForVideo(ctx context.Context, videoID int64) ([]ExecutedAction, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, route_decision_id, run_id, video_id, action_type,
-		        target_playlist_id, outcome, error_message, executed_at
+		        target_playlist_id, outcome, outcome_reason, error_message, executed_at
 		 FROM executed_action WHERE video_id = ?;`, videoID)
 	if err != nil {
 		return nil, fmt.Errorf("querying executed actions: %w", err)
@@ -684,7 +844,7 @@ func (s *Store) GetExecutedActionsForVideo(ctx context.Context, videoID int64) (
 func (s *Store) GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]ExecutedAction, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, route_decision_id, run_id, video_id, action_type,
-		        target_playlist_id, outcome, error_message, executed_at
+		        target_playlist_id, outcome, outcome_reason, error_message, executed_at
 		 FROM executed_action WHERE video_id = ? AND run_id = ?;`, videoID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("querying executed actions: %w", err)
@@ -732,6 +892,45 @@ func (s *Store) GetConditionAuditsForDecision(ctx context.Context, decisionID in
 	return out, nil
 }
 
+// ListFailedConditionIndexes returns, for each requested route decision, the
+// condition_index of every condition that did not match, in condition order.
+// It is one query for the whole set of decisions. Only the index and the
+// pass/fail flag are read: expected and actual values are never loaded, so the
+// result cannot carry a video's compared value. Decisions with no failed
+// condition are absent from the map.
+func (s *Store) ListFailedConditionIndexes(ctx context.Context, decisionIDs []int64) (map[int64][]int, error) {
+	out := make(map[int64][]int)
+	if len(decisionIDs) == 0 {
+		return out, nil
+	}
+	marks := make([]string, len(decisionIDs))
+	args := make([]any, len(decisionIDs))
+	for i, id := range decisionIDs {
+		marks[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT route_decision_id, condition_index FROM condition_audit
+		 WHERE matched = 0 AND route_decision_id IN (`+strings.Join(marks, ",")+`)
+		 ORDER BY route_decision_id, condition_index;`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying failed conditions: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var decisionID int64
+		var index int
+		if err := rows.Scan(&decisionID, &index); err != nil {
+			return nil, fmt.Errorf("scanning failed condition: %w", err)
+		}
+		out[decisionID] = append(out[decisionID], index)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating failed conditions: %w", err)
+	}
+	return out, nil
+}
+
 // CreateConditionAudit persists a condition audit record.
 func (s *Store) CreateConditionAudit(ctx context.Context, a *ConditionAudit) (int64, error) {
 	return createConditionAudit(ctx, s.db, a)
@@ -756,7 +955,16 @@ func createConditionAudit(ctx context.Context, db execer, a *ConditionAudit) (in
 
 // RecomputeRunCounters recomputes outcome counters for a run from video rows.
 func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
-	_, err := s.db.ExecContext(ctx,
+	return recomputeRunCounters(ctx, s.db, runID)
+}
+
+// RecomputeRunCountersTx is RecomputeRunCounters inside the caller's transaction.
+func (s *Store) RecomputeRunCountersTx(ctx context.Context, tx *sql.Tx, runID int64) error {
+	return recomputeRunCounters(ctx, tx, runID)
+}
+
+func recomputeRunCounters(ctx context.Context, db execer, runID int64) error {
+	_, err := db.ExecContext(ctx,
 		`UPDATE run SET
 		  videos_discovered = (SELECT COUNT(*) FROM video WHERE discovered_in_run_id = ?),
 		  videos_accepted = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
@@ -764,7 +972,8 @@ func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 		  videos_excluded = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
 		  videos_deferred = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
 		  videos_failed = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
-		  videos_not_yet_evaluated = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?)
+		  videos_not_yet_evaluated = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?),
+		  videos_unavailable = (SELECT COUNT(*) FROM run_video_outcome WHERE run_id = ? AND final_outcome = ?)
 		 WHERE id = ?;`,
 		runID, runID, FinalOutcomeAccepted,
 		runID, FinalOutcomeRejected,
@@ -772,6 +981,7 @@ func (s *Store) RecomputeRunCounters(ctx context.Context, runID int64) error {
 		runID, FinalOutcomeDeferred,
 		runID, FinalOutcomeFailed,
 		runID, FinalOutcomeNotYetEvaluated,
+		runID, FinalOutcomeUnavailableOnYouTube,
 		runID)
 	if err != nil {
 		return fmt.Errorf("recomputing run %d counters: %w", runID, err)
@@ -808,7 +1018,17 @@ func (s *Store) IncrementChannelRetainedTx(ctx context.Context, tx *sql.Tx, chan
 // evidence exists (without a matched or not-matched route), and
 // discovered when any route decision was recorded.
 func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int64) error {
-	_, err := s.db.ExecContext(ctx,
+	return recomputeRunCountersFromDecisions(ctx, s.db, runID)
+}
+
+// RecomputeRunCountersFromDecisionsTx is RecomputeRunCountersFromDecisions
+// inside the caller's transaction.
+func (s *Store) RecomputeRunCountersFromDecisionsTx(ctx context.Context, tx *sql.Tx, runID int64) error {
+	return recomputeRunCountersFromDecisions(ctx, tx, runID)
+}
+
+func recomputeRunCountersFromDecisions(ctx context.Context, db execer, runID int64) error {
+	_, err := db.ExecContext(ctx,
 		`UPDATE run SET
 		  videos_discovered = (SELECT COUNT(DISTINCT video_id) FROM route_decision WHERE run_id = ?),
 		  videos_accepted = (
@@ -834,7 +1054,8 @@ func (s *Store) RecomputeRunCountersFromDecisions(ctx context.Context, runID int
 		  ),
 		  videos_deferred = 0,
 		  videos_failed = 0,
-		  videos_not_yet_evaluated = 0
+		  videos_not_yet_evaluated = 0,
+		  videos_unavailable = 0
 		 WHERE id = ?;`,
 		runID, runID, RouteDecisionMatched,
 		runID, RouteDecisionNotMatched, runID, RouteDecisionMatched,
@@ -865,17 +1086,35 @@ func scanRun(sc interface {
 	Scan(dest ...any) error
 }) (*Run, error) {
 	r := &Run{}
-	var completedAt, interruptReason, currentPhase sql.NullString
+	var completedAt, interruptReason, currentPhase, initiatedBy, interruptCause sql.NullString
+	var publishedFrom, publishedTo, stopRequestedAt sql.NullString
 	var durationSeconds sql.NullFloat64
 	var configVersionID sql.NullInt64
+	var selectedVideoCount sql.NullInt64
 	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
-		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
-		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion)
+		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.VideosUnavailable,
+		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion,
+		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &stopRequestedAt, &r.VideosEvaluated)
 	if err != nil {
 		return nil, err
 	}
+	if publishedFrom.Valid {
+		r.PublishedFrom = &publishedFrom.String
+	}
+	if publishedTo.Valid {
+		r.PublishedTo = &publishedTo.String
+	}
+	if initiatedBy.Valid {
+		r.InitiatedBy = &initiatedBy.String
+	}
+	if interruptCause.Valid {
+		r.InterruptCause = &interruptCause.String
+	}
 	if r.CompletedAt, err = parseStoredTimestamp(completedAt); err != nil {
+		return nil, err
+	}
+	if r.StopRequestedAt, err = parseStoredTimestamp(stopRequestedAt); err != nil {
 		return nil, err
 	}
 	if r.ActionAuthorityVersion != 0 && r.ActionAuthorityVersion != 1 {
@@ -883,6 +1122,10 @@ func scanRun(sc interface {
 	}
 	if configVersionID.Valid {
 		r.ConfigVersionID = &configVersionID.Int64
+	}
+	if selectedVideoCount.Valid {
+		count := int(selectedVideoCount.Int64)
+		r.VideosSelected = &count
 	}
 	if durationSeconds.Valid {
 		r.DurationSeconds = &durationSeconds.Float64
@@ -899,10 +1142,17 @@ func scanRun(sc interface {
 func scanVideo(sc interface {
 	Scan(dest ...any) error
 }) (*Video, error) {
+	return scanVideoWith(sc)
+}
+
+// scanVideoWith scans the video columns followed by any extra destinations.
+func scanVideoWith(sc interface {
+	Scan(dest ...any) error
+}, extra ...any) (*Video, error) {
 	v := &Video{}
 	var finalOutcome, deferredReason, errorMessage, completedAt sql.NullString
-	err := sc.Scan(&v.ID, &v.VideoID, &v.ChannelID, &v.DiscoveredAt, &v.DiscoveredInRunID,
-		&v.ProcessingState, &finalOutcome, &deferredReason, &errorMessage, &completedAt)
+	err := sc.Scan(append([]any{&v.ID, &v.VideoID, &v.ChannelID, &v.DiscoveredAt, &v.DiscoveredInRunID,
+		&v.ProcessingState, &finalOutcome, &deferredReason, &errorMessage, &completedAt}, extra...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -927,8 +1177,9 @@ func scanRouteDecision(sc interface {
 }) (*RouteDecision, error) {
 	d := &RouteDecision{}
 	var skipReason, rejectionReason sql.NullString
+	var exclusionIndex, exclusionSemanticsVersion sql.NullInt64
 	err := sc.Scan(&d.ID, &d.VideoID, &d.RunID, &d.RouteID, &d.EvaluationOrder,
-		&d.Decision, &skipReason, &rejectionReason)
+		&d.Decision, &skipReason, &rejectionReason, &exclusionIndex, &exclusionSemanticsVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -940,6 +1191,14 @@ func scanRouteDecision(sc interface {
 		s := rejectionReason.String
 		d.RejectionReason = &s
 	}
+	if exclusionIndex.Valid {
+		v := int(exclusionIndex.Int64)
+		d.ExclusionIndex = &v
+	}
+	if exclusionSemanticsVersion.Valid {
+		v := int(exclusionSemanticsVersion.Int64)
+		d.ExclusionSemanticsVersion = &v
+	}
 	return d, nil
 }
 
@@ -947,11 +1206,14 @@ func scanExecutedAction(sc interface {
 	Scan(dest ...any) error
 }) (*ExecutedAction, error) {
 	a := &ExecutedAction{}
-	var errorMessage, executedAt sql.NullString
+	var outcomeReason, errorMessage, executedAt sql.NullString
 	err := sc.Scan(&a.ID, &a.RouteDecisionID, &a.RunID, &a.VideoID, &a.ActionType,
-		&a.TargetPlaylistID, &a.Outcome, &errorMessage, &executedAt)
+		&a.TargetPlaylistID, &a.Outcome, &outcomeReason, &errorMessage, &executedAt)
 	if err != nil {
 		return nil, err
+	}
+	if outcomeReason.Valid {
+		a.OutcomeReason = &outcomeReason.String
 	}
 	if errorMessage.Valid {
 		a.ErrorMessage = &errorMessage.String
@@ -977,4 +1239,74 @@ func scanConditionAudit(sc interface {
 		a.ActualValue = &actualValue.String
 	}
 	return a, nil
+}
+
+// ErrRunStopNotApplied is returned when a stop settle or discard write did not
+// change exactly one row.
+var ErrRunStopNotApplied = errors.New("state: run stop write did not apply")
+
+// StopRunTx writes the terminal stopped state inside tx (ARS-003 §3.3). The
+// run must carry a stop marker and be running or interrupted; exactly one row
+// must change.
+func (s *Store) StopRunTx(ctx context.Context, tx *sql.Tx, id int64, reason string, quotaCost int, now time.Time) error {
+	reason = diag.GuardErrorText(reason)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = NULL,
+		        completed_at = ?, duration_seconds = (julianday(?) - julianday(started_at)) * 86400, quota_cost = ?
+		 WHERE id = ? AND stop_requested_at IS NOT NULL AND status IN ('running','interrupted');`,
+		RunStatusStopped, reason, formatRunTime(now), formatRunTime(now), quotaCost, id)
+	if err != nil {
+		return fmt.Errorf("stopping run %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("stopping run %d: %w", id, ErrRunStopNotApplied)
+	}
+	return nil
+}
+
+// LegacyEndableRow is the one SQL predicate for "a stuck legacy production row"
+// (run-initiation ARS-004 §1). EndableRuns, the in-transaction recheck and
+// EndLegacyRunTx all use it verbatim.
+const LegacyEndableRow = `run_type IN ('manual','scheduled') AND mutation_safety_version = 0
+  AND status IN ('running','interrupted') AND stop_requested_at IS NULL`
+
+// EndLegacyRunTx writes the user's end of a stuck legacy run inside tx: status
+// and reason only (ARS-004 §2.1). Exactly one row must change; completed_at and
+// every other field stay as stored.
+func (s *Store) EndLegacyRunTx(ctx context.Context, tx *sql.Tx, id int64, reason string) error {
+	reason = diag.GuardErrorText(reason)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE run SET status = ?, interrupt_reason = ?, interrupt_cause = NULL
+		 WHERE id = ? AND `+LegacyEndableRow,
+		RunStatusFailed, reason, id)
+	if err != nil {
+		return fmt.Errorf("ending legacy run %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("ending legacy run %d: %w", id, ErrRunStopNotApplied)
+	}
+	return nil
+}
+
+// DiscardRunTx writes the terminal failed state of a user discard inside tx
+// (ARS-002 §2.5). Only the Run Now time-limit candidate qualifies; exactly one
+// row must change.
+func (s *Store) DiscardRunTx(ctx context.Context, tx *sql.Tx, id int64, reason string, quotaCost int) error {
+	reason = diag.GuardErrorText(reason)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE run
+		 SET status = ?, interrupt_reason = ?, interrupt_cause = NULL,
+		     completed_at = COALESCE(completed_at, ?), quota_cost = ?
+		 WHERE id = ? AND status = ? AND run_type = 'manual'
+		   AND initiated_by = 'run_now' AND interrupt_cause = 'time_limit'
+		   AND mutation_safety_version = 1 AND action_authority_version = 1
+		   AND stop_requested_at IS NULL;`,
+		RunStatusFailed, reason, formatRunTime(time.Now()), quotaCost, id, RunStatusInterrupted)
+	if err != nil {
+		return fmt.Errorf("discarding run %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("discarding run %d: %w", id, ErrRunStopNotApplied)
+	}
+	return nil
 }

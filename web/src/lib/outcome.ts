@@ -1,6 +1,10 @@
-import type { RunType, VideoProcessingState, VideoFinalOutcome, RouteDecisionType, SkipReason } from '../types'
+import type { DeferredReason, RunType, VideoProcessingState, VideoFinalOutcome, RouteDecisionType, SkipReason } from '../types'
 
 export type BadgeVariant = 'accepted' | 'rejected' | 'excluded' | 'deferred' | 'failed' | 'not-evaluated' | 'in-progress'
+
+// deriveBadge alone can return the final, separate unavailable_on_youtube
+// category (BR-032 AC1); route and action badges never do.
+export type OutcomeBadgeVariant = BadgeVariant | 'unavailable'
 
 // Badge/filter labels for the BR-032 outcome-category vocabulary, shared by
 // the Run Detail outcome filter and the outcome badge so the two never drift.
@@ -10,7 +14,20 @@ export const videoOutcomeLabels: Record<VideoFinalOutcome, string> = {
   excluded: 'Excluded',
   deferred: 'Deferred',
   failed: 'Failed',
+  unavailable_on_youtube: 'Unavailable on YouTube',
   not_yet_evaluated: 'Not evaluated',
+}
+
+// BR-032 AC1 copy for a final unavailable_on_youtube outcome (design: "Unavailable
+// on YouTube" outcome copy). Shared by Run Detail, Decision Detail and run summaries.
+export const unavailableRowText = 'YouTube did not return this video.'
+export const unavailableNoRoutesRow = 'No routes were evaluated.'
+export const unavailableDetailText = 'YouTube did not return this video. It may have been deleted or made private. This is final. It is not a rejection or a failure.'
+export const unavailableNoRoutesDetail = 'No routes were evaluated for this video.'
+export const unavailableNoAction = 'No playlist addition was attempted.'
+
+export function unavailableSummary(count: number | undefined): string | null {
+  return count && count > 0 ? `${count} unavailable on YouTube` : null
 }
 
 export const simulationExplanation = 'Simulation only. Results are hypothetical; no playlist actions were executed by this run.'
@@ -24,7 +41,7 @@ export function simulationMode(mode: RunType): string | null {
   }
 }
 
-export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFinalOutcome | null | undefined, mode?: RunType): { variant: BadgeVariant; label: string } {
+export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFinalOutcome | null | undefined, mode?: RunType): { variant: OutcomeBadgeVariant; label: string } {
   if (mode && simulationMode(mode)) {
     switch (finalOutcome) {
       case 'accepted': return { variant: 'accepted', label: 'Hypothetical accepted' }
@@ -44,13 +61,17 @@ export function deriveBadge(state: VideoProcessingState, finalOutcome: VideoFina
     case 'deferred': return { variant: 'deferred', label: 'Deferred' }
     case 'failed': return { variant: 'failed', label: 'Failed' }
     case 'not_yet_evaluated': return { variant: 'not-evaluated', label: 'Not evaluated' }
+    // Final and its own category (BR-032 AC1): never Rejected or Failed.
+    // Simulations never produce it, so the simulation branch above keeps the
+    // 'Outcome unavailable' fallback.
+    case 'unavailable_on_youtube': return { variant: 'unavailable', label: 'Unavailable on YouTube' }
     default: return { variant: 'not-evaluated', label: 'Outcome unavailable' }
   }
 }
 
 const skipReasonLabels: Record<SkipReason, string> = {
   final_route_matched: 'A prior final route already matched this video',
-  exclusion: 'This video matched a route-scoped exclusion rule',
+  exclusion: 'Route exclusion recorded; specific rule and compared input unavailable.',
   disabled: 'This route is currently disabled',
 }
 
@@ -63,7 +84,11 @@ export function deriveRouteDecision(decision: RouteDecisionType, skipReason?: Sk
     case 'deferred':
       return { variant: 'deferred', label: 'Deferred' }
     case 'skipped':
-      return { variant: 'not-evaluated', label: 'Skipped', reason: skipReason ? skipReasonLabels[skipReason] : undefined }
+      return {
+        variant: 'not-evaluated',
+        label: skipReason === 'exclusion' ? 'Skipped — excluded from this route.' : 'Skipped',
+        reason: skipReason ? skipReasonLabels[skipReason] : undefined,
+      }
     default:
       return { variant: 'not-evaluated', label: decision }
   }
@@ -84,9 +109,44 @@ export function deriveActionOutcome(outcome: string): { variant: BadgeVariant; l
   }
 }
 
+export function actionOutcomeLabel(outcome: string, reason?: string): { variant: BadgeVariant; label: string } {
+  if (outcome === 'not_attempted' && reason === 'mutation_application_uncertain') return { variant: 'not-evaluated', label: 'Not attempted — unresolved playlist action' }
+  if (reason === 'mutation_application_uncertain') return { variant: 'failed', label: 'Playlist outcome unknown' }
+  if (reason === 'authorization_pending') return { variant: 'deferred', label: 'Waiting for YouTube access' }
+  return deriveActionOutcome(outcome)
+}
+
+// Explanatory outcome-reason vocabulary written by the action executor
+// (ARD-001). `outcome_reason` explains a recorded outcome — it is never an
+// outcome category. Unknown values are server-vetted safe text and render
+// verbatim rather than being guessed at. `already_completed` is explicitly
+// run-scoped: the prior success is not a success in this run.
+const outcomeReasonLabels: Record<string, string> = {
+  authorization_pending: 'Not attempted in this run. YouTube access was unavailable; the work was retained.',
+  mutation_application_uncertain: 'YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.',
+  already_completed: 'Not attempted in this run — already completed by an earlier run',
+  quota_exhausted: 'Not attempted — the daily quota was exhausted before this action could run',
+  prior_action_failed: 'Not attempted in this run — an earlier action on this video failed',
+}
+
+export function actionOutcomeReasonLabel(reason: string): string {
+  return outcomeReasonLabels[reason] ?? reason
+}
+
 export function formatDuration(seconds?: number): string {
   if (seconds === undefined || seconds === null) return '—'
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return `${m}:${String(s).padStart(2, '0')}`
+}
+
+// Labels for the six stored deferral reasons (ARS-005 §7.3). Used by the
+// Deferred reason filter; unknown stored values render verbatim.
+export const deferredReasonLabels: Record<DeferredReason, string> = {
+  quota_exhausted: 'Quota exhausted',
+  api_rate_limited: 'Rate limited by YouTube',
+  authorization_pending: 'Waiting for YouTube access',
+  stopped_by_user: 'Stopped by user',
+  discarded_by_user: 'Discarded by user',
+  requeued_by_user: 'Re-queued by user',
 }

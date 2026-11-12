@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // SQLiteTokenStore persists encrypted OAuth2 tokens in a SQLite database. The
@@ -36,6 +38,10 @@ func NewSQLiteTokenStore(db *sql.DB, key []byte) (*SQLiteTokenStore, error) {
 
 // encryptedRecord is the serialized and encrypted form stored on disk.
 type encryptedRecord struct {
+	AuthorizationID       string    `json:"authorization_id"`
+	CredentialRevision    int64     `json:"credential_revision"`
+	AccessRejected        bool      `json:"access_rejected"`
+	RenewalFailure        string    `json:"renewal_failure,omitempty"`
 	Provider              string    `json:"provider"`
 	EncryptedAccessToken  []byte    `json:"encrypted_access_token"`
 	EncryptedRefreshToken []byte    `json:"encrypted_refresh_token,omitempty"`
@@ -60,8 +66,8 @@ func (s *SQLiteTokenStore) Save(ctx context.Context, record *TokenRecord) error 
 
 	const upsert = `
 INSERT INTO auth_tokens
-    (id, provider, encrypted_access_token, encrypted_refresh_token, token_type, expiry, scopes, connected_at, updated_at)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+    (id, provider, encrypted_access_token, encrypted_refresh_token, token_type, expiry, scopes, connected_at, updated_at, authorization_id, credential_revision, access_rejected, renewal_failure)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL)
 ON CONFLICT(id) DO UPDATE SET
     provider = excluded.provider,
     encrypted_access_token = excluded.encrypted_access_token,
@@ -70,7 +76,11 @@ ON CONFLICT(id) DO UPDATE SET
     expiry = excluded.expiry,
     scopes = excluded.scopes,
     connected_at = excluded.connected_at,
-    updated_at = excluded.updated_at
+    updated_at = excluded.updated_at,
+    authorization_id = excluded.authorization_id,
+    credential_revision = 1,
+    access_rejected = 0,
+    renewal_failure = NULL
 `
 	_, err = s.db.ExecContext(ctx, upsert,
 		enc.Provider,
@@ -81,6 +91,7 @@ ON CONFLICT(id) DO UPDATE SET
 		string(scopesJSON),
 		enc.ConnectedAt,
 		enc.UpdatedAt,
+		uuid.NewString(),
 	)
 	if err != nil {
 		return fmt.Errorf("auth: failed to save token record: %w", err)
@@ -88,10 +99,157 @@ ON CONFLICT(id) DO UPDATE SET
 	return nil
 }
 
+// CredentialVersion identifies the exact durable credential snapshot used as
+// the basis of a conditional credential operation.
+type CredentialVersion struct {
+	AuthorizationID string
+	Revision        int64
+}
+
+// ErrAuthorizationChanged means the durable credential no longer matches the
+// snapshot on which a caller based its operation. The caller must not retry
+// with an unconditional write.
+var ErrAuthorizationChanged = errors.New("auth: authorization changed")
+
+// SaveRefresh atomically replaces credentials only if the same authorization
+// identity and revision are still current. An omitted refresh token preserves
+// its existing ciphertext. Revision overflow and stale snapshots fail closed.
+func (s *SQLiteTokenStore) SaveRefresh(ctx context.Context, expected CredentialVersion, record *TokenRecord) (CredentialVersion, error) {
+	enc, err := s.encryptRecord(record)
+	if err != nil {
+		return CredentialVersion{}, err
+	}
+	scopes, err := json.Marshal(enc.Scopes)
+	if err != nil {
+		return CredentialVersion{}, fmt.Errorf("auth: failed to marshal scopes: %w", err)
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE auth_tokens SET
+ provider=?, encrypted_access_token=?,
+ encrypted_refresh_token=CASE WHEN length(?) > 0 THEN ? ELSE encrypted_refresh_token END,
+ token_type=?, expiry=?, scopes=?, updated_at=?, credential_revision=credential_revision+1,
+ access_rejected=0, renewal_failure=NULL
+WHERE id=1 AND authorization_id=? AND credential_revision=? AND credential_revision < 9223372036854775807`,
+		enc.Provider, enc.EncryptedAccessToken, enc.EncryptedRefreshToken, enc.EncryptedRefreshToken,
+		enc.TokenType, enc.Expiry, string(scopes), enc.UpdatedAt, expected.AuthorizationID, expected.Revision)
+	if err != nil {
+		return CredentialVersion{}, fmt.Errorf("auth: failed to save refreshed credentials: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return CredentialVersion{}, fmt.Errorf("auth: failed to inspect refreshed credential write: %w", err)
+	}
+	if n != 1 {
+		return CredentialVersion{}, ErrAuthorizationChanged
+	}
+	return CredentialVersion{AuthorizationID: expected.AuthorizationID, Revision: expected.Revision + 1}, nil
+}
+
+// SaveRenewalFailure records only a closed application classification on the
+// credential snapshot that produced it. It never changes credential revision.
+func (s *SQLiteTokenStore) SaveRenewalFailure(ctx context.Context, expected CredentialVersion, failure string) error {
+	if !validRenewalFailure(failure) {
+		return errors.New("auth: invalid renewal failure classification")
+	}
+	rejected := failure == "refresh_rejected" || failure == "access_rejected"
+	result, err := s.db.ExecContext(ctx, `UPDATE auth_tokens SET renewal_failure=CASE WHEN renewal_failure='refresh_rejected' AND ?<>'refresh_rejected' THEN renewal_failure ELSE ? END, access_rejected=CASE WHEN ? THEN 1 ELSE access_rejected END, updated_at=? WHERE id=1 AND authorization_id=? AND credential_revision=?`, failure, failure, rejected, now(), expected.AuthorizationID, expected.Revision)
+	if err != nil {
+		return fmt.Errorf("auth: failed to save renewal failure state: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("auth: failed to inspect renewal failure write: %w", err)
+	}
+	if n != 1 {
+		return ErrAuthorizationChanged
+	}
+	return nil
+}
+
+func validRenewalFailure(value string) bool {
+	switch value {
+	case "refresh_rejected", "temporary_network", "temporary_provider", "persistence_failed", "invalid_response", "client_configuration", "access_rejected":
+		return true
+	default:
+		return false
+	}
+}
+
+// ReplaceAuthorization commits a newly accepted OAuth connection only while
+// the previously observed credential snapshot (or absence) is still current.
+// The new identity is generated here and starts at revision 1.
+func (s *SQLiteTokenStore) ReplaceAuthorization(ctx context.Context, expected *CredentialVersion, record *TokenRecord) (CredentialVersion, error) {
+	enc, err := s.encryptRecord(record)
+	if err != nil {
+		return CredentialVersion{}, err
+	}
+	scopes, err := json.Marshal(enc.Scopes)
+	if err != nil {
+		return CredentialVersion{}, fmt.Errorf("auth: failed to marshal scopes: %w", err)
+	}
+	id := uuid.NewString()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CredentialVersion{}, fmt.Errorf("auth: failed to begin authorization replacement: %w", err)
+	}
+	defer tx.Rollback()
+	var current CredentialVersion
+	err = tx.QueryRowContext(ctx, `SELECT authorization_id, credential_revision FROM auth_tokens WHERE id=1`).Scan(&current.AuthorizationID, &current.Revision)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return CredentialVersion{}, fmt.Errorf("auth: failed to inspect current authorization: %w", err)
+	}
+	if expected == nil {
+		if err == nil {
+			return CredentialVersion{}, ErrAuthorizationChanged
+		}
+	} else if err != nil || current != *expected {
+		return CredentialVersion{}, ErrAuthorizationChanged
+	}
+	if expected == nil {
+		_, err = tx.ExecContext(ctx, `INSERT INTO auth_tokens
+(id,provider,encrypted_access_token,encrypted_refresh_token,token_type,expiry,scopes,connected_at,updated_at,authorization_id,credential_revision,access_rejected,renewal_failure)
+VALUES (1,?,?,?,?,?,?,?,?,?,1,0,NULL)`, enc.Provider, enc.EncryptedAccessToken, enc.EncryptedRefreshToken, enc.TokenType, enc.Expiry, string(scopes), enc.ConnectedAt, enc.UpdatedAt, id)
+	} else {
+		var result sql.Result
+		result, err = tx.ExecContext(ctx, `UPDATE auth_tokens SET provider=?,encrypted_access_token=?,encrypted_refresh_token=?,token_type=?,expiry=?,scopes=?,connected_at=?,updated_at=?,authorization_id=?,credential_revision=1,access_rejected=0,renewal_failure=NULL WHERE id=1 AND authorization_id=? AND credential_revision=?`, enc.Provider, enc.EncryptedAccessToken, enc.EncryptedRefreshToken, enc.TokenType, enc.Expiry, string(scopes), enc.ConnectedAt, enc.UpdatedAt, id, expected.AuthorizationID, expected.Revision)
+		if err == nil {
+			var n int64
+			n, err = result.RowsAffected()
+			if err == nil && n != 1 {
+				err = ErrAuthorizationChanged
+			}
+		}
+	}
+	if err != nil {
+		return CredentialVersion{}, fmt.Errorf("auth: failed to replace authorization: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return CredentialVersion{}, fmt.Errorf("auth: failed to commit authorization replacement: %w", err)
+	}
+	return CredentialVersion{AuthorizationID: id, Revision: 1}, nil
+}
+
+// DeleteIfCurrent removes credentials only if their identity and revision
+// still match the caller's snapshot.
+func (s *SQLiteTokenStore) DeleteIfCurrent(ctx context.Context, expected CredentialVersion) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM auth_tokens WHERE id=1 AND authorization_id=? AND credential_revision=?`, expected.AuthorizationID, expected.Revision)
+	if err != nil {
+		return fmt.Errorf("auth: failed to delete current token record: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("auth: failed to inspect token deletion: %w", err)
+	}
+	if n != 1 {
+		return ErrAuthorizationChanged
+	}
+	return nil
+}
+
 // Load reads the stored record and decrypts it.
 func (s *SQLiteTokenStore) Load(ctx context.Context) (*TokenRecord, error) {
 	const query = `
-SELECT provider, encrypted_access_token, encrypted_refresh_token, token_type, expiry, scopes, connected_at, updated_at
+SELECT provider, encrypted_access_token, encrypted_refresh_token, token_type, expiry, scopes, connected_at, updated_at, authorization_id, credential_revision, access_rejected, COALESCE(renewal_failure,'')
 FROM auth_tokens
 WHERE id = 1
 `
@@ -107,6 +265,10 @@ WHERE id = 1
 		&scopesJSON,
 		&enc.ConnectedAt,
 		&enc.UpdatedAt,
+		&enc.AuthorizationID,
+		&enc.CredentialRevision,
+		&enc.AccessRejected,
+		&enc.RenewalFailure,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -146,6 +308,10 @@ func (s *SQLiteTokenStore) encryptRecord(record *TokenRecord) (*encryptedRecord,
 		}
 	}
 	return &encryptedRecord{
+		AuthorizationID:       record.AuthorizationID,
+		CredentialRevision:    record.CredentialRevision,
+		AccessRejected:        record.AccessRejected,
+		RenewalFailure:        record.RenewalFailure,
 		Provider:              record.Provider,
 		EncryptedAccessToken:  encAccess,
 		EncryptedRefreshToken: encRefresh,
@@ -170,14 +336,18 @@ func (s *SQLiteTokenStore) decryptRecord(enc *encryptedRecord) (*TokenRecord, er
 		}
 	}
 	return &TokenRecord{
-		Provider:     enc.Provider,
-		AccessToken:  string(access),
-		RefreshToken: string(refresh),
-		TokenType:    enc.TokenType,
-		Expiry:       enc.Expiry,
-		Scopes:       enc.Scopes,
-		ConnectedAt:  enc.ConnectedAt,
-		UpdatedAt:    enc.UpdatedAt,
+		AuthorizationID:    enc.AuthorizationID,
+		CredentialRevision: enc.CredentialRevision,
+		AccessRejected:     enc.AccessRejected,
+		RenewalFailure:     enc.RenewalFailure,
+		Provider:           enc.Provider,
+		AccessToken:        string(access),
+		RefreshToken:       string(refresh),
+		TokenType:          enc.TokenType,
+		Expiry:             enc.Expiry,
+		Scopes:             enc.Scopes,
+		ConnectedAt:        enc.ConnectedAt,
+		UpdatedAt:          enc.UpdatedAt,
 	}, nil
 }
 

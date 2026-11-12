@@ -1,6 +1,11 @@
 import { api } from './core'
 
-export async function getAccountStatus(): Promise<{ connected: boolean; email?: string }> {
+export async function getAccountStatus(): Promise<{
+  connected: boolean
+  authorization_state?: string
+  authorization_reason?: string | null
+  email?: string
+}> {
   return api('/api/account/status')
 }
 

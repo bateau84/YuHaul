@@ -4,10 +4,12 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/queue"
@@ -68,6 +70,56 @@ func TestProductionAuthority_ConcurrentExecuteSerializesRecovery(t *testing.T) {
 	require.Equal(t, 1, routed)
 }
 
+func TestProductionAuthority_RetentionDeadlineInterruptsThenResumes(t *testing.T) {
+	ctx := context.Background()
+	env := setupIdempotencyTest(t, []mockVideo{makeJazzVideo("V1", time.Now().UTC().Add(-time.Hour))})
+	p := env.pipeline
+	run, err := p.StartRun(ctx, state.RunTypeManual)
+	require.NoError(t, err)
+	videos, err := p.phaseDiscovery(ctx, run.ID)
+	require.NoError(t, err)
+	require.Len(t, videos, 1)
+
+	lockConn, err := p.db.Conn(ctx)
+	require.NoError(t, err)
+	_, err = lockConn.ExecContext(ctx, `BEGIN IMMEDIATE`)
+	require.NoError(t, err)
+	locked := make(chan struct{})
+	go func() {
+		defer close(locked)
+		time.Sleep(11 * time.Second)
+		_, _ = lockConn.ExecContext(context.Background(), `ROLLBACK`)
+		_ = lockConn.Close()
+	}()
+
+	expired, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	p.retainAuthorityFailure(expired, run.ID, videos, fmt.Errorf("captured snapshot unreadable: %s", "safe test reason"))
+	cancel()
+	<-locked
+
+	loaded, err := env.stateStore.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusInterrupted, loaded.Status)
+	require.NotNil(t, loaded.InterruptReason)
+	require.Equal(t, "diag:v1 phase=unknown operation=execute_action code=action_authority_invalid", *loaded.InterruptReason)
+	require.NotContains(t, *loaded.InterruptReason, "safe test reason")
+	queueStore, err := queue.NewStore(p.db)
+	require.NoError(t, err)
+	entries, err := queueStore.ListErrorEntries(ctx, queue.ErrorStatusActive)
+	require.NoError(t, err)
+	require.Empty(t, entries, "no queue handoff committed while the writer remained locked")
+
+	// A normal Execute call is the real recovery path: it resumes the interrupted
+	// run and processes its still-run-owned video after the transient lock clears.
+	p.Execute(ctx, run.ID)
+	loaded, err = env.stateStore.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusCompleted, loaded.Status)
+	entries, err = queueStore.ListErrorEntries(ctx, queue.ErrorStatusActive)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
 func TestProductionAuthority_LegacyFullVector(t *testing.T) {
 	for _, kind := range []string{"compatible", "nonmatch", "order", "skip", "audit_missing", "audit_actual_null", "audit_expected", "audit_match", "metadata_missing", "metadata_expired"} {
 		t.Run(kind, func(t *testing.T) {
@@ -113,11 +165,10 @@ func TestProductionAuthority_LegacyFullVector(t *testing.T) {
 				_, err = p.db.ExecContext(ctx, query)
 				require.NoError(t, err)
 			}
-			out, err := p.executor.Execute(ctx, run.ID, vs[0].ID, []RouteMatch{{ds[0].ID, ds[0].RouteID}})
+			_, err = p.executor.Execute(ctx, run.ID, vs[0].ID, []RouteMatch{{ds[0].ID, ds[0].RouteID}})
 			if kind == "compatible" {
-				require.NoError(t, err)
-				require.Equal(t, state.FinalOutcomeAccepted, out)
-				require.Len(t, env.server.Insertions(), 1)
+				require.ErrorContains(t, err, "run lacks guarded dispatch capability")
+				require.Empty(t, env.server.Insertions())
 			} else {
 				require.Error(t, err)
 				require.Empty(t, env.server.Insertions())
@@ -157,8 +208,8 @@ func TestProductionAuthority_LegacyPrefixCompletion(t *testing.T) {
 	loaded, err := p.stateStore.GetRun(ctx, run.ID)
 	require.NoError(t, err)
 	require.Equal(t, 0, loaded.ActionAuthorityVersion)
-	require.Equal(t, state.RunStatusCompleted, loaded.Status)
-	require.Len(t, env.server.Insertions(), 2)
+	require.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.Empty(t, env.server.Insertions())
 	var audits int
 	require.NoError(t, p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM condition_audit`).Scan(&audits))
 	require.Equal(t, 2, audits)
@@ -210,6 +261,15 @@ func TestProductionAuthority_ExactTargetCompletionBeforeQuota(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, state.FinalOutcomeAccepted, out)
 	require.Len(t, env.server.Insertions(), 1)
+	// The suppression is explicit current-run evidence, never a fabricated
+	// success or attempt timestamp (ARD-001/BR-012).
+	suppressed, err := p.stateStore.GetExecutedActionsForVideoInRun(ctx, v.ID, next.ID)
+	require.NoError(t, err)
+	require.Len(t, suppressed, 1, "duplicate matches must not create repeated evidence")
+	require.Equal(t, state.ActionOutcomeNotAttempted, suppressed[0].Outcome)
+	require.NotNil(t, suppressed[0].OutcomeReason)
+	require.Equal(t, "already_completed", *suppressed[0].OutcomeReason)
+	require.Nil(t, suppressed[0].ExecutedAt)
 	_, err = p.db.ExecContext(ctx, `UPDATE route_action SET target_playlist_id='PLnew'`)
 	require.NoError(t, err)
 	changed, err := p.StartRun(ctx, state.RunTypeManual)
@@ -223,12 +283,27 @@ func TestProductionAuthority_ExactTargetCompletionBeforeQuota(t *testing.T) {
 	out, err = p.executor.Execute(ctx, changed.ID, v.ID, []RouteMatch{{ds[0].ID, ds[0].RouteID}})
 	require.NoError(t, err)
 	require.Equal(t, state.FinalOutcomeDeferred, out)
+	// The quota deferral is recorded without an attempt claim.
+	deferredActions, err := p.stateStore.GetExecutedActionsForVideoInRun(ctx, v.ID, changed.ID)
+	require.NoError(t, err)
+	require.Len(t, deferredActions, 1)
+	require.Equal(t, state.ActionOutcomeDeferred, deferredActions[0].Outcome)
+	require.NotNil(t, deferredActions[0].OutcomeReason)
+	require.Equal(t, "quota_exhausted", *deferredActions[0].OutcomeReason)
+	require.Nil(t, deferredActions[0].ExecutedAt)
 	require.NoError(t, p.ledger.SetDailyLimit(ctx, 100000))
 	out, err = p.executor.Execute(ctx, changed.ID, v.ID, []RouteMatch{{ds[0].ID, ds[0].RouteID}})
 	require.NoError(t, err)
 	require.Equal(t, state.FinalOutcomeAccepted, out)
 	require.Len(t, env.server.Insertions(), 2)
 	require.Equal(t, "PLnew", env.server.Insertions()[1].PlaylistID)
+	// The same-run retry replaced the deferral row with the real attempt's
+	// outcome instead of duplicating or violating the action identity.
+	retried, err := p.stateStore.GetExecutedActionsForVideoInRun(ctx, v.ID, changed.ID)
+	require.NoError(t, err)
+	require.Len(t, retried, 1)
+	require.Equal(t, state.ActionOutcomeSucceeded, retried[0].Outcome)
+	require.NotNil(t, retried[0].ExecutedAt)
 }
 
 func TestProductionAuthority_LegacyContradictionPreservesAllWork(t *testing.T) {
@@ -247,12 +322,17 @@ func TestProductionAuthority_LegacyContradictionPreservesAllWork(t *testing.T) {
 	require.Len(t, vs, 2)
 	_, err = p.db.ExecContext(ctx, `UPDATE route_condition SET value='jazz'`)
 	require.NoError(t, err)
-	// Reproduce the old producer through its real live-route evaluation seam.
+	// Persist historical live-route evidence explicitly: today's recording
+	// router correctly refuses a route that contradicts the captured snapshot.
 	m, err := p.meta.GetDisplayMetadata(ctx, vs[0].VideoID)
 	require.NoError(t, err)
-	result, err := p.router.Evaluate(ctx, legacy.ID, vs[0].ID, videoContextFromMetadata(vs[0].VideoID, vs[0].ChannelID, m), p.machine)
+	routes, err := p.router.Routes(ctx)
 	require.NoError(t, err)
-	require.Len(t, result.MatchedRoutes, 1)
+	expected := p.router.ExpectedEvaluations(legacy.ID, vs[0].ID, videoContextFromMetadata(vs[0].VideoID, vs[0].ChannelID, m), routes)
+	require.Len(t, expected, 1)
+	require.Equal(t, state.RouteDecisionMatched, expected[0].Decision.Decision)
+	_, err = p.machine.RecordRouteEvaluation(ctx, &expected[0].Decision, expected[0].Audits)
+	require.NoError(t, err)
 	before, err := env.stateStore.GetRouteDecisionsForVideoInRun(ctx, vs[0].ID, legacy.ID)
 	require.NoError(t, err)
 	audits, err := env.stateStore.GetConditionAuditsForDecision(ctx, before[0].ID)
@@ -288,13 +368,24 @@ func TestProductionAuthority_LegacyContradictionPreservesAllWork(t *testing.T) {
 	p.queueStore = qs
 	entries, err := qs.ListErrorEntries(ctx, queue.ErrorStatusActive)
 	require.NoError(t, err)
+	key := []byte("01234567890123456789012345678901")
+	tokens, err := auth.NewSQLiteTokenStore(p.db, key)
+	require.NoError(t, err)
+	require.NoError(t, tokens.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "local-test", RefreshToken: "local-refresh", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour), Scopes: auth.DefaultScopes()}))
+	authService, err := auth.NewService(&auth.ServiceConfig{ClientID: "test", ClientSecret: "test", RedirectURL: "http://localhost/callback", EncryptionKey: string(key)}, tokens, auth.NewInMemoryStateStore())
+	require.NoError(t, err)
+	p.auth = authService
+	p.executor = NewExecutor(p.db, p.ledger, authService, WithYouTubeBaseURL(env.server.URL()))
 	svc := queue.NewService(qs, nil).WithRetryCoordinator(p)
 	entry, err := svc.RetryError(ctx, entries[0].ID)
 	require.NoError(t, err)
 	require.Equal(t, queue.ErrorStatusResolved, entry.Status)
 	require.NotNil(t, entry.RetryRunID)
 	require.NotEqual(t, legacy.ID, *entry.RetryRunID)
-	require.Len(t, env.server.Insertions(), 1)
+	var retrySafetyVersion int
+	require.NoError(t, p.db.QueryRowContext(ctx, `SELECT mutation_safety_version FROM run WHERE id=?`, *entry.RetryRunID).Scan(&retrySafetyVersion))
+	require.Equal(t, 1, retrySafetyVersion)
+	require.Empty(t, env.server.Insertions(), "legacy ambiguous work must veto a retry send")
 	fresh, err := p.stateStore.GetRun(ctx, *entry.RetryRunID)
 	require.NoError(t, err)
 	require.Equal(t, 1, fresh.ActionAuthorityVersion)

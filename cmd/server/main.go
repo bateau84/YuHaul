@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,8 +25,10 @@ import (
 
 	"github.com/bateau84/YuHaul/internal/advisory"
 	"github.com/bateau84/YuHaul/internal/auth"
+	"github.com/bateau84/YuHaul/internal/buildinfo"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/corpusimport"
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
@@ -39,7 +42,9 @@ import (
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/stats"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/videosearch"
 	"github.com/bateau84/YuHaul/internal/youtube"
+	"golang.org/x/oauth2"
 )
 
 // appConfig holds runtime configuration sourced from flags and environment
@@ -62,8 +67,12 @@ type appConfig struct {
 func main() {
 	cfg := loadConfig()
 	logger := newLogger(cfg.LogLevel)
+	logger.Info("yuhaul starting", "version", buildinfo.Version, "commit", buildinfo.Commit, "built_at", buildinfo.BuiltAt)
 
-	ctx := context.Background()
+	// Signal handling comes first (ADR-007 §1): SIGINT or SIGTERM cancels ctx,
+	// and every later step, run and the scheduler derive from it.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 
 	db, err := store.Open(ctx, cfg.DBPath)
 	if err != nil {
@@ -118,7 +127,7 @@ func main() {
 	metadataStore := metadata.NewStore(db)
 	meta := metadata.NewManager(
 		metadataStore,
-		&metadataFetcher{auth: authSvc, baseURL: cfg.YouTubeBaseURL},
+		&metadataFetcher{auth: authSvc, baseURL: cfg.YouTubeBaseURL, ledger: ledger},
 		ledger,
 		metadata.WithLogger(logger),
 	)
@@ -167,7 +176,6 @@ func main() {
 		pipeline.WithConfigStore(configStore),
 		pipeline.WithAdvisoryGenerator(advisorySvc),
 	)
-	queueSvc.WithRetryCoordinator(pl)
 
 	schedulerStore, err := scheduler.NewStore(db)
 	if err != nil {
@@ -193,20 +201,45 @@ func main() {
 		server.WithRouteStore(routerStore),
 		server.WithRunStore(stateStore),
 		server.WithRunVideoStore(stateStore),
+		server.WithVideoSearch(videosearch.NewService(db, nil)),
+		server.WithMetadataReader(meta),
 		server.WithConfigVersionStore(configStore),
 		server.WithOverviewProvider(overview),
 		server.WithPlaylistProvider(&playlistProvider{auth: authSvc, baseURL: cfg.YouTubeBaseURL, ledger: ledger}),
 		server.WithCorpusImportHandler(importHandler),
+		server.WithRunContext(ctx),
+		withTestServerOptions(),
 	)
+	// Queue retries run on the application context and join the run drain
+	// (ADR-007 §3.4); wire before the listener starts.
+	queueSvc.WithRetryCoordinator(apiServer.RetryCoordinator(pl))
 
-	sch := scheduler.NewScheduler(schedulerStore, pl, stateStore, scheduler.WithLogger(logger))
-	if err := sch.Start(ctx); err != nil {
-		logger.ErrorContext(ctx, "failed to start scheduler", "error", err)
+	// The deployment must stop the previous owner before this startup boundary.
+	// The producer gate closes before classification; classification is the
+	// only recovery work done before the listener starts (ADR-007 §1).
+	recovered, err := pl.BeginStartupRecovery(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			// The classification transaction rolled back or committed; both
+			// states are eligible again at the next start (ADR-005 §6).
+			logger.InfoContext(ctx, "shutdown during startup classification")
+			return
+		}
+		logger.ErrorContext(ctx, "startup recovery failed", "diagnostic", diag.Encode(err, "unknown", "load_run"))
 		os.Exit(1)
 	}
-	defer sch.Stop()
+
+	sch := scheduler.NewScheduler(schedulerStore, pl, stateStore, scheduler.WithLogger(logger))
+	openProducers := func() {
+		pl.OpenProducers()
+		if err := sch.Start(ctx); err != nil {
+			logger.ErrorContext(ctx, "failed to start scheduler", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	root := http.NewServeMux()
+	root.Handle("GET /api/version", buildinfo.Handler())
 	root.Handle("/api/", apiServer.Handler())
 	root.Handle("/api/auth/", stripPrefix("/api/auth", authSvc.Handler()))
 	root.Handle("/api/account", stripPrefix("/api/account", authSvc.AccountHandler()))
@@ -218,20 +251,70 @@ func main() {
 		Handler: root,
 	}
 
+	// Listen synchronously so a bind failure is fatal and the listener is up
+	// before any recovered run starts.
+	listener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		logger.ErrorContext(ctx, "http listen failed", "error", err, "addr", cfg.HTTPAddr)
+		os.Exit(1)
+	}
 	go func() {
-		logger.InfoContext(ctx, "starting http server", "addr", cfg.HTTPAddr)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.InfoContext(ctx, "starting http server", "addr", listener.Addr().String())
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.ErrorContext(ctx, "http server failed", "error", err)
 			os.Exit(1)
 		}
 	}()
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	// Resume recovered runs in the background, then open the producer gate
+	// and start the scheduler (ADR-007 §1 step 5). If ctx ends first, the
+	// gate stays closed and the scheduler never starts.
+	background := make(chan struct{})
+	if len(recovered) == 0 {
+		openProducers()
+		close(background)
+	} else {
+		go func() {
+			defer close(background)
+			if err := pl.ResumeRecovered(ctx, recovered); err != nil {
+				logger.InfoContext(ctx, "startup resume stopped before finishing", "diagnostic", diag.Encode(err, "unknown", "load_run"))
+				return
+			}
+			openProducers()
+			logger.InfoContext(ctx, "startup recovery finished; production runs enabled")
+		}()
+	}
 
+	<-ctx.Done()
+	stopSignals() // a second signal now terminates immediately
 	logger.InfoContext(ctx, "shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+
+	// Drain order (ADR-007 §3.5): the recovery worker, the scheduler and any
+	// active manual run stop first, within 15 s in total. Each interrupted run
+	// is marked before this wait ends. A step that overruns is logged and
+	// shutdown continues; a kill after that is process loss, which ADR-005
+	// recovers.
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelDrain()
+	drained := make(chan string, 3)
+	go func() { <-background; drained <- "recovery worker" }()
+	go func() { sch.Stop(); drained <- "scheduler" }()
+	go func() {
+		if err := apiServer.WaitRuns(drainCtx); err != nil {
+			logger.ErrorContext(ctx, "manual runs did not stop in time", "error", err)
+		}
+		drained <- "manual runs"
+	}()
+	for remaining := 3; remaining > 0; remaining-- {
+		select {
+		case <-drained:
+		case <-drainCtx.Done():
+			logger.ErrorContext(ctx, "run drain exceeded its budget; continuing shutdown")
+			remaining = 0
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.ErrorContext(ctx, "graceful shutdown failed", "error", err)
@@ -345,6 +428,20 @@ func decodeKey(key string) ([]byte, error) {
 		return nil, fmt.Errorf("encryption key must be 32 bytes, got %d", len(decoded))
 	}
 	return decoded, nil
+}
+
+// testServerOptions are extra server options that only this package's tests
+// set, in the child process they re-execute into main(). They let a composition
+// test shorten the Run Now time limit while keeping the production code path.
+// Production leaves it nil.
+var testServerOptions []server.Option
+
+func withTestServerOptions() server.Option {
+	return func(s *server.Server) {
+		for _, o := range testServerOptions {
+			o(s)
+		}
+	}
 }
 
 // envDefault returns the value of envVar if set, otherwise fallback.
@@ -516,31 +613,25 @@ type playlistProvider struct {
 
 // ListPlaylists returns the authenticated user's complete playlist collection.
 // It follows each playlists.list nextPageToken and preserves upstream page and
-// item order. Per-page quota is charged by the client's recorder (one
-// playlists_list unit per successful page) rather than one post-hoc unit, so a
+// item order. Per-page quota is charged by the client's recorder rather than
+// one post-hoc unit, so a
 // failure on a later page keeps the earlier pages' ledger entries while this
 // method returns an error and no partial collection (ADR-005, ARS-001).
-//
-// Quota accounting limit: a failed page is not charged to the ledger. The
-// YouTube Data API does not report whether a failed request consumed quota, so
-// recording a cost here would fabricate consumption. Failed-attempt accounting
-// remains open in proposed OC-001 and is deliberately not implied here.
 func (p *playlistProvider) ListPlaylists(ctx context.Context) ([]server.Playlist, error) {
-	token, err := p.auth.ActiveToken(ctx)
+	binding, err := p.auth.Bind(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("playlist provider: not authenticated: %w", err)
 	}
-	opts := []youtube.Option{}
-	if p.ledger != nil {
-		recorder := func(ctx context.Context, op youtube.Operation, calls int) error {
-			return p.ledger.RecordCalls(ctx, sql.NullInt64{}, quota.Operation(op), calls)
-		}
-		opts = append(opts, youtube.WithRecorder(recorder))
+	if p.ledger == nil {
+		return nil, errors.New("playlist provider: quota ledger unavailable")
 	}
+	opts := boundReadOptions(p.auth, binding, p.ledger)
 	if p.baseURL != "" {
 		opts = append(opts, youtube.WithBaseURL(p.baseURL))
 	}
-	client := youtube.NewClient(ctx, token, opts...)
+	client := youtube.NewAuthorizedClient(ctx, func(ctx context.Context) (*oauth2.Token, error) {
+		return p.auth.Resolve(ctx, binding)
+	}, opts...)
 
 	out := []server.Playlist{}
 	pageToken := ""
@@ -564,21 +655,27 @@ func (p *playlistProvider) ListPlaylists(ctx context.Context) ([]server.Playlist
 type metadataFetcher struct {
 	auth    *auth.Service
 	baseURL string
+	ledger  *quota.Ledger
 }
 
 func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) ([]metadata.TransientMetadata, error) {
 	if len(videoIDs) == 0 {
 		return []metadata.TransientMetadata{}, nil
 	}
-	token, err := f.auth.ActiveToken(ctx)
+	if f.ledger == nil {
+		return nil, errors.New("metadata fetcher: quota ledger unavailable")
+	}
+	binding, err := f.auth.Bind(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("metadata fetcher: no active token: %w", err)
 	}
-	opts := []youtube.Option{}
+	opts := boundReadOptions(f.auth, binding, f.ledger)
 	if f.baseURL != "" {
 		opts = append(opts, youtube.WithBaseURL(f.baseURL))
 	}
-	client := youtube.NewClient(ctx, token, opts...)
+	client := youtube.NewAuthorizedClient(ctx, func(ctx context.Context) (*oauth2.Token, error) {
+		return f.auth.Resolve(ctx, binding)
+	}, opts...)
 	details, err := client.GetVideos(ctx, videoIDs)
 	if err != nil {
 		return nil, fmt.Errorf("metadata fetcher: get videos: %w", err)
@@ -602,4 +699,29 @@ func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) 
 		})
 	}
 	return out, nil
+}
+
+// boundReadOptions associates each response with the revision admitted for that
+// request. A rejected old revision cannot invalidate a replacement credential.
+func boundReadOptions(service *auth.Service, binding auth.AuthorizationBinding, ledger *quota.Ledger) []youtube.Option {
+	return []youtube.Option{
+		youtube.WithQuotaReads(),
+		youtube.WithRequestDispatcher(func(ctx context.Context, req *http.Request, transport http.RoundTripper) (*http.Response, youtube.RequestAdmission, error) {
+			op, ok := youtube.ReadOperation(ctx)
+			if !ok {
+				return nil, youtube.RequestAdmission{}, errors.New("youtube read operation unavailable")
+			}
+			resp, receipt, hold, err := service.DispatchWithQuota(ctx, binding, req, transport, ledger, quota.Operation(op))
+			admission := youtube.RequestAdmission{AuthorizationID: receipt.AuthorizationID, CredentialRevision: receipt.CredentialRevision, AdmittedAt: receipt.AdmittedAt}
+			if hold != nil {
+				admission.Finalize = func(ctx context.Context, category string, status int) error {
+					return hold.Finalize(ctx, sql.NullInt64{}, quota.OutcomeCategory(category), sql.NullInt64{Int64: int64(status), Valid: status != 0})
+				}
+			}
+			return resp, admission, err
+		}),
+		youtube.WithRejectionObserver(func(ctx context.Context, admission youtube.RequestAdmission) error {
+			return service.ObserveAccessRejection(ctx, binding, auth.AdmissionReceipt{AuthorizationID: admission.AuthorizationID, CredentialRevision: admission.CredentialRevision, AdmittedAt: admission.AdmittedAt})
+		}),
+	}
 }

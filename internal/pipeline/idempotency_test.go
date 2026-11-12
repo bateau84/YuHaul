@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/duplicate"
@@ -61,6 +64,39 @@ type mockYouTubeServer struct {
 	subscriptions []string
 	channels      []mockChannel
 	videos        []mockVideo
+	// Test hooks for simulating process loss around a provider mutation.
+	// beforeInsert runs after the request is received and before it is applied;
+	// afterInsert runs after it is applied and before the response is written.
+	beforeInsert func()
+	afterInsert  func()
+	// insertDecision sees every playlist POST before it is applied. A non-zero
+	// status makes the server answer with that status and body and record no
+	// insertion (a provider failure).
+	insertDecision func(playlistID, videoID string) (int, string)
+	// requests counts every HTTP request the endpoint received.
+	requests atomic.Int64
+	// gate, when set, runs for every request before it is handled; it may block
+	// to hold the request in flight. log records when each request started.
+	gate func(r *http.Request)
+	log  []requestRecord
+}
+
+type requestRecord struct {
+	Method, Path string
+	At           time.Time
+}
+
+// RequestLog returns every request the endpoint received, in arrival order.
+func (m *mockYouTubeServer) RequestLog() []requestRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]requestRecord(nil), m.log...)
+}
+
+func (m *mockYouTubeServer) setGate(g func(r *http.Request)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gate = g
 }
 
 type playlistInsertion struct {
@@ -96,13 +132,26 @@ func newMockYouTubeServer(channels []mockChannel, videos []mockVideo) *mockYouTu
 	mux.HandleFunc("/channels", m.handleChannels)
 	mux.HandleFunc("/playlistItems", m.handlePlaylistItems)
 	mux.HandleFunc("/videos", m.handleVideos)
-	m.server = httptest.NewServer(mux)
+	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.requests.Add(1)
+		m.mu.Lock()
+		m.log = append(m.log, requestRecord{Method: r.Method, Path: r.URL.Path, At: time.Now()})
+		gate := m.gate
+		m.mu.Unlock()
+		if gate != nil {
+			gate(r)
+		}
+		mux.ServeHTTP(w, r)
+	}))
 	return m
 }
 
 func (m *mockYouTubeServer) URL() string {
 	return m.server.URL
 }
+
+// Requests is the number of HTTP requests the endpoint has received.
+func (m *mockYouTubeServer) Requests() int { return int(m.requests.Load()) }
 
 func (m *mockYouTubeServer) Close() {
 	m.server.Close()
@@ -172,8 +221,22 @@ func (m *mockYouTubeServer) handlePlaylistItems(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if m.insertDecision != nil {
+			if status, payload := m.insertDecision(body.Snippet.PlaylistID, body.Snippet.ResourceID.VideoID); status != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, payload)
+				return
+			}
+		}
+		if m.beforeInsert != nil {
+			m.beforeInsert()
+		}
 		m.recordInsertion(body.Snippet.PlaylistID, body.Snippet.ResourceID.VideoID)
-		writeJSON(w, map[string]any{"id": "inserted-item"})
+		if m.afterInsert != nil {
+			m.afterInsert()
+		}
+		writeJSON(w, map[string]any{"id": "inserted-item", "snippet": body.Snippet})
 		return
 	}
 
@@ -249,12 +312,23 @@ func itoa(n int) string {
 
 func setupIdempotencyTest(t *testing.T, videos []mockVideo) *idempotencyTestEnv {
 	t.Helper()
+	return setupIdempotencyTestOpen(t, videos, nil)
+}
+
+// setupIdempotencyTestOpen is setupIdempotencyTest with an optional database
+// opener, for tests that need a seam below database/sql. A nil opener uses
+// store.Open.
+func setupIdempotencyTestOpen(t *testing.T, videos []mockVideo, open func(ctx context.Context, path string) (*sql.DB, error)) *idempotencyTestEnv {
+	t.Helper()
 	ctx := context.Background()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "idempotency.db")
 
-	db, err := store.Open(ctx, path)
+	if open == nil {
+		open = store.Open
+	}
+	db, err := open(ctx, path)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = db.Close()
@@ -282,8 +356,15 @@ func setupIdempotencyTest(t *testing.T, videos []mockVideo) *idempotencyTestEnv 
 			youtube.WithLogger(logger),
 		)
 	}
-	disc := discovery.NewEngine(&fakeTokenSource{}, machine, ledger, db,
+	key := []byte("01234567890123456789012345678901")
+	tokens, err := auth.NewSQLiteTokenStore(db, key)
+	require.NoError(t, err)
+	require.NoError(t, tokens.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "local-test", RefreshToken: "local-refresh", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour), Scopes: auth.DefaultScopes()}))
+	authService, err := auth.NewService(&auth.ServiceConfig{ClientID: "test", ClientSecret: "test", RedirectURL: "http://localhost/callback", EncryptionKey: string(key)}, tokens, auth.NewInMemoryStateStore())
+	require.NoError(t, err)
+	disc := discovery.NewEngine(authService, machine, ledger, db,
 		discovery.WithClientFactory(discoveryFactory),
+		discovery.WithBaseURL(mock.URL()),
 		discovery.WithLogger(logger),
 	)
 
@@ -323,21 +404,13 @@ func setupIdempotencyTest(t *testing.T, videos []mockVideo) *idempotencyTestEnv 
 
 	routerEngine := router.NewEngine(routerStore)
 
-	execFactory := func(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) PlaylistInserter {
-		return youtube.NewClient(ctx, token,
-			youtube.WithBaseURL(mock.URL()),
-			youtube.WithHTTPClient(mock.server.Client()),
-			youtube.WithRecorder(recorder),
-			youtube.WithLogger(logger),
-		)
-	}
-	executor := NewExecutor(db, ledger, &fakeTokenSource{},
+	executor := NewExecutor(db, ledger, authService,
 		WithExecutorLogger(logger),
-		WithYouTubeFactory(execFactory),
+		WithYouTubeBaseURL(mock.URL()),
 	)
 
 	broadcast := NewBroadcaster()
-	p := NewPipeline(db, machine, stateStore, disc, detector, routerEngine, executor, ledger, meta, nil, broadcast,
+	p := NewPipeline(db, machine, stateStore, disc, detector, routerEngine, executor, ledger, meta, authService, broadcast,
 		WithVersioner(versioner),
 		WithConfigStore(cfgStore),
 		WithLogger(logger),

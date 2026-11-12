@@ -28,7 +28,7 @@ timestamp: 2026-10-25T00:00:00Z
 5. **Deferred**: the video was not evaluated due to an operational constraint (quota exhaustion, authorization pending, or other temporary inability to process).
 6. **Failed**: the video's evaluation or action execution attempted and encountered a failure that prevents completion (permanent API error, action execution failure after retry).
 7. **Not-yet-evaluated**: a video that has been discovered but has not yet reached evaluation in the current or any prior run. This is never classified as rejected or any other negative outcome.
-8. The classification of a video can change across runs (e.g., deferred in run N, accepted in run N+1 after re-authorization).
+8. The classification of a video can change across runs only while it is not final (e.g., deferred in run N, accepted in run N+1 after re-authorization). Accepted, rejected, excluded and unavailable on YouTube are final: once committed, they never change, in either direction ([BR-039](br-039-final-outcomes-are-never-reprocessed.md), amended 2026-11-12).
 9. All downstream consumers (State Manager, Statistics, Inspection UI) use this shared vocabulary and do not introduce local classification variants.
 10. Absence of processing is never represented as a negative routing decision.
 11. A duplicate match is supporting match/provenance information, not a primary outcome or an exclusion reason. Evaluation, persistence, reporting, and inspection apply [BR-008 AC9](br-008-exact-and-fuzzy-duplicate-detection.md): a distinct matching video continues through eligible routes/actions and receives its outcome from that processing. Duplicate status alone is not accepted, rejected, excluded, deferred, or failed and cannot stand in for route/action evidence.
@@ -51,6 +51,7 @@ timestamp: 2026-10-25T00:00:00Z
 ## Derived from
 - Anchor: youtube-discovery-routing.md (AC32, AC15, AC20, AC28)
 - [BR-008](br-008-exact-and-fuzzy-duplicate-detection.md) AC9, recording the user's 2026-10-25 “Continue, yes” decision; Guarantee 11 derives the shared reporting meaning without adding an outcome category.
+- Guarantee 8 limit: the user's decision of 2026-11-12 that a final outcome never changes, in either direction ([BR-039](br-039-final-outcomes-are-never-reprocessed.md)).
 
 ## Verified by
 - Unit test: every video in a run has exactly one outcome classification.

@@ -6,7 +6,12 @@
 //  3. ExecutedAction — per-action outcome for a route decision.
 package state
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/bateau84/YuHaul/internal/diag"
+)
 
 // VideoProcessingState is the overall lifecycle state of a video within a run.
 type VideoProcessingState string
@@ -32,6 +37,9 @@ const (
 	FinalOutcomeDeferred        VideoFinalOutcome = "deferred"
 	FinalOutcomeFailed          VideoFinalOutcome = "failed"
 	FinalOutcomeNotYetEvaluated VideoFinalOutcome = "not_yet_evaluated"
+	// FinalOutcomeUnavailableOnYouTube marks a video YouTube no longer returns
+	// (ARS-005 §6). It is its own category, never folded into another.
+	FinalOutcomeUnavailableOnYouTube VideoFinalOutcome = "unavailable_on_youtube"
 )
 
 // RouteDecisionType records the result of evaluating a route against a video.
@@ -82,6 +90,9 @@ const (
 	RunStatusCompleted   RunStatus = "completed"
 	RunStatusInterrupted RunStatus = "interrupted"
 	RunStatusFailed      RunStatus = "failed"
+	// RunStatusStopped is a run the user stopped (run-initiation ADR-004). It
+	// is final and always carries StopRequestedAt.
+	RunStatusStopped RunStatus = "stopped"
 )
 
 // Run is a single execution of the processing pipeline.
@@ -99,13 +110,94 @@ type Run struct {
 	VideosDeferred        int        `json:"videos_deferred"`
 	VideosFailed          int        `json:"videos_failed"`
 	VideosNotYetEvaluated int        `json:"videos_not_yet_evaluated"`
-	QuotaCost             int        `json:"quota_cost"`
-	DurationSeconds       *float64   `json:"duration_seconds"`
-	InterruptReason       *string    `json:"interrupt_reason"`
-	CurrentPhase          *string    `json:"current_phase"`
+	VideosUnavailable     int        `json:"videos_unavailable"`
+	// VideosSelected is the input count captured when the run's selector
+	// established its input set. NULL means selection was never captured
+	// (unknown, including all pre-migration runs); 0 means selection
+	// completed and found no inputs (ARD-001).
+	VideosSelected *int `json:"videos_selected"`
+	// VideosEvaluated is the number of distinct videos with persisted
+	// route-decision evidence for this run, derived at read time. It is not
+	// a stored counter and does not change videos_discovered (ARD-001).
+	VideosEvaluated int      `json:"videos_evaluated"`
+	QuotaCost       int      `json:"quota_cost"`
+	DurationSeconds *float64 `json:"duration_seconds"`
+	// InterruptReason is the internal run recovery reason. Its public JSON
+	// projection vettes the stored text (see MarshalJSON): unsafe legacy free
+	// text is withheld and flagged unavailable instead of serialized raw
+	// (ARD-001 failure diagnostic boundary).
+	InterruptReason *string `json:"interrupt_reason"`
+	CurrentPhase    *string `json:"current_phase"`
+	// StopRequestedAt is the durable stop marker. It is set once, on a running
+	// run, when the user presses Stop; the run then ends only as stopped.
+	StopRequestedAt *time.Time `json:"stop_requested_at"`
 
 	// ActionAuthorityVersion is write-once producer evidence; zero is legacy/unknown.
 	ActionAuthorityVersion int `json:"-"`
+
+	// InitiatedBy records who started a production run (InitiatedBy* values).
+	// It is written once at insert; nil for every pre-024 row and for
+	// simulation runs. Serialized by MarshalJSON as initiated_by.
+	InitiatedBy *string `json:"-"`
+	// InterruptCause records why an interrupted run stopped (InterruptCause*
+	// values). Nil when the cause is unproven. Serialized by MarshalJSON as
+	// interrupt_cause.
+	InterruptCause *string `json:"-"`
+
+	// PublishedFrom/PublishedTo are the Backtest/Replay published-date range
+	// (UTC calendar days), written once at insert; nil means unbounded. They
+	// reach clients through the published_range projection in MarshalJSON.
+	PublishedFrom *string `json:"-"`
+	PublishedTo   *string `json:"-"`
+}
+
+// Closed values of Run.InitiatedBy and Run.InterruptCause. They are enforced
+// by the migration 024 triggers; new values need a new migration.
+const (
+	InitiatedByRunNow     = "run_now"
+	InitiatedBySchedule   = "schedule"
+	InitiatedByQueueRetry = "queue_retry"
+
+	InterruptCauseTimeLimit = "time_limit"
+	InterruptCauseShutdown  = "shutdown"
+)
+
+// MarshalJSON projects Run for public serialization. Admitted canonical and
+// exact legacy reasons are normalized to v1. Rejected historical prose is
+// withheld; generic unknown_error summaries retain safe phase/operation but
+// set failure_reason_unavailable because the cause detail is not known
+// (ARD-001).
+func (r Run) MarshalJSON() ([]byte, error) {
+	type alias Run
+	out := struct {
+		*alias
+		InterruptReason          *string `json:"interrupt_reason"`
+		FailureReasonUnavailable bool    `json:"failure_reason_unavailable,omitempty"`
+		CurrentPhase             *string `json:"current_phase"`
+		PublishedRange           any     `json:"published_range"`
+		// InitiatedBy and InterruptCause are closed-set values (see the
+		// constants above) that let Run Detail tell a time-limit-interrupted
+		// Run Now run apart. Always present; null when unproven or legacy.
+		InitiatedBy    *string `json:"initiated_by"`
+		InterruptCause *string `json:"interrupt_cause"`
+	}{alias: (*alias)(&r), InitiatedBy: r.InitiatedBy, InterruptCause: r.InterruptCause}
+	if pr := r.publishedRange(); pr != nil {
+		out.PublishedRange = pr
+	}
+	if r.InterruptReason != nil {
+		if value, unavailable := diag.AdmitErrorText(*r.InterruptReason); value != "" {
+			out.InterruptReason = &value
+			out.FailureReasonUnavailable = unavailable
+		} else {
+			out.FailureReasonUnavailable = unavailable
+		}
+	}
+	if r.CurrentPhase != nil {
+		if phase, ok := diag.AdmitPhase(*r.CurrentPhase); ok {
+			out.CurrentPhase = &phase
+		}
+	}
+	return json.Marshal(out)
 }
 
 // Video represents a discovered video and its processing state.
@@ -133,6 +225,11 @@ type RouteDecision struct {
 	Decision        RouteDecisionType
 	SkipReason      *SkipReason
 	RejectionReason *string
+	// ExclusionIndex identifies the zero-based occurrence in the run's immutable
+	// configuration snapshot. Nil means this decision has no captured reference.
+	ExclusionIndex *int
+	// ExclusionSemanticsVersion identifies the interpretation of that occurrence.
+	ExclusionSemanticsVersion *int
 }
 
 // ExecutedAction records the outcome of executing one action.
@@ -144,8 +241,20 @@ type ExecutedAction struct {
 	ActionType       string
 	TargetPlaylistID string
 	Outcome          ActionOutcome
-	ErrorMessage     *string
-	ExecutedAt       *time.Time
+	// OutcomeReason explains an existing Outcome without adding a new
+	// outcome category (for example already_completed for an idempotent
+	// no-attempt). It is NULL when no reason was captured.
+	OutcomeReason *string
+	ErrorMessage  *string
+	ExecutedAt    *time.Time
+}
+
+// UnresolvedMutation is a run-owned projection of a persisted playlist send
+// guard. Its presence means application is unknown; it is not an attempt.
+type UnresolvedMutation struct {
+	ActionType       string
+	TargetPlaylistID string
+	PreparedAt       time.Time
 }
 
 // ConditionAudit records the evaluation of one condition within a route decision.
@@ -175,7 +284,8 @@ func (s VideoProcessingState) Valid() bool {
 func (o VideoFinalOutcome) Valid() bool {
 	switch o {
 	case FinalOutcomeAccepted, FinalOutcomeRejected, FinalOutcomeExcluded,
-		FinalOutcomeDeferred, FinalOutcomeFailed, FinalOutcomeNotYetEvaluated:
+		FinalOutcomeDeferred, FinalOutcomeFailed, FinalOutcomeNotYetEvaluated,
+		FinalOutcomeUnavailableOnYouTube:
 		return true
 	}
 	return false

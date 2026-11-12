@@ -71,6 +71,58 @@ func (s *Store) Get(ctx context.Context, videoID string) (*TransientMetadata, er
 	return m, nil
 }
 
+// readLocalDisplayRows reads only the fields needed for projection. Eligibility
+// is deliberately decided by Manager after this query has fully completed.
+func (s *Store) readLocalDisplayRows(ctx context.Context, ids []string) ([]LocalRow, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if len(ids) > 100 {
+		return nil, fmt.Errorf("metadata: local display batch exceeds 100 IDs")
+	}
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	query := `SELECT video_id, title, channel_name, duration_seconds, fetched_at, expires_at, expired_at, is_active FROM transient_metadata WHERE video_id IN (`
+	for i := range ids {
+		if i > 0 {
+			query += ","
+		}
+		query += "?"
+	}
+	query += ")"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("metadata: read local display: %w", err)
+	}
+	defer rows.Close()
+	out := make([]LocalRow, 0, len(ids))
+	for rows.Next() {
+		var row LocalRow
+		var title, channel sql.NullString
+		var duration sql.NullInt64
+		if err := rows.Scan(&row.VideoID, &title, &channel, &duration, &row.FetchedAt, &row.ExpiresAt, &row.ExpiredAt, &row.IsActive); err != nil {
+			return nil, fmt.Errorf("metadata: scan local display: %w", err)
+		}
+		if title.Valid {
+			row.Title = &title.String
+		}
+		if channel.Valid {
+			row.ChannelName = &channel.String
+		}
+		if duration.Valid {
+			n := int(duration.Int64)
+			row.DurationSeconds = &n
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("metadata: iterate local display: %w", err)
+	}
+	return out, nil
+}
+
 // ErrNotFound is returned when a Store A record does not exist.
 var ErrNotFound = errors.New("metadata not found")
 

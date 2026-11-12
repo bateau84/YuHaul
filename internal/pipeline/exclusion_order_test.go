@@ -10,20 +10,18 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"golang.org/x/oauth2"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/discovery"
 	"github.com/bateau84/YuHaul/internal/duplicate"
-	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
-	"github.com/bateau84/YuHaul/internal/youtube"
 )
 
 // Only YouTube is faked: discovery, filtering, detection, routing and storage
 // all use their production implementations.
-func exclusionDiscovery(t *testing.T, deps *exclusionDeps) *discovery.Engine {
+func exclusionDiscovery(t *testing.T, deps *exclusionDeps, service *auth.Service) *discovery.Engine {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var items any
@@ -44,10 +42,7 @@ func exclusionDiscovery(t *testing.T, deps *exclusionDeps) *discovery.Engine {
 		}
 	}))
 	t.Cleanup(server.Close)
-	return discovery.NewEngine(&fakeTokenSource{}, deps.machine, quota.New(deps.db), deps.db,
-		discovery.WithClientFactory(func(ctx context.Context, token *oauth2.Token, recorder youtube.CostRecorder) *youtube.Client {
-			return youtube.NewClient(ctx, token, youtube.WithBaseURL(server.URL), youtube.WithRecorder(recorder))
-		}))
+	return discovery.NewEngine(service, deps.machine, deps.pipeline.ledger, deps.db, discovery.WithBaseURL(server.URL))
 }
 
 func addExclusionOrderRoute(t *testing.T, deps *exclusionDeps, order int, excludes, enabled bool) router.Route {
@@ -86,6 +81,20 @@ func TestExclusionBeforeDuplicate_Production(t *testing.T) {
 			ctx := context.Background()
 			deps, cleanup := setupExclusionPipeline(t)
 			defer cleanup()
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPost, r.Method)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"inserted","snippet":{"playlistId":"PLtest","resourceId":{"videoId":"candidate"}}}`))
+			}))
+			defer provider.Close()
+			key := []byte("01234567890123456789012345678901")
+			tokens, err := auth.NewSQLiteTokenStore(deps.db, key)
+			require.NoError(t, err)
+			require.NoError(t, tokens.Save(ctx, &auth.TokenRecord{Provider: "youtube", AccessToken: "local-test", RefreshToken: "local-refresh", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour), Scopes: auth.DefaultScopes()}))
+			service, err := auth.NewService(&auth.ServiceConfig{ClientID: "test", ClientSecret: "test", RedirectURL: "http://localhost/callback", EncryptionKey: string(key)}, tokens, auth.NewInMemoryStateStore())
+			require.NoError(t, err)
+			deps.pipeline.auth = service
+			deps.pipeline.executor = NewExecutor(deps.db, deps.pipeline.ledger, service, WithYouTubeBaseURL(provider.URL))
 			if !tc.noRoutes {
 				addExclusionOrderRoute(t, deps, 1, !tc.noExclusions, true)
 				second := addExclusionOrderRoute(t, deps, 2, tc.allExcluded, !tc.disabledSecond)
@@ -94,7 +103,7 @@ func TestExclusionBeforeDuplicate_Production(t *testing.T) {
 					require.NoError(t, deps.routerStore.UpdateRoute(ctx, &second))
 				}
 			}
-			_, err := duplicate.SaveFingerprint(ctx, deps.db, "candidate", "imported", "user_import", "Jazz Session", true, nil)
+			_, err = duplicate.SaveFingerprint(ctx, deps.db, "candidate", "imported", "user_import", "Jazz Session", true, nil)
 			require.NoError(t, err)
 			if tc.reference {
 				_, err := duplicate.SaveFingerprint(ctx, deps.db, "reference", "other", "user_import", "Jazz Session", true, nil)
@@ -108,9 +117,12 @@ func TestExclusionBeforeDuplicate_Production(t *testing.T) {
 				_, err := deps.pipeline.detector.Detect(ctx, "candidate", "Jazz Session")
 				require.Error(t, err, "fault must be at the real lookup boundary")
 			}
-			deps.pipeline.discovery = exclusionDiscovery(t, deps)
+			deps.pipeline.discovery = exclusionDiscovery(t, deps, service)
 			run, err := deps.pipeline.StartRun(ctx, state.RunTypeManual)
 			require.NoError(t, err)
+			var safetyVersion int
+			require.NoError(t, deps.db.QueryRowContext(ctx, `SELECT mutation_safety_version FROM run WHERE id=?`, run.ID).Scan(&safetyVersion))
+			require.Equal(t, 1, safetyVersion)
 			events := deps.pipeline.broadcast.Subscribe(run.ID)
 			defer deps.pipeline.broadcast.Unsubscribe(run.ID, events)
 			deps.pipeline.Execute(ctx, run.ID)
@@ -172,6 +184,10 @@ func TestExclusionBeforeDuplicate_Production(t *testing.T) {
 				for _, d := range decisions {
 					require.Equal(t, state.RouteDecisionSkipped, d.Decision)
 					require.Equal(t, skipReasonPtr(state.SkipReasonExclusion), d.SkipReason)
+					require.NotNil(t, d.ExclusionIndex)
+					require.Equal(t, 0, *d.ExclusionIndex)
+					require.NotNil(t, d.ExclusionSemanticsVersion)
+					require.Equal(t, 1, *d.ExclusionSemanticsVersion)
 					audits, err := deps.stateStore.GetConditionAuditsForDecision(ctx, d.ID)
 					require.NoError(t, err)
 					require.Empty(t, audits)
@@ -307,10 +323,10 @@ func TestExclusionBeforeDuplicate_Historical(t *testing.T) {
 				if tc.allExcluded {
 					second.Exclusions = first.Exclusions
 				}
-				run, err := deps.pipeline.Backtest(ctx, proposalSnapshot(first, second))
+				run, err := deps.pipeline.Backtest(ctx, proposalSnapshot(first, second), state.PublishedRange{})
 				require.NoError(t, err)
 				if mode == "replay" {
-					run, err = deps.pipeline.Replay(ctx, run.ConfigVersionID)
+					run, err = deps.pipeline.Replay(ctx, run.ConfigVersionID, state.PublishedRange{})
 					require.NoError(t, err)
 					deps.pipeline.ExecuteReplay(ctx, run.ID)
 				} else {
@@ -320,7 +336,7 @@ func TestExclusionBeforeDuplicate_Historical(t *testing.T) {
 				require.NoError(t, err)
 				if tc.brokenDetector && !tc.allExcluded {
 					require.NotNil(t, after.InterruptReason)
-					require.Contains(t, *after.InterruptReason, "database is closed")
+					require.Equal(t, "diag:v1 phase=unknown operation=unknown code=unknown_error", *after.InterruptReason)
 				} else {
 					require.Nil(t, after.InterruptReason)
 					require.Equal(t, state.RunStatusCompleted, after.Status)
@@ -332,12 +348,18 @@ func TestExclusionBeforeDuplicate_Historical(t *testing.T) {
 					require.Equal(t, 1, after.VideosExcluded)
 					for _, d := range decisions {
 						require.Equal(t, skipReasonPtr(state.SkipReasonExclusion), d.SkipReason)
+						require.NotNil(t, d.ExclusionIndex)
+						require.Equal(t, 0, *d.ExclusionIndex)
+						require.NotNil(t, d.ExclusionSemanticsVersion)
+						require.Equal(t, 1, *d.ExclusionSemanticsVersion)
 						audits, err := deps.stateStore.GetConditionAuditsForDecision(ctx, d.ID)
 						require.NoError(t, err)
 						require.Empty(t, audits)
 					}
 				} else if tc.wantDecisions > 0 {
 					require.Equal(t, skipReasonPtr(state.SkipReasonExclusion), decisions[0].SkipReason)
+					require.NotNil(t, decisions[0].ExclusionIndex)
+					require.Equal(t, 0, *decisions[0].ExclusionIndex)
 					require.Equal(t, state.RouteDecisionMatched, decisions[1].Decision)
 				}
 				productionVideo, err := deps.stateStore.GetVideo(ctx, v.ID)
