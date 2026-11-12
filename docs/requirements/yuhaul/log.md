@@ -3,10 +3,14 @@ type: Log
 title: YuHaul Requirements Change Log
 description: Chronological record of changes to the YuHaul behavioral requirement bundle.
 tags: [changelog, log, okf, requirements, yuhaul]
-timestamp: 2026-11-11T00:00:00Z
+timestamp: 2026-11-12T00:00:00Z
 ---
 
 # YuHaul Requirements Update Log
+
+## 2026-11-12
+
+**Final outcomes are never reprocessed or overwritten (new BR-039); BR-032, BR-035, BR-037 and OC-002 amended.** Source: the user's decision of 2026-11-12, relayed in the requirements assignment; the original human conversation was not independently inspected. Added [BR-039](br-039-final-outcomes-are-never-reprocessed.md), AC1–12. Accepted, rejected, excluded and unavailable on YouTube are final; deferred, failed and not yet evaluated are not. No claim, retry, handoff, re-queue, resume, startup recovery or run routes a video with a final outcome, and no operation changes a final outcome, in either direction. Its queue items are closed with their history and a reason. A partly done video (no final outcome, at least one recorded success) finishes only its missing additions under its original decision, under the send safety rules, and a recorded success is never reversed. If the original decision cannot be read, nothing is sent and the video is retained with a visible reason. Simulations may still evaluate final videos but change nothing. Specification choices are listed in BR-039. Consequential amendments, each pointing to BR-039: [BR-032](br-032-processing-outcome-distinction.md) new AC7 (which outcomes are final); [BR-035](br-035-stop-active-run.md) AC14 (claimed videos are routed only without a final outcome; partly done exception); [BR-037](br-037-requeue-stranded-videos.md) AC11 (partly done exception; stranded videos never have a final outcome); [OC-002](oc-002-route-evaluation-outcome-semantics.md) Guarantee 8 (classification changes only while not final). [Index](index.md): summary, table row, BR-037 "becomes available again" question marked decided, a new non-blocking user question (repair of outcomes already overwritten) and a downstream note. **Conflict with current source:** the deferred-queue claim resets `final_outcome` to `not_yet_evaluated` and re-routes under the receiving run's snapshot (`internal/queue/retry.go`, near line 230). Routed to the Architect. Docs only; no code, design or architecture change.
 
 ## 2026-11-11
 

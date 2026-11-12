@@ -20,12 +20,14 @@ The system SHALL distinguish between rejected, deferred, failed, and not-yet-eva
 4. Outcome categories are consistently used across run history, statistics, inspection UI, and decision evidence.
 5. The user can filter run history by outcome category.
 6. Outcome semantics are durable and consistent across runs.
+7. Accepted, rejected, excluded and unavailable on YouTube are final outcomes; deferred, failed and not-yet-evaluated are not. A final outcome is never changed or reprocessed, as [BR-039](br-039-final-outcomes-are-never-reprocessed.md) requires. (Added 2026-11-12.)
 
 ## Derived from
 
 - Anchor: youtube-discovery-routing.md (AC32)
 - [Admin Interface Design Specification](../../design/yuhaul-admin-ui-design.md), §View: Run Detail (AC5's filter by outcome type)
 - AC1 amendment, the *unavailable on YouTube* category: the user's decision of 2026-11-11 that a re-queued video that YouTube no longer returns gets that final outcome and stays visible in run details and outcome counts as its own category ([BR-037](br-037-requeue-stranded-videos.md), Derived from). AC4–5 then apply to it as to every other category.
+- AC7: the user's decision of 2026-11-12 that a final outcome is never overwritten or reprocessed, relayed in the requirements assignment; the normative home is [BR-039](br-039-final-outcomes-are-never-reprocessed.md).
 
 ## Verified by
 
