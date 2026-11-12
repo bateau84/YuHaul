@@ -73,7 +73,7 @@ func (s *Store) Get(ctx context.Context, videoID string) (*TransientMetadata, er
 
 // readLocalDisplayRows reads only the fields needed for projection. Eligibility
 // is deliberately decided by Manager after this query has fully completed.
-func (s *Store) readLocalDisplayRows(ctx context.Context, ids []string) ([]localDisplayRow, error) {
+func (s *Store) readLocalDisplayRows(ctx context.Context, ids []string) ([]LocalRow, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -97,9 +97,9 @@ func (s *Store) readLocalDisplayRows(ctx context.Context, ids []string) ([]local
 		return nil, fmt.Errorf("metadata: read local display: %w", err)
 	}
 	defer rows.Close()
-	out := make([]localDisplayRow, 0, len(ids))
+	out := make([]LocalRow, 0, len(ids))
 	for rows.Next() {
-		var row localDisplayRow
+		var row LocalRow
 		var title, channel sql.NullString
 		var duration sql.NullInt64
 		if err := rows.Scan(&row.VideoID, &title, &channel, &duration, &row.FetchedAt, &row.ExpiresAt, &row.ExpiredAt, &row.IsActive); err != nil {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/quota"
@@ -199,47 +198,14 @@ func (m *Manager) ReadLocalDisplay(ctx context.Context, ids []string) (map[strin
 		out[id] = LocalDisplay{Attribution: "current_local_not_necessarily_evaluated", TitleAvailability: "unknown", ChannelNameAvailability: "unknown", DurationAvailability: "unknown"}
 	}
 	for _, row := range rows {
-		fetched, fetchedOK := parseLocalTime(row.FetchedAt)
-		expires, expiresOK := parseLocalTime(row.ExpiresAt)
-		_, expiredOK := parseLocalTime(row.ExpiredAt)
-		expiredMarkerPresent := row.ExpiredAt != nil
-		knownExpired := expiredOK || (expiresOK && !expires.After(cutoff))
-		eligibleTime := fetchedOK && expiresOK && fetched.After(time.Time{}) && !fetched.After(cutoff) && expires.After(fetched)
-		eligible := row.IsActive && !expiredMarkerPresent && !knownExpired && eligibleTime
-		item := LocalDisplay{Attribution: "current_local_not_necessarily_evaluated", TitleAvailability: "unknown", ChannelNameAvailability: "unknown", DurationAvailability: "unknown"}
-		if eligible {
-			item.SourceFetchedAt = &fetched
-		}
-		projectString := func(value *string) (*string, string) {
-			if knownExpired {
-				return nil, "known_expired"
-			}
-			if value == nil || strings.TrimSpace(*value) == "" {
-				return nil, "unknown"
-			}
-			if !eligible {
-				return nil, "withheld"
-			}
-			return value, "current_local"
-		}
-		item.Title, item.TitleAvailability = projectString(row.Title)
-		item.ChannelName, item.ChannelNameAvailability = projectString(row.ChannelName)
-		if knownExpired {
-			item.DurationAvailability = "known_expired"
-		} else if row.DurationSeconds != nil {
-			if !eligible {
-				item.DurationAvailability = "withheld"
-			} else {
-				item.DurationSeconds = row.DurationSeconds
-				item.DurationAvailability = "current_local"
-			}
-		}
-		out[row.VideoID] = item
+		out[row.VideoID] = ProjectLocal(row, cutoff)
 	}
 	return out, nil
 }
 
-func parseLocalTime(value any) (time.Time, bool) {
+// ParseLocalTime parses a stored timestamp in any layout the schema has used.
+// Zero and unparseable values report false.
+func ParseLocalTime(value any) (time.Time, bool) {
 	switch v := value.(type) {
 	case time.Time:
 		if v.IsZero() {
@@ -253,7 +219,7 @@ func parseLocalTime(value any) (time.Time, bool) {
 			}
 		}
 	case []byte:
-		return parseLocalTime(string(v))
+		return ParseLocalTime(string(v))
 	}
 	return time.Time{}, false
 }

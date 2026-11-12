@@ -66,7 +66,7 @@ Out of scope:
 | `classify.go` | `Classify(raw string) Input` (§3). Pure. |
 | `match.go` | `Key(s string) string` and `Contains(titleKey, needleKey string) bool` (§5). Pure. |
 | `cursor.go` | `encodeCursor` and `decodeCursor` (§7). Pure. |
-| `store.go` | The read queries (§6), each inside a caller-supplied `*sql.Tx`. |
+| `store.go` | The read queries (§6), each inside a caller-supplied `*sql.Tx`. Implemented: `ScanMatches` (§6.1) and `ProjectMetadata` (§6.3 step 3). They report title and channel availability as `held`, `expired`, `never_fetched` or `withheld`; the wire form (§4.2) maps `held` → `current_local`, `expired` → `expired`, and the other two → `unavailable`. |
 | `service.go` | `Service.Search(ctx, raw, cursor string) (SearchResult, error)` and `Service.View(ctx, videoID string) (VideoView, error)`. Each opens one `BeginTx(ctx, &sql.TxOptions{ReadOnly: true})`, runs every query in it, then rolls back. It takes `now func() time.Time` for tests. |
 
 ### 1.2 Extractions (behavior-preserving)
@@ -221,10 +221,14 @@ A `cursor` or `page` is accepted only with `kind` `results` or a typed `id_not_f
 
 ```json
 {"run_id": 58, "run_type": "manual", "mode": "production | simulation",
+ "started_at": "2026-11-10T08:00:00Z",
+ "initiated_by": "run_now | queue_retry | schedule | null",
  "run_status": "completed", "outcome": "string|null",
  "decision_detail_path": "/runs/58/video/dQw4w9WgXcQ"}
 ```
 
+- `started_at` is `run.started_at` as RFC 3339 UTC, parsed with `metadata.ParseLocalTime`; an unparseable value gives null. It lets the SPA show the run date.
+- `initiated_by` is the stored `run.initiated_by`, unchanged. It tells a queue retry (`queue_retry`) from Run Now (`run_now`) and a scheduled run (`schedule`). It is null for runs started before migration 024 and for simulation runs; the SPA must not guess a value for null.
 - `mode` is `simulation` when `run_type` is `dry_run`, `replay` or `backtest`; otherwise it is `production`.
 - `outcome` is the §6.4 per-run classification, which is the stored value for production runs. Null means the production run recorded no outcome; the SPA must not show null as a negative outcome (BR-032 AC3).
 - Order: `run_id` descending (newest first by creation; a resumed run keeps its id).
@@ -322,7 +326,7 @@ WITH links AS (
          MAX(decision = 'skipped' AND skip_reason = 'exclusion') AS excluded
   FROM route_decision WHERE video_id = :vid GROUP BY run_id
 )
-SELECT r.id, r.run_type, r.status,
+SELECT r.id, r.run_type, r.status, r.started_at, r.initiated_by,
   CASE WHEN r.run_type IN ('dry_run','replay','backtest') THEN
     CASE WHEN e.matched = 1 THEN 'accepted' WHEN e.not_matched = 1 THEN 'rejected'
          WHEN e.excluded = 1 THEN 'excluded' ELSE 'not_yet_evaluated' END

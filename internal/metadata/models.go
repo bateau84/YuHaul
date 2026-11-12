@@ -39,8 +39,10 @@ type LocalDisplay struct {
 	SourceFetchedAt         *time.Time `json:"source_fetched_at"`
 }
 
-// localDisplayRow is the minimal row projection used for manager-owned eligibility.
-type localDisplayRow struct {
+// LocalRow is the minimal transient_metadata projection used for local
+// eligibility. Time columns are scanned as `any` because the schema has stored
+// several layouts.
+type LocalRow struct {
 	VideoID                         string
 	Title, ChannelName              *string
 	DurationSeconds                 *int
