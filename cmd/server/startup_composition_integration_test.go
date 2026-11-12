@@ -81,6 +81,15 @@ type fakeYouTube struct {
 	postReached chan string
 	posts       map[string]int
 	quotaVideo  string // POST for this video answers 403 quotaExceeded
+	postDelay   time.Duration
+	titleOf     func(id string) string // nil means "Jazz "+id
+}
+
+func (f *fakeYouTube) title(id string) string {
+	if f.titleOf != nil {
+		return f.titleOf(id)
+	}
+	return "Jazz " + id
 }
 
 func newFakeYouTube(t *testing.T, videos ...string) *fakeYouTube {
@@ -173,6 +182,16 @@ func (f *fakeYouTube) handlePlaylistItems(w http.ResponseWriter, r *http.Request
 		if hold != nil && !f.hold(hold, r) {
 			return
 		}
+		f.mu.Lock()
+		delay := f.postDelay
+		f.mu.Unlock()
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		fakeJSON(w, map[string]any{"id": "inserted-" + video, "snippet": body.Snippet})
 		return
 	}
@@ -180,7 +199,7 @@ func (f *fakeYouTube) handlePlaylistItems(w http.ResponseWriter, r *http.Request
 	items := make([]map[string]any, len(f.videos))
 	for i, id := range f.videos {
 		items[i] = map[string]any{"snippet": map[string]any{
-			"title": "Jazz " + id, "channelId": "UC1",
+			"title": f.title(id), "channelId": "UC1",
 			"publishedAt": published.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano),
 			"resourceId":  map[string]any{"videoId": id, "kind": "youtube#video"},
 			"thumbnails":  map[string]any{"default": map[string]any{"url": "http://example.com/t.jpg"}},
@@ -195,7 +214,7 @@ func (f *fakeYouTube) handleVideos(w http.ResponseWriter, r *http.Request) {
 	for i, id := range f.videos {
 		items[i] = map[string]any{"id": id,
 			"snippet": map[string]any{
-				"title": "Jazz " + id, "channelId": "UC1", "channelTitle": "Test Channel", "description": "jazz",
+				"title": f.title(id), "channelId": "UC1", "channelTitle": "Test Channel", "description": "jazz",
 				"publishedAt": published.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano),
 				"thumbnails":  map[string]any{"default": map[string]any{"url": "http://example.com/t.jpg"}},
 			},
@@ -229,6 +248,12 @@ func (f *fakeYouTube) setPostHoldFor(video string, ch chan struct{}) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.holdVideo, f.postHold = video, ch
+}
+
+func (f *fakeYouTube) setPostDelay(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.postDelay = d
 }
 
 func (f *fakeYouTube) requestCount() int {
