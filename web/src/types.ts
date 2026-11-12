@@ -538,14 +538,15 @@ export type DeferredReason =
   | 'requeued_by_user'
 
 // The six stored deferral reasons, in the order the Deferred reason filter
-// offers them (ARS-005 §7.3). There is no "other" value.
+// offers them: the order of the admin UI design's reason table. There is no
+// "other" value.
 export const deferredReasons: readonly DeferredReason[] = [
+  'requeued_by_user',
   'quota_exhausted',
-  'api_rate_limited',
   'authorization_pending',
   'stopped_by_user',
   'discarded_by_user',
-  'requeued_by_user',
+  'api_rate_limited',
 ]
 
 export interface DeferredItem {

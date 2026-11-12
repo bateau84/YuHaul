@@ -132,12 +132,12 @@ describe('Deferred reason filter (G4)', () => {
     expect(options.map((o) => o.getAttribute('value'))).toEqual(['', ...deferredReasons])
     expect(options.map((o) => o.textContent)).toEqual([
       'All reasons',
+      'Re-queued by user',
       'Quota exhausted',
-      'Rate limited by YouTube',
       'Waiting for YouTube access',
       'Stopped by user',
       'Discarded by user',
-      'Re-queued by user',
+      'Rate limited by YouTube',
     ])
   })
 
