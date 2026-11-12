@@ -23,6 +23,8 @@ const run = (id: number, over: Partial<VideoRunEntry> = {}): VideoRunEntry => ({
   run_id: id,
   run_type: 'scheduled',
   mode: 'production',
+  started_at: '2026-11-10T08:00:00Z',
+  initiated_by: 'schedule',
   run_status: 'completed',
   outcome: 'rejected',
   decision_detail_path: `/runs/${id}/video/dQw4w9WgXcQ`,

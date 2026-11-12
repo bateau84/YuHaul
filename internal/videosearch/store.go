@@ -68,9 +68,16 @@ WHERE m.is_active = 1
 // caller reuses for ProjectMetadata. It writes nothing and changes no expiry.
 // Titles are dropped as soon as they have been compared.
 func ScanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey string, now func() time.Time) ([]Match, time.Time, error) {
+	m, cutoff, _, err := scanMatches(ctx, tx, folder, needleKey, now)
+	return m, cutoff, err
+}
+
+// scanMatches is ScanMatches that also reports how many candidate rows it read
+// (for the operational log, which carries counts only).
+func scanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey string, now func() time.Time) ([]Match, time.Time, int, error) {
 	rows, err := tx.QueryContext(ctx, candidateSQL)
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("videosearch: scan candidates: %w", err)
+		return nil, time.Time{}, 0, fmt.Errorf("videosearch: scan candidates: %w", err)
 	}
 	defer rows.Close()
 
@@ -86,7 +93,7 @@ func ScanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey stri
 	for rows.Next() {
 		if n++; n%ctxCheckEvery == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, time.Time{}, err
+				return nil, time.Time{}, 0, err
 			}
 		}
 		var (
@@ -95,7 +102,7 @@ func ScanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey stri
 		)
 		if err := rows.Scan(&c.row.VideoID, &title, &c.row.IsActive, &c.row.ExpiredAt,
 			&c.row.FetchedAt, &c.row.ExpiresAt, &c.disc, &c.has); err != nil {
-			return nil, time.Time{}, fmt.Errorf("videosearch: scan candidate: %w", err)
+			return nil, time.Time{}, 0, fmt.Errorf("videosearch: scan candidate: %w", err)
 		}
 		if title.Valid {
 			c.row.Title = &title.String
@@ -103,7 +110,7 @@ func ScanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey stri
 		cands = append(cands, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, time.Time{}, fmt.Errorf("videosearch: iterate candidates: %w", err)
+		return nil, time.Time{}, 0, fmt.Errorf("videosearch: iterate candidates: %w", err)
 	}
 	// One cutoff, taken only after the result set is fully consumed (the same
 	// order ReadLocalDisplay uses).
@@ -120,7 +127,7 @@ func ScanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey stri
 		}
 		out = append(out, Match{Key: SortKey{HasDisc: ok, Disc: disc, VideoID: c.row.VideoID}})
 	}
-	return out, cutoff, nil
+	return out, cutoff, len(cands), nil
 }
 
 // Metadata is the availability of one video's title and channel name at the
@@ -134,15 +141,31 @@ type Metadata struct {
 // projects each row with metadata.ProjectLocal at cutoff. An id with no row is
 // NeverFetched for both fields. It writes nothing.
 func ProjectMetadata(ctx context.Context, tx *sql.Tx, ids []string, cutoff time.Time) (map[string]Metadata, error) {
+	rows, err := readMetadataRows(ctx, tx, ids)
+	if err != nil {
+		return nil, err
+	}
+	return projectRows(ids, rows, cutoff), nil
+}
+
+// ProjectMetadataAfterRead is ProjectMetadata for callers with no earlier
+// cutoff (the video view): it reads the rows, then takes the cutoff, so a row
+// whose expiry passes during the read counts as expired. It returns the cutoff.
+func ProjectMetadataAfterRead(ctx context.Context, tx *sql.Tx, ids []string, now func() time.Time) (map[string]Metadata, time.Time, error) {
+	rows, err := readMetadataRows(ctx, tx, ids)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	cutoff := now().UTC()
+	return projectRows(ids, rows, cutoff), cutoff, nil
+}
+
+func readMetadataRows(ctx context.Context, tx *sql.Tx, ids []string) ([]metadata.LocalRow, error) {
 	if len(ids) > 50 {
 		return nil, fmt.Errorf("videosearch: projection batch exceeds 50 IDs")
 	}
-	out := make(map[string]Metadata, len(ids))
-	for _, id := range ids {
-		out[id] = Metadata{TitleAvailability: NeverFetched, ChannelAvailability: NeverFetched}
-	}
 	if len(ids) == 0 {
-		return out, nil
+		return nil, nil
 	}
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -176,6 +199,14 @@ FROM transient_metadata WHERE video_id IN (?` + strings.Repeat(",?", len(ids)-1)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("videosearch: iterate metadata: %w", err)
 	}
+	return all, nil
+}
+
+func projectRows(ids []string, all []metadata.LocalRow, cutoff time.Time) map[string]Metadata {
+	out := make(map[string]Metadata, len(ids))
+	for _, id := range ids {
+		out[id] = Metadata{TitleAvailability: NeverFetched, ChannelAvailability: NeverFetched}
+	}
 	for _, r := range all {
 		d := metadata.ProjectLocal(r, cutoff)
 		out[r.VideoID] = Metadata{
@@ -185,5 +216,5 @@ FROM transient_metadata WHERE video_id IN (?` + strings.Repeat(",?", len(ids)-1)
 			ChannelAvailability: availability(d.ChannelNameAvailability),
 		}
 	}
-	return out, nil
+	return out
 }

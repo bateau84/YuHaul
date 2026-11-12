@@ -70,6 +70,10 @@ var outcomeInventory = []outcomeSite{
 	{"internal/pipeline/retry.go", `FinalOutcomeNotYetEvaluated|FinalOutcomeDeferred|FinalOutcomeFailed|final_outcome='failed'`, inventoryNotApplicable, "deferred/failed/not_yet_evaluated-specific retry branches"},
 	{"internal/pipeline/exclusion.go", `FinalOutcomeExcluded`, inventoryNotApplicable, "excluded-specific check"},
 
+	// internal/videosearch
+	{"internal/videosearch/service.go", `final_outcome IS NOT NULL AND final_outcome <> 'not_yet_evaluated'`, inventoryHandled, "a run that stored any committed outcome, including unavailable_on_youtube, is listed in the video view (ARS-001 §6.4)"},
+	{"internal/videosearch/service.go", `SELECT 'deferred' AS q`, inventoryNotApplicable, "queue-table label for queue state, not a final outcome"},
+
 	// internal/queue (owned by a separate change; listed so new sites there fail loudly)
 	{"internal/queue/retry.go", `final_outcome = 'not_yet_evaluated'`, inventoryNotApplicable, "requeue resets a video to not_yet_evaluated"},
 }

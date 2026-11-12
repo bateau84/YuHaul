@@ -42,6 +42,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/stats"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/videosearch"
 	"github.com/bateau84/YuHaul/internal/youtube"
 	"golang.org/x/oauth2"
 )
@@ -200,6 +201,7 @@ func main() {
 		server.WithRouteStore(routerStore),
 		server.WithRunStore(stateStore),
 		server.WithRunVideoStore(stateStore),
+		server.WithVideoSearch(videosearch.NewService(db, nil)),
 		server.WithMetadataReader(meta),
 		server.WithConfigVersionStore(configStore),
 		server.WithOverviewProvider(overview),

@@ -61,7 +61,7 @@ describe('video search client (video-search ARS-001)', () => {
   })
 
   it('reads the video view with queue state and run entries', async () => {
-    const view = { ...summary, queue_state: { state: 'deferred_claimed', reason: 'requeued_by_user', claiming_run_id: 60 }, runs: [{ run_id: 58, run_type: 'manual', mode: 'production', run_status: 'completed', outcome: null, decision_detail_path: '/runs/58/video/dQw4w9WgXcQ' }] }
+    const view = { ...summary, queue_state: { state: 'deferred_claimed', reason: 'requeued_by_user', claiming_run_id: 60 }, runs: [{ run_id: 58, run_type: 'manual', mode: 'production', started_at: '2026-11-10T08:00:00Z', initiated_by: null, run_status: 'completed', outcome: null, decision_detail_path: '/runs/58/video/dQw4w9WgXcQ' }] }
     const f = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(view))
     const res = await getVideo('dQw4w9WgXcQ')
     expect(f).toHaveBeenCalledWith('/api/videos/dQw4w9WgXcQ', expect.anything())

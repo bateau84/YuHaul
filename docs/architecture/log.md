@@ -10,6 +10,8 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-12
 
+**Video search service and handlers implemented (Coder):** [ARS-001](video-search/specifications/ars-001-video-search-api-and-queries.md) §1.1 now shows the real `Service.Search` signature (a `Paging` value for `cursor` and `page`), and §8.1 records how T30 is checked: direct imports, because `go list -deps` always lists `quota` and `youtube` through the permitted `metadata`, `state` and `queue` packages. The [topic index](video-search/index.md) status changed to implemented, with P1–P4 and T32 still to run.
+
 **ARS-005 §7.2 item shape corrected:** [ARS-005](run-initiation/specifications/ars-005-requeue-stranded-videos.md) §7.2 now shows the actual snake_case deferred item (`external_video_id`, `retry_run_id`) instead of "unchanged item shape". Source: foundation gate recheck, assessment `a682df63`.
 
 ## 2026-11-11

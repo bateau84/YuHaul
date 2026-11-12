@@ -6,7 +6,7 @@ tags: [architecture, specification, videos, search, api, retention, sqlite, pagi
 timestamp: 2026-11-11T00:00:00Z
 ---
 
-**Status:** accepted — exact implementation contract, not implemented. It realizes [ADR-001](../decisions/adr-001-held-title-search-by-request-time-scan.md). Search adds no migration and reads existing tables only. It depends on [run-initiation ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) for the predicate `queue.RemovedByUser` (§2.3), the indexes `deferred_item_video_status` and `error_entry_video_status` (migration 026), and the stored `unavailable_on_youtube` outcome. See §1.3. Revised 2026-11-11 after critique: identity outcome mapping, a 150,000-held-title speed gate, index ownership and the access-log advisory. Reconciled 2026-11-11 (Plan revision 19) with the updated BR-038 and QS-001: the page carries the AC18 `total`, positions and page count; `page=n` jumps are added beside the cursors; scheme-less links stay unrecognized (Q1 closed); the timing seed equals QS-001's new load.
+**Status:** accepted — exact implementation contract. The pure code, metadata reads, `Service`, both handlers and tests T1–T26, T30 and T31 are implemented; the SPA data shape is checked against `web/src/types.ts` by a server test. The QS-001 timing tests P1–P4 (§9.2) and SPA test T32 are not yet run. It realizes [ADR-001](../decisions/adr-001-held-title-search-by-request-time-scan.md). Search adds no migration and reads existing tables only. It depends on [run-initiation ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) for the predicate `queue.RemovedByUser` (§2.3), the indexes `deferred_item_video_status` and `error_entry_video_status` (migration 026), and the stored `unavailable_on_youtube` outcome. See §1.3. Revised 2026-11-11 after critique: identity outcome mapping, a 150,000-held-title speed gate, index ownership and the access-log advisory. Reconciled 2026-11-11 (Plan revision 19) with the updated BR-038 and QS-001: the page carries the AC18 `total`, positions and page count; `page=n` jumps are added beside the cursors; scheme-less links stay unrecognized (Q1 closed); the timing seed equals QS-001's new load.
 
 ## What the two sides agree on
 
@@ -67,7 +67,7 @@ Out of scope:
 | `match.go` | `Key(s string) string` and `Contains(titleKey, needleKey string) bool` (§5). Pure. |
 | `cursor.go` | `encodeCursor` and `decodeCursor` (§7). Pure. |
 | `store.go` | The read queries (§6), each inside a caller-supplied `*sql.Tx`. Implemented: `ScanMatches` (§6.1) and `ProjectMetadata` (§6.3 step 3). They report title and channel availability as `held`, `expired`, `never_fetched` or `withheld`; the wire form (§4.2) maps `held` → `current_local`, `expired` → `expired`, and the other two → `unavailable`. |
-| `service.go` | `Service.Search(ctx, raw, cursor string) (SearchResult, error)` and `Service.View(ctx, videoID string) (VideoView, error)`. Each opens one `BeginTx(ctx, &sql.TxOptions{ReadOnly: true})`, runs every query in it, then rolls back. It takes `now func() time.Time` for tests. |
+| `service.go` | `Service.Search(ctx, raw string, p Paging) (SearchResult, error)` and `Service.View(ctx, videoID string) (VideoView, error)`. `Paging` carries the raw `cursor` and `page` values and whether each was sent. Each opens one `BeginTx(ctx, &sql.TxOptions{ReadOnly: true})`, runs every query in it, then rolls back. Kinds that need no lookup (`empty`, `invalid_text`, `too_long`, `unusable_link`, `too_short`) open no transaction. It takes `now func() time.Time` for tests. Errors: `ErrInvalidCursor`, `ErrInvalidPage`, `ErrInvalidVideoID`, `ErrNotFound`. The handlers (`internal/server/video_search_handlers.go`) map them to the §2 codes. |
 
 ### 1.2 Extractions (behavior-preserving)
 
@@ -433,6 +433,7 @@ The answer is `400 {"error":"invalid_cursor"}`. A `page` that is not a positive 
 ## 8. Invariants, failure and security
 
 1. **No YouTube or quota (AC14).** `internal/videosearch` and the two handlers may import `database/sql`, `metadata` (only `ProjectLocal`, `Held`, `ParseLocalTime`, `LocalRow`), `state` (the shared per-run outcome constant), `queue` (`RemovedByUser`) and `x/text`. Neither may depend on `internal/youtube`, `internal/quota`, `internal/discovery`, `internal/pipeline`, or `metadata.Manager`'s refresh and fetch methods. Test T30 enforces this.
+   - **How T30 is checked.** `go list -deps` cannot be empty of these packages, because the permitted `metadata`, `state` and `queue` packages import `quota` or `youtube` for unrelated code. The test therefore checks the **direct** imports of `internal/videosearch` and of `video_search_handlers.go`, and that neither mentions `metadata.Manager`. The handlers import `diag` (§8.5), which is allowed.
 2. **Read only (AC15).** Every statement runs in a `ReadOnly` transaction that is rolled back. No statement is `INSERT`, `UPDATE`, `DELETE`, `REPLACE` or DDL.
 3. **Retention (AC16).** These follow ADR-001 constraints 1–2:
    - titles exist only in request-scoped memory;

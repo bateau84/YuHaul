@@ -150,6 +150,7 @@ type Server struct {
 	routeStore       RouteStore
 	runStore         RunStore
 	runVideoStore    RunVideoStore
+	videoSearch      VideoSearcher
 	metadataReader   interface {
 		ReadLocalDisplay(context.Context, []string) (map[string]metadata.LocalDisplay, error)
 	}
@@ -398,6 +399,7 @@ func NewServer(pipeline Pipeline, broadcast *pipeline.Broadcaster, opts ...Optio
 		routeStore:          noopRouteStore{},
 		runStore:            noopRunStore{},
 		runVideoStore:       noopRunVideoStore{},
+		videoSearch:         noopVideoSearcher{},
 		configVersionStore:  noopConfigVersionStore{},
 		overviewProvider:    noopOverviewProvider{},
 		playlistProvider:    noopPlaylistProvider{},
@@ -553,6 +555,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/videos", s.handleListRunVideos)
 	mux.HandleFunc("GET /api/runs/{id}/videos/{videoId}", s.handleGetRunVideo)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
+	mux.HandleFunc("GET /api/videos/search", s.handleVideoSearch)
+	mux.HandleFunc("GET /api/videos/{videoId}", s.handleGetVideo)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/playlists", s.handleListPlaylists)
 

@@ -716,6 +716,10 @@ export interface VideoRunEntry {
   run_id: number
   run_type: RunType
   mode: 'production' | 'simulation'
+  /** RFC 3339 UTC; null when the stored value does not parse. */
+  started_at: string | null
+  /** Stored run.initiated_by. Null for runs before migration 024 and for simulations; never guess a value. */
+  initiated_by: 'run_now' | 'queue_retry' | 'schedule' | null
   run_status: RunStatus
   /** Null: the production run recorded no outcome. Never a negative outcome. */
   outcome: VideoFinalOutcome | null

@@ -647,6 +647,19 @@ func (s *Store) ListRetainedVideos(ctx context.Context) ([]Video, error) {
 	return out, nil
 }
 
+// RunVideoOutcomeCase is the per-run outcome classification (ARS-001 video
+// search §6.4 and run-video inspection): a simulation run's outcome comes from
+// its route decisions, a production run's from run_video_outcome. It refers to
+// the aliases r (run), e (aggregated route_decision evidence with matched,
+// not_matched and excluded) and o (run_video_outcome). Shared so the run
+// detail and the video view cannot drift.
+const RunVideoOutcomeCase = `CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN
+          CASE WHEN e.matched = 1 THEN 'accepted'
+               WHEN e.not_matched = 1 THEN 'rejected'
+               WHEN e.excluded = 1 THEN 'excluded'
+               ELSE 'not_yet_evaluated' END
+          ELSE o.final_outcome END`
+
 // runVideoInspection projects read-only run membership and simulation outcomes.
 // Discovery ownership is retained; decisions also establish membership for
 // historical evaluation and receiving runs. Aggregated evidence avoids multiplying
@@ -664,12 +677,7 @@ const runVideoInspection = `WITH requested_run AS (
 ), inspection AS (
  SELECT v.id, v.video_id, v.channel_id, v.discovered_at, v.discovered_in_run_id,
         v.processing_state,
-        CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN
-          CASE WHEN e.matched = 1 THEN 'accepted'
-               WHEN e.not_matched = 1 THEN 'rejected'
-               WHEN e.excluded = 1 THEN 'excluded'
-               ELSE 'not_yet_evaluated' END
-          ELSE o.final_outcome END AS final_outcome,
+        ` + RunVideoOutcomeCase + ` AS final_outcome,
         CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.deferred_reason END AS deferred_reason,
         CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.error_message END AS error_message,
         CASE WHEN r.run_type IN ('dry_run', 'replay', 'backtest') THEN NULL ELSE o.completed_at END AS completed_at,
