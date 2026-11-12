@@ -412,6 +412,50 @@ func TestPlaylistSendClaimBlocksLegacyRetryOwnerWithFailedOutcomeAndMissingDecis
 	}
 }
 
+// A retry-owned run whose outcome is final must not veto the guard, while an
+// unresolved one must. unavailable_on_youtube is final (ARS-005 O2 inventory).
+func TestPlaylistSendClaimLegacyRetryVetoByOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		outcome, errMsg string
+		want            PlaylistClaimResult
+	}{
+		{"failed", "legacy failure", PlaylistUncertainBlocked},
+		{"not_yet_evaluated", "", PlaylistUncertainBlocked},
+		{"unavailable_on_youtube", "", PlaylistClaimed},
+		{"accepted", "", PlaylistClaimed},
+	} {
+		t.Run(tc.outcome, func(t *testing.T) {
+			s, c := guardFixture(t)
+			ctx := context.Background()
+			origin, err := s.CreateRun(ctx, &Run{StartedAt: timeNow(), RunType: RunTypeManual, Status: RunStatusCompleted})
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry, err := s.CreateRun(ctx, &Run{StartedAt: timeNow(), RunType: RunTypeManual, Status: RunStatusInterrupted})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range []struct {
+				sql  string
+				args []any
+			}{
+				{`UPDATE run SET current_phase='action_execution' WHERE id=?`, []any{retry}},
+				{`UPDATE video SET discovered_in_run_id=? WHERE id=?`, []any{origin, c.VideoID}},
+				{`INSERT INTO error_entry(video_id,run_id,error_category,error_message,status,retry_run_id) VALUES(?,?,'runtime','legacy','retrying',?)`, []any{c.VideoID, origin, retry}},
+				{`INSERT INTO run_video_outcome(run_id,video_id,final_outcome,error_message,updated_at) VALUES(?,?,?,NULLIF(?,''),?)`, []any{retry, c.VideoID, tc.outcome, tc.errMsg, timeNow().Format(time.RFC3339Nano)}},
+			} {
+				if _, err := s.db.Exec(q.sql, q.args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, _, err := s.ClaimPlaylistSend(ctx, c, timeNow())
+			if err != nil || result != tc.want {
+				t.Fatalf("claim with retry outcome %q = %q, %v; want %q", tc.outcome, result, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestPlaylistSendResolutionFailureRetainsGuardAndNotIssuedDeferredResolution(t *testing.T) {
 	s, c := guardFixture(t)
 	ctx := context.Background()

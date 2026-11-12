@@ -186,6 +186,8 @@ WHERE old_run.id <> ?
         SELECT 1 FROM run_video_outcome retry_outcome
         WHERE retry_outcome.run_id = old_run.id
           AND retry_outcome.video_id = ?
+           -- Only unresolved outcomes veto. 'unavailable_on_youtube' is final
+           -- (like accepted/rejected/excluded/deferred), so it must not veto.
            AND (retry_outcome.final_outcome IS NULL OR retry_outcome.final_outcome IN ('not_yet_evaluated', 'failed'))
       )
       AND (

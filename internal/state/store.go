@@ -523,7 +523,8 @@ func (s *Store) updateVideoState(ctx context.Context, exec execer, id int64, sta
 		deferredReason = &safe
 	}
 	if outcome == FinalOutcomeAccepted || outcome == FinalOutcomeRejected ||
-		outcome == FinalOutcomeExcluded || outcome == FinalOutcomeFailed {
+		outcome == FinalOutcomeExcluded || outcome == FinalOutcomeFailed ||
+		outcome == FinalOutcomeUnavailableOnYouTube {
 		now := time.Now().UTC()
 		completedAt = &now
 	}
