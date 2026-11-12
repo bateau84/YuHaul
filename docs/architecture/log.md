@@ -10,9 +10,76 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-12
 
+**Video search index revised after critique (Architect):** Source: critic review of [ARS-001](video-search/specifications/ars-001-video-search-api-and-queries.md) §10, verdict CHANGES REQUIRED (session `ses_e2e61920affeUTLBU835PmTm85`, probe data in `/tmp/ftsprobe`). [ADR-001](video-search/decisions/adr-001-held-title-search-by-request-time-scan.md) and the topic index are updated to match.
+
+- **F1:** the migration is renumbered to `029_title_search_index`, because BR-039 owns 028. Search releases only after BR-039's 028.
+- **F2:** a new `BEFORE INSERT` purge trigger, by `NEW.video_id`, covers `REPLACE`, whose implicit delete fires no delete trigger. The "no insert trigger" rule is removed. R2 adds the `REPLACE`, upsert and `OR IGNORE` cases. R7's patterns are case-insensitive and allow the `OR <conflict>` forms.
+- **F3:** a write-cost spike on realistic titles, with secure-delete on and off, is the first implementation task, with pass criteria. `IndexWriteBatch = 200` caps `ExpireStale`, `CleanupExpired` and reconcile transactions. P3 adds five things: a 5,000-title sweep, a third copy without the index, no `SQLITE_BUSY`, the budget B ≤ 1.15 × C, and sweep transactions of at most 1 s. A rebuild is drop-and-recreate (`store.RecreateSearchIndex`). Alternatives S1–S4 are recorded for a decision if the spike fails (ADR-001 O5).
+- **F4, F7:** §10.9 documents that a damaged index blocks writes to `transient_metadata`. Recovery: reset `key_version`, and `store.Open` drops and recreates the index. Rollback: an older binary does not start at version 29, so restore a backup or reset by hand (the SQL is given); test F-R covers this.
+- **F5:** the reconcile and recreate run `BEGIN IMMEDIATE` on a dedicated connection. The DSN option `_txlock=immediate` is rejected, because it would also apply to read-only searches.
+- **F6:** §10.11 states what R1 proves (what SQL can read in the FTS5 structures) and what it does not (freed pages, WAL, backups; whole-trigram probes under prefix compression). The connection-wide `secure_delete` pragma is recorded as a compliance decision (ADR-001 O2).
+- **F8:** `title_search_state.key_version` stores `titlekey.Version()` (`<rev>/<norm.Version>`). Search uses the index only when it matches; `store.Open` rebuilds when it differs.
+- **Also:** P2 reports a per-stage timing split (`begin`, `candidates`, `recheck`, `sort`, `project`, `encode`).
+- **New open items:** O4 (the P3 budgets are architecture defaults) and O5 (the secure-delete alternatives).
+
+**Video search switches to an FTS5 trigram prefilter (Architect):** Source: the P2 gate failed. Harness commit `e4cc1f7`; results reported by the user on a 4-core i7-10510U at 150,000 held titles: name search p95 about 2.8–3.0 s (scan alone about 1.5 s), typed not-found ID p95 about 1.5 s. As [ADR-001](video-search/decisions/adr-001-held-title-search-by-request-time-scan.md) required, option C applies; the user agreed. ADR-001 is rewritten in place (same path) and [ARS-001](video-search/specifications/ars-001-video-search-api-and-queries.md) gains §10.
+
+- **Schema:** migration `028_title_search_index` follows BR-039's 027. It adds:
+  - a regular FTS5 table `title_search(k)` with `trigram case_sensitive 1` and `secure-delete = 1`;
+  - `title_search_doc(doc_id INTEGER PRIMARY KEY, video_id UNIQUE)` as the stable key;
+  - `title_search_state.built_at`;
+  - purge triggers on `transient_metadata` update (six columns) and delete.
+- **Writers:** `metadata.IndexTitleTx` runs in the same transaction in discovery's raw upsert, `Refresh` and `Upsert`. `Expire` and `CleanupExpired` rely on the triggers.
+- **Reconcile:** `metadata.ReconcileSearchIndex` runs at `store.Open` (the backfill) and in `RunLifecycle` after `ExpireStale` (the sweep).
+- **Search:** the key `N` is sent as a quoted FTS5 phrase when it has at least 3 code points, contains no NUL and the index is built; otherwise the scan runs. Go re-checks `Held` and `Contains`, and `total` counts only re-checked matches.
+- **Tests:** R1–R7 (physical purge with a negative control, trigger coverage, writer adds, reconcile, sweep, schema, writer census), D1 (indexed equals scan), D2 (path and plan), and P1–P4 rerun as the gate.
+- **Evidence:** experiment this session on SQLite 3.46.1: a contentless-delete FTS5 table keeps a deleted row's trigrams with secure-delete on, and a regular table removes them.
+- **Findings:** F7 (a discovery re-upsert keeps `expired_at`) is routed to the metadata owner. O1 (AC16 reading), O2 (page-level remnants) and O3 (the sweep runs only at run start) are routed and do not block.
+
 **Video search service and handlers implemented (Coder):** [ARS-001](video-search/specifications/ars-001-video-search-api-and-queries.md) §1.1 now shows the real `Service.Search` signature (a `Paging` value for `cursor` and `page`), and §8.1 records how T30 is checked: direct imports, because `go list -deps` always lists `quota` and `youtube` through the permitted `metadata`, `state` and `queue` packages. The [topic index](video-search/index.md) status changed to implemented, with P1–P4 and T32 still to run.
 
 **ARS-005 §7.2 item shape corrected:** [ARS-005](run-initiation/specifications/ars-005-requeue-stranded-videos.md) §7.2 now shows the actual snake_case deferred item (`external_video_id`, `retry_run_id`) instead of "unchanged item shape". Source: foundation gate recheck, assessment `a682df63`.
+
+**Final outcomes design revised after critic review (Architect):** Source: critic session `ses_e2e6c22cfffeEhvwlTXJINOyx1` (CHANGES REQUIRED). Rewrote [ADR-007](run-initiation/decisions/adr-007-final-outcomes-are-never-reprocessed.md) and [ARS-006](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md), and aligned ADR-006 Decision 10, ARS-005 §15, the ARS-003 note and the authorization ARS-001 pointer. This entry supersedes the details of the entry below where they differ.
+
+- **F1:** continuation reads the original run's routes through a new status-free `decisionAuthority` loader, because original runs are normally ended. `decisionRunID` reaches `loadActions`' persisted-run check and `ClaimPlaylistSend`. Run status, authority, mutation-safety and binding gates stay on the receiving run.
+- **F2:** one production main-loop input filter, `state.RoutableByRun`, applied after `withoutRetryVideos`. It drops members that are final, partly done under another run, or held by an active queue item the run does not hold. Test K19 reproduces the critic's resume sequence.
+- **F3:**
+  - Migration 027 is now `closed_reason` only. The triggers moved to migration 028, with a down file and a rollback release note, shipped with or after the claim classification.
+  - Continuation ships in the same release, or the classification ships with an interim hold (`ClaimHeld`, `409 continuation_unavailable`).
+  - ARS-005 step 6 comes last.
+- **F4:** run video detail gains `continued_actions` ("continues run N's decision", a Designer label). Per-run route statistics count the actions the run itself attempted, which leaves existing numbers unchanged.
+- **Minor changes:**
+  - M1: the filter applies to production runs only; the per-function checks were removed.
+  - M2: a run's own final outcome is acknowledged.
+  - M3: migrations run before the Go schema steps (sentence corrected).
+  - M4: *final* is the four outcomes only; a third pre-release count was added.
+  - M5: only production successes count.
+- **Simplifications adopted:** one retry transaction; one input filter. The critic's advisory claim-clause conditions were adopted (no success under another run; the receiving run holds the claim).
+
+Documentation only; no code change.
+
+**Final outcomes are never reprocessed (Architect):** Source: new [BR-039](../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md) (uncommitted; specifier session `ses_e30bcac9effezYlWT50DFKP1Fm`). Added [run-initiation ADR-007](run-initiation/decisions/adr-007-final-outcomes-are-never-reprocessed.md) and [ARS-006](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md), new artifacts because the rule governs every claim, retry, handoff and resume, not only BR-037.
+
+- **Classification:** `state.FinalVideo` (accepted, rejected, excluded, `unavailable_on_youtube`, or `completed`) and `state.PartlyDoneVideo` (not final, with a `succeeded` `executed_action`). They are applied in `claimRetryGroupTx` and again in the processing gate.
+- **Final videos:**
+  - the claim closes its family: deferred items become `completed`, Errors entries `resolved`, with `closed_reason='final_outcome'` (migration 027). It writes no membership, no reset and no outcome;
+  - a user retry gets `409 video_already_final` and no run is created;
+  - handoffs and authority-failure retention exclude final videos;
+  - the gate skips them on resume and startup recovery.
+- **Partly done videos:**
+  - the original run is the single run whose route decisions the recorded successes reference;
+  - the run passes that run's matched decisions to the executor, which already skips completed targets, so only the missing additions are sent;
+  - `ClaimPlaylistSend` gains `DecisionRunID` (authority = that run's decision and snapshot, plus a recorded success under it);
+  - an ambiguous or unreadable original decision means no send, and `failed` with `original_decision_unavailable`.
+- **Backstop:** triggers make final values of `video.final_outcome`, `video.processing_state` and `run_video_outcome.final_outcome` immutable.
+- **Amended:**
+  - [ADR-006](run-initiation/decisions/adr-006-requeue-stranded-videos.md) Decision 10 and [ARS-005](run-initiation/specifications/ars-005-requeue-stranded-videos.md) §15: partly done videos skip the metadata precondition and never get `unavailable_on_youtube`;
+  - [ARS-003](run-initiation/specifications/ars-003-stop-run-and-deferred-handoff.md) amendment note;
+  - [authorization ARS-001](youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md) pointer.
+- **Delivery order:** BR-039 ships with or before ARS-005 step 6.
+
+Documentation only; no code change.
 
 ## 2026-11-11
 

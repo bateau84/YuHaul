@@ -3,10 +3,10 @@ type: decision
 title: ADR-006 — Re-queue Stranded Videos with a Two-Phase Scan-and-Insert Under the Initiation Locks
 description: Realize BR-037 as a preview read plus a confirm that scans the stranded set in a read snapshot and inserts every deferred item in one short write transaction, under initiationMu and the production lock. Blocked follows the send-time veto (branch 3 evaluated as at send time) through one shared SQL predicate. Runs claim deferred work in the existing created-at order, in quota-gated batches. Retried videos are never routed on missing or expired metadata, and a re-queued video whose id is absent from YouTube's raw response ends with the final outcome unavailable_on_youtube. A paged GET /api/deferred is a prerequisite.
 tags: [architecture, decision, runs, deferred-queue, recovery, run-14, send-guard, stranded, metadata, quota, outcomes, paging, concurrency, migration]
-timestamp: 2026-11-11T00:00:00Z
+timestamp: 2026-11-12T00:00:00Z
 ---
 
-**Status:** accepted — technical realization of [BR-037](../../../requirements/yuhaul/br-037-requeue-stranded-videos.md) AC1–AC19, of [BR-035](../../../requirements/yuhaul/br-035-stop-active-run.md) AC14 as amended 2026-11-11, and of [BR-032](../../../requirements/yuhaul/br-032-processing-outcome-distinction.md) AC1 as amended 2026-11-11. Revised 2026-11-11 after those amendments, then corrected the same day after critic review `ses_e33a11010ffe4XP0Rmw0ZVtQBs` (CHANGES REQUIRED; F1, F2 and minors applied, F3 prepared in two variants): see "Revisions" below. Reconciled 2026-11-11 (Plan revision 19) with the user's decisions: F3 is decided as **variant K** (BR-035 AC14 unchanged); F4 does not apply to production data; the paged deferred read gains page jumps, positions and a reason filter (Decision 9). Not implemented. The exact contract is [ARS-005](../specifications/ars-005-requeue-stranded-videos.md). It reuses the Discard and Mark-as-ended locking ([ADR-003](adr-003-discard-unusable-time-limit-run.md), [ADR-005](adr-005-mark-legacy-run-as-ended.md)), the claim and processing path of the stop handoff ([ADR-004](adr-004-stop-active-run-and-deferred-handoff.md)), and ADR-004's guarded `writable_schema` procedure. Independent critique is recommended before implementation.
+**Status:** accepted — technical realization of [BR-037](../../../requirements/yuhaul/br-037-requeue-stranded-videos.md) AC1–AC19, of [BR-035](../../../requirements/yuhaul/br-035-stop-active-run.md) AC14 as amended 2026-11-11, and of [BR-032](../../../requirements/yuhaul/br-032-processing-outcome-distinction.md) AC1 as amended 2026-11-11. Revised 2026-11-11 after those amendments, then corrected the same day after critic review `ses_e33a11010ffe4XP0Rmw0ZVtQBs` (CHANGES REQUIRED; F1, F2 and minors applied, F3 prepared in two variants): see "Revisions" below. Reconciled 2026-11-11 (Plan revision 19) with the user's decisions: F3 is decided as **variant K** (BR-035 AC14 unchanged); F4 does not apply to production data; the paged deferred read gains page jumps, positions and a reason filter (Decision 9). Not implemented. The exact contract is [ARS-005](../specifications/ars-005-requeue-stranded-videos.md). It reuses the Discard and Mark-as-ended locking ([ADR-003](adr-003-discard-unusable-time-limit-run.md), [ADR-005](adr-005-mark-legacy-run-as-ended.md)), the claim and processing path of the stop handoff ([ADR-004](adr-004-stop-active-run-and-deferred-handoff.md)), and ADR-004's guarded `writable_schema` procedure. Independent critique is recommended before implementation. **Amended 2026-11-12 for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md):** Decision 10 adds the final and partly done exceptions to Decision 6. The mechanism is [ADR-007](adr-007-final-outcomes-are-never-reprocessed.md).
 
 ## Summary
 
@@ -304,7 +304,7 @@ The first draft's "eligible-since" order and its change to the ARS-003 handoff a
 
 ## Decision 6 — no rejection or exclusion from missing metadata (AC13)
 
-**The rule applies to every retried video** (`processRetryVideo`: every claimed group). Before a claimed batch is processed, the run collects the batch's videos that lack eligible metadata (`GetDisplayMetadata` fails). It fetches them in chunks of 50 with `metadata.Manager.FetchForEvaluation`, bound to the run's authorization binding. That function issues `videos.list` through `DispatchWithQuota` with `quota.OpVideosList` and stores each usable returned record with the normal 30-day TTL.
+**The rule applies to every open retried video** (`processRetryVideo`: every claimed group whose video is neither final nor partly done; see Decision 10). Before a claimed batch is processed, the run collects the batch's videos that lack eligible metadata (`GetDisplayMetadata` fails). It fetches them in chunks of 50 with `metadata.Manager.FetchForEvaluation`, bound to the run's authorization binding. That function issues `videos.list` through `DispatchWithQuota` with `quota.OpVideosList` and stores each usable returned record with the normal 30-day TTL.
 
 **`absent` comes from the raw response** (critic F2). The adapter's parsed list drops items it cannot parse (Current source), so it cannot show what YouTube returned. The read client therefore reports, alongside the parsed details, the `id` of every item in the raw `items` array of a successful response, parsed or not. Then, per requested id:
 
@@ -430,6 +430,21 @@ The response keeps the key `deferred` and the item shape. Dismiss (`POST /api/de
 
 **Prerequisite enforcement.** The stranded-videos routes and the SPA control are added only in a change set that already contains the paged read and view. Composition test X3 fails a build where the action is registered and `GET /api/deferred` without parameters can return more than 200 items. No runtime flag is added.
 
+## Decision 10 — BR-039 exceptions (amendment of 2026-11-12)
+
+[BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md) limits which claimed videos this design may evaluate. [ADR-007](adr-007-final-outcomes-are-never-reprocessed.md) and [ARS-006](../specifications/ars-006-final-outcomes-are-never-reprocessed.md) own the mechanism. Here, `processRetryVideo` dispatches on the video's class before anything in Decision 6 runs:
+
+- **Final video** (accepted, rejected, excluded or `unavailable_on_youtube`): the claim closes its queue items with `closed_reason='final_outcome'` and does not claim it, so Decision 6 never sees it. A re-queued item can only belong to a final video if the video became final after the re-queue. The BR-037 scan never queues a final video.
+- **Partly done video** (not final, with at least one recorded success). This includes a stranded video that was mid-action when its run ended. For such a video:
+  - **No metadata precondition.** It is not evaluated, so it needs no inputs, and no `videos.list` call is made for it.
+  - **Never `unavailable_on_youtube`.** It has a recorded success, and committing a final "not on YouTube" outcome would contradict that success (BR-039 AC8). If the video is gone, the missing addition fails at send time and the video is retained as `failed`.
+  - **Continued under its original decision.** Only the missing additions of the run that made its recorded successes are sent, under that run's decisions (ADR-007 Decision 7).
+- **Open video:** Decision 6 applies unchanged.
+
+**Delivery.** Decision 5's batched claiming and Decision 6's precondition (ARS-005 step 6) ship only after ADR-007's continuation is in place (ARS-006 §0 step 3). The interim hold is not enough for step 6.
+
+The BR-037 scan, the blocked set and the re-queue action are unchanged. A partly done stranded video is re-queued like any other, and BR-039 decides how it is processed. Decision 5's batches count a closed claim as not claimed.
+
 ## Rules the implementation must preserve
 
 1. Only the confirm handler calls `RequeueStranded`. Only `InsertRequeuedTx` writes `deferral_reason='requeued_by_user'`.
@@ -444,7 +459,7 @@ The response keeps the key `deferred` and the item shape. Dismiss (`POST /api/de
    - `unavailable_on_youtube`, for re-queued videos only, and only when a successful response's raw item ids lack the video;
    - `failed`/`video_unavailable`, for other retried videos on the same evidence.
 
-   A returned but unusable item is always released.
+   A returned but unusable item is always released. This rule and Decision 6 apply only to open videos. Final videos are closed at the claim, and partly done videos are continued without evaluation (Decision 10, ADR-007).
 7. Claims follow the existing created-at order. A claim transaction claims at most 500 groups. A run never claims a video twice and stops claiming only under the Decision 5 conditions of the chosen variant.
 8. `unavailable_on_youtube` is written only by `commitUnavailableTx`. Every outcome list treats it as a finished, separate category, and readers map stored outcomes by identity.
 9. Migration 026 lands before any other migration and owns both `(video_id, status)` indexes. The action ships only with the paged deferred read and view.
@@ -472,6 +487,8 @@ The response keeps the key `deferred` and the item shape. Dismiss (`POST /api/de
 | `selected_video_count` reflects membership at capture time. | Existing approximation (ARD-001). | Run outcome diagnostics | No |
 
 ## Revisions
+
+**2026-11-12, BR-039.** Decision 10 was added: final videos are closed at the claim, and partly done videos skip the metadata precondition, never get `unavailable_on_youtube`, and continue under their original decision (ADR-007/ARS-006). Rule 6 and Decision 6's scope were narrowed to open videos.
 
 **2026-11-11, requirement amendments.** The specifier amended BR-037 (AC4, AC11, AC13, AC17–19), BR-035 AC14 and BR-032 AC1. Changes:
 

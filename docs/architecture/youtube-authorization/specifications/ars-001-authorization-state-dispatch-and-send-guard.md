@@ -8,6 +8,8 @@ timestamp: 2026-11-07T00:00:00Z
 
 **Status:** decided technical contract; implementation and conformance proof outstanding.
 
+**Amended 2026-11-12 by [run-initiation ARS-006](../../run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) §7.3 (BR-039):** `PlaylistSendClaim` gains an optional `DecisionRunID`. When it differs from `RunID`, authority is checked against that run's decision and snapshot, whatever that run's status. It also requires all of these: a production success under a decision of that run; no production success under any other run's decision; and the receiving run holding the video's retry claim. A run can therefore finish a partly done video's missing additions under the original decision. The receiving-run, success, veto and guard checks are unchanged. Review by the send-guard owner is requested.
+
 The authorization owner and request adapter must agree on which authorization is current, when a replacement becomes usable, and whether a request was admitted for sending. The executor must separately remember when a playlist request might have applied. For example, renewal followed by a failed encrypted save returns unavailable and sends no protected request. Renewal after an uncertain POST may restore account access, but it cannot release that POST's durable replay veto.
 
 ## Derived from

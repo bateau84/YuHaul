@@ -3,10 +3,10 @@ type: specification
 title: ARS-005 — Re-queue Stranded Videos — Migration 026, Outcome Schema Step, Shared Predicates, Scan and Insert SQL, Ordered Batch Claiming, Metadata Precondition, Unavailable Outcome, Paged Deferred Queue, HTTP and Tests
 description: Exact contract for BR-037. Covers migration 026 and the final-outcome schema step; the shared send-veto, guard, active-item and removed-by-user predicates; the stranded scan and chunked insert; PreviewStranded and RequeueStranded with their locks and refusal codes; claiming in the existing created-at order while quota remains (with a ready alternative for provider failures); the metadata precondition and the unavailable_on_youtube outcome; the paged GET /api/deferred prerequisite; HTTP bodies; and the conformance tests.
 tags: [architecture, specification, runs, deferred-queue, recovery, run-14, send-guard, stranded, metadata, quota, outcomes, paging, migration, api, concurrency]
-timestamp: 2026-11-11T00:00:00Z
+timestamp: 2026-11-12T00:00:00Z
 ---
 
-**Status:** accepted — exact implementation contract, not implemented. Revised 2026-11-11 for the amended BR-037, BR-035 AC14 and BR-032 AC1, then corrected after critic review `ses_e33a11010ffe4XP0Rmw0ZVtQBs` (see §13). It realizes [ADR-006](../decisions/adr-006-requeue-stranded-videos.md). Reconciled 2026-11-11 (Plan revision 19): F3 is decided as **variant K** (user decision; BR-035 AC14 unchanged), so the body is the contract and Appendix A is kept only as a rejected alternative. F4 does not apply to production data. §7 gains page jumps, positions and a reason filter.
+**Status:** accepted — exact implementation contract, not implemented. Revised 2026-11-11 for the amended BR-037, BR-035 AC14 and BR-032 AC1, then corrected after critic review `ses_e33a11010ffe4XP0Rmw0ZVtQBs` (see §13). It realizes [ADR-006](../decisions/adr-006-requeue-stranded-videos.md). Reconciled 2026-11-11 (Plan revision 19): F3 is decided as **variant K** (user decision; BR-035 AC14 unchanged), so the body is the contract and Appendix A is kept only as a rejected alternative. F4 does not apply to production data. §7 gains page jumps, positions and a reason filter. **Amended 2026-11-12 for BR-039:** see §15.
 
 It amends [ARS-003](ars-003-stop-run-and-deferred-handoff.md) in three places:
 
@@ -507,7 +507,8 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 
 ### 6.2 Pipeline precondition (per claimed pass)
 
-- Collect the YouTube ids of `ids` and call `FetchForEvaluation(ctx, *p.executionBinding, …)`. If `p.executionBinding` is nil, or fetching is *suspended* for this run, give every non-`current` id the status `failed` without a call.
+- **BR-039 first (§15):** classify each video of `ids` with `state.ClassifyVideoTx`. Only `open` videos enter this precondition and its dispositions. `final` videos are closed and `partly_done` videos are continued, as ARS-006 §5 and §7 say.
+- Collect the YouTube ids of the `open` videos in `ids` and call `FetchForEvaluation(ctx, *p.executionBinding, …)`. If `p.executionBinding` is nil, or fetching is *suspended* for this run, give every non-`current` id the status `failed` without a call.
 - Once any chunk returns `authorization_pending`, `rate_limited` or `failed`, fetching is suspended for the rest of the run (an in-memory flag on the run control). `unusable` does not suspend fetching, because the call succeeded. Suspension does not end claiming (variant K, decided).
 - `requeued(v)` := `EXISTS (SELECT 1 FROM deferred_item WHERE id IN <receipt.Deferred ids> AND deferral_reason = 'requeued_by_user')`.
 
@@ -980,3 +981,20 @@ It would also have extended §5.3's loop-exit sentence with "or after fetching i
 ## 14. Foundation gate correction of 2026-11-12
 
 - **§7.2:** the item shape is now the snake_case wire shape of `deferredItemView`, including `external_video_id` and `retry_run_id`. The earlier text said "unchanged item shape", which did not match the code. The SPA shows `external_video_id` as the "Video ID" in the Deferred tab, not the internal `video_id`.
+
+## 15. BR-039 amendment of 2026-11-12 (partly done exception)
+
+Source: [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md), realized by [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) and [ARS-006](ars-006-final-outcomes-are-never-reprocessed.md), with ADR-006 Decision 10.
+
+- **§5 claims.** `claimRetryGroupTx` returns `ClaimClosedFinal` for a final video, after closing its claim family with `closed_reason='final_outcome'` (ARS-006 §3). `createClaimedRunLocked` and the §5.2 batch claim treat it like a lost claim. It is not a member, and it counts against nothing. The open-video reset is unchanged. A partly done video is reset to `evaluated`/`not_yet_evaluated` instead, so that it is not routed.
+- **§6.2 precondition.** Only `open` videos are fetched and given the dispositions in the §6.2 table. A partly done video is never fetched, never evaluated, and never committed `unavailable_on_youtube`. It goes to ARS-006 §7 (continuation under its original decision). A final video is closed (ARS-006 §5).
+- **§6.3 `commitUnavailableTx`** is reachable only for an `open` re-queued video.
+- **Invariant 4** gains: "and the video was open (not partly done) when the fetch ran".
+- **Tests:**
+  - D3 and D7 seed only open videos.
+  - New **D8:** a re-queued partly done video whose metadata is expired and whose id is absent from a fetch. It is not fetched, not committed unavailable, and continues only its missing addition (ARS-006 K9).
+  - New **D9:** a re-queued item whose video became final after the confirm. It is closed at the claim with `closed_reason='final_outcome'`, with no fetch and no outcome.
+- **Delivery order (§0 step 6).** This step ships after ARS-006 §0 step 3 (continuation), as ARS-006 §0 step 5 requires. It is never shipped with the claim reset still unconditional, nor with only the interim hold.
+- **Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` of ARS-006:**
+  - *final* now means the four final outcomes only, with no `completed` clause;
+  - the main loop of a resumed run drops videos held by the queue or partly done under another run (ARS-006 §5). This step's batch claims are unaffected.

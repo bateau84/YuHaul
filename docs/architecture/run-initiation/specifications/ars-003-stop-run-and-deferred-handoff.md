@@ -110,6 +110,11 @@ type HandoffResult struct{ Requeued, Created, Resolved, Removed int } // for log
 **Amended 2026-11-11 by [ARS-005](ars-005-requeue-stranded-videos.md) (not implemented yet):**
 
 - `listUnfinishedRunVideosTx` also treats `unavailable_on_youtube` as finished (ARS-005 §6.4).
+- **Amended 2026-11-12 by [ARS-006](ars-006-final-outcomes-are-never-reprocessed.md) (BR-039):**
+  - `unfinishedRunMembersTx` excludes every video with a final outcome in any run (`state.FinalVideo`);
+  - a claim of a final video closes its queue items with `closed_reason='final_outcome'` and returns `ClaimClosedFinal`;
+  - a partly done video is not reset for re-routing;
+  - a resumed run's main loop processes only members that are routable by it (`state.RoutableByRun`, ARS-006 §5).
 - Candidate claiming gains a `LIMIT` and a same-run exclusion, in the unchanged created-at order (ARS-005 §5). Step 3 and test H1(b) are unchanged; an earlier draft's change to them was withdrawn after the critic review.
 
 The unfinished set comes from `listUnfinishedRunVideosTx(ctx, tx, runID) ([]int64, error)` in package `pipeline`. It is the exact `SELECT` now inline in `sweepStrandedWork` (`authority.go:314–326`), extracted. `sweepStrandedWork` calls it and is otherwise unchanged. For a non-production run type it returns an empty set.
