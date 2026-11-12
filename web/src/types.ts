@@ -552,9 +552,11 @@ export const deferredReasons: readonly DeferredReason[] = [
 export interface DeferredItem {
   id: number
   video_id: number
+  external_video_id?: string
   video_title?: string
   channel_name?: string
   run_id: number
+  retry_run_id?: number
   deferral_reason: DeferredReason | (string & {})
   deferred_reason_unavailable?: boolean
   retry_after?: string

@@ -48,13 +48,13 @@ type outcomeSite struct {
 
 var outcomeInventory = []outcomeSite{
 	// Schema: CHECK lists and their migration.
-	{"internal/store/store.go", `.`, inventoryHandled, "migration 026 widens the video and run_video_outcome final_outcome CHECKs"},
+	{"internal/store/store.go", `CHECK\(final_outcome IN \('accepted', 'rejected'|final_outcome IN \('accepted','rejected'|unavailableOutcomeLiteral = |^// 'unavailable_on_youtube' \(run-initiation|^// widenFinalOutcomeChecks adds`, inventoryHandled, "migration 026 widens the video and run_video_outcome final_outcome CHECKs"},
 	{"internal/store/migrations/001_initial_schema.up.sql", `final_outcome IN|'discovered'`, inventorySuperseded, "original video CHECK, widened by widenFinalOutcomeChecks; line 81 is the processing_state list"},
 	{"internal/store/migrations/001_initial_schema.up.sql", `decision TEXT|outcome TEXT`, inventoryNotApplicable, "route decision and executed_action outcome domains, not final outcomes"},
-	{"internal/store/migrations/015_run_video_outcome.up.sql", `.`, inventorySuperseded, "original run_video_outcome CHECK, widened by widenFinalOutcomeChecks; deferred/failed pairing CHECKs are unaffected"},
+	{"internal/store/migrations/015_run_video_outcome.up.sql", `CHECK \(final_outcome IS NULL OR final_outcome IN \('accepted','rejected','excluded','deferred','failed','not_yet_evaluated'\)\)|final_outcome = 'deferred' AND|final_outcome = 'failed' AND`, inventorySuperseded, "original run_video_outcome CHECK, widened by widenFinalOutcomeChecks; deferred/failed pairing CHECKs are unaffected"},
 
 	// internal/state
-	{"internal/state/models.go", `.`, inventoryHandled, "VideoFinalOutcome.Valid accepts the value"},
+	{"internal/state/models.go", `^\s*case FinalOutcomeAccepted, FinalOutcomeRejected, FinalOutcomeExcluded,$|^\s*FinalOutcomeDeferred, FinalOutcomeFailed, FinalOutcomeNotYetEvaluated,$|^\s*FinalOutcomeUnavailableOnYouTube:$`, inventoryHandled, "VideoFinalOutcome.Valid accepts the value"},
 	{"internal/state/store.go", `completedAt|FinalOutcomeAccepted \|\| outcome|FinalOutcomeExcluded \|\| outcome|FinalOutcomeUnavailableOnYouTube \{`, inventoryHandled, "updateVideoState sets completed_at for every final outcome"},
 	{"internal/state/store.go", `FinalOutcomeDeferred\) != |FinalOutcomeFailed\) != `, inventoryNotApplicable, "deferred_reason and error_message pairing; unavailable carries neither"},
 	{"internal/state/store.go", `FinalOutcomeNotYetEvaluated\)`, inventoryNotApplicable, "only not_yet_evaluated may be overwritten, so a recorded unavailable is protected as terminal"},

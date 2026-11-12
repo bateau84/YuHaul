@@ -368,7 +368,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                   <td data-label="Video">
                     {d.video_title ?? (
                       <>
-                        Video title unavailable <span style={{ color: 'var(--color-text-muted)' }}>Video ID: {d.video_id}</span>
+                        Video title unavailable <span style={{ color: 'var(--color-text-muted)' }}>Video ID: {d.external_video_id ?? d.video_id}</span>
                       </>
                     )}
                   </td>
@@ -391,7 +391,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                       </button>
                       <button
                         className="button"
-                        aria-label={`Dismiss deferred item: ${d.video_title ?? d.video_id}`}
+                        aria-label={`Dismiss deferred item: ${d.video_title ?? d.external_video_id ?? d.video_id}`}
                         onClick={() => (isHandedOver(d) ? setConfirmDismiss({ item: d, index: i }) : void discard(d, i))}
                       >
                         Dismiss

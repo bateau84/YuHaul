@@ -621,11 +621,31 @@ It runs in one read-only transaction. `<filter>` is `status = 'pending'` for `pe
 
 | Outcome | Status | Body |
 |---|---|---|
-| Page | `200` | `{"deferred":[<unchanged item shape>…],"total":N,"queue_total":Q,"by_reason":{"<reason>":n,…},"page":{"limit":L,"number":p,"total_pages":P,"first_position":f\|null,"last_position":l\|null,"next_after_id":id\|null,"prev_before_id":id\|null}}` |
+| Page | `200` | `{"deferred":[<item, below>…],"total":N,"queue_total":Q,"by_reason":{"<reason>":n,…},"page":{"limit":L,"number":p,"total_pages":P,"first_position":f\|null,"last_position":l\|null,"next_after_id":id\|null,"prev_before_id":id\|null}}` |
 | Bad `include` | `400` | unchanged |
 | Bad `limit`; a non-positive id; `page` not a positive integer or `last`; more than one of `after_id`, `before_id` and `page` | `400` | `{"error":"invalid page","code":"invalid_page"}` |
 | `reason` not one of the six stored values | `400` | `{"error":"invalid reason","code":"invalid_reason"}` |
 | Read failed | `500` | unchanged |
+
+Each item uses the snake_case wire shape of `deferredItemView` (`internal/queue/handlers.go`):
+
+```json
+{
+  "id": 51,
+  "video_id": 7,
+  "external_video_id": "dQw4w9WgXcQ",
+  "run_id": 3,
+  "retry_run_id": 4,
+  "deferral_reason": "requeued_by_user",
+  "retry_after": "2026-11-12T06:00:00Z",
+  "retry_count": 0,
+  "status": "pending",
+  "created_at": "2026-11-11T00:00:00Z"
+}
+```
+
+- `video_id` is the internal row id. `external_video_id` is the provider's video ID, and it is the "Video ID" the SPA shows.
+- `retry_run_id`, `retry_after`, `deferral_reason` and `deferred_reason_unavailable` are omitted when empty.
 
 - With no parameters, the server returns the first 50 pending items in ascending id order, with every reason.
 - A page past the end answers `200` with `deferred: []`, so the SPA can say the queue changed and offer the last page.
@@ -956,3 +976,7 @@ Revised to match the amended BR-037 (AC4, AC11, AC13, AC17–19), BR-035 AC14 an
    - The next run claims, in created-at order, from the oldest released or unclaimed item.
 
 It would also have extended §5.3's loop-exit sentence with "or after fetching is suspended". ADR-006's Findings row F3 reads "Decided: variant K".
+
+## 14. Foundation gate correction of 2026-11-12
+
+- **§7.2:** the item shape is now the snake_case wire shape of `deferredItemView`, including `external_video_id` and `retry_run_id`. The earlier text said "unchanged item shape", which did not match the code. The SPA shows `external_video_id` as the "Video ID" in the Deferred tab, not the internal `video_id`.

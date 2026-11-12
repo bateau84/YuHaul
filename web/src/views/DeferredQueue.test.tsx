@@ -192,7 +192,7 @@ describe('Deferred rows and Dismiss (G4)', () => {
       item(3, 'api_rate_limited'),
       item(4, 'some_future_reason'),
       item(5, 'quota_exhausted', { retry_after: future }),
-      item(6, 'authorization_pending', { video_title: undefined }),
+      item(6, 'authorization_pending', { video_title: undefined, external_video_id: 'dQw4w9WgXcQ' }),
     ])
     await openDeferred()
     const row = (title: string) => screen.getByText(title).closest('tr')!
@@ -211,8 +211,10 @@ describe('Deferred rows and Dismiss (G4)', () => {
     expect(within(row('Video 5')).getByText('Quota exhausted')).toBeInTheDocument()
 
     expect(screen.getByText(/Video title unavailable/)).toBeInTheDocument()
-    expect(screen.getByText('Video ID: 1006')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Dismiss deferred item: 1006' })).toBeInTheDocument()
+    // The provider's video ID is shown, never the internal row id (1006).
+    expect(screen.getByText('Video ID: dQw4w9WgXcQ')).toBeInTheDocument()
+    expect(screen.queryByText(/1006/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dismiss deferred item: dQw4w9WgXcQ' })).toBeInTheDocument()
   })
 
   it('reloads the same position after Dismiss and moves focus to the row that took its place', async () => {

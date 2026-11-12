@@ -292,7 +292,7 @@ func discardAndRunAgain(t *testing.T, srv *serverProcess, dbPath string, yt *fak
 	listed := map[string]string{}
 	for _, it := range queue["deferred"].([]any) {
 		m := it.(map[string]any)
-		listed[m["ExternalVideoID"].(string)] = m["Reason"].(string)
+		listed[m["external_video_id"].(string)] = m["deferral_reason"].(string)
 	}
 	require.Equal(t, map[string]string{"V2": "discarded_by_user", "V3": "discarded_by_user"}, listed)
 	require.Equal(t, 1, scalar[int](t, db, `SELECT count(*) FROM playlist_send_guard`), "V2's guard is untouched")

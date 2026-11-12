@@ -8,6 +8,10 @@ timestamp: 2026-11-11T00:00:00Z
 
 # Architecture Update Log
 
+## 2026-11-12
+
+**ARS-005 §7.2 item shape corrected:** [ARS-005](run-initiation/specifications/ars-005-requeue-stranded-videos.md) §7.2 now shows the actual snake_case deferred item (`external_video_id`, `retry_run_id`) instead of "unchanged item shape". Source: foundation gate recheck, assessment `a682df63`.
+
 ## 2026-11-11
 
 **Open questions closed and paging added (Architect):** Changes to the [video-search](video-search/index.md) and [run-initiation](run-initiation/index.md) topics:

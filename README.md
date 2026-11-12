@@ -451,6 +451,21 @@ trusted main-push Actions environment and is a publishing command.
 
 Implementation details and boundaries: [ADR-016](docs/architecture/release-automation/decisions/adr-016-semantic-release-image-publication.md).
 
+## Verification commands
+
+Run these from the repository root. There is no Makefile; these commands are the standard gate.
+
+```sh
+go build ./...
+go vet ./...
+go test ./...
+go test -race -timeout 30m ./...
+go test -tags=integration ./cmd/server
+(cd web && npm ci && npm test && npm run build && npm run lint)
+```
+
+The `-race` run needs the explicit `-timeout 30m`: the `internal/pipeline` package alone takes about 500 s under the race detector, which exceeds Go's default 10-minute per-package limit once the machine is loaded.
+
 ## Deployment
 
 YuHaul ships as a single container. The container serves the admin SPA and the
