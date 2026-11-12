@@ -1024,7 +1024,7 @@ Where the dialog stays open, the message appears inside it with `role="alert"` a
 
 `Name search finds only videos whose titles YuHaul still holds. Titles are held for a limited time: 30 days without refresh. Searching by video ID or YouTube link always works, even when the title is no longer held. Search reads only YuHaul's own records and never asks YouTube.`
 
-**Input messages.** The UI classifies the trimmed text in this order: empty; URL; video ID (11 characters of `A–Z a–z 0–9 - _`, case-sensitive); other text. Messages sit directly under the notice. Errors set `aria-invalid="true"` on the input and are linked by `aria-describedby`; focus stays in the input.
+**Input messages.** The server classifies the trimmed text in this order: empty; unreadable text; too long; URL; video ID (11 characters of `A–Z a–z 0–9 - _`, case-sensitive); too short; other text. The UI shows the message for the returned kind. Messages sit directly under the notice. Errors set `aria-invalid="true"` on the input and are linked by `aria-describedby`; focus stays in the input.
 
 | Situation | Exact message | Role |
 |---|---|---|
@@ -1035,6 +1035,8 @@ Where the dialog stays open, the message appears inside it with `role="alert"` a
 | ID typed, no video with that ID | `YuHaul knows no video with the ID {id}. Video IDs are case-sensitive, so check the letters. YuHaul searched only its own records and did not ask YouTube.` | `status` |
 | ID from a link, no video with that ID | `YuHaul knows no video with the ID {id}, taken from your link. Video IDs are case-sensitive. YuHaul searched only its own records and did not ask YouTube.` | `status` |
 | Name search, no match | `No video with a held title contains “{text}”. Videos whose titles are no longer held can still be found by video ID or YouTube link.` | `status` |
+| Text that is not valid UTF-8 | `Some of this text can't be read, so nothing was searched. Type it again, or paste it as plain text.` | `alert` |
+| Result page link rejected (stale or altered cursor or page) | `This page of results can't be opened any more. Search again to start from page 1.` with the button `Search again` | `alert` |
 | Search could not be read | `Could not search. Nothing was changed. Try again.` with the button `Retry search` | `alert` |
 
 A URL is never name-searched. For an ID typed in, and not found, the name results (if any) follow under the message with the heading below. A found ID opens the video at once, with no list. The messages never claim the video “does not exist”, only that YuHaul knows no video with that ID.
@@ -1224,6 +1226,67 @@ An active simulation does not cause a refusal. A production run starting, a Disc
 **Acceptance observations:** With a real server and about 70,000 seeded items: opening the Deferred tab loads one page of 50, shows the total, and every item is reachable by paging, `Last page` and `Go to page`; Dismiss and its confirmation work on a middle page and on the last item of the last page. The reason filter lists the six stored reasons and no `Other`, counts across the whole queue, resets to page 1 when changed, and keeps its stored value in the URL; a dismissal on a filtered page stays on the same page of the same filter. Preview: each count matches the seeded categories; run 14 reads “End run 14 first.” until it is marked as ended and “Run 52 has not ended…” for a live run; the blocked list names each video's reason and run and links to the video page and run. Confirm: cancel by every route changes nothing; confirming gives the acknowledgement with the actual count, and a seeded change between preview and confirm gives the “preview showed” wording. Repeat: a second confirm re-queues nothing new. Refusals: a Run Now run, a scheduled run, a queue-retry run, a resumed run, startup recovery and shutdown each give their message; an active dry run does not. Nothing-to-re-queue at preview and after confirm. Keyboard, screen-reader and 320 px passes.
 
 **Decision and capability gaps.** Rejected: an Overview button (wrong place for a rare, long-preview action), a dialog-only preview (cannot hold two tables and a paged list), per-category “Re-queue” buttons and any “override block” control (BR-037 AC15), and filtering one page in the browser. (1) No endpoint, shape or error codes exist; the architect defines the preview, the action, the paged `GET /api/deferred` (position by `page` or `after_id`, `total`, `queue_total` and a `reason` filter over the six stored reasons), and the blocked-list paging. *Updated by the architect's reconciliation, plan revision 19:* these shapes are agreed in principle; the exact fields follow the architect's contract. (2) The preview must say, per listed run, whether it is stuck and can be ended (`endable`) and its saved status; without that the UI shows the “has not ended” wording for every run and never “End run {id} first.” (3) The preview must supply sub-counts for blocked reasons and for the two queues. (4) The 503 causes are still not separable; the fallback row covers them. (5) There is no bulk undo or bulk dismiss, which BR-037 does not ask for; with 70,000 items the dialog says so plainly, and a bulk action would be a requirements decision. (6) Resolved: the reason filter exists, with the six stored reasons and no `Other`. (7) Resolved: the option labels are in the table above; `Rate limited by YouTube` is new. (8) *Known limitation: a stale `requeued_by_user` reason.* An item re-queued by the user keeps the stored reason `requeued_by_user` even after a run claims it, runs out of quota and defers it again. The reason says how the item came to be queued, not why it waits now, and the stored value is not updated. The design handles this without changing the stored reason. A row labelled `Re-queued by user` always shows the API's current eligibility, never a fixed “Eligible for the next run”. When the item is not eligible now, the reason cell adds `Not eligible yet.` beside the label, and the eligibility text states when. The label never claims the item has not been attempted. The limit that remains: the filter `Re-queued by user` includes such items, and the row does not say that quota is the cause. If the architect later records the new reason on re-defer, the row will show it without any design change. No code, browser or accessibility verification is claimed.
+
+#### Final Outcomes Are Never Reprocessed — Run Detail, Queue and Statistics Copy
+
+**Status and scope (2026-11-12):** Copy for [BR-039](/docs/requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md), from [run-initiation ADR-007](/docs/architecture/run-initiation/decisions/adr-007-final-outcomes-are-never-reprocessed.md) and [ARS-006](/docs/architecture/run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) §8.3, and for the two video-search refusals of [video-search ARS-001](/docs/architecture/video-search/specifications/ars-001-video-search-api-and-queries.md) §3 and §7.5. Not implemented. It adds no control. The UI branches on machine values (`closed_reason`, `video_final_outcome`, `decision_run_id`, `code`, `kind`), never on message text. Final-outcome names in this section are `Accepted`, `Rejected`, `Excluded` and `Unavailable on YouTube`; an unknown value is never shown raw, and the sentence then says `a final outcome`.
+
+**1. “Continues run N's decision” (Run Detail video view).** A video that an earlier run left partly done can be finished by a later run without evaluating it again. The later run's video view (`GET /api/runs/{id}/videos/{videoId}`, `continued_actions`) shows those additions in their own group, after Layer 3, and only when `continued_actions` is not empty.
+
+- Group heading (H3): `Continued from an earlier run`
+- Group text: `Run {id} did not evaluate this video again. These playlist additions finish a decision made by run {N}.`
+- Each row: the action as in every action row (target playlist, outcome badge such as `Succeeded`, `Failed`, `Deferred` or `Playlist outcome unknown`, attempt time, and the existing safe reason), then the label `Continues run {N}'s decision`, the route as `Route: {route name}` or `Route name unavailable`, and the link `See run {N}'s decision`, which opens run {N}'s decision detail for this video. The row's accessible name starts with the target playlist and includes the label.
+- Layer 2 for this run, in place of the usual empty text: `No routes were evaluated for this video in this run. Its routes were decided in run {N}.`
+- Layer 3 for this run: the group above replaces `No action outcomes recorded for this video.`; the run's own actions, if any, stay in their usual place.
+- Run {N}'s own detail is unchanged and shows only its own actions. It does not mention the continuation.
+- An uncertain continued addition keeps its existing `Playlist outcome unknown` presentation and guard explanation. Simulations never show this group.
+
+**2. Route statistics note.** Wherever per-run route statistics show action counts (attempted, succeeded, failed), show this once, as persistent text directly under the table or card group and tied to it with `aria-describedby`:
+
+`Action counts include playlist additions this run sent to finish an earlier run's decision. They count under the route they came from, so a route can show attempts here without a match in this run. The earlier run's counts do not change.`
+
+Decision counts (matched, rejected, excluded) are not marked: they count only decisions the run made. I found no web view that renders these counts today; the Coder places the note wherever they appear.
+
+**3. `video_already_final` (409 on Retry of an Errors or Deferred item).** The retry is refused, the item is closed, and nothing is sent. Show a persistent inline `role="alert"` message in the row's place (not a toast), with no focus move, then render the row as a closed row (section 4) from the `entry` in the response. The same copy serves both queues.
+
+`Retry did nothing. This video already has a final outcome: {Outcome}. It was not processed again, and nothing was sent to YouTube. This item is now closed.`
+
+With an unknown outcome value: `Retry did nothing. This video already has a final outcome. It was not processed again, and nothing was sent to YouTube. This item is now closed.` Link: `View video` (the video's page). A second press cannot happen, because the closed row has no Retry. If the response has no usable `entry`, re-read the queue.
+
+*Only if the interim hold ships (ARS-006 §3.4):* `continuation_unavailable` shows `Retry did nothing. This video is waiting for a later update of YuHaul. Nothing was changed.` and the row stays as it was.
+
+**4. Closed rows (`closed_reason = final_outcome`).** A closed deferred item or Errors entry is no longer active. Wherever a queue view shows one, for example after the refusal above, on a page that was stale, or in a view that includes closed rows, it reads:
+
+- Badge: `Closed` (neutral slate, circle-with-check icon, text always)
+- Text: `Closed. This video already has a final outcome: {Outcome}. It was not processed again.` With no `video_final_outcome`: `Closed. This video already has a final outcome. It was not processed again.`
+- Controls: `Retry` and `Dismiss` are not shown, because there is nothing to retry or dismiss. Link: `View video`.
+- The row keeps its original title, channel and reason, so the person can see what it was. It is not styled or counted as a failure.
+- Active counts are not changed by this copy: the tab count, `Deferred ({queue_total})`, the page totals and the Overview counts include only the items the API returns as active. A closed row is never counted as pending.
+
+**5. `original_decision_unavailable` (Errors entry that can only be dismissed).** The video already has a playlist addition that an earlier run sent, and the saved decision that made it cannot be read, so YuHaul cannot safely send the rest. The UI recognizes it by the diagnostic code, never by text.
+
+- Error type: `Original decision unavailable`
+- Detail: `This video already has a playlist addition that YuHaul sent in an earlier run. YuHaul cannot read that run's saved decision, so it cannot safely send the remaining additions. Nothing was sent now.`
+- Controls: `Dismiss` only. `Retry` is not shown, with this line in its place: `Retry is not offered: it would fail the same way.`
+- Dismiss confirmation, replacing the usual text for this type: `Dismiss this item from the error queue? YuHaul cannot finish this video's remaining playlist additions, so dismissing it means they will not be sent. The historical record will be preserved.` Buttons and the toast `Item dismissed from error queue` are unchanged.
+- Run Detail and Decision Detail, the failed video's reason: `Playlist additions not finished: the earlier run's decision could not be read.`
+- Links: `View video`. No raw diagnostic text, run configuration or database text is ever shown.
+
+**6. Video search: `invalid_text`.** The server found text that is not valid UTF-8, for example from a garbled paste or an edited URL. Nothing was searched. Message under the notice, `role="alert"`, `aria-invalid` on the input, focus stays in the input:
+
+`Some of this text can't be read, so nothing was searched. Type it again, or paste it as plain text.`
+
+**7. Video search: rejected cursor or page (`invalid_cursor`, `invalid_page`).** The link to this page of results is stale, altered or does not match the search text. Message under the notice, `role="alert"`, with the button `Search again`:
+
+`This page of results can't be opened any more. Search again to start from page 1.`
+
+`Search again` repeats the same search text without a cursor or page and moves focus to the results heading. The message appears for any `page` that is not a positive whole number as well. The Deferred tab uses the same pattern for a bad `page` or cursor: `This page of the deferred queue can't be opened any more. Go to the first page.` with the button `Go to the first page`. A bad Deferred `reason` keeps `Unknown reason filter. Showing all reasons.`
+
+**Accessibility.** WCAG 2.2 AA. The refusal and the two search messages use `role="alert"` and do not move focus (SC 4.1.3); the closed state is text plus an icon, never color alone (SC 1.4.1); controls have names that contain their visible labels (SC 2.5.3); the continued group is a labelled region so a screen reader can reach it (SC 1.3.1); the statistics note is visible text, not a tooltip (SC 1.3.1). Everything wraps at 320 CSS px and 200% zoom (SC 1.4.4, 1.4.10).
+
+**Acceptance observations:** With a real server. A partly done video finished by a later run: its video view lists the continued group with `Continues run {N}'s decision`, Layer 2 says no routes were evaluated, and run {N}'s own view is unchanged. Retry an Errors entry and a Deferred item of a final video: the same refusal copy appears, the row becomes a closed row with no Retry or Dismiss, and the provider logs no request. A closed row is absent from active counts. An unreadable original decision shows `Original decision unavailable` with Dismiss only, and the dismiss dialog uses the longer text. Request `?q=%FF`: the unreadable-text message. Alter a result cursor or page: the stale-page message and `Search again` restart at page 1. Keyboard, screen-reader and 320 px passes.
+
+**Gaps and limits.** (1) The Videos page's “Runs that decided this video” lists runs that recorded a decision. A run that only continued an earlier decision records none, so it would not appear there. The architect should decide whether the video view also lists runs that continued it; until then this page can omit a run that sent an addition. (2) Run {N}'s own detail does not point to the later continuation, so its deferred action can read `Deferred` while a later run sent it. This follows ADR-007 Decision 8, which leaves R0's detail unchanged; the later run's page carries the explanation. (3) Which view shows per-run route action counts is not established. (4) Whether queue views include closed rows is the API's choice; the copy applies wherever they appear. (5) `route_name` can be null, so the row falls back to `Route name unavailable`. No code, browser or accessibility verification is claimed.
 
 #### Run Video Recognition — Current Local Context
 

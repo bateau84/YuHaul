@@ -6,6 +6,10 @@ tags: [design, documentation, change-log]
 timestamp: 2026-11-10T00:00:00Z
 ---
 
+## 2026-11-12
+
+- Amended [admin interface design](/docs/design/yuhaul-admin-ui-design.md) with “Final Outcomes Are Never Reprocessed — Run Detail, Queue and Statistics Copy” for tasks b39-copy and rq-search-copy (plan revision 20), from run-initiation ADR-007 and ARS-006 §8.3. Wrote the label “Continues run N's decision” and its group on Run Detail, the route statistics note, the `video_already_final` refusal, closed-row copy for `closed_reason=final_outcome`, the dismiss-only `original_decision_unavailable` entry, and the search `invalid_text` and rejected cursor or page messages, which replace the coder's placeholders in the Videos input-message table. Recorded gaps: the Videos page does not list runs that only continued a decision, run N's own detail does not mention the continuation, and which view shows per-run route counts. Design only; not implemented, no browser or accessibility verification.
+
 ## 2026-11-11
 
 - Amended [admin interface design](/docs/design/yuhaul-admin-ui-design.md) for task rq-doc-design, plan revision 19, after the architect's contract reconciliation. Deferred tab: kept First, Previous, Next, Last, Go to page and Page p of P; the reason filter is now `All reasons` plus the six stored reasons (no `Other`) with a label `Rate limited by YouTube` for `api_rate_limited`; the URL uses the stored value; changing the filter resets to page 1; the count line uses `{total}` for matches and adds `{queue_total}` when filtered; Dismiss reloads the same `after_id` or `page`. Videos search: the count line `Showing {first}–{last} of {total}` is always shown (none when 0 matches), no Last or Go-to-page control, mobile “More” placement recorded as confirmed by the user. Recorded the stale `requeued_by_user` reason after a quota re-defer as a known limitation, with a truthful row presentation (current eligibility plus “Not eligible yet.”). Design only. Earlier uncommitted edits kept; no commit.
