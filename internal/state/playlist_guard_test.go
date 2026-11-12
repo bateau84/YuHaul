@@ -570,3 +570,203 @@ func TestPlaylistSendResolutionRollsBackWhenRetainedHandoffFails(t *testing.T) {
 func ptrString(v string) *string { return &v }
 
 func ptrTime(v time.Time) *time.Time { return &v }
+
+// K12 (ARS-006 §7.3, §7.4 C1-C5): the DecisionRunID authority clause.
+
+// continuationFixture builds a retry run (c.RunID) that holds the video's retry
+// claim and continues decision run D, which already succeeded for "PL done".
+// The returned claim sends the still-missing target "PL exact" under D's
+// decision. decisionSafety is D's mutation_safety_version.
+func continuationFixture(t *testing.T, decisionSafety int) (*Store, PlaylistSendClaim, int64) {
+	t.Helper()
+	s, c := guardFixture(t)
+	ctx := context.Background()
+	d, err := s.CreateRun(ctx, &Run{StartedAt: timeNow(), RunType: RunTypeManual, Status: RunStatusCompleted, ConfigVersionID: ptrInt64(1), ActionAuthorityVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{`UPDATE run SET mutation_safety_version=? WHERE id=?`, []any{decisionSafety, d}},
+		{`INSERT INTO route_decision(video_id,run_id,route_id,evaluation_order,decision) VALUES(1,?,1,1,'matched')`, []any{d}},
+		{`INSERT INTO executed_action(route_decision_id,run_id,video_id,action_type,target_playlist_id,outcome) VALUES(2,?,1,'playlist_insert','PL done','succeeded')`, []any{d}},
+		{`INSERT INTO deferred_item(video_id,run_id,deferral_reason,status,retry_run_id) VALUES(1,?,'quota_exhausted','retrying',?)`, []any{d, c.RunID}},
+	} {
+		if _, err := s.db.Exec(q.sql, q.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.RouteDecisionID, c.DecisionRunID = 2, d
+	return s, c, d
+}
+
+func guardCount(t *testing.T, s *Store) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM playlist_send_guard`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestPlaylistSendClaimRejectsNegativeDecisionRunWithoutWriting(t *testing.T) {
+	s, c := guardFixture(t)
+	c.DecisionRunID = -1
+	result, g, err := s.ClaimPlaylistSend(context.Background(), c, timeNow())
+	if err == nil || err.Error() != "state: invalid playlist send claim" || result != "" || g != nil {
+		t.Fatalf("claim = %q, %v, %v; want invalid claim", result, g, err)
+	}
+	if n := guardCount(t, s); n != 0 {
+		t.Fatalf("guards = %d, want 0", n)
+	}
+}
+
+func TestPlaylistSendClaimDecisionRunEqualToRunMatchesZero(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T, *Store, PlaylistSendClaim)
+		want  PlaylistClaimResult
+	}{
+		{"claimed", func(*testing.T, *Store, PlaylistSendClaim) {}, PlaylistClaimed},
+		{"already_completed", func(t *testing.T, s *Store, c PlaylistSendClaim) {
+			if _, err := s.db.Exec(`INSERT INTO executed_action(route_decision_id,run_id,video_id,action_type,target_playlist_id,outcome) VALUES(1,?,1,'playlist_insert','PL exact','succeeded')`, c.RunID); err != nil {
+				t.Fatal(err)
+			}
+		}, PlaylistAlreadyCompleted},
+		{"held_guard", func(t *testing.T, s *Store, c PlaylistSendClaim) {
+			if _, _, err := s.ClaimPlaylistSend(ctx, c, timeNow()); err != nil {
+				t.Fatal(err)
+			}
+		}, PlaylistUncertainBlocked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c := guardFixture(t)
+			tc.setup(t, s, c)
+			c.DecisionRunID = c.RunID
+			result, g, err := s.ClaimPlaylistSend(ctx, c, timeNow())
+			if err != nil || result != tc.want {
+				t.Fatalf("claim = %q, %v; want %q", result, err, tc.want)
+			}
+			if (result == PlaylistClaimed) != (g != nil) {
+				t.Fatalf("receipt = %v for result %q", g, result)
+			}
+			if g != nil && g.DecisionRunID != 0 {
+				t.Fatalf("receipt DecisionRunID = %d, want normalized 0", g.DecisionRunID)
+			}
+		})
+	}
+	// A same-run claim with a foreign decision id still fails the same-run authority query.
+	s, c := guardFixture(t)
+	c.DecisionRunID, c.RouteDecisionID = c.RunID, 99
+	if _, _, err := s.ClaimPlaylistSend(ctx, c, timeNow()); err == nil {
+		t.Fatal("same-run claim with unknown decision succeeded")
+	}
+}
+
+func TestPlaylistSendClaimContinuationClaimedAndResolvedUnderReceivingRun(t *testing.T) {
+	s, c, d := continuationFixture(t, 1)
+	ctx := context.Background()
+	result, g, err := s.ClaimPlaylistSend(ctx, c, timeNow())
+	if err != nil || result != PlaylistClaimed || g == nil {
+		t.Fatalf("claim = %q, %v, %v; want claimed", result, g, err)
+	}
+	var gRun, gDecision int64
+	if err := s.db.QueryRow(`SELECT run_id, route_decision_id FROM playlist_send_guard`).Scan(&gRun, &gDecision); err != nil {
+		t.Fatal(err)
+	}
+	if gRun != c.RunID || gDecision != 2 {
+		t.Fatalf("guard row run=%d decision=%d, want %d and 2", gRun, gDecision, c.RunID)
+	}
+	at := timeNow()
+	if err := s.ResolvePlaylistSend(ctx, *g, ActionOutcomeSucceeded, nil, &at); err != nil {
+		t.Fatal(err)
+	}
+	if n := guardCount(t, s); n != 0 {
+		t.Fatalf("guards after resolution = %d, want 0", n)
+	}
+	var runID, decisionID int64
+	if err := s.db.QueryRow(`SELECT run_id, route_decision_id FROM executed_action WHERE target_playlist_id='PL exact' AND outcome='succeeded'`).Scan(&runID, &decisionID); err != nil {
+		t.Fatal(err)
+	}
+	if runID != c.RunID || decisionID != 2 {
+		t.Fatalf("executed_action run=%d decision=%d, want run %d decision 2 (decision run %d)", runID, decisionID, c.RunID, d)
+	}
+}
+
+func TestPlaylistSendClaimContinuationRefusesWithoutAuthority(t *testing.T) {
+	const authErr = "state: playlist claim lacks captured run-owned action authority"
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *Store, *PlaylistSendClaim, int64)
+	}{
+		{"no_success_under_decision_run", func(t *testing.T, s *Store, c *PlaylistSendClaim, d int64) {
+			if _, err := s.db.Exec(`DELETE FROM executed_action`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"success_under_third_run", func(t *testing.T, s *Store, c *PlaylistSendClaim, d int64) {
+			if _, err := s.db.Exec(`INSERT INTO executed_action(route_decision_id,run_id,video_id,action_type,target_playlist_id,outcome) VALUES(1,?,1,'playlist_insert','PL other','succeeded')`, c.RunID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"receiving_run_lacks_retry_claim", func(t *testing.T, s *Store, c *PlaylistSendClaim, d int64) {
+			if _, err := s.db.Exec(`DELETE FROM deferred_item`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"retry_claim_held_by_another_run", func(t *testing.T, s *Store, c *PlaylistSendClaim, d int64) {
+			if _, err := s.db.Exec(`UPDATE deferred_item SET retry_run_id=?`, d); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"third_run_success_even_when_target_complete", func(t *testing.T, s *Store, c *PlaylistSendClaim, d int64) {
+			if _, err := s.db.Exec(`INSERT INTO executed_action(route_decision_id,run_id,video_id,action_type,target_playlist_id,outcome) VALUES(1,?,1,'playlist_insert','PL exact','succeeded')`, c.RunID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"decision_belongs_to_receiving_run_not_decision_run", func(t *testing.T, s *Store, c *PlaylistSendClaim, d int64) {
+			c.RouteDecisionID = 1
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c, d := continuationFixture(t, 1)
+			tc.mutate(t, s, &c, d)
+			result, g, err := s.ClaimPlaylistSend(context.Background(), c, timeNow())
+			if err == nil || err.Error() != authErr || result != "" || g != nil {
+				t.Fatalf("claim = %q, %v, %v; want authority error", result, g, err)
+			}
+			if n := guardCount(t, s); n != 0 {
+				t.Fatalf("guards = %d, want 0", n)
+			}
+		})
+	}
+}
+
+func TestPlaylistSendClaimContinuationHonoursHeldGuardAndLegacyVeto(t *testing.T) {
+	t.Run("guard_held_by_decision_run", func(t *testing.T) {
+		s, c, d := continuationFixture(t, 1)
+		if _, err := s.db.Exec(`INSERT INTO playlist_send_guard(video_id,target_playlist_id,action_type,run_id,route_decision_id,authorization_id,prepared_at) VALUES(1,'PL exact','playlist_insert',?,2,'held',?)`, d, formatRunTime(timeNow())); err != nil {
+			t.Fatal(err)
+		}
+		result, g, err := s.ClaimPlaylistSend(context.Background(), c, timeNow())
+		if err != nil || result != PlaylistUncertainBlocked || g != nil {
+			t.Fatalf("claim = %q, %v, %v; want uncertain_blocked", result, g, err)
+		}
+		if n := guardCount(t, s); n != 1 {
+			t.Fatalf("guards = %d, want only the held one", n)
+		}
+	})
+	t.Run("version_0_decision_run_with_unresolved_matched_target", func(t *testing.T) {
+		s, c, _ := continuationFixture(t, 0)
+		result, g, err := s.ClaimPlaylistSend(context.Background(), c, timeNow())
+		if err != nil || result != PlaylistUncertainBlocked || g != nil {
+			t.Fatalf("claim = %q, %v, %v; want uncertain_blocked", result, g, err)
+		}
+		if n := guardCount(t, s); n != 0 {
+			t.Fatalf("guards = %d, want 0", n)
+		}
+	})
+}

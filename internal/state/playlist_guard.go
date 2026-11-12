@@ -15,7 +15,30 @@ type PlaylistSendClaim struct {
 	VideoID, RunID, RouteDecisionID   int64
 	TargetPlaylistID, AuthorizationID string
 	ActionType                        string
+	// DecisionRunID is the run whose matched decision authorizes a continued
+	// send (ARS-006 §7.3). 0, or a value equal to RunID, means the sending run
+	// made the decision. It is carried only so callers can log it; it is never
+	// persisted and ResolvePlaylistSendTx must not read it.
+	DecisionRunID int64
 }
+
+// continuedAuthorityQuery replaces the same-run authority query when a retry
+// run continues another run's decision (ARS-006 §7.3, §7.4 C2/C4).
+const continuedAuthorityQuery = `SELECT 1 FROM route_decision rd
+JOIN run dr ON dr.id = rd.run_id
+JOIN config_version cv ON cv.id = dr.config_version_id
+WHERE rd.id = :decision AND rd.run_id = :decisionRun AND rd.video_id = :video AND rd.decision = 'matched'
+  AND dr.run_type IN ('manual','scheduled')
+  AND EXISTS (SELECT 1 FROM json_each(cv.snapshot,'$.routes') route, json_each(route.value,'$.actions') action
+      WHERE CAST(json_extract(route.value,'$.id') AS INTEGER) = rd.route_id
+        AND json_extract(action.value,'$.action_type') = 'playlist_insert'
+        AND json_extract(action.value,'$.target_playlist_id') = :target)
+  AND EXISTS (SELECT 1 FROM executed_action s JOIN route_decision srd ON srd.id = s.route_decision_id
+      WHERE s.video_id = :video AND ` + prodSuccess + ` AND srd.run_id = :decisionRun)
+  AND NOT EXISTS (SELECT 1 FROM executed_action s JOIN route_decision srd ON srd.id = s.route_decision_id
+      WHERE s.video_id = :video AND ` + prodSuccess + ` AND srd.run_id <> :decisionRun)
+  AND (EXISTS (SELECT 1 FROM deferred_item d WHERE d.video_id = :video AND d.status = 'retrying' AND d.retry_run_id = :run)
+    OR EXISTS (SELECT 1 FROM error_entry e WHERE e.video_id = :video AND e.status = 'retrying' AND e.retry_run_id = :run))`
 
 // PlaylistSendGuard is an immutable descriptor returned only to the winning
 // caller of ClaimPlaylistSend. Loading a persisted row never creates a receipt.
@@ -77,8 +100,11 @@ const (
 // ClaimPlaylistSend atomically validates the run's captured action authority,
 // checks exact-target success, and inserts the replay-veto guard.
 func (s *Store) ClaimPlaylistSend(ctx context.Context, c PlaylistSendClaim, now time.Time) (PlaylistClaimResult, *PlaylistSendGuard, error) {
-	if c.VideoID <= 0 || c.RunID <= 0 || c.RouteDecisionID <= 0 || c.TargetPlaylistID == "" || c.AuthorizationID == "" || c.ActionType != playlistInsert {
+	if c.VideoID <= 0 || c.RunID <= 0 || c.RouteDecisionID <= 0 || c.TargetPlaylistID == "" || c.AuthorizationID == "" || c.ActionType != playlistInsert || c.DecisionRunID < 0 {
 		return "", nil, errors.New("state: invalid playlist send claim")
+	}
+	if c.DecisionRunID == c.RunID {
+		c.DecisionRunID = 0
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -98,7 +124,13 @@ func (s *Store) ClaimPlaylistSend(ctx context.Context, c PlaylistSendClaim, now 
 		return "", nil, errors.New("state: run is not eligible for playlist mutation")
 	}
 	var authorized int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM route_decision rd
+	if c.DecisionRunID != 0 {
+		err = tx.QueryRowContext(ctx, continuedAuthorityQuery,
+			sql.Named("decision", c.RouteDecisionID), sql.Named("decisionRun", c.DecisionRunID),
+			sql.Named("video", c.VideoID), sql.Named("target", c.TargetPlaylistID),
+			sql.Named("run", c.RunID)).Scan(&authorized)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM route_decision rd
 JOIN run r ON r.id=rd.run_id
 JOIN config_version cv ON cv.id=r.config_version_id
 WHERE rd.id=? AND rd.run_id=? AND rd.video_id=? AND rd.decision='matched'
@@ -107,6 +139,7 @@ AND EXISTS (SELECT 1 FROM json_each(cv.snapshot, '$.routes') route,
  WHERE CAST(json_extract(route.value,'$.id') AS INTEGER)=rd.route_id
  AND json_extract(action.value,'$.action_type')='playlist_insert'
  AND json_extract(action.value,'$.target_playlist_id')=?)`, c.RouteDecisionID, c.RunID, c.VideoID, c.TargetPlaylistID).Scan(&authorized)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, errors.New("state: playlist claim lacks captured run-owned action authority")
 	}
