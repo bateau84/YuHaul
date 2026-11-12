@@ -10,6 +10,26 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-12
 
+**Send-guard owner review of ARS-006 §7.3 (task b39-sendguard-review, Plan revision 20):** The `DecisionRunID` clause of `ClaimPlaylistSend` is approved with conditions C1–C5, recorded in [ARS-006 §7.4](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) and noted in [authorization ARS-001](youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md). The checks were made against `playlist_guard.go` and `send_predicates.go` at `a83ab51`:
+
+- equivalence at 0;
+- decision-run authority;
+- no success under another run;
+- the sender holds the claim;
+- veto interplay;
+- guard key;
+- receipt fields.
+
+Conditions:
+
+- reject negative values, and normalize a value equal to `RunID` to 0;
+- the cross-run query replaces the same-run query and fails with the existing authority error;
+- no persisted shape change;
+- check order unchanged;
+- six added K12 tests.
+
+Documentation only; no code change.
+
 **BR-039 foundation implemented (Coder):** [ARS-006](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) §1.1, §1.3 and §2 exist in code (migration 027, queue and diag vocabulary, `state` classification predicates) with tests F1, F3, F5 and the OriginalDecisionTx parts of F4. Deviation recorded in ARS-006 §12: `FinalVideo` uses `COALESCE` so a NULL outcome is not final and the predicates stay two-valued. Migration 028, claims, filter, continuation and inspection are not implemented.
 
 **Video search index revised after critique (Architect):** Source: critic review of [ARS-001](video-search/specifications/ars-001-video-search-api-and-queries.md) §10, verdict CHANGES REQUIRED (session `ses_e2e61920affeUTLBU835PmTm85`, probe data in `/tmp/ftsprobe`). [ADR-001](video-search/decisions/adr-001-held-title-search-by-request-time-scan.md) and the topic index are updated to match.

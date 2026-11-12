@@ -13,7 +13,7 @@ It amends:
 - [ARS-003](ars-003-stop-run-and-deferred-handoff.md) §2 and §2.1;
 - [ARS-005](ars-005-requeue-stranded-videos.md) §5–§6 (ARS-005 §15);
 - run video detail and per-run route statistics;
-- `ClaimPlaylistSend` in [authorization ARS-001](../../youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md) (§7.3). The send-guard owner reviews §7.3 before it is built.
+- `ClaimPlaylistSend` in [authorization ARS-001](../../youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md) (§7.3). The send-guard owner reviewed §7.3 on 2026-11-12 and approved it with the conditions in §7.4.
 
 ## What the two sides agree on
 
@@ -292,6 +292,36 @@ WHERE rd.id = ? AND rd.run_id = :decisionRun AND rd.video_id = :video AND rd.dec
 
 The receiving-run gate, the success check, `LegacySendVeto` (`receiving_run_id = RunID`, `assume_acted = 0`) and the guard insert are unchanged. The guard and the `executed_action` row get `run_id = RunID` and `route_decision_id` = the R0 decision.
 
+### 7.4 Send-guard owner review (2026-11-12, task b39-sendguard-review, Plan revision 20)
+
+**Verdict: APPROVED with conditions C1–C5.** The conditions are part of this contract. Checked against [authorization ARS-001](../../youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md) §"Claim request" and the code at `a83ab51`: `internal/state/playlist_guard.go:79–146, 189–215` and `internal/state/send_predicates.go`.
+
+| Point | Finding |
+|---|---|
+| **Equivalence at `DecisionRunID = 0`** | Safe. With 0, or a value equal to `RunID`, the run gate, the authority query (`rd.run_id = RunID`, the target in the sending run's snapshot), the exact-target success check, `legacyClaimVetoQuery` and the guard insert are byte-for-byte today's. C1 makes this a closed rule, not an implementation choice. |
+| **Decision-run authority** | Sound. It requires: `rd` is matched, belongs to `DecisionRunID` and the video; `dr` is a production run; and the target is a `playlist_insert` action of `rd.route_id` in the decision run's snapshot. There is deliberately no status gate on `dr`. Run-level gates (`running`, authority 1, mutation safety 1) stay on `RunID`. A version-0 decision run is still refused by the veto (below), so no authority or mutation-safety check is needed on `dr`. |
+| **No success under any other run** | Sound and necessary: it makes the uniqueness of `OriginalDecisionTx` a database-checked fact at send time. It reads production successes over **all** targets (`prodSuccess`), including the receiving run's own decisions. That is conservative, and it can hold only for continuation. It runs inside the claim transaction, so the claim and the success it reads are serialized like today's checks. |
+| **Sender holds the retry claim** | Sound. A `retrying` deferred or Errors row with `retry_run_id = RunID` for the video ties a cross-run send to the queue path. Only one live owner can exist (`retryOwner`). A resumed or other run without the claim cannot use `DecisionRunID`. |
+| **Veto interplay** | Unchanged and still effective. `legacyClaimVetoQuery` runs with `receiving_run_id = RunID` and `assume_acted = 0`. `old_run.id <> RunID` therefore still includes the decision run: a version-0 decision run with an unresolved matched target (branch 1) or action (branch 2) refuses, as today. A version-1 decision run is outside the veto by design: its uncertainty lives in guards, which the key protects. |
+| **Guard key uniqueness** | Unchanged. The key is `(video_id, target_playlist_id, action_type)` and does not include the run. A guard left by the decision run, or by any run, for the same target makes the `ON CONFLICT DO NOTHING` insert affect 0 rows, so the claim returns `uncertain_blocked`. Two runs can never hold a send for one target. |
+| **Receipt fields** | Acceptable with C3. `PlaylistSendGuard` embeds `PlaylistSendClaim`, so the in-process receipt carries `DecisionRunID`. The persisted guard row is not extended. It stores `run_id = RunID` (the sender) and `route_decision_id` (a decision-run decision), and the decision run is derivable as `route_decision.run_id`. `ResolvePlaylistSendTx` deletes by the full row tuple and gates on `g.RunID` being `running`, so it works unchanged. Its `executed_action` upsert writes `run_id = RunID` and the decision-run `route_decision_id`, which is what `OriginalDecisionTx`, `continued_actions` and the run-attributed statistics read. `ListUnresolvedMutations` is scoped by guard `run_id`, so a continuation guard appears in the **sending** run's inspection (BR-035 AC8). |
+
+**Conditions (exact changes).**
+
+- **C1 Validation.** The claim validation (`playlist_guard.go:80`) also rejects `DecisionRunID < 0` as `state: invalid playlist send claim`. `DecisionRunID == RunID` is normalized to 0 before any query, so only one code path exists for same-run sends.
+- **C2 One authority statement, one error.** When `DecisionRunID ≠ 0`, the §7.3 query **replaces** the same-run authority query; it is not run in addition. If it returns no row, the claim fails with the existing error `state: playlist claim lacks captured run-owned action authority`. There is no new `PlaylistClaimResult` value. The caller treats it like today's authority failure. That fails closed: nothing is sent, and the executor's existing error path applies.
+- **C3 Persisted shape unchanged.** No column is added to `playlist_send_guard` or `executed_action`. `ResolvePlaylistSendTx` and its callers must not read `DecisionRunID` for any decision. It is carried only so callers can log it. Any reader that needs the decision run joins `route_decision`.
+- **C4 Order inside the transaction.** The order stays: run gate → authority (same-run or §7.3) → exact-target success → legacy veto → guard insert. The §7.3 conditions "no success under another run" and "sender holds the claim" are part of the authority statement, so they are evaluated before the success check, and refuse even when the target is already complete.
+- **C5 Tests**, added to K12:
+  - `DecisionRunID = -1` → invalid claim, no write;
+  - `DecisionRunID = RunID` gives results identical to `0` on the full V1 suite;
+  - a guard already held by the decision run for the missing target → `uncertain_blocked`, zero sends;
+  - a version-0 decision run with an unresolved matched target → `uncertain_blocked` through branch 1;
+  - after a successful continuation send, `ResolvePlaylistSendTx` removes exactly that guard, and the `executed_action` row has `run_id = RunID` and the decision-run `route_decision_id`;
+  - a run without the retry claim, or with a success under a third run → authority error, no guard row.
+
+**Not changed by this review:** the exact-target success check (it still counts every run's success, which is conservative), quota and authorization dispatch, and the uncertainty rules of ARS-001.
+
 ## 8. Inspection and statistics
 
 ### 8.1 Run video detail (`GET /api/runs/{id}/videos/{videoId}`, `buildVideoDetail`)
@@ -440,6 +470,8 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
 - **M5:** production-only successes.
 - **Simplifications:** one retry transaction (§4); one input filter (§5); the advisory clause conditions adopted (§7.3).
 - **Test numbering:** the K-series is no longer contiguous.
+
+**2026-11-12, send-guard owner review (task b39-sendguard-review):** §7.3 approved with conditions C1–C5 (§7.4). C5 adds six cases to test K12. No other section changes.
 
 ## 12. Implementation record and deviations
 
