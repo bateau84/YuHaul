@@ -492,7 +492,17 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
 
 **Deviation (K19).** Run Now resumes only a manual `run_now` run interrupted by `time_limit`. The Run Now variant of K19 therefore uses a manual `run_now` run for R; the startup-recovery variant uses a scheduled run. R's two targets are deferred through a quota limit with no room, because the pre-flight prices a video's whole action batch. R2 sends A and defers B through a provider `quotaExceeded` on B. The final clause of K19 ("the next new run continues V under R2 and sends only B") needs §7 continuation and is not asserted; the test asserts that B's item is left pending and unchanged, or that V is still partly done with no queue row in the dismissed variant.
 
-**Continuation-pending tests.** Six integration tests fail identically at 07c6429, before 2b, with and without `-race` (the race run reports no data race). They are expected to pass once §7 continuation lands: `TestV2_ScanAndSendTimeVetoAgree`, `TestRetryRecovery_CompletedTargetSurvivesFreshEvaluation` and `TestEndLegacyRunChangesOnlyStatusAndReason`, `TestEndedRunsAreOutsideStartupClassification`, `TestEndedRunNeverResumedAndNeverBlocks`, `TestEndableReadAndStaleTrue`. They exercise a partly done video claimed without §7 continuation. §7 owns them.
+**Failing integration tests (corrected 2026-11-16, gate b39-gate-ii, finding D2).** Six integration tests failed at 07c6429, before 2b. An earlier version of this section called all six "continuation-pending". That was wrong for five of them.
+
+- **Fixture defects (D2), fixed in the tests.**
+  - `TestEndLegacyRunChangesOnlyStatusAndReason`, `TestEndedRunsAreOutsideStartupClassification`, `TestEndedRunNeverResumedAndNeverBlocks` and `TestEndableReadAndStaleTrue` share `endPair`. It claimed a pending item for V2, and V2 was already `accepted`. Closing a final video at claim is correct BR-039 behavior (§3), so the fixture was wrong. `endPair` now seeds V4, a video with no final outcome, and L14 claims V4. The BR-036 assertions are unchanged. These four pass with no dependency on §7.
+  - `TestRetryRecovery_CompletedTargetSurvivesFreshEvaluation` asserted two new route decisions in the receiving run. That contradicts BR-039 AC7: a partly done video is not routed again. It now asserts that the receiving run records no route decision for the video, sends only the missing target (`PLsecond`), does not send the completed target (`PLjazz`) again, and leaves the video `accepted`. **This test is red until §7 continuation lands.** Today the receiving run sends nothing, so it fails on the insertion count.
+- **Still continuation-pending:** `TestV2_ScanAndSendTimeVetoAgree` (unchanged by this correction; §7 owns it).
+
+**Open hazards recorded 2026-11-16.**
+
+- **D1, run-failure hazard.** A partly done video claimed without §7 continuation can fail the receiving run. The continuation task in progress fixes it; nothing in the tests removes it.
+- **D3, e2e.** `TestComposition_ActionOutcomesThroughHTTP` (e2e) fails for the same reason as D1. CI stays red until continuation lands.
 
 Not implemented: §1.2 migration 028, §7 (continuation, `decisionAuthority`, `ClaimPlaylistSend` clause), §8 projections, F2, F4's `decisionAuthority` parts, and the remaining K-series tests (K6–K16, K18, K20–K22).
 

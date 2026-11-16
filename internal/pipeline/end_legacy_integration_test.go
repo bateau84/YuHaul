@@ -54,12 +54,23 @@ func (e *runNowEnv) endPair(t *testing.T) (l14, l2 int64) {
 
 	qs, err := queue.NewStore(e.db())
 	require.NoError(t, err)
-	for _, ext := range []string{"V1", "V2"} {
-		v, err := e.stateStore.GetVideoByExternalID(e.ctx, ext)
+	// V1..V3 are final after the completed run, and a claim closes a final video
+	// (BR-039). L14 therefore claims V4, a video no run has decided: not final,
+	// not partly done. V1 keeps a plain pending row.
+	res, err := e.db().Exec(`INSERT INTO video (video_id, channel_id, discovered_at, discovered_in_run_id, processing_state, final_outcome) VALUES ('V4','UC1',?,?,'deferred',NULL)`, time.Now().UTC(), l14)
+	require.NoError(t, err)
+	v4ID, err := res.LastInsertId()
+	require.NoError(t, err)
+	for _, ext := range []string{"V1", "V4"} {
+		vid := v4ID
+		if ext != "V4" {
+			v, err := e.stateStore.GetVideoByExternalID(e.ctx, ext)
+			require.NoError(t, err)
+			vid = v.ID
+		}
+		item, err := qs.CreateDeferredItem(e.ctx, &queue.DeferredItem{VideoID: vid, RunID: l14, Reason: queue.DeferredReasonQuotaExhausted, Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC()})
 		require.NoError(t, err)
-		item, err := qs.CreateDeferredItem(e.ctx, &queue.DeferredItem{VideoID: v.ID, RunID: l14, Reason: queue.DeferredReasonQuotaExhausted, Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC()})
-		require.NoError(t, err)
-		if ext == "V2" {
+		if ext == "V4" {
 			require.NoError(t, qs.WithRetryTx(e.ctx, func(tx *sql.Tx) error {
 				_, claimed, err := qs.ClaimDeferredGroupTx(e.ctx, tx, item, l14, time.Now())
 				require.True(t, claimed)

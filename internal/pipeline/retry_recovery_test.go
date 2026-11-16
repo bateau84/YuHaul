@@ -199,14 +199,17 @@ func TestRetryRecovery_CompletedTargetSurvivesFreshEvaluation(t *testing.T) {
 	retry, err := p.StartRun(ctx, state.RunTypeManual)
 	require.NoError(t, err)
 	p.Execute(ctx, retry.ID)
+	// BR-039 AC7: V is partly done, so the receiving run routes nothing. It sends
+	// only the missing addition, under the original decision, and never repeats
+	// the completed one.
 	ins := env.server.Insertions()
-	require.Len(t, ins, 2)
-	require.Equal(t, "PLjazz", ins[0].PlaylistID)
-	require.Equal(t, "PLsecond", ins[1].PlaylistID)
+	require.Len(t, ins, 2, "one send from the origin run and one continued send")
+	require.Equal(t, "PLjazz", ins[0].PlaylistID, "the completed target was sent once, by the origin run")
+	require.Equal(t, "PLsecond", ins[1].PlaylistID, "only the missing target is sent")
 	newDecisions, err := p.stateStore.GetRouteDecisionsForVideoInRun(ctx, v.ID, retry.ID)
 	require.NoError(t, err)
-	require.Len(t, newDecisions, 2)
-	var succeeded int
-	require.NoError(t, p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM executed_action WHERE run_id=? AND outcome='succeeded'`, retry.ID).Scan(&succeeded))
-	require.Equal(t, 1, succeeded, "completion veto is not a new successful mutation")
+	require.Empty(t, newDecisions, "a partly done video is not routed again")
+	done, err := p.stateStore.GetVideo(ctx, v.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.FinalOutcomeAccepted, done.FinalOutcome, "finishing every missing addition makes the video accepted")
 }
