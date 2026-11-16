@@ -89,6 +89,16 @@ type compVideo struct {
 	FinalOutcome    *string        `json:"final_outcome"`
 	ErrorMessage    *string        `json:"error_message"`
 	RouteDecisions  []compDecision `json:"route_decisions"`
+	// ContinuedActions are this run's sends under an earlier run's decision
+	// (ARS-006 §8.1).
+	ContinuedActions []compContinuedAction `json:"continued_actions"`
+}
+
+// compContinuedAction is one continued send: the action plus the run whose
+// decision authorized it.
+type compContinuedAction struct {
+	compAction
+	DecisionRunID int64 `json:"decision_run_id"`
 }
 
 // getRunSummary reads GET /api/runs/{id} through the registered routes and
@@ -433,15 +443,25 @@ func TestComposition_ActionOutcomesThroughHTTP(t *testing.T) {
 	require.NotNil(t, retry.VideosSelected,
 		"the claimed retry group is the selector's established input set")
 	assert.Equal(t, 1, *retry.VideosSelected)
-	assert.Equal(t, 1, retry.VideosEvaluated)
+	assert.Equal(t, 0, retry.VideosEvaluated,
+		"a partly done video is continued, never re-evaluated (BR-039)")
 	assert.Equal(t, 0, retry.VideosDiscovered,
 		"the retry discovers no new videos; its input is the claimed retry work")
 	assert.Equal(t, 1, retry.VideosAccepted)
 	assert.Equal(t, 0, retry.VideosDeferred)
 
+	// The retry run makes no decision of its own for V1: it finishes run 1's
+	// decision, so its sends read back as continued actions (ARS-006 §8.1).
 	retryDetail, retryDetailBody := getRunVideoDetail(t, api, run2.ID, "V1")
-	require.Len(t, retryDetail.RouteDecisions, 1)
-	retryActions := actionsByTarget(t, retryDetail.RouteDecisions[0].Actions)
+	assert.Empty(t, retryDetail.RouteDecisions, "the continuing run writes no decision")
+	retryActions := map[string]compContinuedAction{}
+	for _, a := range retryDetail.ContinuedActions {
+		retryActions[a.Target] = a
+	}
+	require.Len(t, retryActions, 2)
+	for target, a := range retryActions {
+		assert.Equal(t, run1.ID, a.DecisionRunID, "%s continues run 1's decision", target)
+	}
 	suppressed := retryActions["PLjazzA"]
 	assert.Equal(t, "not_attempted", suppressed.Outcome,
 		"a prior exact-target completion is suppressed, not re-succeeded")

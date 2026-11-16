@@ -436,21 +436,20 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 		}
 	}
 
-	// The run-owned input set — this run's discoveries plus its claimed retry
-	// work — is established here, before the exclusion gate or routing can
-	// remove anything from it. Capture it write-once (ARD-001) so a later
-	// phase failure keeps the known selection; a run that never reaches this
-	// point keeps a NULL (unknown) count.
-	p.captureSelectedCount(ctx, runID, len(videos))
-
+	// The claimed retry work is dispatched by processDeferredItems, which
+	// settles each claimed video itself (final, partly done or open), so it
+	// never enters the phases below. It still belongs to the run's input set.
+	total := len(videos)
 	videos, err = p.withoutRetryVideos(ctx, runID, videos)
 	if err != nil {
 		p.failRun(ctx, runID, "load retry membership", err)
 		return
 	}
-	// BR-039: a production run routes only what it may route. This is the one
-	// place final and other-run-held videos are removed; the phases below carry
-	// no final checks of their own, and simulations skip it.
+	retryMembers := total - len(videos)
+	// BR-039 (ARS-006 §5): a production run routes only what it may route. This
+	// is the one place final and other-run-held videos are removed; the phases
+	// below carry no final checks of their own, and simulations skip it. It
+	// runs before the selection is captured, so such videos are not counted.
 	if p.isProductionRun(run.RunType) {
 		videos, err = p.withoutUnroutableVideos(ctx, runID, videos)
 		if err != nil {
@@ -458,6 +457,13 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 			return
 		}
 	}
+
+	// The run-owned input set — this run's discoveries plus its claimed retry
+	// work — is established here, before the exclusion gate or routing can
+	// remove anything from it. Capture it write-once (ARD-001) so a later
+	// phase failure keeps the known selection; a run that never reaches this
+	// point keeps a NULL (unknown) count.
+	p.captureSelectedCount(ctx, runID, len(videos)+retryMembers)
 	if startPhase == PhaseExclusion {
 		videos, err = p.phaseExclusion(ctx, runID, videos)
 		if err != nil {
@@ -840,8 +846,27 @@ func (p *Pipeline) phaseActionExecution(ctx context.Context, runID int64, videos
 	return nil
 }
 
+// executeVideoActions executes the run's own matched decisions for v.
 func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *state.Video) (state.VideoFinalOutcome, error) {
-	// Collect matched route IDs for the video.
+	return p.executeDecision(ctx, runID, v, runID, nil)
+}
+
+// executeDecision executes the matched decision of decisionRunID for v under
+// runID (ARS-006 §7.3). When decisionRunID is runID, matched is this run's own
+// matched decisions, read here. Otherwise it is a continuation: matched is the
+// original run's decisions, supplied by continueOriginalDecision. Run-level
+// gates, state transitions and reconciliation use runID.
+func (p *Pipeline) executeDecision(ctx context.Context, runID int64, v *state.Video, decisionRunID int64, matched []RouteMatch) (state.VideoFinalOutcome, error) {
+	// Backstop of the main-loop filter (ARS-006 §5): a final video is never
+	// written or sent, whoever calls.
+	class, finalOutcome, err := state.ClassifyVideoTx(ctx, p.db, v.ID)
+	if err != nil {
+		return state.FinalOutcomeFailed, err
+	}
+	if class == state.VideoClassFinal {
+		p.logger.DebugContext(ctx, "action execution skipped: video final", "run_id", runID, "video_id", v.ID, "outcome", finalOutcome)
+		return finalOutcome, nil
+	}
 	run, routes, err := productionAuthority(ctx, p.db, p.configStore, runID)
 	if err != nil {
 		return state.FinalOutcomeFailed, err
@@ -849,19 +874,22 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 	if err := admitLegacy(ctx, p.db, run, v.ID, routes, true); err != nil {
 		return state.FinalOutcomeFailed, err
 	}
-	decisions, err := p.stateStore.GetRouteDecisionsForVideoInRun(ctx, v.ID, runID)
-	if err != nil {
-		return state.FinalOutcomeFailed, fmt.Errorf("load decisions for video %d: %w", v.ID, err)
-	}
-
-	var matched []RouteMatch
-	for _, d := range decisions {
-		if d.Decision == state.RouteDecisionMatched {
-			matched = append(matched, RouteMatch{
-				RouteDecisionID: d.ID,
-				RouteID:         d.RouteID,
-			})
+	if decisionRunID == runID {
+		decisions, err := p.stateStore.GetRouteDecisionsForVideoInRun(ctx, v.ID, runID)
+		if err != nil {
+			return state.FinalOutcomeFailed, fmt.Errorf("load decisions for video %d: %w", v.ID, err)
 		}
+		for _, d := range decisions {
+			if d.Decision == state.RouteDecisionMatched {
+				matched = append(matched, RouteMatch{
+					RouteDecisionID: d.ID,
+					RouteID:         d.RouteID,
+				})
+			}
+		}
+	} else if routes, err = decisionAuthority(ctx, p.db, p.configStore, decisionRunID); err != nil {
+		// Completion is judged against the decision run's actions.
+		return state.FinalOutcomeFailed, err
 	}
 
 	if len(matched) == 0 {
@@ -917,9 +945,12 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 
 	var outcome state.VideoFinalOutcome
 	guardedDeferredCommitted := false
+	boundDecision, canContinue := p.executor.(interface {
+		ExecuteBoundDecision(context.Context, int64, int64, int64, []RouteMatch, auth.AuthorizationBinding) (state.VideoFinalOutcome, error)
+	})
 	if bound, ok := p.executor.(interface {
 		ExecuteBound(context.Context, int64, int64, []RouteMatch, auth.AuthorizationBinding) (state.VideoFinalOutcome, error)
-	}); ok && p.executionBinding != nil {
+	}); ok && p.executionBinding != nil && (decisionRunID == runID || canContinue) {
 		handoff := func(tx *sql.Tx, reason queue.DeferredReason) error {
 			qs := p.queueStore
 			if qs == nil {
@@ -955,8 +986,15 @@ func (p *Pipeline) executeVideoActions(ctx context.Context, runID int64, v *stat
 			}
 			return nil
 		}
-		outcome, err = bound.ExecuteBound(withGuardedDeferral(execCtx, handoff), runID, v.ID, matched, *p.executionBinding)
+		if decisionRunID == runID {
+			outcome, err = bound.ExecuteBound(withGuardedDeferral(execCtx, handoff), runID, v.ID, matched, *p.executionBinding)
+		} else {
+			outcome, err = boundDecision.ExecuteBoundDecision(withGuardedDeferral(execCtx, handoff), runID, decisionRunID, v.ID, matched, *p.executionBinding)
+		}
 		guardedDeferredCommitted = outcome == state.FinalOutcomeDeferred && err == nil
+	} else if decisionRunID != runID {
+		// A continuation sends only through the guarded, decision-run-aware path.
+		err = errors.New("continuation requires guarded execution")
 	} else {
 		outcome, err = p.executor.Execute(execCtx, runID, v.ID, matched)
 	}
@@ -1033,7 +1071,7 @@ func (p *Pipeline) matchedActionsComplete(ctx context.Context, videoID int64, ma
 			if a.ActionType != "playlist_insert" || a.TargetPlaylistID == "" {
 				return false, nil
 			}
-			done, err := actionCompleted(ctx, p.db, videoID, action{m.RouteDecisionID, a.ActionType, a.TargetPlaylistID})
+			done, err := actionCompleted(ctx, p.db, videoID, action{RouteDecisionID: m.RouteDecisionID, ActionType: a.ActionType, TargetPlaylistID: a.TargetPlaylistID})
 			if err != nil {
 				return false, err
 			}
@@ -1162,7 +1200,7 @@ func (p *Pipeline) listRunVideos(ctx context.Context, runID int64) ([]*state.Vid
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT id, video_id, channel_id, discovered_at, discovered_in_run_id,
 		        processing_state, final_outcome, deferred_reason, error_message, completed_at
-		 FROM video WHERE discovered_in_run_id = ? OR id IN (SELECT video_id FROM route_decision WHERE run_id=?) OR id IN (SELECT video_id FROM deferred_item WHERE retry_run_id=? AND status='retrying') OR id IN (SELECT video_id FROM error_entry WHERE retry_run_id=? AND status='retrying');`, runID, runID, runID, runID)
+		 FROM video WHERE discovered_in_run_id = ? OR id IN (SELECT video_id FROM route_decision WHERE run_id=?) OR id IN (SELECT video_id FROM deferred_item WHERE retry_run_id=?) OR id IN (SELECT video_id FROM error_entry WHERE retry_run_id=?);`, runID, runID, runID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("list run videos: %w", err)
 	}

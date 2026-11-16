@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -31,15 +32,51 @@ func productionAuthority(ctx context.Context, db *sql.DB, cs ConfigStore, runID 
 		(run.ActionAuthorityVersion != 0 && run.ActionAuthorityVersion != 1) {
 		return nil, nil, fmt.Errorf("run %d has no production action authority", runID)
 	}
+	routes, err := snapshotRoutes(ctx, cs, run)
+	if err != nil {
+		return nil, nil, err
+	}
+	return run, routes, nil
+}
+
+// decisionAuthority is productionAuthority without the run-status gate
+// (ARS-006 §7.1): it reads the captured snapshot of the run whose decision a
+// partly done video continues, whatever state that run ended in. Any failure
+// is ErrOriginalDecisionUnavailable, so the caller sends nothing.
+func decisionAuthority(ctx context.Context, db *sql.DB, cs ConfigStore, decisionRunID int64) ([]router.Route, error) {
+	unavailable := func(err error) ([]router.Route, error) {
+		return nil, fmt.Errorf("%w: decision run %d: %v", state.ErrOriginalDecisionUnavailable, decisionRunID, err)
+	}
+	s, err := state.NewStore(db)
+	if err != nil {
+		return unavailable(err)
+	}
+	run, err := s.GetRun(ctx, decisionRunID)
+	if err != nil {
+		return unavailable(err)
+	}
+	if run.RunType != state.RunTypeManual && run.RunType != state.RunTypeScheduled {
+		return unavailable(errors.New("not a production run"))
+	}
+	routes, err := snapshotRoutes(ctx, cs, run)
+	if err != nil {
+		return unavailable(err)
+	}
+	return routes, nil
+}
+
+// snapshotRoutes reads and orders the routes of the run's captured
+// configuration snapshot.
+func snapshotRoutes(ctx context.Context, cs ConfigStore, run *state.Run) ([]router.Route, error) {
 	if cs == nil || run.ConfigVersionID == nil {
-		return nil, nil, fmt.Errorf("run %d missing captured configuration", runID)
+		return nil, fmt.Errorf("run %d missing captured configuration", run.ID)
 	}
 	cv, err := cs.Get(ctx, *run.ConfigVersionID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("run %d snapshot: %w", runID, err)
+		return nil, fmt.Errorf("run %d snapshot: %w", run.ID, err)
 	}
 	if err := validateSnapshotRoutes(cv.Snapshot); err != nil {
-		return nil, nil, fmt.Errorf("run %d snapshot: %w", runID, err)
+		return nil, fmt.Errorf("run %d snapshot: %w", run.ID, err)
 	}
 	routes := routesFromSnapshot(cv.Snapshot)
 	sort.SliceStable(routes, func(i, j int) bool { return routes[i].EvaluationOrder < routes[j].EvaluationOrder })
@@ -47,13 +84,13 @@ func productionAuthority(ctx context.Context, db *sql.DB, cs ConfigStore, runID 
 	for i := range routes {
 		r := &routes[i]
 		if r.ID <= 0 || seen[r.ID] {
-			return nil, nil, fmt.Errorf("run %d invalid snapshot route %d", runID, r.ID)
+			return nil, fmt.Errorf("run %d invalid snapshot route %d", run.ID, r.ID)
 		}
 		seen[r.ID] = true
 		sort.SliceStable(r.Conditions, func(i, j int) bool { return r.Conditions[i].ConditionIndex < r.Conditions[j].ConditionIndex })
 		sort.SliceStable(r.Actions, func(i, j int) bool { return r.Actions[i].ActionIndex < r.Actions[j].ActionIndex })
 	}
-	return run, routes, nil
+	return routes, nil
 }
 
 func (p *Pipeline) productionRoutes(ctx context.Context, runID int64) ([]router.Route, error) {

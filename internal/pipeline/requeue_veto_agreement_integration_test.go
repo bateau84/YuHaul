@@ -38,20 +38,25 @@ type v2Seed struct {
 	name    string
 	title   string
 	blocked bool // expected scan result, from the veto definitions, not from the SQL
+	// partlyDone marks a seed with a production success whose original
+	// decision matched nothing. BR-039 never re-evaluates such a video: the
+	// run cannot continue it, sends nothing, and retains it in Errors with
+	// original_decision_unavailable (ARS-006 §7.2).
+	partlyDone bool
 }
 
 func v2Seeds() []v2Seed {
 	return []v2Seed{
-		{"branch1_matched_decision", "Jazz Marimba Concert Recording", true},
-		{"branch1_missing_config", "Jazz Harpsichord Midnight Sonata", true},
-		{"branch1_missing_route", "Jazz Theremin Desert Journey", true},
-		{"branch2_unresolved_action", "Jazz Banjo Festival Highlights", true},
-		{"branch3_not_acted_at_scan", "Jazz Accordion Harbour Evening", true},
-		{"branch4_target_a_succeeded", "Jazz Bassoon Branch4 Workshop", true},
-		{"held_guard", "Jazz Cello Cathedral Rehearsal", true},
-		{"uncertain_addition_with_guard", "Jazz Oboe Riverside Picnic", true},
-		{"guard_on_succeeded_target", "Jazz Trumpet Lighthouse Session", false},
-		{"control_no_evidence", "Jazz Vibraphone Winter Anthology", false},
+		{"branch1_matched_decision", "Jazz Marimba Concert Recording", true, false},
+		{"branch1_missing_config", "Jazz Harpsichord Midnight Sonata", true, false},
+		{"branch1_missing_route", "Jazz Theremin Desert Journey", true, false},
+		{"branch2_unresolved_action", "Jazz Banjo Festival Highlights", true, false},
+		{"branch3_not_acted_at_scan", "Jazz Accordion Harbour Evening", true, false},
+		{"branch4_target_a_succeeded", "Jazz Bassoon Branch4 Workshop", true, true},
+		{"held_guard", "Jazz Cello Cathedral Rehearsal", true, false},
+		{"uncertain_addition_with_guard", "Jazz Oboe Riverside Picnic", true, false},
+		{"guard_on_succeeded_target", "Jazz Trumpet Lighthouse Session", false, true},
+		{"control_no_evidence", "Jazz Vibraphone Winter Anthology", false, false},
 	}
 }
 
@@ -263,13 +268,16 @@ func TestV2_ScanAndSendTimeVetoAgree(t *testing.T) {
 	e.seed(t)
 
 	// The oracle is the veto definitions in the seeds table, not the SQL.
-	var wantBlocked, wantUnblocked []string
+	var wantBlocked, wantUnblocked, wantSent []string
 	for _, s := range v2Seeds() {
 		ext := e.videos[s.name].VideoID
 		if s.blocked {
 			wantBlocked = append(wantBlocked, ext)
 		} else {
 			wantUnblocked = append(wantUnblocked, ext)
+		}
+		if !s.blocked && !s.partlyDone {
+			wantSent = append(wantSent, ext)
 		}
 	}
 	sort.Strings(wantBlocked)
@@ -328,6 +336,16 @@ func TestV2_ScanAndSendTimeVetoAgree(t *testing.T) {
 			require.Equal(t, s.blocked, inBlocked[ext], "scan result must match the seed definition")
 			// Every seed was claimed by the run and evaluated into a matched route.
 			require.Equal(t, 1, count(`SELECT COUNT(*) FROM deferred_item WHERE id=? AND retry_run_id=?`, e.deferred[s.name], run.ID), "the run must claim the queued item")
+			if s.partlyDone {
+				// BR-039: claimed but never re-evaluated or sent.
+				require.Zero(t, count(`SELECT COUNT(*) FROM route_decision WHERE run_id=? AND video_id=?`, run.ID, v.ID), "a partly done video is not re-evaluated")
+				require.Zero(t, e.postsFor(ext, ""), "the provider must see no request for it")
+				var msg string
+				require.NoError(t, e.pipeline.db.QueryRowContext(e.ctx, `SELECT error_message FROM run_video_outcome WHERE run_id=? AND video_id=?`, run.ID, v.ID).Scan(&msg))
+				require.Contains(t, msg, "code=original_decision_unavailable")
+				require.Equal(t, 1, count(`SELECT COUNT(*) FROM error_entry WHERE video_id=? AND run_id=? AND status='active'`, v.ID, run.ID), "one retained Errors entry")
+				return
+			}
 			require.Equal(t, 1, count(`SELECT COUNT(*) FROM route_decision WHERE run_id=? AND video_id=? AND route_id=? AND decision='matched'`, run.ID, v.ID, e.jazzID), "evaluated and matched to B's route")
 
 			bSucceeded := count(`SELECT COUNT(*) FROM executed_action WHERE run_id=? AND video_id=? AND target_playlist_id=? AND outcome='succeeded'`, run.ID, v.ID, v2TargetB)
@@ -354,8 +372,8 @@ func TestV2_ScanAndSendTimeVetoAgree(t *testing.T) {
 	require.Zero(t, e.postsFor(b4.VideoID, v2TargetB))
 	require.Equal(t, 0, count(`SELECT COUNT(*) FROM executed_action WHERE run_id=? AND video_id=? AND target_playlist_id=? AND outcome IN ('failed','deferred')`, run.ID, b4.ID, v2TargetA))
 
-	// Totals: nothing but the unblocked seeds reached the provider.
+	// Totals: nothing but the unblocked, not partly done seeds reached the provider.
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	require.Len(t, e.posts, len(wantUnblocked), fmt.Sprintf("posts: %v", e.posts))
+	require.Len(t, e.posts, len(wantSent), fmt.Sprintf("posts: %v", e.posts))
 }

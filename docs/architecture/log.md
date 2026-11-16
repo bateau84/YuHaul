@@ -10,6 +10,8 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-16
 
+**BR-039 continuation implemented (task b39-continuation, Plan revision 20):** ARS-006 §7 is in the code, which fixes gate b39-gate-ii D1 (a claimed partly done video committed no outcome, every production run failed and a user retry answered 500) and D4 (filter order). The details, the two test fixtures changed under BR-039 and the provider-failure note for K10 are in [ARS-006 §12](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md). Migration 028 and tests K6, K18 and K20–K22 remain.
+
 **Video search: decision O5 = S1 (Architect):** The user chose option S1 on 2026-11-16: FTS5 `secure-delete` off, plus an FTS5 optimize after each sweep. The choice was relayed to the architect by the coordinating session; the evidence is the spike in commit `acf141b` ([ARS-001 §10.10](video-search/specifications/ars-001-video-search-api-and-queries.md)). [ADR-001](video-search/decisions/adr-001-held-title-search-by-request-time-scan.md) and the topic index are updated.
 
 - **Contract:** secure-delete is removed (migration 029 no longer sets it; R6 asserts it is off). Purges are logical at once (I2). Removed trigrams leave the live segments at the next complete optimize (new I2b).

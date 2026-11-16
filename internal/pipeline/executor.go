@@ -214,19 +214,35 @@ func (e *Executor) authorizedYouTubeFactory(ctx context.Context, binding auth.Au
 // `executed_at` is written only for a YouTube action that was actually
 // attempted; deferral and no-attempt rows carry no attempt timestamp.
 func (e *Executor) Execute(ctx context.Context, runID, videoID int64, matches []RouteMatch) (state.VideoFinalOutcome, error) {
-	return e.execute(ctx, runID, videoID, matches, nil)
+	return e.execute(ctx, runID, runID, videoID, matches, nil)
 }
 
 // ExecuteBound executes production actions using the pipeline invocation's
 // authorization identity rather than taking a fresh token snapshot.
 func (e *Executor) ExecuteBound(ctx context.Context, runID, videoID int64, matches []RouteMatch, binding auth.AuthorizationBinding) (state.VideoFinalOutcome, error) {
-	return e.execute(ctx, runID, videoID, matches, &binding)
+	return e.execute(ctx, runID, runID, videoID, matches, &binding)
 }
 
-func (e *Executor) execute(ctx context.Context, runID, videoID int64, matches []RouteMatch, binding *auth.AuthorizationBinding) (state.VideoFinalOutcome, error) {
+// ExecuteBoundDecision is ExecuteBound for a partly done video continued under
+// the original decision of decisionRunID (ARS-006 §7.3): matches are that run's
+// matched decisions, the run-level gates stay on runID, and every send is
+// authorized by the decision run's snapshot.
+func (e *Executor) ExecuteBoundDecision(ctx context.Context, runID, decisionRunID, videoID int64, matches []RouteMatch, binding auth.AuthorizationBinding) (state.VideoFinalOutcome, error) {
+	return e.execute(ctx, runID, decisionRunID, videoID, matches, &binding)
+}
+
+func (e *Executor) execute(ctx context.Context, runID, decisionRunID, videoID int64, matches []RouteMatch, binding *auth.AuthorizationBinding) (state.VideoFinalOutcome, error) {
 	run, routes, err := productionAuthority(ctx, e.db, config.NewStore(e.db), runID)
 	if err != nil {
 		return state.FinalOutcomeFailed, err
+	}
+	// The run-level gates above and below stay on runID. The routes that
+	// authorize the matched decisions are the decision run's snapshot.
+	decisionRoutes := routes
+	if decisionRunID != runID {
+		if decisionRoutes, err = decisionAuthority(ctx, e.db, config.NewStore(e.db), decisionRunID); err != nil {
+			return state.FinalOutcomeFailed, err
+		}
 	}
 	// A lower-level production entry still owns an invocation: bind once here
 	// when the caller did not provide the pipeline's captured identity. Never
@@ -262,7 +278,7 @@ func (e *Executor) execute(ctx context.Context, runID, videoID int64, matches []
 		}
 		return state.FinalOutcomeFailed, err
 	}
-	actions, err := e.loadActions(ctx, runID, videoID, matches, routes)
+	actions, err := e.loadActions(ctx, decisionRunID, videoID, matches, decisionRoutes)
 	if err != nil {
 		return state.FinalOutcomeFailed, err
 	}
@@ -581,9 +597,15 @@ type action struct {
 	RouteDecisionID  int64
 	ActionType       string
 	TargetPlaylistID string
+	// DecisionRunID is the run whose matched decision authorizes the action.
+	// A send by another run (a continuation) carries it into the send claim.
+	DecisionRunID int64
 }
 
-func (e *Executor) loadActions(ctx context.Context, runID, videoID int64, matches []RouteMatch, routes []router.Route) ([]action, error) {
+// loadActions returns the playlist actions of the matched decisions, which
+// must belong to decisionRunID, the run that made them (the sending run itself,
+// or the original run of a continued video).
+func (e *Executor) loadActions(ctx context.Context, decisionRunID, videoID int64, matches []RouteMatch, routes []router.Route) ([]action, error) {
 	if len(matches) == 0 {
 		return nil, nil
 	}
@@ -596,8 +618,8 @@ func (e *Executor) loadActions(ctx context.Context, runID, videoID int64, matche
 			return nil, fmt.Errorf("action decision %d: %w", m.RouteDecisionID, err)
 		}
 		r := findRoute(routes, m.RouteID)
-		if persistedRun != runID || persistedVideo != videoID || persistedRoute != m.RouteID || decision != string(state.RouteDecisionMatched) || r == nil || !r.IsEnabled {
-			return nil, fmt.Errorf("action decision %d has no authority for run %d video %d route %d", m.RouteDecisionID, runID, videoID, m.RouteID)
+		if persistedRun != decisionRunID || persistedVideo != videoID || persistedRoute != m.RouteID || decision != string(state.RouteDecisionMatched) || r == nil || !r.IsEnabled {
+			return nil, fmt.Errorf("action decision %d has no authority for run %d video %d route %d", m.RouteDecisionID, decisionRunID, videoID, m.RouteID)
 		}
 		decisionByRoute[m.RouteID] = m.RouteDecisionID
 	}
@@ -625,7 +647,7 @@ func (e *Executor) loadActions(ctx context.Context, runID, videoID int64, matche
 				continue
 			}
 			seenActions[key] = true
-			actions = append(actions, action{d, a.ActionType, a.TargetPlaylistID})
+			actions = append(actions, action{RouteDecisionID: d, ActionType: a.ActionType, TargetPlaylistID: a.TargetPlaylistID, DecisionRunID: decisionRunID})
 		}
 	}
 	return actions, nil
@@ -704,7 +726,7 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 	if err != nil {
 		return state.ActionOutcomeFailed, err
 	}
-	claim := state.PlaylistSendClaim{RunID: runID, VideoID: videoID, RouteDecisionID: a.RouteDecisionID, TargetPlaylistID: a.TargetPlaylistID, ActionType: a.ActionType, AuthorizationID: identity}
+	claim := state.PlaylistSendClaim{RunID: runID, VideoID: videoID, RouteDecisionID: a.RouteDecisionID, TargetPlaylistID: a.TargetPlaylistID, ActionType: a.ActionType, AuthorizationID: identity, DecisionRunID: a.DecisionRunID}
 	claimed, receipt, err := guardStore.ClaimPlaylistSend(ctx, claim, time.Now().UTC())
 	if err != nil {
 		return state.ActionOutcomeFailed, err

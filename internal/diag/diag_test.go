@@ -202,6 +202,20 @@ func TestWithCodeMarksOnlyRegisteredUncertainMutation(t *testing.T) {
 	}
 }
 
+// BR-039 / ARS-006 §7.2: an unreadable original decision is explained by its
+// registered code and only at action_execution/load_run.
+func TestWithCodeMarksOriginalDecisionUnavailable(t *testing.T) {
+	err := At(WithCode(errors.New("run 40 snapshot secret "+markerFreeSecret), "original_decision_unavailable"), "action_execution", "load_run")
+	got := Encode(fmt.Errorf("wrap: %w", err), "unknown", "retry")
+	want := "diag:v1 phase=action_execution operation=load_run code=original_decision_unavailable"
+	if got != want {
+		t.Fatalf("Encode()=%q want %q", got, want)
+	}
+	if !Safe(got) {
+		t.Fatalf("%q must be admitted", got)
+	}
+}
+
 func TestInterruptReasonKeepsContextCodeAndStepFacts(t *testing.T) {
 	tests := []struct {
 		name     string

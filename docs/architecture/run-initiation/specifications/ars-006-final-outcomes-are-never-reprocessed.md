@@ -6,7 +6,7 @@ tags: [architecture, specification, outcomes, lifecycle, retry, deferred-queue, 
 timestamp: 2026-11-12T00:00:00Z
 ---
 
-**Status:** accepted — exact implementation contract; steps 1, 2a and 2b (§1.1, §1.3, §2, §3–§6) implemented, the rest not (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
+**Status:** accepted — exact implementation contract; steps 1, 2a, 2b and 3 (§1.1, §1.3, §2–§7) implemented; migration 028 and some K-series tests not yet (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
 
 It amends:
 
@@ -490,21 +490,27 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
   - `unfinishedRunMembersTx` adds `AND NOT state.FinalVideo`. It is the single source for the stop, discard and failure-sweep handoffs. `retainAuthorityFailure` classifies inside its retention transaction and skips `final` videos.
   - Tests: K3, K4, K5, K17, K19 and the final retry dispatch (`final_filter_test.go`, `final_filter_integration_test.go`).
 
-**Deviation (K19).** Run Now resumes only a manual `run_now` run interrupted by `time_limit`. The Run Now variant of K19 therefore uses a manual `run_now` run for R; the startup-recovery variant uses a scheduled run. R's two targets are deferred through a quota limit with no room, because the pre-flight prices a video's whole action batch. R2 sends A and defers B through a provider `quotaExceeded` on B. The final clause of K19 ("the next new run continues V under R2 and sends only B") needs §7 continuation and is not asserted; the test asserts that B's item is left pending and unchanged, or that V is still partly done with no queue row in the dismissed variant.
+**Step 3 (continuation) — implemented 2026-11-16**, fixing gate b39-gate-ii D1 (a claimed partly done video committed no outcome, so every production run failed and a user retry answered 500) and D4:
 
-**Failing integration tests (corrected 2026-11-16, gate b39-gate-ii, finding D2).** Six integration tests failed at 07c6429, before 2b. An earlier version of this section called all six "continuation-pending". That was wrong for five of them.
+- §7.1 `decisionAuthority` (`internal/pipeline/authority.go`) shares `snapshotRoutes` with `productionAuthority` and has no run-status gate. Every failure wraps `state.ErrOriginalDecisionUnavailable`.
+- §7.2 `Pipeline.continueOriginalDecision` (`retry.go`): `processRetryVideo` dispatches a `partly_done` video to it before any evaluation. It reads `state.OriginalDecisionTx` and `decisionAuthority`, and checks that every matched route still has a `playlist_insert` target. If any step is unavailable, nothing is sent and the error carries `original_decision_unavailable` (`diag.WithCode` now accepts that code), so the existing failure transaction retains the video in Errors. Other read errors take the same failure path without that code.
+- §7.3 `Pipeline.executeDecision(ctx, runID, v, decisionRunID, matched)`; `executeVideoActions` is its `decisionRunID == runID` case. A continuation uses `Executor.ExecuteBoundDecision`; it fails closed if the executor lacks it or no execution binding exists. `Executor.execute` keeps the run-level gates on the receiving run, takes routes for `loadActions` and `matchedActionsComplete` from `decisionAuthority`, and `loadActions` compares persisted decisions with `decisionRunID`. Each `action` carries `DecisionRunID` into `PlaylistSendClaim`. The send-claim clause itself shipped in e159c72.
+- §5 backstop: `executeDecision` classifies first and returns the stored outcome for a `final` video, with no write or send.
+- D4: in `executeHeld`, `withoutRetryVideos` runs first, then `withoutUnroutableVideos`, then `captureSelectedCount`. The captured count is the kept members plus the claimed retry members, so unroutable videos are not counted and claimed work still is. `listRunVideos` now treats any queue row with `retry_run_id = run` as claimed work, whatever its status, as `withoutRetryVideos` already did. Without that, a continued video (which gets no decision of its own) left the run's input set once acknowledged.
+- Tests: K9, K10, K11, K13, K14, K15, K16, the D1 regression (`continuation_integration_test.go`, `executed_action_writers_test.go`), and K19's final clause (`final_filter_integration_test.go`).
 
-- **Fixture defects (D2), fixed in the tests.**
-  - `TestEndLegacyRunChangesOnlyStatusAndReason`, `TestEndedRunsAreOutsideStartupClassification`, `TestEndedRunNeverResumedAndNeverBlocks` and `TestEndableReadAndStaleTrue` share `endPair`. It claimed a pending item for V2, and V2 was already `accepted`. Closing a final video at claim is correct BR-039 behavior (§3), so the fixture was wrong. `endPair` now seeds V4, a video with no final outcome, and L14 claims V4. The BR-036 assertions are unchanged. These four pass with no dependency on §7.
-  - `TestRetryRecovery_CompletedTargetSurvivesFreshEvaluation` asserted two new route decisions in the receiving run. That contradicts BR-039 AC7: a partly done video is not routed again. It now asserts that the receiving run records no route decision for the video, sends only the missing target (`PLsecond`), does not send the completed target (`PLjazz`) again, and leaves the video `accepted`. **This test is red until §7 continuation lands.** Today the receiving run sends nothing, so it fails on the insertion count.
-- **Still continuation-pending:** `TestV2_ScanAndSendTimeVetoAgree` (unchanged by this correction; §7 owns it).
+**Provider failures other than quota leave the send guard** (authorization ARS-001: the application state is unknown). K10's "permanent failure" case therefore asserts that V stays partly done and that a retry is refused at the claim, with nothing resent. The retry that sends only the missing target is asserted after a quota deferral, by the next run and by a user retry.
 
-**Open hazards recorded 2026-11-16.**
+**Fixtures changed because BR-039 forbids their old expectation (a re-evaluation of a partly done video):**
 
-- **D1, run-failure hazard.** A partly done video claimed without §7 continuation can fail the receiving run. The continuation task in progress fixes it; nothing in the tests removes it.
-- **D3, e2e.** `TestComposition_ActionOutcomesThroughHTTP` (e2e) fails for the same reason as D1. CI stays red until continuation lands.
+- `TestV2_ScanAndSendTimeVetoAgree`: the seeds `branch4_target_a_succeeded` and `guard_on_succeeded_target` hold a production success under a decision that matched nothing. They have no original decision to continue, so the run now sends nothing for them and retains them with `original_decision_unavailable`. The scan-side assertions are unchanged.
+- `TestComposition_ActionOutcomesThroughHTTP`: the retry run has no decision for V1 and its sends are read as `continued_actions` of run 1's decision.
 
-Not implemented: §1.2 migration 028, §7 (continuation, `decisionAuthority`, `ClaimPlaylistSend` clause), §8 projections, F2, F4's `decisionAuthority` parts, and the remaining K-series tests (K6–K16, K18, K20–K22).
+**Deviation (K19).** Run Now resumes only a manual `run_now` run interrupted by `time_limit`. The Run Now variant of K19 therefore uses a manual `run_now` run for R; the startup-recovery variant uses a scheduled run. R's two targets are deferred through a quota limit with no room, because the pre-flight prices a video's whole action batch. R2 sends A and defers B through a provider `quotaExceeded` on B. The final clause (the next new run continues V under R2 and sends only B) is asserted in the two pending-item variants. In the dismissed variants no queue row claims V; the BR-037 re-queue (ARS-005 step 6) is what lists it as stranded, and it is not implemented.
+
+**Continuation-pending tests.** The six integration tests that failed at 07c6429 (`TestV2_ScanAndSendTimeVetoAgree`, `TestRetryRecovery_CompletedTargetSurvivesFreshEvaluation`, `TestEndLegacyRunChangesOnlyStatusAndReason`, `TestEndedRunsAreOutsideStartupClassification`, `TestEndedRunNeverResumedAndNeverBlocks`, `TestEndableReadAndStaleTrue`) pass after step 3, with the `TestV2` fixture change above.
+
+Not implemented: §1.2 migration 028, F2, and the K-series tests K6, K18 and K20–K22.
 
 **Deviation.** `FinalVideo` wraps the column in `COALESCE(v.final_outcome, '')`. `video.final_outcome` is nullable, and without it a NULL outcome makes `FinalVideo`, `NOT FinalVideo` and `PartlyDoneVideo` NULL, so `RoutableByRun` would drop every video with a NULL outcome. Classification is otherwise as specified.
 

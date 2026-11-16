@@ -10,7 +10,7 @@
 - a metadata fetch before a retried video is evaluated;
 - the final outcome `unavailable_on_youtube` for re-queued videos that YouTube no longer returns.
 
-BR-039 (final outcomes are never reprocessed) is specified 2026-11-12 in ADR-007/ARS-006, revised after critic review the same day. A claim of a final video closes its item with a reason. A production main-loop filter keeps resumed runs off videos that are final, held by the queue, or partly done under another run. A partly done video finishes only its missing additions under its original run's decision, shown and counted in the sending run. Triggers (migration 028) make final outcomes immutable once the claim classification is in place. Not implemented.
+BR-039 (final outcomes are never reprocessed) is specified 2026-11-12 in ADR-007/ARS-006, revised after critic review the same day. A claim of a final video closes its item with a reason. A production main-loop filter keeps resumed runs off videos that are final, held by the queue, or partly done under another run. A partly done video finishes only its missing additions under its original run's decision, shown and counted in the sending run. Triggers (migration 028) make final outcomes immutable once the claim classification is in place. Implemented 2026-11-16 except migration 028 (the triggers); see ARS-006 §12.
 
 F3 decided: variant K (BR-035 AC14 unchanged); F4 does not apply (runs 17 and 21, 0 open retry rows); `GET /api/deferred` adds `page=n|last`, positions, `total_pages`, `queue_total` and a server-side `reason` filter.
 

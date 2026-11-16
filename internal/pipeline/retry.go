@@ -10,6 +10,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/queue"
+	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 )
 
@@ -166,27 +167,34 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 		return err
 	}
 	var workErr error
-	if v.FinalOutcome == state.FinalOutcomeNotYetEvaluated {
-		var survivors []*state.Video
-		routes, err := p.productionRoutes(ctx, runID)
-		if err != nil {
-			return err
-		}
-		survivors, workErr = p.runExclusionGate(ctx, runID, []*state.Video{v}, routes, true)
-		if workErr == nil && len(survivors) > 0 {
-			workErr = p.detectVideos(ctx, runID, survivors)
-			if workErr == nil {
-				_, workErr = p.routeVideos(ctx, runID, survivors)
+	switch class {
+	case state.VideoClassPartlyDone:
+		// BR-039 / ARS-006 §7: never re-evaluated. Only the missing additions
+		// are sent, under the original run's decision.
+		workErr = p.continueOriginalDecision(ctx, runID, v)
+	default:
+		if v.FinalOutcome == state.FinalOutcomeNotYetEvaluated {
+			var survivors []*state.Video
+			routes, err := p.productionRoutes(ctx, runID)
+			if err != nil {
+				return err
+			}
+			survivors, workErr = p.runExclusionGate(ctx, runID, []*state.Video{v}, routes, true)
+			if workErr == nil && len(survivors) > 0 {
+				workErr = p.detectVideos(ctx, runID, survivors)
+				if workErr == nil {
+					_, workErr = p.routeVideos(ctx, runID, survivors)
+				}
 			}
 		}
-	}
-	if workErr == nil {
-		v, err = p.stateStore.GetVideo(ctx, videoID)
-		if err != nil {
-			return err
-		}
-		if v.FinalOutcome == state.FinalOutcomeNotYetEvaluated && (v.ProcessingState == state.VideoStateEvaluated || v.ProcessingState == state.VideoStateActed) {
-			_, workErr = p.executeVideoActions(ctx, runID, v)
+		if workErr == nil {
+			v, err = p.stateStore.GetVideo(ctx, videoID)
+			if err != nil {
+				return err
+			}
+			if v.FinalOutcome == state.FinalOutcomeNotYetEvaluated && (v.ProcessingState == state.VideoStateEvaluated || v.ProcessingState == state.VideoStateActed) {
+				_, workErr = p.executeVideoActions(ctx, runID, v)
+			}
 		}
 	}
 	// The retained message carries the vetted bounded summary, not the raw
@@ -291,6 +299,58 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 		p.logger.WarnContext(ctx, "retry handed to retained runtime error", attrs...)
 	}
 	return err
+}
+
+// continueOriginalDecision finishes a partly done video under the decision of
+// the run that made its first production success (ARS-006 §7.2). It sends only
+// the targets still missing. If the original decision cannot be identified or
+// read, nothing is sent and the returned error carries the registered
+// original_decision_unavailable code, so processRetryVideo's failure path
+// retains the video in Errors with it.
+func (p *Pipeline) continueOriginalDecision(ctx context.Context, runID int64, v *state.Video) error {
+	matched, decisionRunID, err := p.originalDecision(ctx, v.ID)
+	if errors.Is(err, state.ErrOriginalDecisionUnavailable) {
+		p.logger.WarnContext(ctx, "original decision unavailable; nothing sent", "run_id", runID, "video_id", v.ID, "error", err)
+		return diag.At(diag.WithCode(err, "original_decision_unavailable"), "action_execution", "load_run")
+	}
+	if err != nil {
+		return err
+	}
+	_, err = p.executeDecision(ctx, runID, v, decisionRunID, matched)
+	return err
+}
+
+// originalDecision resolves the single run holding all of a partly done
+// video's production successes, checks that its snapshot is readable and that
+// every matched route still has a playlist_insert action with a target, and
+// returns its matched decisions.
+func (p *Pipeline) originalDecision(ctx context.Context, videoID int64) ([]RouteMatch, int64, error) {
+	od, err := state.OriginalDecisionTx(ctx, p.db, videoID)
+	if err != nil {
+		return nil, 0, err
+	}
+	routes, err := decisionAuthority(ctx, p.db, p.configStore, od.RunID)
+	if err != nil {
+		return nil, 0, err
+	}
+	matched := make([]RouteMatch, 0, len(od.Matched))
+	for _, m := range od.Matched {
+		r := findRoute(routes, m.RouteID)
+		if r == nil || !hasInsertTarget(r) {
+			return nil, 0, fmt.Errorf("%w: route %d of run %d has no playlist action", state.ErrOriginalDecisionUnavailable, m.RouteID, od.RunID)
+		}
+		matched = append(matched, RouteMatch{RouteDecisionID: m.RouteDecisionID, RouteID: m.RouteID})
+	}
+	return matched, od.RunID, nil
+}
+
+func hasInsertTarget(r *router.Route) bool {
+	for _, a := range r.Actions {
+		if a.ActionType == "playlist_insert" && a.TargetPlaylistID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // settleFinalRetryVideo settles a claimed retry whose video is final. When this

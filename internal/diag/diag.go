@@ -59,10 +59,12 @@ func (e *codeCause) Error() string { return "operation failed" }
 func (e *codeCause) Unwrap() error { return e.cause }
 
 // WithCode marks err with a registered code that carries no provider facts.
-// Only mutation_application_uncertain is accepted: it names a guard-blocked or
-// admitted-but-unconfirmed mutation. Other codes are ignored.
+// Only mutation_application_uncertain (a guard-blocked or admitted-but-
+// unconfirmed mutation) and original_decision_unavailable (BR-039: a partly
+// done video whose original decision cannot be read) are accepted. Other codes
+// are ignored.
 func WithCode(err error, code string) error {
-	if err == nil || code != "mutation_application_uncertain" {
+	if err == nil || (code != "mutation_application_uncertain" && code != "original_decision_unavailable") {
 		return err
 	}
 	return &codeCause{cause: err, code: code}

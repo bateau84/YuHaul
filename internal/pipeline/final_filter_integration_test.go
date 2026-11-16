@@ -316,6 +316,24 @@ func TestResumeAfterAnotherRunTookOverK19(t *testing.T) {
 			class, _, err = state.ClassifyVideoTx(ctx, p.db, videoID)
 			require.NoError(t, err)
 			require.Equal(t, state.VideoClassPartlyDone, class)
+
+			// Final clause: the next new run continues V under R2's decision
+			// and sends only B. With R2's item dismissed nothing claims V; the
+			// BR-037 re-queue (ARS-005 step 6) is what lists it as stranded.
+			if !c.dismissed {
+				r3, err := p.StartRun(ctx, state.RunTypeScheduled)
+				require.NoError(t, err)
+				p.Execute(ctx, r3.ID)
+				done, err := p.stateStore.GetRun(ctx, r3.ID)
+				require.NoError(t, err)
+				require.Equal(t, state.RunStatusCompleted, done.Status, "reason: %v", done.InterruptReason)
+				require.Equal(t, sends+1, postCount(), "exactly one request: B")
+				require.Equal(t, []playlistInsertion{{PlaylistID: "PLjazz", VideoID: "V1"}, {PlaylistID: "PLsecond", VideoID: "V1"}}, env.server.Insertions(),
+					"A was sent by R2, B by the next run, nothing twice")
+				require.Zero(t, env.countRows(t, `SELECT COUNT(*) FROM route_decision WHERE run_id=? AND video_id=?`, r3.ID, videoID), "the next run makes no decision of its own for V")
+				require.Equal(t, r2.ID, env.countRows(t, `SELECT rd.run_id FROM executed_action ea JOIN route_decision rd ON rd.id=ea.route_decision_id WHERE ea.run_id=? AND ea.video_id=? AND ea.target_playlist_id='PLsecond' AND ea.outcome='succeeded'`, r3.ID, videoID),
+					"B is sent under R2's decision")
+			}
 		})
 	}
 }
