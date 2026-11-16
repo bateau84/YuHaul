@@ -457,6 +457,56 @@ func (s *Store) RequeueRetryGroupTx(ctx context.Context, tx *sql.Tx, videoID, ru
 	return s.finishRetryGroupTx(ctx, tx, videoID, runID, false)
 }
 
+// CloseRetryReceiptFinalTx closes the exact rows receipt still owns because
+// the video became final after the claim (BR-039, ARS-006 §5): deferred rows
+// become completed and Errors rows resolved, both with
+// closed_reason='final_outcome'. It reports how many rows it closed. Rows an
+// operator already removed leave nothing to close and return ErrWorkRemoved.
+func (s *Store) CloseRetryReceiptFinalTx(ctx context.Context, tx *sql.Tx, receipt RetryGroupReceipt) (int, error) {
+	owned, err := s.ValidateRetryReceiptTx(ctx, tx, receipt)
+	if err != nil {
+		return 0, err
+	}
+	var outcome string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(final_outcome,'') FROM video WHERE id=?`, receipt.VideoID).Scan(&outcome); err != nil {
+		return 0, fmt.Errorf("read video %d outcome: %w", receipt.VideoID, err)
+	}
+	resolvedAt := time.Now().UTC().Format(time.RFC3339)
+	closed := 0
+	for _, group := range []struct {
+		table, set string
+		args       []any
+		refs       []RetryRowRef
+	}{
+		{"deferred_item", `status='completed', closed_reason=?`, []any{ClosedReasonFinalOutcome}, owned.Deferred},
+		{"error_entry", `status='resolved', resolved_at=?, closed_reason=?`, []any{resolvedAt, ClosedReasonFinalOutcome}, owned.Errors},
+	} {
+		for _, ref := range group.refs {
+			args := append(append([]any(nil), group.args...), ref.ID, receipt.VideoID, ref.OriginRunID, receipt.ReceivingRunID)
+			res, err := tx.ExecContext(ctx, `UPDATE `+group.table+` SET `+group.set+` WHERE id=? AND video_id=? AND run_id=? AND status='retrying' AND retry_run_id=?`, args...)
+			if err != nil {
+				return closed, fmt.Errorf("close final retry row %s %d: %w", group.table, ref.ID, err)
+			}
+			n, err := rowsAffected(res)
+			if err != nil {
+				return closed, err
+			}
+			if n != 1 {
+				return closed, fmt.Errorf("close final retry row %s %d: %w", group.table, ref.ID, ErrWorkNotOwned)
+			}
+			closed += n
+		}
+	}
+	first := int64(0)
+	if len(owned.Deferred) > 0 {
+		first = owned.Deferred[0].ID
+	} else if len(owned.Errors) > 0 {
+		first = owned.Errors[0].ID
+	}
+	logFamilyClosed(ctx, receipt.VideoID, first, outcome, closed)
+	return closed, nil
+}
+
 // RequeueRetryReceiptTx releases only the exact retry rows admitted by receipt.
 // It is safe to use in a disposition transaction alongside action and send-guard
 // writes: any SQL failure leaves all three unchanged when the caller rolls back.

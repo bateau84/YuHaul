@@ -152,6 +152,15 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 		}
 		ctx = context.WithValue(ctx, guardedRetryGroupKey{}, receipt)
 	}
+	// BR-039 / ARS-006 §5: a final video is never processed. Settle the claim
+	// and return before any evaluation or send.
+	class, outcome, err := state.ClassifyVideoTx(ctx, p.db, videoID)
+	if err != nil {
+		return err
+	}
+	if class == state.VideoClassFinal {
+		return p.settleFinalRetryVideo(ctx, qs, receipt, outcome)
+	}
 	v, err := p.stateStore.GetVideo(ctx, videoID)
 	if err != nil {
 		return err
@@ -282,6 +291,37 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 		p.logger.WarnContext(ctx, "retry handed to retained runtime error", attrs...)
 	}
 	return err
+}
+
+// settleFinalRetryVideo settles a claimed retry whose video is final. When this
+// run itself made the video final and was interrupted before acknowledging
+// (M2), the claim is acknowledged as completed. Otherwise another run made it
+// final, and the owned rows are closed with closed_reason='final_outcome'.
+// Neither path evaluates, writes a decision or outcome, or sends. Rows an
+// operator removed meanwhile leave nothing to settle.
+func (p *Pipeline) settleFinalRetryVideo(ctx context.Context, qs *queue.Store, receipt queue.RetryGroupReceipt, outcome state.VideoFinalOutcome) error {
+	return qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var own sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT final_outcome FROM run_video_outcome WHERE run_id=? AND video_id=?`,
+			receipt.ReceivingRunID, receipt.VideoID).Scan(&own)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read run %d outcome of video %d: %w", receipt.ReceivingRunID, receipt.VideoID, err)
+		}
+		if own.Valid && own.String == string(outcome) {
+			owned, err := qs.ValidateRetryReceiptTx(ctx, tx, receipt)
+			if errors.Is(err, queue.ErrWorkRemoved) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			return acknowledgeRetryReceiptTx(ctx, tx, receipt, owned)
+		}
+		if _, err := qs.CloseRetryReceiptFinalTx(ctx, tx, receipt); err != nil && !errors.Is(err, queue.ErrWorkRemoved) {
+			return err
+		}
+		return nil
+	})
 }
 
 // committedRetryFailureTx recognizes only the exact already-committed

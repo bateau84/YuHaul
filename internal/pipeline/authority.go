@@ -242,7 +242,13 @@ func (p *Pipeline) retainAuthorityFailure(ctx context.Context, runID int64, vide
 	reason := diag.Reason(cause, "snapshot action authority failure")
 	p.retainThenFail(ctx, runID, reason, func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
 		for _, v := range videos {
-			if v.ProcessingState == state.VideoStateCompleted {
+			// A final video is never re-queued (BR-039); classify inside the
+			// retention transaction so a concurrent finalization is seen.
+			class, _, err := state.ClassifyVideoTx(retainCtx, tx, v.ID)
+			if err != nil {
+				return err
+			}
+			if class == state.VideoClassFinal {
 				continue
 			}
 			if _, err := qs.RetainRuntimeErrorTx(retainCtx, tx, v.ID, runID, "snapshot action authority failure", reason); err != nil {
@@ -377,6 +383,7 @@ func unfinishedRunMembersTx(ctx context.Context, tx *sql.Tx, runID int64) ([]unf
 	   OR v.id IN (SELECT video_id FROM deferred_item WHERE retry_run_id=?1)
 	   OR v.id IN (SELECT video_id FROM error_entry WHERE retry_run_id=?1))
 	  AND v.processing_state <> 'completed'
+	  AND NOT `+state.FinalVideo+`
 	  AND NOT EXISTS(SELECT 1 FROM run_video_outcome o WHERE o.run_id=?1 AND o.video_id=v.id
 	   AND o.final_outcome IN ('accepted','rejected','excluded','deferred','failed','unavailable_on_youtube'))
 	 ORDER BY v.id`, runID)

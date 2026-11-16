@@ -448,6 +448,16 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 		p.failRun(ctx, runID, "load retry membership", err)
 		return
 	}
+	// BR-039: a production run routes only what it may route. This is the one
+	// place final and other-run-held videos are removed; the phases below carry
+	// no final checks of their own, and simulations skip it.
+	if p.isProductionRun(run.RunType) {
+		videos, err = p.withoutUnroutableVideos(ctx, runID, videos)
+		if err != nil {
+			p.failRun(ctx, runID, "filter routable members", err)
+			return
+		}
+	}
 	if startPhase == PhaseExclusion {
 		videos, err = p.phaseExclusion(ctx, runID, videos)
 		if err != nil {

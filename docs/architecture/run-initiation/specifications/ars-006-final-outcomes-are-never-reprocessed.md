@@ -6,7 +6,7 @@ tags: [architecture, specification, outcomes, lifecycle, retry, deferred-queue, 
 timestamp: 2026-11-12T00:00:00Z
 ---
 
-**Status:** accepted — exact implementation contract; step 1 (§1.1, §1.3, §2) implemented, the rest not (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
+**Status:** accepted — exact implementation contract; steps 1, 2a and 2b (§1.1, §1.3, §2, §3–§6) implemented, the rest not (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
 
 It amends:
 
@@ -481,7 +481,20 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
 - §1.3 vocabulary: `queue.ClosedReasonFinalOutcome`, `ErrVideoAlreadyFinal`, `AlreadyFinalError`, `ClosedReason` and `VideoFinalOutcome` on `ErrorEntry` and `DeferredItem` (read by every queue select, `video_final_outcome` only when `closed_reason` is set), the queue JSON views, the `diag` code `original_decision_unavailable`, and `ClosedReason`, `VideoFinalOutcome`, `RunVideoDetail.continued_actions` in `web/src/types.ts`;
 - §2 `state.FinalVideo`, `PartlyDoneVideo`, `RoutableByRun`, `ClassifyVideoTx`, `OriginalDecisionTx` (`internal/state/final_outcome.go`).
 
-Not implemented: §1.2 migration 028, §3–§8, the `continued_actions` projection, `decisionAuthority`, F2, F4's `decisionAuthority` parts, K-series tests.
+**Steps 2a and 2b — implemented 2026-11-16** (commits 07c6429 and the main-loop filter commit):
+
+- 2a, §3–§4: claim classification and closing, the `ClaimResult`, `closeFinalFamilyTx`, the one-transaction user-retry refusal and the `409 video_already_final` answer (tests K1, K2, K8a parts).
+- 2b, §5–§6:
+  - `Pipeline.withoutUnroutableVideos` (`internal/pipeline/routable_filter.go`) applies `state.RoutableByRun` once, right after `withoutRetryVideos`, only when `isProductionRun`. It runs for every start phase. Dropped ids are logged at debug, and counts by reason (`final`, `held_elsewhere`) at info. No per-function final check exists in exclusion, duplicate detection or routing, so none was removed.
+  - `processRetryVideo` classifies first: a `final` video is settled by `settleFinalRetryVideo`. When the run's own `run_video_outcome` equals the video's outcome, the receipt is acknowledged (items `completed`, `closed_reason` NULL). Otherwise `queue.Store.CloseRetryReceiptFinalTx` closes the owned rows with `closed_reason='final_outcome'`. Rows an operator removed leave nothing to settle.
+  - `unfinishedRunMembersTx` adds `AND NOT state.FinalVideo`. It is the single source for the stop, discard and failure-sweep handoffs. `retainAuthorityFailure` classifies inside its retention transaction and skips `final` videos.
+  - Tests: K3, K4, K5, K17, K19 and the final retry dispatch (`final_filter_test.go`, `final_filter_integration_test.go`).
+
+**Deviation (K19).** Run Now resumes only a manual `run_now` run interrupted by `time_limit`. The Run Now variant of K19 therefore uses a manual `run_now` run for R; the startup-recovery variant uses a scheduled run. R's two targets are deferred through a quota limit with no room, because the pre-flight prices a video's whole action batch. R2 sends A and defers B through a provider `quotaExceeded` on B. The final clause of K19 ("the next new run continues V under R2 and sends only B") needs §7 continuation and is not asserted; the test asserts that B's item is left pending and unchanged, or that V is still partly done with no queue row in the dismissed variant.
+
+**Continuation-pending tests.** Six integration tests fail identically at 07c6429, before 2b, with and without `-race` (the race run reports no data race). They are expected to pass once §7 continuation lands: `TestV2_ScanAndSendTimeVetoAgree`, `TestRetryRecovery_CompletedTargetSurvivesFreshEvaluation` and `TestEndLegacyRunChangesOnlyStatusAndReason`, `TestEndedRunsAreOutsideStartupClassification`, `TestEndedRunNeverResumedAndNeverBlocks`, `TestEndableReadAndStaleTrue`. They exercise a partly done video claimed without §7 continuation. §7 owns them.
+
+Not implemented: §1.2 migration 028, §7 (continuation, `decisionAuthority`, `ClaimPlaylistSend` clause), §8 projections, F2, F4's `decisionAuthority` parts, and the remaining K-series tests (K6–K16, K18, K20–K22).
 
 **Deviation.** `FinalVideo` wraps the column in `COALESCE(v.final_outcome, '')`. `video.final_outcome` is nullable, and without it a NULL outcome makes `FinalVideo`, `NOT FinalVideo` and `PartlyDoneVideo` NULL, so `RoutableByRun` would drop every video with a NULL outcome. Classification is otherwise as specified.
 
