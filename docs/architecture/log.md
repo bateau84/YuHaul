@@ -8,6 +8,16 @@ timestamp: 2026-11-11T00:00:00Z
 
 # Architecture Update Log
 
+## 2026-11-16
+
+**Video search: decision O5 = S1 (Architect):** The user chose option S1 on 2026-11-16: FTS5 `secure-delete` off, plus an FTS5 optimize after each sweep. The choice was relayed to the architect by the coordinating session; the evidence is the spike in commit `acf141b` ([ARS-001 §10.10](video-search/specifications/ars-001-video-search-api-and-queries.md)). [ADR-001](video-search/decisions/adr-001-held-title-search-by-request-time-scan.md) and the topic index are updated.
+
+- **Contract:** secure-delete is removed (migration 029 no longer sets it; R6 asserts it is off). Purges are logical at once (I2). Removed trigrams leave the live segments at the next complete optimize (new I2b).
+- **Optimize:** `metadata.OptimizeSearchIndex` runs after every sweep (`RunLifecycle` step 3, even when earlier steps fail) and at `store.Open` after a reconcile that removed entries. It is incremental: a first `merge` of `-OptimizeMergePages` (500 pages, about 2 MB), then `+OptimizeMergePages` steps until `total_changes()` moves by less than 2. Each step is one write-lock-first transaction (`BEGIN IMMEDIATE`, dedicated connection), so writers wait at most one step. Cancellation, errors and `OptimizeMaxSteps` (1000) stop it as incomplete; the next call resumes. A single `optimize` command is not used.
+- **Tests:** R1 now proves logical removal only (MATCH, `fts5vocab`, content, docsize and doc rows). Bytes may linger in segments until the optimize, and in freed pages until reused, as with `transient_metadata` today. New R8 checks with a byte probe that optimize clears the segments (positive control first), plus interruption and concurrency. The §10.10 pass rule is kept and now applies to secure-delete off, which passed.
+- **Gate:** optimize cost was not measured by the spike. New P3 criterion (f) (complete, total ≤ 60 s, every step ≤ 1 s) and gated test G-O must pass before release.
+- **Open:** O5 is closed. O2 (the connection-wide `secure_delete` pragma) stays a compliance question. O4 now also covers the 60 s optimize default. New F10: with secure-delete off, a contentless-delete table is no longer ruled out; not adopted.
+
 ## 2026-11-12
 
 **Video-search write-cost spike (task fts-spike, Plan revision 20): FAIL with secure-delete on.** Measured on 150,000 generated multi-script titles, and recorded in [ARS-001 §10.10](video-search/specifications/ars-001-video-search-api-and-queries.md). A purge costs about 5–7 ms with `secure-delete = 1` and about 0.2 ms with it off. A 200-row `Expire` transaction has p95 1.25 s (tmpfs) or 2.45 s (disk), above the 1 s limit. Expiring 5,000 rows takes 27–29 s on tmpfs and 38–52 s on disk, against the 30 s limit, and smaller batches make the total worse. Decision O5 (S1–S4) is open and blocks building. `IndexWriteBatch` is unchanged.

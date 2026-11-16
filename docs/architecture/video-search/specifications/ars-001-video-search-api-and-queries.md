@@ -1,9 +1,9 @@
 ---
 type: specification
 title: ARS-001 — Video Search — HTTP API, Input Classification, Matcher, Keyset Paging, Read Queries and Tests
-description: Exact contract for BR-038 and QS-001. GET /api/videos/search classifies the input (empty, too long, link, video ID, too short, name) and returns a tagged body; GET /api/videos/{videoId} returns the video view. Name search takes candidates from an FTS5 trigram index over Go-folded keys of held titles (migration 029, secure-delete, purge triggers, stable document map, reconcile at open and at the sweep), or from a full scan when the key is shorter than 3 code points, and decides every candidate in Go with NFC plus full case folding and the held rule; results use an opaque keyset cursor and total counts only re-checked matches. The view joins outcome, queue state and per-run decisions, with simulation kept apart. No YouTube call, no write by search. Includes the conformance, retention-proof and QS-001 timing tests.
+description: Exact contract for BR-038 and QS-001. GET /api/videos/search classifies the input (empty, too long, link, video ID, too short, name) and returns a tagged body; GET /api/videos/{videoId} returns the video view. Name search takes candidates from an FTS5 trigram index over Go-folded keys of held titles (migration 029, purge triggers, stable document map, reconcile at open and at the sweep, an incremental FTS5 optimize after each sweep), or from a full scan when the key is shorter than 3 code points, and decides every candidate in Go with NFC plus full case folding and the held rule; results use an opaque keyset cursor and total counts only re-checked matches. The view joins outcome, queue state and per-run decisions, with simulation kept apart. No YouTube call, no write by search. Includes the conformance, retention-proof and QS-001 timing tests.
 tags: [architecture, specification, videos, search, api, retention, sqlite, fts5, migration, paging, unicode, performance, simulation]
-timestamp: 2026-11-12T00:00:00Z
+timestamp: 2026-11-16T00:00:00Z
 ---
 
 **Status:** accepted. This is the exact implementation contract.
@@ -13,7 +13,8 @@ timestamp: 2026-11-12T00:00:00Z
 What is implemented, as of 2026-11-12:
 
 - **Done:** the pure code, metadata reads, `Service`, both handlers and tests T1–T26, T30 and T31 (option B scan path). A server test checks the SPA data shape against `web/src/types.ts`. The P1–P4 harness exists (commit `e4cc1f7`).
-- **Not built:** §10, which includes the write-cost spike (§10.10), migration 029, the writer changes, the batched sweep, the reconcile and recreate, and tests R1–R7, D1, D2 and F-R.
+- **Decided 2026-11-16:** O5 = S1. Secure-delete is removed from the contract, and an incremental optimize runs after each sweep and each removing reconcile (§10.10). The user's decision was relayed by the coordinating session; spike evidence is commit `acf141b`.
+- **Not built:** §10, which includes migration 029, the writer changes, the batched sweep, the reconcile and recreate, and tests R1–R8, D1, D2, F-R and G-O.
 - **Revised 2026-11-12 after critique (CHANGES REQUIRED, session `ses_e2e61920affeUTLBU835PmTm85`):** migration renumbered to 029; `BEFORE INSERT` purge trigger for `REPLACE`; write-cost spike, batched expiry, P3 write-side criteria and drop-and-recreate rebuild; damaged-index and rollback procedures; write-lock-first reconcile; a precise statement of what R1 proves; key version; per-stage P2 timing.
 - **Not passing or not run:** the P1–P4 gate must be rerun on the indexed path. SPA test T32 has not run.
 
@@ -71,7 +72,7 @@ The browser sends whatever the user typed. The server alone decides what the tex
 | AC13 simulation labelled | §4.4 `mode`, §6.4 `simulation_only`. Latest outcome and queue state read only production tables (§6.5–§6.6). |
 | AC14 no YouTube call | §8.1 dependency rule, test T30. |
 | AC15 read only | §8.2, test T31. |
-| AC16 no new retention | ADR-001 constraints 1–6; §6.1 cutoff and Go re-check; §10 index lifecycle (purge triggers, secure-delete, stable key, reconcile); `Cache-Control: no-store`; §8.4 no client persistence; tests T19–T21 and R1–R7. |
+| AC16 no new retention | ADR-001 constraints 1–6; §6.1 cutoff and Go re-check; §10 index lifecycle (purge triggers, stable key, reconcile, optimize after each sweep); `Cache-Control: no-store`; §8.4 no client persistence; tests T19–T21, R1–R8 and G-O. |
 | AC17, QS-001 AC1–AC4 | §10 index path; §9.2, tests P1–P4 rerun as the gate; D1 (the index path never misses a scan-path match). |
 
 ## Scope
@@ -558,7 +559,7 @@ Use the real server path where marked:
 - 150,000 imported references (`title_fingerprint`, `source = 'user_import'`, no `video` row);
 - 1–3 `route_decision` and `run_video_outcome` rows per video, across about 200 runs, 20 of them simulations;
 - 5,000 deferred items and 1,000 error entries in mixed states;
-- for P3 only: 5,000 of the held rows get `expires_at` in the past, before the run starts, so the run's sweep purges 5,000 index entries. This is about one day's expiry at QS-001's load (150,000 / 30), and it puts the secure-delete cost (§10.10) inside the measured run.
+- for P3 only: 5,000 of the held rows get `expires_at` in the past, before the run starts, so the run's sweep purges 5,000 index entries. This is about one day's expiry at QS-001's load (150,000 / 30), and it puts the purge cost and the sweep's optimize (§10.10) inside the measured run.
 
 **After seeding.** The seed writes rows with raw SQL, so it must call `metadata.ReconcileSearchIndex` once after the seed and before any timed request. The harness reports the reconcile's duration and its inserted count, which must be 150,000, for information. This is the first-start backfill cost on that host (§10.4).
 
@@ -584,7 +585,8 @@ Use the real server path where marked:
 It reports:
 
 - run wall duration for A, B and C;
-- the longest single write transaction of the sweep (§10.10 batches);
+- the longest single write transaction of the sweep (§10.10 batches and optimize steps);
+- the optimize's steps, step p50, p95 and max, and total (§10.10);
 - every error or log record whose chain contains SQLite result code 5 (`SQLITE_BUSY`, including `SQLITE_BUSY_SNAPSHOT`) or 6 (`SQLITE_LOCKED`).
 
 Titles use generated words. Planted tokens match exactly 20,000, 5,000, 500, 1 and 0 held titles, all within the 150,000. The generator records the ground-truth match set for each token. Time each request on the server as the duration of `ServeHTTP` of the real mux until the complete body is written.
@@ -593,7 +595,7 @@ Titles use generated words. Planted tokens match exactly 20,000, 5,000, 500, 1 a
 |---|---|---|
 | P1 | ≥200 ID requests, one at a time: typed found and not found, all three link forms, through `/api/videos/search`; and ≥200 `GET /api/videos/{id}` | p95 ≤ 1 s for each endpoint (QS-001 AC1) |
 | P2 | ≥200 first-page name searches spread over the planted tokens; separately ≥200 requests for page ≥100, reached by following `next_cursor` on the 5,000- and 20,000-match tokens (only the page-100+ requests are timed) | p95 ≤ 2 s for each set at 150,000 held titles (AC2). **This is ADR-001's gate.** Option B failed it on 2026-11-12. Option C must pass it before release. If it still fails, follow ADR-001 "Confirmation and reconsideration"; do not weaken the re-check or `total` |
-| P3 | Repeat P1–P2 while a production run against the controlled provider processes ≥1,000 videos and its sweep expires 5,000 titles (copy A). Run the same run on copies B and C (above) | All of: (a) p95 limits hold on A; (b) `run_video_outcome`, `executed_action`, `deferred_item` and `error_entry` contents match between A and B, ignoring timestamps (AC3); (c) **no `SQLITE_BUSY` or `SQLITE_LOCKED`** in A or B, in any log record or returned error, from the run or from search; (d) **run-duration budget:** B's wall duration ≤ 1.15 × C's; (e) no sweep write transaction lasts longer than 1 s. The thresholds in (d) and (e) are architecture defaults (finding O4) |
+| P3 | Repeat P1–P2 while a production run against the controlled provider processes ≥1,000 videos and its sweep expires 5,000 titles (copy A). Run the same run on copies B and C (above) | All of: (a) p95 limits hold on A; (b) `run_video_outcome`, `executed_action`, `deferred_item` and `error_entry` contents match between A and B, ignoring timestamps (AC3); (c) **no `SQLITE_BUSY` or `SQLITE_LOCKED`** in A or B, in any log record or returned error, from the run or from search; (d) **run-duration budget:** B's wall duration ≤ 1.15 × C's; (e) no sweep write transaction lasts longer than 1 s, including each optimize step; (f) **optimize cost:** the sweep's `OptimizeSearchIndex` reports `Complete`, and its total is ≤ 60 s; steps, step p95 and max, and total are reported. The thresholds in (d)–(f) are architecture defaults (finding O4). The spike did not measure optimize, so (f) and test G-O (§10.11) are the first check of it, and both must pass before release |
 | P4 | In P2–P3, every response is `200`, and the union of all pages for each token equals the generator's ground truth exactly | No time-out, error or omission (AC4) |
 
 ## 10. Title search index (ADR-001 option C)
@@ -603,7 +605,7 @@ Titles use generated words. Planted tokens match exactly 20,000, 5,000, 500, 1 a
 The index is a list of candidates that is always up to date and never decides anything.
 
 - **Adding.** The Go code that writes a held title also adds `Key(title)` to an FTS5 trigram index, in the same transaction.
-- **Removing.** SQL triggers remove the entry before any insert and after any change or delete of that video's title row, whichever program does it. FTS5 `secure-delete` removes the old trigrams from the index structures as well.
+- **Removing.** SQL triggers remove the entry before any insert and after any change or delete of that video's title row, whichever program does it. The removal is logical at once: no query or term list can see the entry, and its stored copy of the key is deleted. The old trigrams stay in the index segments, hidden behind delete markers, until an FTS5 optimize merges them away. The optimize runs after every sweep, and after every reconcile that removes entries (§10.10).
 - **Searching.** Search asks the index which keys contain the search key. It then re-reads each source row and decides with `metadata.Held` and `titlekey.Contains` (§6.1).
 - **Repair.** A reconcile at `store.Open` and at the sweep removes entries that should not exist and adds missing ones. A rebuild drops and recreates the index; it never deletes entries one by one.
 
@@ -630,7 +632,6 @@ CREATE VIRTUAL TABLE title_search USING fts5(
     tokenize = 'trigram case_sensitive 1', -- k is already folded; no tokenizer folding
     detail   = full                        -- phrase queries longer than 3 code points need positions
 );
-INSERT INTO title_search(title_search, rank) VALUES ('secure-delete', 1);
 
 CREATE TABLE title_search_state (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
@@ -672,8 +673,9 @@ Rules:
   - `INSERT OR IGNORE` on an existing row purges the entry but leaves the row unchanged. That is a recall gap until the next reconcile, never a retention breach. No production writer uses `OR IGNORE`.
 - **No backfill in SQL.** SQL cannot compute `Key`. The backfill is the Go reconcile in `store.Open` (§10.4). The index is empty, and `key_version` and `built_at` are NULL, until that reconcile finishes.
 - **No foreign key from `title_search_doc` to `transient_metadata`.** Orphans are removed by the triggers and the reconcile, so a constraint would add nothing.
-- **Table type.** `title_search` must stay a regular, content-storing FTS5 table: no `content=''`, no `contentless_delete`, no external `content=`. Secure-delete needs the stored tokens. A contentless-delete table only writes a tombstone and keeps the trigrams (ADR-001, observed experiment).
-- **DDL in two places.** `store.RecreateSearchIndex` (§10.9) runs the same `CREATE` statements for the two index tables, the `secure-delete` setting and the three triggers, from a Go constant. Test R6 checks that the `sqlite_master.sql` text for these five objects is identical after migration 029 and after `RecreateSearchIndex`.
+- **Table type.** `title_search` must stay a regular, content-storing FTS5 table: no `content=''`, no `contentless_delete`, no external `content=`. A regular table deletes a removed entry's stored key (`title_search_content`) in the purging statement. An external-content table would key on an unstable rowid (ADR-001).
+- **No secure-delete.** The FTS5 `secure-delete` option stays at its default, 0. It was dropped by decision O5 on 2026-11-16 (§10.10, ADR-001), because it costs 5–7 ms per purge. Physical removal of a removed entry's trigrams from the live index segments is done by the optimize (§10.10).
+- **DDL in two places.** `store.RecreateSearchIndex` (§10.9) runs the same `CREATE` statements for the two index tables and the three triggers, from a Go constant. Test R6 checks that the `sqlite_master.sql` text for these five objects is identical after migration 029 and after `RecreateSearchIndex`.
 - **Ordering and release (F1).**
   - BR-039 owns migrations 027 and 028 ([ARS-006](../../run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) §1.1–§1.2). This migration is 029.
   - golang-migrate applies only versions above the database's current version. A database that reached 029 before 027 or 028 existed would never receive them.
@@ -740,6 +742,18 @@ func ReconcileSearchIndex(ctx context.Context, db *sql.DB, now time.Time) (Recon
 
 type ReconcileStats struct{ OrphansRemoved, Purged, Added, Batches int }
 
+// OptimizeSearchIndex runs the incremental FTS5 optimize of §10.10: one
+// 'merge' command per write-lock-first transaction (§10.5), until FTS5
+// reports no more work or ctx ends. It returns counts and timings only.
+func OptimizeSearchIndex(ctx context.Context, db *sql.DB) (OptimizeStats, error)
+
+type OptimizeStats struct {
+    Steps    int
+    Complete bool          // false when stopped by ctx, an error or the step cap
+    Longest  time.Duration // longest single step transaction
+    Total    time.Duration
+}
+
 // SearchIndexReady reports, read in tx, that title_search_state.built_at IS NOT NULL
 // and key_version = titlekey.Version().
 func SearchIndexReady(ctx context.Context, tx *sql.Tx) (bool, error)
@@ -753,8 +767,8 @@ Callers:
 
 | When | Where | On error |
 |---|---|---|
-| **Startup backfill and repair** | `store.Open`, after `BackfillRouteIdentities`, before returning: if `key_version` is not NULL and differs from `titlekey.Version()`, call `RecreateSearchIndex` (§10.9) first; then `ReconcileSearchIndex`. `cmd/server` calls `Open` before the scheduler and the listener, so the index is complete before any request. At first start after 029, or after a recreate, this is the backfill: it folds and inserts every indexable title. | Startup aborts, like the route backfill. Recovery is in §10.9. |
-| **Sweep** | `metadata.Manager.RunLifecycle`, in this order: (1) `ExpireStale`, whose `Expire` batches purge through the trigger; (2) `ReconcileSearchIndex(ctx, m.store.DB(), m.now().UTC())`, which runs even if `ExpireStale` failed or expired 0 rows; (3) `RefreshRoutedNearExpiry`, which runs only if `ExpireStale` succeeded, as today. Errors are combined with `errors.Join`. | The pipeline already logs a warning and continues (`pipeline.go` line 408). Search stays correct: retention is enforced by the triggers and the re-check. Only a recall gap from a non-Go writer can last until the next reconcile. |
+| **Startup backfill and repair** | `store.Open`, after `BackfillRouteIdentities`, before returning: if `key_version` is not NULL and differs from `titlekey.Version()`, call `RecreateSearchIndex` (§10.9) first; then `ReconcileSearchIndex`; then, if that reconcile removed any entry (`OrphansRemoved + Purged > 0`), `OptimizeSearchIndex`. `cmd/server` calls `Open` before the scheduler and the listener, so the index is complete before any request. At first start after 029, or after a recreate, this is the backfill: it folds and inserts every indexable title. | Startup aborts, like the route backfill. Recovery is in §10.9. |
+| **Sweep** | `metadata.Manager.RunLifecycle`, in this order: (1) `ExpireStale`, whose `Expire` batches purge through the trigger; (2) `ReconcileSearchIndex(ctx, m.store.DB(), m.now().UTC())`, which runs even if `ExpireStale` failed or expired 0 rows; (3) `OptimizeSearchIndex(ctx, m.store.DB())`, which runs after every sweep, even if step 1 or 2 failed or removed nothing; (4) `RefreshRoutedNearExpiry`, which runs only if `ExpireStale` succeeded, as today. Errors are combined with `errors.Join`. | The pipeline already logs a warning and continues (`pipeline.go` line 408). Search stays correct: logical removal is enforced by the triggers and the re-check. Only a recall gap from a non-Go writer can last until the next reconcile. An optimize that fails or stops early leaves removed trigrams in the segments until the next complete optimize; this is logged with its counts. |
 
 The sweep's reconcile is the "purge on the sweep":
 
@@ -763,7 +777,7 @@ The sweep's reconcile is the "purge on the sweep":
 
 ### 10.5 Write-lock-first transactions (F5)
 
-`ReconcileSearchIndex` and `RecreateSearchIndex` read and then write. In WAL mode, a `BEGIN DEFERRED` transaction that reads first and writes later can fail. If another connection commits between its first read and its first write, the upgrade to a write lock fails with `SQLITE_BUSY_SNAPSHOT`, and `_busy_timeout` does not retry it.
+`ReconcileSearchIndex`, `RecreateSearchIndex` and each `OptimizeSearchIndex` step read and then write. In WAL mode, a `BEGIN DEFERRED` transaction that reads first and writes later can fail. If another connection commits between its first read and its first write, the upgrade to a write lock fails with `SQLITE_BUSY_SNAPSHOT`, and `_busy_timeout` does not retry it.
 
 So each of their transactions takes the write lock at its start, with `BEGIN IMMEDIATE` semantics:
 
@@ -817,7 +831,8 @@ indexed := SearchIndexReady(tx) && utf8.RuneCountInString(N) >= 3 && !strings.Co
 | # | Invariant | Enforced by |
 |---|---|---|
 | I1 | **Bounded to the source.** At every commit, each `title_search` row `x` has a `title_search_doc` row `(x, v)`, and a `transient_metadata` row `v` exists. That row has not been inserted over, replaced, or changed in `video_id`, `title`, `is_active`, `expired_at`, `fetched_at` or `expires_at` since the entry was added. So no entry survives `Expire`, a title change, a replace or a delete, whatever the writer. | §10.2 triggers; reconcile steps 1–3 |
-| I2 | **Removed from the index structures.** A purged entry's trigrams are removed from the live segment content of `title_search_data`, and its `title_search_content` and `title_search_docsize` rows are deleted, in the same transaction. This is a statement about what SQL can read in those tables, not about bytes left in freed pages or the WAL (§10.11, ADR-001 O2). | `secure-delete = 1` on a regular FTS5 table |
+| I2 | **Logical removal at once.** In the purging statement's transaction, the entry stops matching any `MATCH`, `fts5vocab` stops counting it, and its `title_search_content`, `title_search_docsize` and `title_search_doc` rows are deleted. | Regular FTS5 table; §10.2 triggers |
+| I2b | **Segment removal at the next complete optimize.** The removed entry's trigrams stay in live `title_search_data` segments, behind delete markers, until the end of the first complete `OptimizeSearchIndex` that starts after the purge. That is normally the next sweep, at the start of the next production run. FTS5 automerge may remove them earlier. After that, bytes can remain only in freed pages, in-page free space, WAL frames and backups, until reused or overwritten. That is the same as `transient_metadata` today when `Expire` sets `title = NULL` (ADR-001 O2). | §10.10 optimize |
 | I3 | **Completeness.** After each §10.3 writer commits, and after each complete reconcile, every row that is `Indexable` at that writer's or reconcile's `now` has exactly one entry, with `k = Key(title)` under `key_version`. | §10.3, §10.4 |
 | I4 | **Only held, unexpired titles.** An entry is added only for an `Indexable` row. It is removed at the first of: an insert, change or delete of the source row, or the next reconcile after the row stops being indexable. Between `expires_at` and that point, the entry exists only while the source title also still exists, and it is never returned. | I1, §10.4, §6.1 filter |
 | I5 | **The index never decides.** Results and `total` come only from rows that pass `Held(row, cutoff)` and `Contains(Key(m.title), N)`. `k` is never read back, matched against or returned. | §6.1 |
@@ -831,12 +846,12 @@ indexed := SearchIndexReady(tx) && utf8.RuneCountInString(N) >= 3 && !strings.Co
 
 1. drops the three triggers;
 2. runs `DROP TABLE title_search` (FTS5 drops its shadow tables with it) and `DROP TABLE title_search_doc`;
-3. runs the §10.2 `CREATE` statements again (two tables, `secure-delete`, three triggers) from the Go constant;
+3. runs the §10.2 `CREATE` statements again (two tables, three triggers) from the Go constant;
 4. sets `key_version = NULL` and `built_at = NULL`.
 
 The reconcile that follows is the backfill. Rules:
 
-- **Never rebuild by `DELETE FROM title_search`.** With secure-delete, each deleted entry costs about as much as a purge, which the critic measured at about 3 ms in a dense index: about 7.5 minutes for 150,000 entries, holding the write lock.
+- **Never rebuild by `DELETE FROM title_search`.** Each deleted entry writes a delete marker, and its trigrams stay in the segments until an optimize rewrites the whole index. Dropping the tables frees everything at once and costs no merge.
 - **Never use FTS5 `'rebuild'` as a repair.** It rebuilds from `title_search_content`, not from `transient_metadata`, so it cannot fix a gap or a wrong key.
 - **The trigger for a rebuild** is `store.Open` seeing a `key_version` that is set and differs from `titlekey.Version()`, or an operator who resets it (below).
 - **Leftovers.** Dropping the tables frees their pages. Freed-page bytes follow §10.11.
@@ -882,14 +897,14 @@ Search on the indexed path answers `500` (§10.7). This is a new availability de
 
 ### 10.10 Write cost and batching (F3)
 
-The critic measured about 3 ms per secure-delete purge in a dense test index of 150,000 near-identical titles. Real titles differ, and the cost is not yet known for them. So:
+**Decision O5 (2026-11-16): option S1.** `secure-delete` is off, and an incremental FTS5 optimize runs after each sweep and after each reconcile that removes entries. The user chose S1 on 2026-11-16, after the spike below failed with secure-delete on. The choice was relayed to the architect by the coordinating session, and the spike evidence is commit `acf141b`. History: the critic measured about 3 ms per secure-delete purge in a dense test index; the spike then measured 5–7 ms on realistic titles. The rest of this section keeps that history and specifies the chosen design.
 
 - **Batch constant.** `metadata.IndexWriteBatch = 200`. It is the most rows that one transaction may purge or add in:
   - `ExpireStale`;
   - `CleanupExpired`;
   - each reconcile batch.
 
-  At 3 ms per row that is about 0.6 s of write lock per transaction, below P3's 1 s limit. The spike (task 1 of the implementation plan) may change the value, and the change is recorded here.
+  With secure-delete off, the spike measured a 200-row `Expire` transaction at p95 ≤ 0.48 s on disk, below P3's 1 s limit. The value stays 200. A change is recorded here.
 - **`ExpireStale`.** It still lists up to 10,000 IDs. It now calls `Expire` once per chunk of at most `IndexWriteBatch` IDs, each in its own transaction. If a chunk fails, it returns the number expired so far, joined with the error. The earlier chunks stay committed, and the next sweep continues.
 - **`CleanupExpired`.** `limit` is clamped to `IndexWriteBatch`.
 - **Discovery** purges only rows it overwrites and adds one entry per held title, inside its existing transaction. The spike measures this cost. P3's run-duration budget bounds it.
@@ -903,13 +918,13 @@ The critic measured about 3 ms per secure-delete purge in a dense test index of 
   - the add cost per discovery insert;
   - reconcile backfill time;
   - the database and WAL size after backfill.
-- **Pass:** with `secure-delete = 1`, both of these hold:
+- **Pass** (rule unchanged; it was written for `secure-delete = 1`, and since decision O5 it applies to the chosen `secure-delete = 0`, which the spike measured as passing). Both of these hold:
   - an `Expire` batch of `IndexWriteBatch` rows commits in ≤ 1 s at p95;
   - expiring 5,000 rows takes ≤ 30 s in total.
 
   Otherwise, lower `IndexWriteBatch` until the batch limit holds. If even 50 rows per batch exceed 1 s, or 5,000 rows exceed 30 s, secure-delete is too costly. Then the options below go to a decision.
 
-**Spike result (2026-11-12): FAIL with `secure-delete = 1`.** Decision O5 is now open (ADR-001 O5). `IndexWriteBatch` stays 200 until O5 is decided.
+**Spike result (2026-11-12): FAIL with `secure-delete = 1`; PASS with `secure-delete = 0`.** Decision O5 was opened and was closed on 2026-11-16 with S1 (above). `IndexWriteBatch` stays 200.
 
 Setup. Throwaway code outside the repository, not committed. Bundled `modernc.org/sqlite` v1.58.0, WAL, the production DSN. The schema is the §10.2 DDL and the real `transient_metadata` columns. Host: i7-10510U (4 cores, 8 threads), 14 GB RAM. The host was shared with other Go build and test jobs (load average 1.6–4.7), so wall times are noisy and best read as upper bounds. Data: 150,000 rows, each indexed under `lower(title)`, an approximation of `Key`, because `titlekey` is internal.
 - **Titles.** Generated, not copied. Vocabulary of about 150,000 pseudo-words with Zipf frequencies, 20–100 code points (p5/p50/p95 = 21/57/94). Scripts: Latin 75%, Cyrillic 8%, Han 6%, kana 4%, Greek 3%, Arabic 3%. About 20% end with an emoji. They also contain digits, separators such as ` - ` and ` | `, and mixed-in Latin words. This sample is not drawn from real held titles.
@@ -947,44 +962,57 @@ Consequences:
 - `secure-delete = 0` passes by a wide margin (2.5–5.6 s for 5,000 rows, 200-row p95 ≤ 0.48 s). Backfill, size and add cost do not depend on the setting.
 - Not measured: S1's `optimize` and S2's drop-and-recreate (the backfill time above is S2's rebuild cost, 9–23 s with search on the scan path meanwhile). S3 and S4 are decisions, not measurements. Measure S1 before choosing it.
 
-**Alternatives if secure-delete is too costly.** These are recorded for a decision, not chosen. Each one changes when a removed title's trigrams leave the index structures, so the compliance owner decides together with the user (ADR-001 O5).
+**Alternatives considered for O5.** **S1 was chosen on 2026-11-16**; S2–S4 are kept as history. Each option changes when a removed title's trigrams leave the index structures.
 
 | # | Option | What changes | Cost |
 |---|---|---|---|
-| S1 | `secure-delete = 0`, plus `INSERT INTO title_search(title_search) VALUES('optimize')` at the end of each sweep | Purges are logical at once: the trigger and the re-check still hide the title. The old trigrams stay in segment b-trees, behind tombstones, until the `optimize` at the end of the same sweep. A title cleared outside the sweep, by `Refresh` or discovery, keeps its old trigrams until the next sweep. | `optimize` rewrites the whole index: one long write transaction per sweep, to be measured |
+| S1 (**chosen**) | `secure-delete = 0`, plus an optimize at the end of each sweep (realized incrementally; see "Optimize" below) | Purges are logical at once: the trigger and the re-check still hide the title. The old trigrams stay in segment b-trees, behind tombstones, until the `optimize` at the end of the same sweep. A title cleared outside the sweep, by `Refresh` or discovery, keeps its old trigrams until the next sweep. | `optimize` rewrites the whole index: one long write transaction per sweep, to be measured |
 | S2 | `secure-delete = 0`, plus a drop-and-recreate (§10.9) at the end of each sweep | Same window as S1. No tombstones at all after the sweep. | A full backfill each sweep; the index is not ready during the rebuild, so search uses the scan |
 | S3 | Keep secure-delete with a smaller batch, and run the sweep only when no run is writing | No change to retention | A longer sweep; needs a scheduling change in the pipeline |
 | S4 | Return to option B (scan) and ask the requirements owner to relax QS-001 | No index | Fails QS-001 as it stands |
+
+**Optimize (S1), normative.**
+
+- **What it does.** FTS5's `optimize` merges every segment of the index into one. When segments merge, a removed entry's trigrams and its delete markers cancel out, so the trigrams leave the live segments. A single `optimize` command rewrites the whole index (about 53 MB at 150,000 titles, spike) in one transaction. That would hold the write lock for an unmeasured time, so it is **not** used. The same result is reached incrementally, as the FTS5 documentation describes for the `merge` command.
+- **Steps.** `OptimizeSearchIndex` runs steps until done:
+  1. Each step is one write-lock-first transaction on a dedicated connection (§10.5): `BEGIN IMMEDIATE`; `SELECT total_changes()`; one `merge` command; `SELECT total_changes()`; `COMMIT`.
+  2. The first step runs `INSERT INTO title_search(title_search, rank) VALUES('merge', -OptimizeMergePages)`. The negative value starts a full merge of all existing segments. Every later step runs the same command with `+OptimizeMergePages`, which continues that merge without restarting it when other writers add segments meanwhile.
+  3. The loop stops as **complete** when a step's `total_changes()` difference is below 2 (FTS5 found no more work).
+  4. It stops as **incomplete** when `ctx` ends (checked between steps), a step fails (that step rolls back; earlier steps stay committed) or `OptimizeMaxSteps` steps have run. The next optimize call starts with a negative step again, which takes over the unfinished work.
+- **Batching.** `metadata.OptimizeMergePages = 500` pages of about 4 KB each (FTS5 `pgsz` default 4050), so about 2 MB of merged data per step. `metadata.OptimizeMaxSteps = 1000`. Both are initial values; the gate measurement (P3, G-O) may change `OptimizeMergePages`, and any change is recorded here.
+- **Lock behaviour.** Each step holds the write lock only for its own transaction. Between steps the lock is released, so discovery, `Expire` and `Refresh` interleave, waiting at most one step. Readers, including search, are never blocked (WAL). A writer that waits longer than `_busy_timeout` (5 s) would get `SQLITE_BUSY`, which is why a step must stay ≤ 1 s (P3 (e)).
+- **When.** After every sweep (§10.4, `RunLifecycle` step 3), and at `store.Open` after a reconcile that removed entries. Not after `Refresh` or discovery purges outside the sweep. Their old trigrams wait for the next sweep's optimize (I2b).
+- **What it does not do.** It does not touch freed pages, WAL frames or backups (ADR-001 O2, a separate compliance question). It never changes which entries exist, so search results are the same before and after (D1 is rerun after an optimize).
+- **Logging.** Steps, `Complete`, the longest step and the total, never terms or keys.
+
+**Optimize cost is not yet measured.** The spike did not measure it. It must be measured before release, as part of the gate: P3 criterion (f) and test G-O (§10.11).
 
 ### 10.11 Retention proof and index tests
 
 All of these tests use `store.Open` on a temporary file, with the bundled modernc SQLite.
 
-**What R1 proves, and what it does not (F6).** After a purge, R1 shows four things for a marker title:
+**What R1 proves, and what it does not.** R1 proves **logical removal** (I2). Right after a purge, for a marker title:
 
 1. no FTS5 query (`MATCH`) can find it;
-2. FTS5's own term list (`fts5vocab`) lists none of its trigrams;
-3. its rows in `title_search_content`, `title_search_docsize` and `title_search_doc` are gone;
-4. no live `title_search_data` block, read through SQL, contains the bytes of any marker trigram as a whole.
+2. FTS5's own term list (`fts5vocab`, `row` and `instance`) lists none of its trigrams;
+3. its rows in `title_search_content`, `title_search_docsize` and `title_search_doc` are gone.
 
-R1 does **not** prove that the bytes are gone from the database file. They can remain in:
+R1 does **not** prove that the trigram bytes are gone from the database file. With `secure-delete` off, they stay in live `title_search_data` segments, behind delete markers, until the next complete optimize (I2b). After that they can still remain in freed pages, in-page free space and WAL frames until those are reused or overwritten, and in backups. That is consistent with `transient_metadata` today, where `Expire` sets `title = NULL` and the old bytes stay in freed space the same way.
 
-- freed pages and in-page free space;
-- WAL frames until checkpoint and overwrite;
-- the OS page cache and backups.
+R8 adds evidence about the segments: after a complete optimize, a byte probe no longer finds the marker in live `title_search_data` blocks. That probe has a limit: FTS5 stores terms with prefix compression, so a trigram can be stored split, and a probe for whole trigrams can miss it. R8 therefore checks the same probe before the optimize as a positive control.
 
-The byte probe (point 4) also has a limit. FTS5 stores terms with prefix compression, so a trigram can be stored split. A probe for whole trigrams can therefore miss a remaining entry. That is why R1 has a negative control: an index with `secure-delete = 0` must make the same probe find the marker. If the control finds nothing, the probe is not sensitive enough and R1 fails as inconclusive. Point 2 is the primary proof; point 4 adds evidence.
-
-Whether to also use the connection-wide `PRAGMA secure_delete` is a compliance decision (ADR-001 O2). It zeroes freed content for every table, including the title that `Expire` clears in `transient_metadata`. It costs extra writes on every delete and overwrite in the database, and it does not clear WAL frames before checkpoint.
+**O2 stays open.** Whether to use the connection-wide `PRAGMA secure_delete` is still a compliance question (ADR-001 O2), unaffected by O5. It zeroes freed content for every table, including the title that `Expire` clears in `transient_metadata`. It costs extra writes on every delete and overwrite, and it does not clear WAL frames before checkpoint.
 
 | # | Test | Proves |
 |---|---|---|
-| R1 | **Purge from the index structures.** Index a title containing a marker made of trigrams that appear in no other seeded title, among 1,000 realistic titles. Then, separately, remove it in each of these ways: (a) `Manager.ExpireStale` after `expires_at`; (b) `CleanupExpired`; (c) `Refresh` to a different title; (d) a discovery re-upsert with a different title; (e) raw SQL `UPDATE transient_metadata SET title = NULL`; (f) raw SQL `DELETE`; (g) raw `INSERT OR REPLACE` with a different title; (h) `RecreateSearchIndex`. After each, points 1–4 above hold. **Negative control**, in the same test: repeat (e) on a scratch FTS5 table with the same tokenizer and `secure-delete = 0`, and on a contentless-delete one. Point 4's probe must find at least one marker trigram there; if it finds none, the test fails as inconclusive. | AC16, I1, I2, within the limits stated above |
+| R1 | **Logical removal.** Index a title containing a marker made of trigrams that appear in no other seeded title, among 1,000 realistic titles. Then, separately, remove it in each of these ways: (a) `Manager.ExpireStale` after `expires_at`; (b) `CleanupExpired`; (c) `Refresh` to a different title; (d) a discovery re-upsert with a different title; (e) raw SQL `UPDATE transient_metadata SET title = NULL`; (f) raw SQL `DELETE`; (g) raw `INSERT OR REPLACE` with a different title; (h) `RecreateSearchIndex`. Right after each, with no optimize in between, points 1–3 above hold. | AC16, I1, I2, within the limits stated above |
+| R8 | **Optimize removes segment trigrams.** After R1 (e) on an index of 1,000 realistic titles, and before any optimize, the byte probe (whole marker trigrams in live `title_search_data` blocks, read through SQL) finds at least one marker trigram. If it finds none, the test fails as inconclusive. Then `OptimizeSearchIndex` with `OptimizeMergePages` forced to 2 runs more than one step and reports `Complete`; afterwards the probe finds no marker trigram, and D1 gives the same results as before. **Interruption:** cancel `ctx` after the first step; the result is `Complete = false`; a second call completes and the probe finds nothing. **Concurrency:** while optimize steps run, a second connection commits discovery upserts and `Expire` batches; no call returns `SQLITE_BUSY`, and the call still completes. | I2b, §10.10 optimize |
+| G-O | **Optimize cost (gate, `YUHAUL_PERF=1`).** On the P1–P4 seed after the 150,000-row backfill, on disk on the gate host: expire 5,000 rows through `ExpireStale`, then run `OptimizeSearchIndex`. Report steps, the p50, p95 and max step duration, the total, and the WAL peak, for `OptimizeMergePages` 500 and one smaller value. Pass: `Complete`; every step ≤ 1 s; total ≤ 60 s. If no tested value meets both, record it as a finding for decision before release. | §10.10 optimize, before release |
 | R2 | **Trigger coverage (non-Go writers).** For an indexed row, each of these removes its `title_search_doc` and FTS rows: raw-SQL updates of `video_id`, `title`, `is_active`, `expired_at`, `fetched_at` and `expires_at`; a raw `DELETE`; `INSERT OR REPLACE INTO transient_metadata …`; `REPLACE INTO transient_metadata …`; and an `INSERT … ON CONFLICT(video_id) DO UPDATE` on an existing row. `INSERT OR IGNORE` on an existing row removes them as well (the documented recall gap, repaired by the next reconcile). An update of an unrelated column, such as `duration_seconds`, keeps them. The test runs with `PRAGMA recursive_triggers` both off and on. | I1 |
 | R3 | **Writer adds.** Discovery upsert, `Refresh` and `Upsert` each leave exactly one entry with `k = titlekey.Key(title)`. No entry is added for: a blank or whitespace-only title; `is_active = 0`; `expired_at` set, including a discovery re-upsert of a row with `expired_at` set; `expires_at` not after `fetched_at`; a `Refresh` that matches no row. A `Refresh` with a future `fetched_at` inside its TTL is indexed. A failing `IndexTitleTx` (closed table, injected) rolls back the title write. | I3, §10.3 |
 | R4 | **Reconcile.** Seed by raw SQL: an indexable row with no entry; a held entry; an entry whose row passed `expires_at` without a sweep; an entry whose row was deleted while the triggers were dropped (test-only); an FTS row with no document; a document with no FTS row. Run one reconcile with `IndexWriteBatch` forced to 2. It leaves exactly the indexable rows indexed, with the expected counts and more than one batch, and it sets `key_version` and `built_at`. A second reconcile reports 0, 0, 0. **Concurrency:** while a reconcile runs, a second connection commits discovery upserts and `Expire` batches in a loop. No call returns `SQLITE_BUSY`, and at the end I1 and I3 hold. **Version:** with a stored `key_version` of `0/x`, `ReconcileSearchIndex` returns `ErrSearchIndexVersion`; `store.Open` rebuilds, and afterwards `key_version` equals `titlekey.Version()`. | §10.4, §10.5, I3, I4, I8 |
-| R5 | **Sweep.** `RunLifecycle` with 450 expired rows and `IndexWriteBatch` = 200 runs 3 `Expire` transactions and purges all 450 entries. With no expired rows, its reconcile still purges an entry whose row's `expires_at` is in a layout that `ListActivePastExpiry` misses. With `ExpireStale` failing (injected), the reconcile still runs and the error is returned joined. | "purge on the sweep", §10.10 |
-| R6 | **Schema.** After `ApplyMigrations` to head: `title_search` is a regular FTS5 table, so its `sqlite_master.sql` has `trigram case_sensitive 1` and no `content=` or `contentless_delete`. `title_search_config` has `secure-delete` = 1. All three triggers exist; the update trigger lists the six columns. `title_search_doc.doc_id` is an `INTEGER PRIMARY KEY`. `title_search_state` has one row. The `sqlite_master.sql` text of the two tables and three triggers is identical after `RecreateSearchIndex`. After `VACUUM`, every document still maps to the same `video_id`, and D1 still holds. | I2, I6, §10.2 DDL rule; guards against a migration that rebuilds the table |
+| R5 | **Sweep.** `RunLifecycle` with 450 expired rows and `IndexWriteBatch` = 200 runs 3 `Expire` transactions, purges all 450 entries, and then runs `OptimizeSearchIndex` to completion (observed through a test hook on the step count). With no expired rows, its reconcile still purges an entry whose row's `expires_at` is in a layout that `ListActivePastExpiry` misses. With `ExpireStale` failing (injected), the reconcile and the optimize still run and the error is returned joined. `store.Open` runs an optimize only when its reconcile removed entries. | "purge on the sweep", §10.10 |
+| R6 | **Schema.** After `ApplyMigrations` to head: `title_search` is a regular FTS5 table, so its `sqlite_master.sql` has `trigram case_sensitive 1` and no `content=` or `contentless_delete`. `title_search_config` has no `secure-delete` row, or the value 0. All three triggers exist; the update trigger lists the six columns. `title_search_doc.doc_id` is an `INTEGER PRIMARY KEY`. `title_search_state` has one row. The `sqlite_master.sql` text of the two tables and three triggers is identical after `RecreateSearchIndex`. After `VACUUM`, every document still maps to the same `video_id`, and D1 still holds. | I2, I6, §10.2 DDL and no-secure-delete rules; guards against a migration that rebuilds the table |
 | R7 | **Writer census (static).** Scan the non-test Go files with case-insensitive patterns, with any whitespace or newline between words: `insert\s+(or\s+(replace\|ignore\|abort\|fail\|rollback)\s+)?into\s+transient_metadata\b`, `replace\s+into\s+transient_metadata\b`, `update\s+(or\s+(replace\|ignore\|abort\|fail\|rollback)\s+)?transient_metadata\b` and `delete\s+from\s+transient_metadata\b`. The matching functions are exactly: `metadata.Store.Upsert`, `Refresh`, `Expire` and `CleanupExpired` (`internal/metadata/store.go`), `discovery.Engine.upsertTransientMetadata` (`internal/discovery/engine.go`) and the reconcile's own reads, which are not writes. Each insert or update writer except `Expire` calls `IndexTitleTx`. A new writer fails the test until it is added here. Limit: SQL assembled at run time from fragments is not seen. Review must catch it; the triggers still guarantee purges. | §10.3 completeness |
 | D1 | **Indexed equals scan (differential).** For a corpus with `ß`, NFC and NFD accents, standalone combining marks, `ﬃ`, Greek final sigma, Turkish `İ`, emoji, quotes, `%`, `_`, `*`, `\`, double spaces and U+0000, plus held, expired, past-expiry-not-swept, withheld and future-fetched rows: for every T3 case and for ≥500 needles (substrings of titles, mutated substrings and random strings of 3–12 code points), the match list and `total` from the indexed path equal those from the scan path. T10–T12 and T19 are repeated with the indexed path asserted. | AC4, AC7, AC18, §10.6 |
 | D2 | **Path and plan.** Unit test of the §10.7 rule: not built → scan; `key_version` different → scan; a 2-code-point `N` from 3 typed characters → scan; `N` with U+0000 → scan; otherwise → indexed. `EXPLAIN QUERY PLAN` of the indexed query starts with `SCAN title_search VIRTUAL TABLE INDEX` and an `M` constraint. | §6.1, §10.7 |
@@ -997,4 +1025,4 @@ T19–T21 and T31 still apply unchanged. T31's table snapshot includes the three
 See the [topic index](../index.md). None block this contract.
 
 - Q3 changes only test T25 and the `links` CTE.
-- ADR-001 O1–O5 and findings F7–F9 and O4 are tracked in the topic index.
+- ADR-001 O1–O4 and findings F7–F9 are tracked in the topic index. O5 is closed (S1, 2026-11-16).
