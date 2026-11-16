@@ -501,8 +501,9 @@ func TestRetryQueueEntry_CapturesClaimedRetrySelection(t *testing.T) {
 		logger:      discardLogger(),
 	}
 
-	// Origin run holds a video that already has a durable rejected
-	// disposition plus pending deferred work waiting for manual retry. The
+	// Origin run holds a video with a durable, non-final deferred
+	// disposition plus pending deferred work waiting for manual retry (a final
+	// outcome such as rejected would be refused, BR-039). The
 	// run is finalized only after its fixture rows exist: recording run
 	// evidence on a terminal run is rejected.
 	origin := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
@@ -515,7 +516,7 @@ func TestRetryQueueEntry_CapturesClaimedRetrySelection(t *testing.T) {
 	require.NoError(t, err)
 	_, err = machine.TransitionVideoState(ctx, video.ID,
 		state.VideoStateEvaluating, state.VideoStateEvaluated,
-		state.WithFinalOutcome(state.FinalOutcomeRejected))
+		state.WithFinalOutcome(state.FinalOutcomeDeferred))
 	require.NoError(t, err)
 	itemID, err := queueStore.CreateDeferredItem(ctx, &queue.DeferredItem{
 		VideoID: video.ID, RunID: originID, Reason: queue.DeferredReasonQuotaExhausted,

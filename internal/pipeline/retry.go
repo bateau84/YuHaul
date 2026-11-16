@@ -51,14 +51,22 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 	if p.auth == nil {
 		return fmt.Errorf("pipeline: manual retry requires authorization binding")
 	}
-	binding, err := p.auth.Bind(ctx)
-	if err != nil {
-		return fmt.Errorf("pipeline: bind authorization for manual retry: %w", err)
-	}
-	p.executionBinding = &binding
-	defer func() { p.executionBinding = nil }()
 	var claimedReceipt queue.RetryGroupReceipt
+	var alreadyFinal *queue.AlreadyFinalError
 	err = p.queueStore.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		// BR-039 / ARS-006 §4: refuse a final video's retry before any run is
+		// created or bound. The family is closed and committed; no run exists.
+		final, lost, err := p.queueStore.RefuseFinalRetryTx(ctx, tx, entryID, errorQueue, time.Now())
+		if err != nil {
+			return err
+		}
+		if lost {
+			return errRetryClaimLost
+		}
+		if final != nil {
+			alreadyFinal = final
+			return nil
+		}
 		id, err := p.stateStore.CreateGuardedMutationRunTx(ctx, tx, run, true)
 		if err != nil {
 			return err
@@ -87,6 +95,9 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 		}
 		return err
 	}
+	if alreadyFinal != nil {
+		return alreadyFinal
+	}
 	ctl := p.registerRun(run.ID)
 	defer p.finishRun(ctx, run.ID)
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
@@ -104,6 +115,16 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 	if stopped {
 		return nil // settled by finishRun
 	}
+	// Authorization is bound only now: a refused retry above made no
+	// authorization or provider call.
+	binding, err := p.auth.Bind(ctx)
+	if err != nil {
+		bindErr := fmt.Errorf("pipeline: bind authorization for manual retry: %w", err)
+		p.failRun(ctx, run.ID, "authorization binding failed", bindErr)
+		return bindErr
+	}
+	p.executionBinding = &binding
+	defer func() { p.executionBinding = nil }()
 	if err := p.processDeferredItems(ctx, run.ID); err != nil {
 		p.failRun(ctx, run.ID, "manual retry failed", err)
 		if stopOwnsEnding(ctx) {

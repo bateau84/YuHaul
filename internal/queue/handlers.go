@@ -77,6 +77,17 @@ func (s *Service) handleRetryError(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "error entry not found")
 			return
 		}
+		var final *AlreadyFinalError
+		if errors.As(err, &final) {
+			s.writeAlreadyFinal(w, r, final, func() (any, error) {
+				e, gerr := s.store.GetErrorEntry(r.Context(), id)
+				if gerr != nil {
+					return nil, gerr
+				}
+				return publicErrorEntry(e), nil
+			})
+			return
+		}
 		if errors.Is(err, ErrInvalidState) {
 			writeError(w, http.StatusConflict, queueFailureMessage(err, "retry"))
 			return
@@ -222,6 +233,17 @@ func (s *Service) handleRetryDeferred(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "deferred item not found")
 			return
 		}
+		var final *AlreadyFinalError
+		if errors.As(err, &final) {
+			s.writeAlreadyFinal(w, r, final, func() (any, error) {
+				d, gerr := s.store.GetDeferredItem(r.Context(), id)
+				if gerr != nil {
+					return nil, gerr
+				}
+				return publicDeferredItem(d), nil
+			})
+			return
+		}
 		if errors.Is(err, ErrInvalidState) {
 			writeError(w, http.StatusConflict, queueFailureMessage(err, "retry"))
 			return
@@ -232,6 +254,23 @@ func (s *Service) handleRetryDeferred(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, publicDeferredItem(item))
+}
+
+// writeAlreadyFinal answers a refused retry of an entry whose video already has
+// a final outcome (ARS-006 §4): 409 with the closed entry.
+func (s *Service) writeAlreadyFinal(w http.ResponseWriter, r *http.Request, final *AlreadyFinalError, load func() (any, error)) {
+	entry, err := load()
+	if err != nil {
+		slog.ErrorContext(r.Context(), "load closed entry failed", "entry_id", final.EntryID, "diagnostic", diag.Encode(err, "unknown", "retry"))
+		writeError(w, http.StatusInternalServerError, "failed to load closed entry")
+		return
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":         "this video already has a final outcome; nothing was retried",
+		"code":          "video_already_final",
+		"final_outcome": final.Outcome,
+		"entry":         entry,
+	})
 }
 
 func (s *Service) handleDiscardDeferred(w http.ResponseWriter, r *http.Request) {
