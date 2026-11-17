@@ -426,7 +426,9 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
       - V and run 41's outcome are `accepted`;
       - run 41's video detail lists the "Study" action under `continued_actions` with `decision_run_id=40`;
       - run 41's route statistics count one attempt, and run 40's do not change.
-16. **K10 still partly done:** "Study" fails permanently → `failed` with an Errors entry; a user retry sends only "Study". "Study" deferred for quota → the next run sends only "Study".
+16. **K10 still partly done:**
+    - **Non-quota rejection:** "Study" is rejected for a reason other than quota → V is `failed` with an Errors entry, and "Lofi" stays `succeeded`. The "Study" send guard stays as possibly applied ([authorization ARS-001](../../youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md): only a success or a quota `not_applied` releases it), listed under the original sending run's `unresolved_mutations`. A user retry sends nothing, records "Study" as `not_attempted` with `mutation_application_uncertain`, and keeps V in the Errors queue (one active entry).
+    - **Quota deferral:** "Study" deferred for quota → the next run, and separately a user retry, each send only "Study".
 17. **K11 send safety:** a held guard on "Study" → `uncertain_blocked`, zero inserts, and the guard is listed in run 41's `unresolved_mutations`. A version-0 R0 → the legacy veto refuses, and nothing is sent.
 18. **K12 authority clause:**
     - `DecisionRunID=40` without a run-40 success → refused;

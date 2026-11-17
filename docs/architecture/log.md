@@ -8,6 +8,10 @@ timestamp: 2026-11-11T00:00:00Z
 
 # Architecture Update Log
 
+## 2026-11-17
+
+**ARS-006 K10 corrected (gate b39-gate-ii finding MAJOR-1).** [ARS-006 §10.3](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) K10 said that after "Study" fails permanently a user retry sends only "Study". That contradicted BR-039 AC7 and AC11, authorization ARS-001 (only a success or a quota `not_applied` releases the send guard) and the code. K10 now says: after a non-quota rejection, V is `failed` with an Errors entry, "Lofi" stays `succeeded`, the "Study" guard stays as possibly applied under the original sending run's `unresolved_mutations`, and a user retry sends nothing, records "Study" as `not_attempted` with `mutation_application_uncertain`, and keeps V in the Errors queue. After a quota deferral, the next run and a user retry each send only "Study". This now agrees with the §12 note and `TestContinuationStillPartlyDoneK10`. The code is unchanged. BR-039 "Verified by" is aligned in the same change.
+
 ## 2026-11-16
 
 **BR-039 continuation implemented (task b39-continuation, Plan revision 20):** ARS-006 §7 is in the code, which fixes gate b39-gate-ii D1 (a claimed partly done video committed no outcome, every production run failed and a user retry answered 500) and D4 (filter order). The details, the two test fixtures changed under BR-039 and the provider-failure note for K10 are in [ARS-006 §12](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md). Migration 028 and tests K6, K18 and K20–K22 remain.
