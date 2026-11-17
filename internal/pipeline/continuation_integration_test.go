@@ -250,6 +250,8 @@ func TestContinuationStillPartlyDoneK10(t *testing.T) {
 		require.Equal(t, 1, len(e.server.Insertions()))
 		require.Equal(t, "failed", e.text(t, `SELECT final_outcome FROM video WHERE id=?`, video))
 		require.Contains(t, e.text(t, `SELECT error_message FROM run_video_outcome WHERE run_id=(SELECT MAX(run_id) FROM run_video_outcome WHERE video_id=?) AND video_id=?`, video, video), "mutation_application_uncertain")
+		require.Equal(t, int64(1), e.one(t, `SELECT COUNT(*) FROM error_entry WHERE video_id=? AND status='active'`, video), "exactly one active Errors entry after the refused retry")
+		require.Contains(t, e.text(t, `SELECT error_message FROM error_entry WHERE video_id=? AND status='active'`, video), "mutation_application_uncertain")
 	})
 
 	for _, via := range []string{"next run", "user retry"} {

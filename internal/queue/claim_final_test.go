@@ -85,7 +85,7 @@ func TestClaimClosesFinalVideoFamilyK1(t *testing.T) {
 			first := deferredSibling(t, s, video, origin, DeferredStatusPending)
 			second := deferredSibling(t, s, video, origin, DeferredStatusPending)
 			errID := exec(t, s.db, `INSERT INTO error_entry(video_id,run_id,error_category,error_message,status) VALUES(?,?,'runtime','m','active')`, video, origin)
-			before := claimItemRow(t, s.db, first)
+			before := map[int64]claimItem{first: claimItemRow(t, s.db, first), second: claimItemRow(t, s.db, second)}
 
 			receipt, result := claimResult(t, s, first, run)
 			if result != ClaimClosedFinal {
@@ -99,8 +99,8 @@ func TestClaimClosesFinalVideoFamilyK1(t *testing.T) {
 				if got.status != "completed" || got.closed != ClosedReasonFinalOutcome {
 					t.Fatalf("item %d = %s/%s, want completed/final_outcome", id, got.status, got.closed)
 				}
-				if got.retryCount != before.retryCount || got.createdAt != before.createdAt || got.retryRun.Valid {
-					t.Fatalf("item %d history changed: %+v vs %+v", id, got, before)
+				if got.retryCount != before[id].retryCount || got.createdAt != before[id].createdAt || got.retryRun.Valid {
+					t.Fatalf("item %d history changed: %+v vs %+v", id, got, before[id])
 				}
 				if got.videoOutcome != outcome || got.videoProcess != "completed" {
 					t.Fatalf("video changed: %s/%s", got.videoOutcome, got.videoProcess)
