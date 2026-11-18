@@ -136,6 +136,10 @@ type RunEntry struct {
 	RunStatus         string  `json:"run_status"`
 	Outcome           *string `json:"outcome"`
 	DecisionDetailURL string  `json:"decision_detail_path"`
+	// ContinuedOnly is true when the run recorded no decision for the video and
+	// is listed only because it sent playlist additions under an earlier run's
+	// decision (BR-039; design gap 1).
+	ContinuedOnly bool `json:"continued_only"`
 }
 
 // VideoView is the body of GET /api/videos/{videoId}.
@@ -381,6 +385,10 @@ var runsSQL = `WITH links AS (
   SELECT run_id FROM run_video_outcome
    -- every committed outcome lists the run, including unavailable_on_youtube
    WHERE video_id = ?1 AND final_outcome IS NOT NULL AND final_outcome <> 'not_yet_evaluated'
+  UNION
+  -- a run that only continued an earlier run's decision (BR-039)
+  SELECT ea.run_id FROM executed_action ea JOIN route_decision rd ON rd.id = ea.route_decision_id
+   WHERE ea.video_id = ?1 AND rd.run_id <> ea.run_id
 ), evidence AS (
   SELECT run_id,
          MAX(decision = 'matched') AS matched,
@@ -389,7 +397,10 @@ var runsSQL = `WITH links AS (
   FROM route_decision WHERE video_id = ?1 GROUP BY run_id
 )
 SELECT r.id, r.run_type, r.status, r.started_at, r.initiated_by,
-  ` + state.RunVideoOutcomeCase + ` AS outcome
+  ` + state.RunVideoOutcomeCase + ` AS outcome,
+  (NOT EXISTS (SELECT 1 FROM route_decision d WHERE d.run_id = r.id AND d.video_id = ?1)
+   AND EXISTS (SELECT 1 FROM executed_action ea JOIN route_decision rd ON rd.id = ea.route_decision_id
+                WHERE ea.run_id = r.id AND ea.video_id = ?1 AND rd.run_id <> r.id)) AS continued_only
 FROM links l JOIN run r ON r.id = l.run_id
 LEFT JOIN evidence e ON e.run_id = r.id
 LEFT JOIN run_video_outcome o ON o.run_id = r.id AND o.video_id = ?1
@@ -412,7 +423,7 @@ func runEntries(ctx context.Context, tx *sql.Tx, vid int64, videoID string) ([]R
 			started            any
 			initiated, outcome sql.NullString
 		)
-		if err := rows.Scan(&e.RunID, &e.RunType, &e.RunStatus, &started, &initiated, &outcome); err != nil {
+		if err := rows.Scan(&e.RunID, &e.RunType, &e.RunStatus, &started, &initiated, &outcome, &e.ContinuedOnly); err != nil {
 			return nil, fmt.Errorf("videosearch: scan run: %w", err)
 		}
 		e.Mode = "production"

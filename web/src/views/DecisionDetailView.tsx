@@ -8,7 +8,8 @@ import { routeAttribution } from '../lib/route-attribution'
 import { deriveRouteDecision, actionOutcomeLabel, actionOutcomeReasonLabel, formatDuration, simulationExplanation, simulationMode, unavailableDetailText, unavailableNoAction, unavailableNoRoutesDetail, type BadgeVariant } from '../lib/outcome'
 import { shortRouteId } from '../lib/route'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
-import type { Run, DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome } from '../types'
+import { diagCode, ORIGINAL_DECISION_UNAVAILABLE, originalDecisionUnavailable } from '../lib/final-outcome'
+import type { Run, DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome, ContinuedAction } from '../types'
 
 const actionIcons = {
   accepted: Check,
@@ -133,6 +134,46 @@ function ActionRow({ action, simulation }: { action: ActionOutcome; simulation: 
       </span>
       <ActionOutcomeEvidence action={action} simulation={simulation} />
     </li>
+  )
+}
+
+// "Run 3", "runs 3 and 5": the runs whose decisions the continued actions finish.
+function decisionRunList(actions: ContinuedAction[]): { text: string; plural: boolean } {
+  const ids = [...new Set(actions.map((a) => a.decision_run_id))]
+  if (ids.length <= 1) return { text: String(ids[0]), plural: false }
+  return { text: `${ids.slice(0, -1).join(', ')} and ${ids[ids.length - 1]}`, plural: true }
+}
+
+// Playlist additions this run sent to finish an earlier run's decision (BR-039).
+// Production only; a simulation never shows this group.
+function ContinuedGroup({ runId, videoId, actions }: { runId: string | undefined; videoId: string; actions: ContinuedAction[] }) {
+  const { text, plural } = decisionRunList(actions)
+  return (
+    <section aria-labelledby="continued-heading" style={{ marginTop: 12 }}>
+      <h3 id="continued-heading" className="section-title">Continued from an earlier run</h3>
+      <p>
+        {plural
+          ? `Run ${runId} did not evaluate this video again. These playlist additions finish decisions made by runs ${text}.`
+          : `Run ${runId} did not evaluate this video again. These playlist additions finish a decision made by run ${text}.`}
+      </p>
+      <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+        {actions.map((a, i) => {
+          const label = `Continues run ${a.decision_run_id}'s decision`
+          return (
+            <li key={i} style={{ marginBottom: 8 }}>
+              <div role="group" aria-label={`${a.target_playlist_id} — ${label}`} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span>{a.action_type} → {a.target_playlist_id}</span>
+                <ActionOutcomeBadge outcome={a.outcome} reason={a.outcome_reason} />
+                <ActionOutcomeEvidence action={a} simulation={false} />
+                <strong>{label}</strong>
+                <span>{a.route_name ? `Route: ${a.route_name}` : 'Route name unavailable'}</span>
+                <Link to={`/runs/${a.decision_run_id}/video/${videoId}`}>See run {a.decision_run_id}'s decision</Link>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
   )
 }
 
@@ -314,6 +355,9 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
       .map((action) => action.target_playlist_id),
   ))
   const unresolvedMutations = (video.unresolved_mutations ?? []).filter((mutation) => !actionTargets.has(mutation.target_playlist_id))
+  // Simulations never continue an earlier decision.
+  const continued = mode ? [] : (detail.continued_actions ?? [])
+  const noOwnRoutes = (detail.route_decisions ?? []).length === 0
   const local = video.current_local_metadata
   const observedAt = currentLocalObservedAt(local?.source_fetched_at)
   const metadataFallback = video.metadata_context_status === 'context_read_failed'
@@ -405,7 +449,9 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
           <p style={{ marginTop: 8, color: 'var(--color-text-muted)' }}>Deferred reason: {video.deferred_reason}</p>
         )}
         {!mode && video.error_message && (
-          <p style={{ marginTop: 8, color: 'var(--color-status-rejected)' }}>{video.error_message}</p>
+          <p style={{ marginTop: 8, color: 'var(--color-status-rejected)' }}>
+            {diagCode(video.error_message) === ORIGINAL_DECISION_UNAVAILABLE ? originalDecisionUnavailable.videoReason : video.error_message}
+          </p>
         )}
         {!mode && !video.error_message && video.error_message_unavailable && (
           <p style={{ marginTop: 8, color: 'var(--color-text-muted)' }}>
@@ -417,6 +463,10 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
       <h2 className="section-title">Layer 2 — Route decisions</h2>
       {unavailable ? (
         <p style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>{unavailableNoRoutesDetail}</p>
+      ) : noOwnRoutes && continued.length > 0 ? (
+        <p style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
+          No routes were evaluated for this video in this run. Its routes were decided in {decisionRunList(continued).plural ? 'runs' : 'run'} {decisionRunList(continued).text}.
+        </p>
       ) : (
         <>
           <p style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
@@ -455,9 +505,10 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
             ))
           )}
         </ul>
-      ) : (
+      ) : continued.length > 0 ? null : (
         <p style={{ color: 'var(--color-text-muted)' }}>{mode ? 'No simulated actions recorded for this video.' : 'No action outcomes recorded for this video.'}</p>
       )}
+      {!unavailable && continued.length > 0 && <ContinuedGroup runId={id} videoId={video.video_id} actions={continued} />}
       </div>
     </>
   )

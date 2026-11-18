@@ -255,13 +255,15 @@ A `cursor` or `page` is accepted only with `kind` `results` or a typed `id_not_f
  "started_at": "2026-11-10T08:00:00Z",
  "initiated_by": "run_now | queue_retry | schedule | null",
  "run_status": "completed", "outcome": "string|null",
- "decision_detail_path": "/runs/58/video/dQw4w9WgXcQ"}
+ "decision_detail_path": "/runs/58/video/dQw4w9WgXcQ",
+ "continued_only": false}
 ```
 
 - `started_at` is `run.started_at` as RFC 3339 UTC, parsed with `metadata.ParseLocalTime`; an unparseable value gives null. It lets the SPA show the run date.
 - `initiated_by` is the stored `run.initiated_by`, unchanged. It tells a queue retry (`queue_retry`) from Run Now (`run_now`) and a scheduled run (`schedule`). It is null for runs started before migration 024 and for simulation runs; the SPA must not guess a value for null.
 - `mode` is `simulation` when `run_type` is `dry_run`, `replay` or `backtest`; otherwise it is `production`.
 - `outcome` is the §6.4 per-run classification, which is the stored value for production runs. Null means the production run recorded no outcome; the SPA must not show null as a negative outcome (BR-032 AC3).
+- `continued_only` is true when the run has no `route_decision` row for the video and is listed only because it sent playlist additions under another run's decision (BR-039; an `executed_action` whose `route_decision.run_id` differs from its own `run_id`). Such a run is listed so the video page shows every run that sent an addition; `outcome` is whatever that run stored, often null. Its `decision_detail_path` opens the run's own decision detail, which carries `continued_actions`.
 - Order: `run_id` descending (newest first by creation; a resumed run keeps its id).
 
 ## 5. Matcher (BR-038 AC7)
@@ -388,6 +390,9 @@ WITH links AS (
   UNION
   SELECT run_id FROM run_video_outcome
    WHERE video_id = :vid AND final_outcome IS NOT NULL AND final_outcome <> 'not_yet_evaluated'
+  UNION
+  SELECT ea.run_id FROM executed_action ea JOIN route_decision rd ON rd.id = ea.route_decision_id
+   WHERE ea.video_id = :vid AND rd.run_id <> ea.run_id   -- continued an earlier decision (BR-039)
 ), evidence AS (
   SELECT run_id,
          MAX(decision = 'matched') AS matched,

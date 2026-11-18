@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import * as api from '../api/client'
+import { ApiError } from '../api/core'
 import type { DeferredPageQuery } from '../api/deferred-page'
 import { deferredReasonLabels } from '../lib/outcome'
+import { isClosedEntry, refusalText, usableEntry } from '../lib/final-outcome'
 import { deferredReasons } from '../types'
 import type { DeferredItem, DeferredPage, DeferredReason } from '../types'
+import { ClosedNotice, RefusalAlert } from './ClosedNotice'
 import { ConfirmDialog } from './ConfirmDialog'
 import { FetchErrorRegion } from './FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
@@ -110,7 +113,12 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   const queryKey = JSON.stringify(query)
 
   const [data, setData] = useState<DeferredPage | null>(null)
-  const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading')
+  const [status, setStatus] = useState<'loading' | 'error' | 'badpage' | 'ready'>('loading')
+  // Items whose Retry was refused with video_already_final (BR-039), by id. They
+  // stay on this page as closed rows until the next read replaces the page, and
+  // are taken out of the totals shown, because the API now counts them closed.
+  const [closedHere, setClosedHere] = useState<Record<number, DeferredItem>>({})
+  const closedHereCount = Object.keys(closedHere).length
   const [reloads, setReloads] = useState(0)
   const [reasonDraft, setReasonDraft] = useState<string>(reason ?? '')
   const [jumpValue, setJumpValue] = useState('')
@@ -158,13 +166,15 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
           return
         }
         settledIntent.current = intent
+        setClosedHere({})
         setData(page)
         setStatus('ready')
         onQueueTotal(page.queue_total)
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (cancelled) return
-        setStatus('error')
+        // A rejected page or cursor is a stale or altered link, not a failed read.
+        setStatus(err instanceof ApiError && err.status === 400 && err.code === 'invalid_page' ? 'badpage' : 'error')
       })
     return () => {
       cancelled = true
@@ -255,6 +265,31 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
     }
   }
 
+  // Retry now: a 409 video_already_final closes the item and sends nothing, so
+  // it shows the refusal and the closed row in place and does not reload.
+  async function retryItem(d: DeferredItem, index: number) {
+    try {
+      await api.retryDeferred(d.id)
+      addToast('Deferred item queued for retry', 'success')
+      intentRef.current = { focus: { kind: 'row', index }, announce: false }
+      setReloads((n) => n + 1)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.code === 'video_already_final') {
+        const entry = usableEntry<DeferredItem>(err.entry, d.id)
+        // The item is closed now, so it is no longer part of the queue total.
+        if (data && !(d.id in closedHere)) onQueueTotal(data.queue_total - closedHereCount - 1)
+        if (entry) {
+          setClosedHere((prev) => ({ ...prev, [d.id]: { ...d, ...entry } }))
+        } else {
+          // The refusal itself says the video is final, so close the row we have.
+          setClosedHere((prev) => ({ ...prev, [d.id]: { ...d, closed_reason: 'final_outcome', video_final_outcome: err.finalOutcome as DeferredItem['video_final_outcome'] } }))
+        }
+        return
+      }
+      addToast(err instanceof Error ? err.message : 'Failed to retry deferred item', 'error')
+    }
+  }
+
   const discard = (d: DeferredItem, index: number) =>
     removeItem(index, () => api.discardDeferred(d.id), 'Deferred item dismissed', 'Failed to discard deferred item')
 
@@ -268,6 +303,22 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         onRetry={retryLoad}
         retrying={false}
       />
+    )
+  }
+
+  if (status === 'badpage') {
+    return (
+      <div className="card">
+        <h2 ref={headingRef} tabIndex={-1} style={{ marginTop: 0, fontSize: '1.1rem' }}>
+          Deferred queue
+        </h2>
+        <p role="alert" className="form-error">
+          This page of the deferred queue can't be opened any more. Go to the first page.
+        </p>
+        <button type="button" className="button" onClick={() => go(() => {})}>
+          Go to the first page
+        </button>
+      </div>
     )
   }
 
@@ -350,8 +401,8 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         <>
           <p>
             {filtered
-              ? `Showing ${fmt(first ?? 0)}–${fmt(last ?? 0)} of ${fmt(data.total)} items with this reason. ${fmt(data.queue_total)} items in the deferred queue.`
-              : `Showing ${fmt(first ?? 0)}–${fmt(last ?? 0)} of ${fmt(data.total)} items.`}
+              ? `Showing ${fmt(first ?? 0)}–${fmt(last ?? 0)} of ${fmt(data.total - closedHereCount)} items with this reason. ${fmt(data.queue_total - closedHereCount)} items in the deferred queue.`
+              : `Showing ${fmt(first ?? 0)}–${fmt(last ?? 0)} of ${fmt(data.total - closedHereCount)} items.`}
           </p>
           <table className="table">
             <thead>
@@ -363,43 +414,50 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
               </tr>
             </thead>
             <tbody ref={bodyRef}>
-              {items.map((d, i) => (
-                <tr key={d.id} tabIndex={-1}>
-                  <td data-label="Video">
-                    {d.video_title ?? (
-                      <>
-                        Video title unavailable <span style={{ color: 'var(--color-text-muted)' }}>Video ID: {d.external_video_id ?? d.video_id}</span>
-                      </>
+              {items.map((row, i) => {
+                const d = closedHere[row.id] ?? row
+                const closed = isClosedEntry(d)
+                return (
+                  <Fragment key={d.id}>
+                    {row.id in closedHere && (
+                      <tr>
+                        <td colSpan={4}>
+                          <RefusalAlert text={refusalText(d.video_final_outcome)} />
+                        </td>
+                      </tr>
                     )}
-                  </td>
-                  <td data-label="Reason">{reasonText(d)}</td>
-                  <td data-label="Retry after">{eligibilityText(d)}</td>
-                  <td data-label="Actions">
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <button
-                        className="button"
-                        onClick={() =>
-                          removeItem(
-                            i,
-                            () => api.retryDeferred(d.id),
-                            'Deferred item queued for retry',
-                            'Failed to retry deferred item',
-                          )
-                        }
-                      >
-                        Retry now
-                      </button>
-                      <button
-                        className="button"
-                        aria-label={`Dismiss deferred item: ${d.video_title ?? d.external_video_id ?? d.video_id}`}
-                        onClick={() => (isHandedOver(d) ? setConfirmDismiss({ item: d, index: i }) : void discard(d, i))}
-                      >
-                        Dismiss
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                    <tr tabIndex={-1}>
+                      <td data-label="Video">
+                        {d.video_title ?? (
+                          <>
+                            Video title unavailable <span style={{ color: 'var(--color-text-muted)' }}>Video ID: {d.external_video_id ?? d.video_id}</span>
+                          </>
+                        )}
+                      </td>
+                      <td data-label="Reason">{reasonText(d)}</td>
+                      <td data-label="Retry after">{closed ? '' : eligibilityText(d)}</td>
+                      <td data-label="Actions">
+                        {closed ? (
+                          <ClosedNotice outcome={d.video_final_outcome} videoId={d.external_video_id} />
+                        ) : (
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button className="button" onClick={() => void retryItem(d, i)}>
+                              Retry now
+                            </button>
+                            <button
+                              className="button"
+                              aria-label={`Dismiss deferred item: ${d.video_title ?? d.external_video_id ?? d.video_id}`}
+                              onClick={() => (isHandedOver(d) ? setConfirmDismiss({ item: d, index: i }) : void discard(d, i))}
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  </Fragment>
+                )
+              })}
             </tbody>
           </table>
         </>

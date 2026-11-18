@@ -28,6 +28,7 @@ const run = (id: number, over: Partial<VideoRunEntry> = {}): VideoRunEntry => ({
   run_status: 'completed',
   outcome: 'rejected',
   decision_detail_path: `/runs/${id}/video/dQw4w9WgXcQ`,
+  continued_only: false,
   ...over,
 })
 
@@ -222,5 +223,21 @@ describe('VideoView', () => {
     renderAt('/videos/dQw4w9WgXcQ')
     await screen.findByRole('heading', { level: 1 })
     expect(set).not.toHaveBeenCalled()
+  })
+
+  it('lists a run that only continued an earlier decision, labelled, with its decision-detail link', async () => {
+    fetchMock.mockResolvedValue(
+      json(base({ runs: [run(62, { outcome: null, continued_only: true, initiated_by: 'queue_retry', run_type: 'manual' }), run(58)] }))
+    )
+    renderAt('/videos/dQw4w9WgXcQ')
+    const runs = await screen.findByRole('region', { name: 'Runs that decided this video' })
+    const items = within(runs).getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(items[0]).toHaveTextContent("Continued an earlier run's decision")
+    // A null outcome is never shown as a negative outcome.
+    expect(within(items[0]).queryByText('Rejected')).toBeNull()
+    expect(within(items[0]).getByRole('link', { name: 'Open decision detail for run 62' })).toHaveAttribute('href', '/runs/62/video/dQw4w9WgXcQ')
+    expect(items[1]).not.toHaveTextContent('Continued an earlier run')
+    expect(within(items[1]).getByText('Rejected')).toBeInTheDocument()
   })
 })

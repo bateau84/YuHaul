@@ -146,6 +146,7 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     video: mockVideos[1][0],
     processing_state: 'completed',
     final_outcome: 'accepted',
+    continued_actions: [],
     route_decisions: [
       {
         id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
@@ -175,6 +176,7 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     video: mockVideos[1][1],
     processing_state: 'evaluated',
     final_outcome: 'rejected',
+    continued_actions: [],
     route_decisions: [
       {
         id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',
@@ -205,6 +207,7 @@ const mockDecisionDetails: Record<string, DecisionDetail> = {
     video: mockVideos[1][2],
     processing_state: 'deferred',
     final_outcome: 'deferred',
+    continued_actions: [],
     route_decisions: [
       {
         id: '3a554e96-47ba-4f3d-a7bb-a61e3f50c1ce',

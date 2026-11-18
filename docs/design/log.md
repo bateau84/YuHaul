@@ -6,6 +6,10 @@ tags: [design, documentation, change-log]
 timestamp: 2026-11-10T00:00:00Z
 ---
 
+## 2026-11-18
+
+- Recorded SPA implementation of “Final Outcomes Are Never Reprocessed — Run Detail, Queue and Statistics Copy” (task b39-fe, plan revision 20) in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): resolved gap 1 (video page lists runs that only continued a decision, via the new `continued_only` run-entry field) and gap 3 (no web view renders per-run action counts), and added implementation notes for the places the existing UI differs from the copy. Component tests only; no browser or accessibility verification.
+
 ## 2026-11-12
 
 - Amended [admin interface design](/docs/design/yuhaul-admin-ui-design.md) with “Final Outcomes Are Never Reprocessed — Run Detail, Queue and Statistics Copy” for tasks b39-copy and rq-search-copy (plan revision 20), from run-initiation ADR-007 and ARS-006 §8.3. Wrote the label “Continues run N's decision” and its group on Run Detail, the route statistics note, the `video_already_final` refusal, closed-row copy for `closed_reason=final_outcome`, the dismiss-only `original_decision_unavailable` entry, and the search `invalid_text` and rejected cursor or page messages, which replace the coder's placeholders in the Videos input-message table. Recorded gaps: the Videos page does not list runs that only continued a decision, run N's own detail does not mention the continuation, and which view shows per-run route counts. Design only; not implemented, no browser or accessibility verification.

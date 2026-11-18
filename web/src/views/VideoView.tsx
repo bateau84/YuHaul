@@ -96,6 +96,9 @@ function QueueState({ state }: { state: VideoQueueState }) {
   }
 }
 
+// Proposed copy: the design leaves this row's wording open (gap 1).
+export const CONTINUED_LABEL = "Continued an earlier run's decision"
+
 function RunItem({ run }: { run: VideoRunEntry }) {
   const simulation = run.mode === 'simulation'
   const when = formatWhen(run.started_at)
@@ -103,7 +106,16 @@ function RunItem({ run }: { run: VideoRunEntry }) {
     <li className="card" style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
       <span>
         <RunLink id={run.run_id} /> · {modeLabel(run)} ·{' '}
-        <OutcomeBadge outcome={run.outcome} mode={simulation ? run.run_type : undefined} />
+        {run.continued_only ? (
+          // The run made no decision of its own; it only sent additions that
+          // finish an earlier run's decision (BR-039).
+          <>
+            {run.outcome !== null && <><OutcomeBadge outcome={run.outcome} /> · </>}
+            {CONTINUED_LABEL}
+          </>
+        ) : (
+          <OutcomeBadge outcome={run.outcome} mode={simulation ? run.run_type : undefined} />
+        )}
         {when && <> · {when}</>}
       </span>
       <Link to={run.decision_detail_path} style={{ display: 'inline-block', minHeight: 24 }}>

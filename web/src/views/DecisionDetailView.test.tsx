@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, Link } from 'react-router-dom'
 import { DecisionDetailView } from './DecisionDetailView'
 import { ToastProvider } from '../components/ToastProvider'
@@ -36,6 +36,7 @@ const baseDetail: DecisionDetail = {
   },
   processing_state: 'completed',
   final_outcome: 'accepted',
+  continued_actions: [],
   route_decisions: [
     {
       id: ROUTE_A,
@@ -621,5 +622,92 @@ describe('DecisionDetailView', () => {
     expect(await screen.findByText('Recorded causal exclusion: configuration 42, exclusion #3.')).toBeInTheDocument()
     expect(screen.getByText('Matched rule: Title contains configured substring “live”, ignoring case.')).toBeInTheDocument()
     expect(screen.getByText(`Route: ${route.route_name} (ID: ${route.route_id})`)).toBeInTheDocument()
+  })
+
+  describe('continued actions (BR-039)', () => {
+    const continuedDetail = (over: Partial<DecisionDetail> = {}): DecisionDetail => ({
+      ...baseDetail,
+      route_decisions: [],
+      continued_actions: [
+        { id: 0, action_type: 'add_to_playlist', target_playlist_id: 'PL2', outcome: 'succeeded', executed_at: '2026-11-12T10:00:00Z', decision_run_id: 1, route_decision_id: 9, route_id: ROUTE_A, route_name: 'Music Discovery' },
+        { id: 1, action_type: 'add_to_playlist', target_playlist_id: 'PL3', outcome: 'deferred', outcome_reason: 'quota_exhausted', decision_run_id: 1, route_decision_id: 9, route_id: ROUTE_B, route_name: null },
+        { id: 2, action_type: 'add_to_playlist', target_playlist_id: 'PL4', outcome: 'failed', outcome_reason: 'mutation_application_uncertain', decision_run_id: 1, route_decision_id: 9, route_id: ROUTE_B, route_name: 'Ambient' },
+      ],
+      ...over,
+    })
+
+    it('shows the continued group after Layer 3, with the Layer 2 text and each row labelled', async () => {
+      mockGetRun.mockResolvedValue({ id: 2, run_type: 'manual' })
+      mockGetDecisionDetail.mockResolvedValue(continuedDetail())
+      renderView('2', 'dQw4w9WgXcQ')
+      const group = await screen.findByRole('region', { name: 'Continued from an earlier run' })
+      expect(within(group).getByRole('heading', { level: 3 })).toBeInTheDocument()
+      expect(within(group).getByText('Run 2 did not evaluate this video again. These playlist additions finish a decision made by run 1.')).toBeInTheDocument()
+      expect(screen.getByText("No routes were evaluated for this video in this run. Its routes were decided in run 1.")).toBeInTheDocument()
+      // The group replaces the usual empty Layer 3 text.
+      expect(screen.queryByText('No action outcomes recorded for this video.')).toBeNull()
+
+      const layer3 = screen.getByText('Layer 3 — Action outcomes')
+      expect(layer3.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+      const first = within(group).getByRole('group', { name: "PL2 — Continues run 1's decision" })
+      expect(within(first).getByText('Succeeded')).toBeInTheDocument()
+      expect(within(first).getByText("Continues run 1's decision")).toBeInTheDocument()
+      expect(within(first).getByText('Route: Music Discovery')).toBeInTheDocument()
+      expect(within(first).getByRole('link', { name: "See run 1's decision" })).toHaveAttribute('href', '/runs/1/video/dQw4w9WgXcQ')
+
+      const second = within(group).getByRole('group', { name: "PL3 — Continues run 1's decision" })
+      expect(within(second).getByText('Deferred')).toBeInTheDocument()
+      expect(within(second).getByText('Route name unavailable')).toBeInTheDocument()
+      // An uncertain continued addition keeps its existing presentation.
+      expect(within(group).getByText('Playlist outcome unknown')).toBeInTheDocument()
+    })
+
+    it('keeps the run\'s own actions in their usual place and the usual Layer 2', async () => {
+      mockGetDecisionDetail.mockResolvedValue(continuedDetail({ route_decisions: baseDetail.route_decisions }))
+      renderView('2', 'dQw4w9WgXcQ')
+      const group = await screen.findByRole('region', { name: 'Continued from an earlier run' })
+      expect(screen.getByText('Routes evaluated in order. Numbers show evaluation sequence.')).toBeInTheDocument()
+      expect(screen.queryByText(/No routes were evaluated for this video in this run/)).toBeNull()
+      expect(screen.getAllByText('add_to_playlist → PLmusic').length).toBeGreaterThanOrEqual(1)
+      expect(within(group).queryByText('add_to_playlist → PLmusic')).toBeNull()
+    })
+
+    it('shows no group and the usual empty text when nothing was continued', async () => {
+      mockGetDecisionDetail.mockResolvedValue({ ...baseDetail, route_decisions: [] })
+      renderView('1', 'dQw4w9WgXcQ')
+      await screen.findByText('Layer 3 — Action outcomes')
+      expect(screen.queryByRole('region', { name: 'Continued from an earlier run' })).toBeNull()
+      expect(screen.getByText('No action outcomes recorded for this video.')).toBeInTheDocument()
+    })
+
+    it('never shows the group in a simulation', async () => {
+      mockGetRun.mockResolvedValue({ id: 2, run_type: 'dry_run' })
+      mockGetDecisionDetail.mockResolvedValue(continuedDetail())
+      renderView('2', 'dQw4w9WgXcQ')
+      await screen.findByText('Layer 3 — Simulated action outcomes')
+      expect(screen.queryByRole('region', { name: 'Continued from an earlier run' })).toBeNull()
+    })
+
+    it('names the runs when the additions finish decisions of more than one run', async () => {
+      const d = continuedDetail()
+      d.continued_actions[1] = { ...d.continued_actions[1], decision_run_id: 5 }
+      mockGetDecisionDetail.mockResolvedValue(d)
+      renderView('7', 'dQw4w9WgXcQ')
+      expect(await screen.findByText('Run 7 did not evaluate this video again. These playlist additions finish decisions made by runs 1 and 5.')).toBeInTheDocument()
+      expect(screen.getByText('No routes were evaluated for this video in this run. Its routes were decided in runs 1 and 5.')).toBeInTheDocument()
+    })
+  })
+
+  it('replaces the diagnostic of an unreadable original decision with the plain reason', async () => {
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      processing_state: 'failed',
+      final_outcome: 'failed',
+      video: { ...baseDetail.video, final_outcome: 'failed', error_message: 'diag:v1 phase=action_execution operation=load_run code=original_decision_unavailable' },
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText("Playlist additions not finished: the earlier run's decision could not be read.")).toBeInTheDocument()
+    expect(screen.queryByText(/diag:v1/)).toBeNull()
   })
 })

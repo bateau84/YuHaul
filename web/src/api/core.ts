@@ -11,7 +11,11 @@ export class ApiError extends Error {
   // not_production carries the simulation kind. Both are closed values.
   savedStatus?: string
   runType?: string
-  constructor(status: number, message: string, details?: { code?: string; runId?: number; reason?: string; savedStatus?: string; runType?: string }) {
+  // video_already_final (409) carries the final outcome and the closed queue
+  // entry (BR-039). The entry is untrusted until the caller checks its shape.
+  finalOutcome?: string
+  entry?: unknown
+  constructor(status: number, message: string, details?: { code?: string; runId?: number; reason?: string; savedStatus?: string; runType?: string; finalOutcome?: string; entry?: unknown }) {
     super(message)
     this.status = status
     this.name = 'ApiError'
@@ -20,6 +24,8 @@ export class ApiError extends Error {
     this.reason = details?.reason
     this.savedStatus = details?.savedStatus
     this.runType = details?.runType
+    this.finalOutcome = details?.finalOutcome
+    this.entry = details?.entry
   }
 }
 
@@ -36,6 +42,8 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       reason: typeof body.reason === 'string' ? body.reason : undefined,
       savedStatus: typeof body.status === 'string' ? body.status : undefined,
       runType: typeof body.run_type === 'string' ? body.run_type : undefined,
+      finalOutcome: typeof body.final_outcome === 'string' ? body.final_outcome : undefined,
+      entry: body.entry,
     })
   }
   if (res.status === 204) {

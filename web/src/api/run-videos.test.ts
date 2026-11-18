@@ -247,3 +247,35 @@ describe('getDecisionDetail', () => {
     expect(detail?.route_decisions).toEqual([])
   })
 })
+
+describe('getDecisionDetail continued actions', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  const video = { id: 1, video_id: 'v', channel_id: 'c', processing_state: 'completed', final_outcome: 'accepted', route_decisions: [] }
+  const respond = (body: unknown) =>
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+  it('maps continued_actions with the decision run, public route id and a null route name', async () => {
+    respond({
+      video: {
+        ...video,
+        continued_actions: [
+          { action_type: 'add_to_playlist', target_playlist_id: 'PL2', outcome: 'succeeded', executed_at: '2026-11-12T10:00:00Z', decision_run_id: 3, route_decision_id: 9, route_id: 'uuid-a', route_name: 'Rock' },
+          { action_type: 'add_to_playlist', target_playlist_id: 'PL3', outcome: 'deferred', outcome_reason: 'quota_exhausted', decision_run_id: 3, route_decision_id: 9, route_id: 'uuid-b', route_name: null },
+        ],
+      },
+    })
+    const detail = await getDecisionDetail(4, 'v')
+    expect(detail?.continued_actions).toEqual([
+      expect.objectContaining({ target_playlist_id: 'PL2', outcome: 'succeeded', decision_run_id: 3, route_id: 'uuid-a', route_name: 'Rock', executed_at: '2026-11-12T10:00:00Z' }),
+      expect.objectContaining({ target_playlist_id: 'PL3', outcome_reason: 'quota_exhausted', route_name: null }),
+    ])
+  })
+
+  it('treats a missing or null continued_actions as none', async () => {
+    respond({ video })
+    expect((await getDecisionDetail(4, 'v'))?.continued_actions).toEqual([])
+    respond({ video: { ...video, continued_actions: null } })
+    expect((await getDecisionDetail(4, 'v'))?.continued_actions).toEqual([])
+  })
+})

@@ -165,10 +165,30 @@ describe('VideosView (design: Videos — Find a Video by Title or ID)', () => {
     expect(await screen.findByText('Showing 1–1 of 1. Newest discovery first.')).toBeInTheDocument()
   })
 
-  it('tells the user to start again when the server rejects a cursor or page', async () => {
-    fetchMock.mockResolvedValue(json({ error: 'invalid_page' }, 400))
+  it.each(['invalid_page', 'invalid_cursor'])('shows the stale-page message and Search again for %s, then restarts at page 1', async (code) => {
+    fetchMock.mockResolvedValueOnce(json({ error: code }, 400))
     renderAt('/videos?q=lofi&page=x')
-    expect(await screen.findByText('This page of results is no longer valid. Start the search again.')).toHaveAttribute('role', 'alert')
+    const alert = await screen.findByText("This page of results can't be opened any more. Search again to start from page 1.")
+    expect(alert).toHaveAttribute('role', 'alert')
+    // A rejected link is not a failed search: no Retry search.
+    expect(screen.queryByRole('button', { name: 'Retry search' })).toBeNull()
+
+    fetchMock.mockResolvedValueOnce(json({ kind: 'results', results: pageOf() }))
+    fireEvent.click(screen.getByRole('button', { name: 'Search again' }))
+    const heading = await screen.findByRole('heading', { level: 2, name: 'Videos whose titles contain “lofi”' })
+    expect(String(fetchMock.mock.calls.at(-1)![0])).toBe('/api/videos/search?q=lofi')
+    await waitFor(() => expect(heading).toHaveFocus())
+    expect(screen.queryByText(/can't be opened any more/)).toBeNull()
+  })
+
+  it('says unreadable text was not searched, in an alert, with the input marked invalid', async () => {
+    fetchMock.mockResolvedValue(json({ kind: 'invalid_text' }))
+    renderAt('/videos?q=%FF')
+    const msg = await screen.findByText("Some of this text can't be read, so nothing was searched. Type it again, or paste it as plain text.")
+    expect(msg).toHaveAttribute('role', 'alert')
+    expect(screen.getByRole('searchbox')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('searchbox')).toHaveAccessibleDescription(/can't be read/)
+    expect(screen.queryByRole('button', { name: 'Search again' })).toBeNull()
   })
 
   it('lists results with the total, the item fields and the announcement', async () => {

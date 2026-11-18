@@ -338,6 +338,8 @@ export interface DecisionDetail {
   processing_state: VideoProcessingState
   final_outcome: VideoFinalOutcome | null
   route_decisions: RouteDecision[]
+  // Playlist additions this run sent under an earlier run's decision (BR-039).
+  continued_actions: ContinuedAction[]
 }
 
 export interface QuotaBudget {
@@ -747,6 +749,11 @@ export interface VideoRunEntry {
   /** Null: the production run recorded no outcome. Never a negative outcome. */
   outcome: VideoFinalOutcome | null
   decision_detail_path: string
+  /**
+   * True when the run recorded no decision for the video and is listed only
+   * because it sent playlist additions under an earlier run's decision (BR-039).
+   */
+  continued_only: boolean
 }
 
 export interface VideoView extends VideoSummary {

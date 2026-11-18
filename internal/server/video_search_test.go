@@ -817,3 +817,41 @@ func TestVideoSearchHandlerOutputMatchesSPAShape(t *testing.T) {
 }
 
 func sorted(s []string) []string { sort.Strings(s); return s }
+
+// TestVideoViewListsRunThatOnlyContinuedADecision (BR-039, design gap 1): a run
+// that sent playlist additions under an earlier run's decision, and recorded no
+// decision of its own, is listed with continued_only=true. The deciding run and
+// an unrelated run are unchanged.
+func TestVideoViewListsRunThatOnlyContinuedADecision(t *testing.T) {
+	f := newVSFix(t)
+	t0 := vsNow.Add(-48 * time.Hour)
+	r1 := f.run("manual", "completed", "run_now", t0)
+	r2 := f.run("manual", "completed", "queue_retry", t0.Add(time.Hour))
+	r3 := f.run("scheduled", "completed", "schedule", t0.Add(2*time.Hour))
+	v := f.video("ccccccccccc", t0, r1, "accepted")
+	f.held("ccccccccccc", "Continued", "Chan")
+	f.decision(v, r1, "matched", nil)
+	f.outcome(r1, v, "accepted", nil, nil)
+	var decisionID int64
+	require.NoError(t, f.db.QueryRow(`SELECT id FROM route_decision WHERE run_id = ?`, r1).Scan(&decisionID))
+	// r1 sent one addition itself; r2 sent the rest under r1's decision; r3 did nothing.
+	f.exec(`INSERT INTO executed_action (route_decision_id, run_id, video_id, action_type, target_playlist_id, outcome, executed_at) VALUES (?,?,?,?,?,?,?)`,
+		decisionID, r1, v, "playlist_insert", "PL1", "succeeded", ts(t0))
+	f.exec(`INSERT INTO executed_action (route_decision_id, run_id, video_id, action_type, target_playlist_id, outcome, executed_at) VALUES (?,?,?,?,?,?,?)`,
+		decisionID, r2, v, "playlist_insert", "PL2", "succeeded", ts(t0.Add(time.Hour)))
+
+	m := f.get("/api/videos/ccccccccccc").view(t)
+	byID := map[int64]map[string]any{}
+	var order []int64
+	for _, r := range m["runs"].([]any) {
+		e := r.(map[string]any)
+		id := int64(e["run_id"].(float64))
+		order = append(order, id)
+		byID[id] = e
+	}
+	assert.Equal(t, []int64{r2, r1}, order)
+	assert.Equal(t, true, byID[r2]["continued_only"])
+	assert.Equal(t, false, byID[r1]["continued_only"])
+	assert.NotContains(t, byID, r3)
+	assert.Equal(t, fmt.Sprintf("/runs/%d/video/ccccccccccc", r2), byID[r2]["decision_detail_path"])
+}

@@ -1,4 +1,4 @@
-import type { VideoOutcome, DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome, RouteActionType } from '../types'
+import type { VideoOutcome, DecisionDetail, ContinuedAction, RouteDecision, ConditionAudit, ActionOutcome, RouteActionType } from '../types'
 import { api } from './core'
 
 interface VideoListResponse {
@@ -34,6 +34,7 @@ interface BackendVideoOutcome {
 interface VideoDetailResponse {
   video: BackendVideoOutcome & {
     route_decisions: BackendRouteDecision[]
+    continued_actions?: BackendContinuedAction[] | null
   }
 }
 
@@ -51,6 +52,13 @@ interface BackendRouteDecision {
   rejection_reason?: string
   condition_audits?: BackendConditionAudit[] | null
   executed_actions?: BackendExecutedAction[] | null
+}
+
+interface BackendContinuedAction extends BackendExecutedAction {
+  decision_run_id: number
+  route_decision_id: number
+  route_id: string
+  route_name: string | null
 }
 
 interface BackendConditionAudit {
@@ -121,6 +129,17 @@ function toActionOutcomes(actions: BackendExecutedAction[] | null | undefined): 
   }))
 }
 
+function toContinuedActions(actions: BackendContinuedAction[] | null | undefined): ContinuedAction[] {
+  return (actions ?? []).map((a, index) => ({
+    ...toActionOutcomes([a])[0],
+    id: index,
+    decision_run_id: a.decision_run_id,
+    route_decision_id: a.route_decision_id,
+    route_id: a.route_id,
+    route_name: a.route_name ?? null,
+  }))
+}
+
 function toRouteDecisionSummary(d: BackendRouteDecision) {
   return {
     id: d.route_id,
@@ -187,6 +206,7 @@ export async function getDecisionDetail(
       processing_state: data.video.processing_state,
       final_outcome: data.video.final_outcome,
       route_decisions: toRouteDecisions(data.video.route_decisions),
+      continued_actions: toContinuedActions(data.video.continued_actions),
     }
   } catch (err) {
     if (err instanceof Error && err.message.includes('not found')) {

@@ -19,10 +19,11 @@ const msgTooLong = 'The search text is too long. Use at most 200 characters.'
 const msgLink =
   'This link does not contain a video ID YuHaul can use. Paste a youtube.com/watch?v=…, youtu.be/… or youtube.com/shorts/… link, or the 11-character video ID.'
 const msgFailed = 'Could not search. Nothing was changed. Try again.'
-// Not in the design table: the server rejects a stale or foreign cursor or
-// page (ARS-001 §7.5) and the SPA "tells the user to start the search again".
-const msgStale = 'This page of results is no longer valid. Start the search again.'
-const msgInvalidText = 'The search text contains characters YuHaul cannot read. Change the text and search again.'
+// The server rejects a stale, altered or foreign cursor or page (ARS-001 §7.5),
+// and text that is not valid UTF-8 (§3). Copy from the design section "Final
+// Outcomes Are Never Reprocessed", items 6 and 7.
+const msgStale = "This page of results can't be opened any more. Search again to start from page 1."
+const msgInvalidText = "Some of this text can't be read, so nothing was searched. Type it again, or paste it as plain text."
 
 type Outcome =
   | { phase: 'idle' }
@@ -181,6 +182,16 @@ export function VideosView() {
     navigate(`/videos?${new URLSearchParams({ q: trimmedQ }).toString()}`)
   }
 
+  // "Search again": the same text, no cursor or page, focus on the results heading.
+  const searchAgain = () => {
+    if (pageParam === null) {
+      focusHeading.current = true
+      setNonce((n) => n + 1)
+    } else {
+      goToFirst()
+    }
+  }
+
   const pending = outcome.phase === 'pending'
   const response = outcome.phase === 'done' ? outcome.response : null
 
@@ -276,6 +287,11 @@ export function VideosView() {
           <p role={message.role} className={message.error ? 'form-error' : undefined} style={{ margin: '0 0 12px' }}>
             {message.text}
           </p>
+        )}
+        {outcome.phase === 'failed' && outcome.stale && (
+          <button type="button" className="button" onClick={searchAgain}>
+            Search again
+          </button>
         )}
         {outcome.phase === 'failed' && !outcome.stale && (
           <button type="button" className="button" onClick={() => setNonce((n) => n + 1)}>
