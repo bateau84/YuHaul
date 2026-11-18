@@ -8,6 +8,8 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-18
 
+- Reconciled the `video_already_final` refusal focus decision in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): in Errors and Deferred, focus moves to the persistent alert because the activated Retry control is removed. Kept search-message focus behavior unchanged and added keyboard and screen-reader checks. Design only; browser and assistive-technology verification remains outstanding.
+
 - Recorded SPA implementation of “Final Outcomes Are Never Reprocessed — Run Detail, Queue and Statistics Copy” (task b39-fe, plan revision 20) in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): resolved gap 1 (video page lists runs that only continued a decision, via the new `continued_only` run-entry field) and gap 3 (no web view renders per-run action counts), and added implementation notes for the places the existing UI differs from the copy. Component tests only; no browser or accessibility verification.
 
 ## 2026-11-18
