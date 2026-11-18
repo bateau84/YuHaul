@@ -337,6 +337,11 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   const queueEmpty = data.queue_total === 0
   const first = page.first_position
   const last = page.last_position
+  // Closed-here rows leave the total, so the range may not run past it
+  // ("Showing 1–1 of 0" when the only item closed).
+  const shownTotal = Math.max(data.total - closedHereCount, 0)
+  const shownLast = Math.min(last ?? 0, shownTotal)
+  const range = shownTotal === 0 ? 'Showing 0' : `Showing ${fmt(first ?? 0)}–${fmt(shownLast)}`
   const showFirst = page.number > 1 && !pastEnd
   const showPrev = page.prev_before_id !== null
   const showNext = page.next_after_id !== null
@@ -401,8 +406,8 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         <>
           <p>
             {filtered
-              ? `Showing ${fmt(first ?? 0)}–${fmt(last ?? 0)} of ${fmt(data.total - closedHereCount)} items with this reason. ${fmt(data.queue_total - closedHereCount)} items in the deferred queue.`
-              : `Showing ${fmt(first ?? 0)}–${fmt(last ?? 0)} of ${fmt(data.total - closedHereCount)} items.`}
+              ? `${range} of ${fmt(shownTotal)} items with this reason. ${fmt(data.queue_total - closedHereCount)} items in the deferred queue.`
+              : `${range} of ${fmt(shownTotal)} items.`}
           </p>
           <table className="table">
             <thead>
@@ -441,7 +446,11 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                           <ClosedNotice outcome={d.video_final_outcome} videoId={d.external_video_id} />
                         ) : (
                           <div style={{ display: 'flex', gap: 8 }}>
-                            <button className="button" onClick={() => void retryItem(d, i)}>
+                            <button
+                              className="button"
+                              aria-label={`Retry now: ${d.video_title ?? `video ${d.external_video_id ?? d.video_id}`}`}
+                              onClick={() => void retryItem(d, i)}
+                            >
                               Retry now
                             </button>
                             <button

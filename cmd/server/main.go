@@ -142,6 +142,7 @@ func main() {
 		logger.ErrorContext(ctx, "failed to open queue store", "error", err)
 		os.Exit(1)
 	}
+	queueStore.WithLogger(logger)
 	queueSvc := queue.NewService(queueStore, nil).WithLogger(logger)
 
 	statsStore := stats.NewStore(db)

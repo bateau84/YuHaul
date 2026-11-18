@@ -96,7 +96,8 @@ function QueueState({ state }: { state: VideoQueueState }) {
   }
 }
 
-// Proposed copy: the design leaves this row's wording open (gap 1).
+// Designer decision 1 (b7e4a75): a continuation-only run row shows this text in
+// place of the outcome badge, because the run made no decision of its own.
 export const CONTINUED_LABEL = "Continued an earlier run's decision"
 
 function RunItem({ run }: { run: VideoRunEntry }) {
@@ -109,10 +110,7 @@ function RunItem({ run }: { run: VideoRunEntry }) {
         {run.continued_only ? (
           // The run made no decision of its own; it only sent additions that
           // finish an earlier run's decision (BR-039).
-          <>
-            {run.outcome !== null && <><OutcomeBadge outcome={run.outcome} /> · </>}
-            {CONTINUED_LABEL}
-          </>
+          CONTINUED_LABEL
         ) : (
           <OutcomeBadge outcome={run.outcome} mode={simulation ? run.run_type : undefined} />
         )}

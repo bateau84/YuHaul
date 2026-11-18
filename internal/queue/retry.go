@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/diag"
@@ -237,8 +236,14 @@ func rowsAffected(res sql.Result) (int, error) {
 	return int(n), nil
 }
 
-func logFamilyClosed(ctx context.Context, videoID, entryID int64, outcome string, rows int) {
-	slog.InfoContext(ctx, "queue item closed: video final", "video_id", videoID, "entry_id", entryID, "final_outcome", outcome, "rows", rows)
+// logFamilyClosed records that a final video's queue rows were closed. runID is
+// the run doing the closing; 0 means none exists yet (a refused user retry).
+func (s *Store) logFamilyClosed(ctx context.Context, runID, videoID, entryID int64, outcome string, rows int) {
+	attrs := []any{"video_id", videoID, "entry_id", entryID, "final_outcome", outcome, "rows", rows}
+	if runID != 0 {
+		attrs = append([]any{"run_id", runID}, attrs...)
+	}
+	s.logger.InfoContext(ctx, "queue item closed: video final", attrs...)
 }
 
 // RefuseFinalRetryTx is the first step of a user retry (ARS-006 §4), run in the
@@ -278,7 +283,7 @@ func (s *Store) RefuseFinalRetryTx(ctx context.Context, tx *sql.Tx, entryID int6
 	if err != nil {
 		return nil, false, err
 	}
-	logFamilyClosed(ctx, videoID, entryID, string(outcome), rows)
+	s.logFamilyClosed(ctx, 0, videoID, entryID, string(outcome), rows)
 	return &AlreadyFinalError{VideoID: videoID, EntryID: entryID, ErrorQueue: errorQueue, Outcome: string(outcome)}, false, nil
 }
 
@@ -335,7 +340,7 @@ func (s *Store) claimRetryGroupTx(ctx context.Context, tx *sql.Tx, entryID, runI
 		if err != nil {
 			return receipt, videoID, ClaimLost, err
 		}
-		logFamilyClosed(ctx, videoID, entryID, string(outcome), rows)
+		s.logFamilyClosed(ctx, runID, videoID, entryID, string(outcome), rows)
 		return receipt, videoID, ClaimClosedFinal, nil
 	}
 	if !manual && owner == 0 {
@@ -503,7 +508,7 @@ func (s *Store) CloseRetryReceiptFinalTx(ctx context.Context, tx *sql.Tx, receip
 	} else if len(owned.Errors) > 0 {
 		first = owned.Errors[0].ID
 	}
-	logFamilyClosed(ctx, receipt.VideoID, first, outcome, closed)
+	s.logFamilyClosed(ctx, receipt.ReceivingRunID, receipt.VideoID, first, outcome, closed)
 	return closed, nil
 }
 

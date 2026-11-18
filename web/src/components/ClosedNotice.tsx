@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { CircleCheck } from 'lucide-react'
 import { closedText } from '../lib/final-outcome'
@@ -21,10 +22,15 @@ export function ClosedNotice({ outcome, videoId }: { outcome: string | null | un
   )
 }
 
-// Persistent refusal shown where the row was; no focus move (SC 4.1.3).
+// Persistent refusal shown where the row was. The Retry button that was
+// focused is gone, so focus moves to the alert instead of falling to <body>.
 export function RefusalAlert({ text }: { text: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    ref.current?.focus()
+  }, [])
   return (
-    <div role="alert" className="form-error">
+    <div ref={ref} tabIndex={-1} role="alert" className="form-error">
       {text}
     </div>
   )

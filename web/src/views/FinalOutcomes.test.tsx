@@ -96,12 +96,12 @@ describe('Errors: Retry refused with video_already_final', () => {
     renderErrors()
     expect(await screen.findByRole('tab', { name: 'Errors (2)' })).toBeInTheDocument()
     const row = screen.getByText('Final Video').closest('tr')!
-    fireEvent.click(within(row).getByRole('button', { name: 'Retry' }))
+    fireEvent.click(within(row).getByRole('button', { name: /^Retry / }))
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(REFUSAL_ACCEPTED)
-    // A persistent message, not a toast, and focus does not move to it.
-    expect(alert).not.toHaveFocus()
+    // A persistent message, not a toast. Focus moves to it, not to <body>.
+    expect(alert).toHaveFocus()
     expect(retry).toHaveBeenCalledTimes(1)
 
     const closedRow = screen.getByText('Final Video').closest('tr')!
@@ -114,14 +114,14 @@ describe('Errors: Retry refused with video_already_final', () => {
     expect(screen.getByRole('tab', { name: 'Errors (1)' })).toBeInTheDocument()
     // The other row is untouched.
     const other = screen.getByText('Other Video').closest('tr')!
-    expect(within(other).getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(within(other).getByRole('button', { name: /^Retry / })).toBeInTheDocument()
   })
 
   it('names no outcome it does not know, and closes the row without a usable entry', async () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue([errorEntry()])
     vi.spyOn(queueApi, 'retryError').mockRejectedValue(refused('not_yet_evaluated', { id: 999 }))
     renderErrors()
-    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Retry / }))
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Retry did nothing. This video already has a final outcome. It was not processed again, and nothing was sent to YouTube. This item is now closed.',
     )
@@ -135,7 +135,7 @@ describe('Errors: Retry refused with video_already_final', () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue([errorEntry()])
     vi.spyOn(queueApi, 'retryError').mockRejectedValue(refused('unavailable_on_youtube'))
     renderErrors()
-    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Retry / }))
     expect(await screen.findByRole('alert')).toHaveTextContent('final outcome: Unavailable on YouTube. It was not processed again')
   })
 
@@ -143,7 +143,7 @@ describe('Errors: Retry refused with video_already_final', () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue([errorEntry()])
     vi.spyOn(queueApi, 'retryError').mockRejectedValue(new ApiError(409, 'invalid state'))
     renderErrors()
-    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Retry / }))
     expect((await screen.findAllByText('invalid state')).length).toBeGreaterThan(0)
     expect(screen.queryByText('Closed')).toBeNull()
   })
@@ -176,7 +176,7 @@ describe('Errors: original_decision_unavailable', () => {
         "This video already has a playlist addition that YuHaul sent in an earlier run. YuHaul cannot read that run's saved decision, so it cannot safely send the remaining additions. Nothing was sent now.",
       ),
     ).toBeInTheDocument()
-    expect(within(row).queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(within(row).queryByRole('button', { name: /^Retry / })).toBeNull()
     expect(within(row).getByText('Retry is not offered: it would fail the same way.')).toBeInTheDocument()
     expect(within(row).getByRole('link', { name: 'View video' })).toHaveAttribute('href', '/videos/dQw4w9WgXcQ')
     expect(within(row).getAllByRole('button')).toHaveLength(1)
@@ -216,7 +216,7 @@ describe('Deferred: Retry refused with video_already_final', () => {
     renderErrors('?tab=deferred')
     expect(await screen.findByRole('tab', { name: 'Deferred (120)' })).toBeInTheDocument()
     const row = screen.getByText('Video 1').closest('tr')!
-    fireEvent.click(within(row).getByRole('button', { name: 'Retry now' }))
+    fireEvent.click(within(row).getByRole('button', { name: /^Retry now: / }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(REFUSAL_ACCEPTED)
     const closedRow = screen.getByText('Video 1').closest('tr')!
@@ -230,7 +230,7 @@ describe('Deferred: Retry refused with video_already_final', () => {
     // No toast, no reload, and the other row keeps its controls.
     expect(page).toHaveBeenCalledTimes(1)
     expect(retry).toHaveBeenCalledTimes(1)
-    expect(within(screen.getByText('Video 2').closest('tr')!).getByRole('button', { name: 'Retry now' })).toBeInTheDocument()
+    expect(within(screen.getByText('Video 2').closest('tr')!).getByRole('button', { name: /^Retry now: / })).toBeInTheDocument()
   })
 
   it('shows a closed row the API returns, without counting it again', async () => {
@@ -270,5 +270,52 @@ describe('Deferred: rejected page or cursor', () => {
     renderErrors('?tab=deferred')
     expect(await screen.findByText('Could not load the deferred queue. Nothing was changed.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Go to the first page' })).toBeNull()
+  })
+})
+
+describe('Retry accessible names (SC 2.5.3, 2.4.6)', () => {
+  it('names the target in Errors rows, with the id when no title is held', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([
+      errorEntry(),
+      errorEntry({ id: 2, video_title: undefined, external_video_id: 'abcdefghijk' }),
+      errorEntry({ id: 3, video_title: undefined, external_video_id: undefined, video_id: 77 }),
+    ])
+    renderErrors()
+    expect(await screen.findByRole('button', { name: 'Retry Final Video' })).toHaveTextContent(/^Retry$/)
+    expect(screen.getByRole('button', { name: 'Retry video abcdefghijk' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry video 77' })).toBeInTheDocument()
+  })
+
+  it('names the target in Deferred rows and keeps the visible label first', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    vi.spyOn(deferredPageApi, 'getDeferredPage').mockResolvedValue(pageOf([deferredItem(1), deferredItem(2, { video_title: undefined })]))
+    renderErrors('?tab=deferred')
+    const named = await screen.findByRole('button', { name: 'Retry now: Video 1' })
+    expect(named).toHaveTextContent('Retry now')
+    expect(screen.getByRole('button', { name: 'Retry now: video vid00000002' })).toBeInTheDocument()
+  })
+})
+
+describe('Refusal focus and Deferred range', () => {
+  it('moves focus to the alert after a Deferred refusal', async () => {
+    const items = [deferredItem(1)]
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    vi.spyOn(deferredPageApi, 'getDeferredPage').mockResolvedValue(pageOf(items))
+    vi.spyOn(queueApi, 'retryDeferred').mockRejectedValue(refused('accepted', { ...items[0], closed_reason: 'final_outcome', video_final_outcome: 'accepted' }))
+    renderErrors('?tab=deferred')
+    fireEvent.click(await screen.findByRole('button', { name: /^Retry now: / }))
+    expect(await screen.findByRole('alert')).toHaveFocus()
+  })
+
+  it('does not say "Showing 1–1 of 0" when the only item closes', async () => {
+    const items = [deferredItem(1)]
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    vi.spyOn(deferredPageApi, 'getDeferredPage').mockResolvedValue(pageOf(items))
+    vi.spyOn(queueApi, 'retryDeferred').mockRejectedValue(refused('accepted', { ...items[0], closed_reason: 'final_outcome', video_final_outcome: 'accepted' }))
+    renderErrors('?tab=deferred')
+    expect(await screen.findByText('Showing 1–1 of 1 items.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Retry now: / }))
+    expect(await screen.findByText('Showing 0 of 0 items.')).toBeInTheDocument()
+    expect(screen.queryByText(/1–1 of 0/)).toBeNull()
   })
 })

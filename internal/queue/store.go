@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -13,7 +14,17 @@ import (
 
 // Store persists and queries the error and deferred queues.
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	logger *slog.Logger
+}
+
+// WithLogger sets the logger the store writes to (the app's JSON logger).
+// A nil logger is ignored.
+func (s *Store) WithLogger(logger *slog.Logger) *Store {
+	if logger != nil {
+		s.logger = logger
+	}
+	return s
 }
 
 // NewStore creates a queue store backed by db. The caller retains ownership of
@@ -23,7 +34,7 @@ func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("queue: db is required")
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, logger: slog.Default()}, nil
 }
 
 // CreateErrorEntry persists a new error queue entry and returns its ID.

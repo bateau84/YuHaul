@@ -38,7 +38,7 @@ describe('ErrorsView', () => {
     const row = await waitFor(() => screen.getByText('yt-safe-id').closest('tr'))
     expect(within(row!).getByText('api_error')).toBeInTheDocument()
     expect(within(row!).getByText('quotaExceeded')).toBeInTheDocument()
-    fireEvent.click(within(row!).getByRole('button', { name: 'Retry' }))
+    fireEvent.click(within(row!).getByRole('button', { name: /^Retry / }))
     await waitFor(() => expect(retry).toHaveBeenCalledWith(427))
 
     // Reload the same real-shaped row to exercise the independent dismiss action.

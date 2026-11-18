@@ -211,7 +211,11 @@ export function ErrorsView() {
                                 </div>
                               ) : (
                                 <div style={{ display: 'flex', gap: 8 }}>
-                                  <button className="button" onClick={() => retryError(e.id)}>
+                                  <button
+                                    className="button"
+                                    aria-label={`Retry ${e.video_title ?? `video ${e.external_video_id ?? e.video_id}`}`}
+                                    onClick={() => retryError(e.id)}
+                                  >
                                     Retry
                                   </button>
                                   <button className="button" onClick={() => dismissError(e.id)}>

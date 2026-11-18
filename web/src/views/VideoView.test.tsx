@@ -240,4 +240,15 @@ describe('VideoView', () => {
     expect(items[1]).not.toHaveTextContent('Continued an earlier run')
     expect(within(items[1]).getByText('Rejected')).toBeInTheDocument()
   })
+
+  it('shows the continued label in place of the outcome badge even when an outcome is held', async () => {
+    fetchMock.mockResolvedValue(
+      json(base({ runs: [run(62, { outcome: 'accepted', continued_only: true, initiated_by: 'queue_retry', run_type: 'manual' })] }))
+    )
+    renderAt('/videos/dQw4w9WgXcQ')
+    const runs = await screen.findByRole('region', { name: 'Runs that decided this video' })
+    const item = within(runs).getAllByRole('listitem')[0]
+    expect(item).toHaveTextContent("Continued an earlier run's decision")
+    expect(within(item).queryByText('Accepted')).toBeNull()
+  })
 })

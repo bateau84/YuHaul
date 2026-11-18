@@ -21,6 +21,7 @@
   --color-text-primary: #111827;
   --color-text-secondary: #4b5563;
   --color-text-muted: #6b7280;
+  --color-text-error: #b91c1c;
   --color-interactive-primary: #2563eb;
   --color-interactive-primary-hover: #1d4ed8;
   --color-interactive-destructive: #dc2626;
@@ -42,6 +43,7 @@
     --color-text-primary: #f8fafc;
     --color-text-secondary: #cbd5e1;
     --color-text-muted: #94a3b8;
+    --color-text-error: #fca5a5;
     --color-border-default: #334155;
   }
 }
@@ -165,6 +167,11 @@ a {
   margin: 0 0 12px;
   font-size: 1.125rem;
   font-weight: 600;
+}
+
+/* A <dialog> does not inherit body text colour: the browser default is black. */
+dialog.card {
+  color: var(--color-text-primary);
 }
 
 .card {
@@ -303,8 +310,9 @@ a {
   border-color: var(--color-status-rejected);
 }
 
+/* Error text: 6.5:1 on white (#b91c1c), 7.5:1 on the dark card (#fca5a5). */
 .form-error {
-  color: var(--color-status-rejected);
+  color: var(--color-text-error);
   font-size: 0.875rem;
   margin-top: 4px;
 }
