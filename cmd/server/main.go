@@ -714,6 +714,21 @@ func boundReadOptions(service *auth.Service, binding auth.AuthorizationBinding, 
 			}
 			resp, receipt, hold, err := service.DispatchWithQuota(ctx, binding, req, transport, ledger, quota.Operation(op))
 			admission := youtube.RequestAdmission{AuthorizationID: receipt.AuthorizationID, CredentialRevision: receipt.CredentialRevision, AdmittedAt: receipt.AdmittedAt}
+			if errors.Is(err, auth.ErrQuotaAccounting) {
+				admission.Accounting = auth.ErrQuotaAccounting
+				switch {
+				case errors.Is(err, context.Canceled):
+					err = context.Canceled
+				case errors.Is(err, context.DeadlineExceeded):
+					err = context.DeadlineExceeded
+				case errors.Is(err, auth.ErrAccessExpiredBeforeAdmission):
+					err = auth.ErrAccessExpiredBeforeAdmission
+				case errors.Is(err, auth.ErrQuotaRefused):
+					err = auth.ErrQuotaRefused
+				default:
+					err = auth.ErrQuotaAccounting
+				}
+			}
 			if hold != nil {
 				admission.Finalize = func(ctx context.Context, category string, status int) error {
 					return hold.Finalize(ctx, sql.NullInt64{}, quota.OutcomeCategory(category), sql.NullInt64{Int64: int64(status), Valid: status != 0})

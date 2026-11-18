@@ -315,13 +315,14 @@ func (s *Service) Dispatch(ctx context.Context, b AuthorizationBinding, req *htt
 // A nil hold means no attempt was admitted.
 func (s *Service) DispatchWithQuota(ctx context.Context, b AuthorizationBinding, req *http.Request, transport http.RoundTripper, ledger *quota.Ledger, op quota.Operation) (*http.Response, AdmissionReceipt, *quota.Hold, error) {
 	if ledger == nil {
-		return nil, AdmissionReceipt{}, nil, errors.New("auth: nil quota ledger")
+		return nil, AdmissionReceipt{}, nil, fmt.Errorf("%w: nil quota ledger", ErrQuotaAccounting)
 	}
 	return s.dispatch(ctx, b, req, transport, ledger, op)
 }
 
 var ErrQuotaRefused = errors.New("auth: quota admission refused")
 var ErrAccessExpiredBeforeAdmission = errors.New("auth: access expired before admission")
+var ErrQuotaAccounting = errors.New("auth: quota admission accounting failed")
 
 func (s *Service) dispatch(ctx context.Context, b AuthorizationBinding, req *http.Request, transport http.RoundTripper, ledger *quota.Ledger, op quota.Operation) (*http.Response, AdmissionReceipt, *quota.Hold, error) {
 	if req == nil || req.URL == nil || transport == nil {
@@ -380,8 +381,14 @@ func (s *Service) dispatch(ctx context.Context, b AuthorizationBinding, req *htt
 				})
 			}
 			if err != nil {
+				if !errors.Is(err, ErrQuotaRefused) && !errors.Is(err, ErrAccessExpiredBeforeAdmission) &&
+					!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					err = errors.Join(ErrQuotaAccounting, err)
+				}
 				if hold != nil {
-					err = errors.Join(err, hold.Cancel())
+					if cleanup := hold.Cancel(); cleanup != nil {
+						err = errors.Join(err, ErrQuotaAccounting, cleanup)
+					}
 				}
 				s.mu.Unlock()
 				return nil, AdmissionReceipt{}, nil, err
