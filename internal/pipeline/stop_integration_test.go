@@ -706,3 +706,26 @@ func TestR3_StopSettleVersusStartsAndDiscard(t *testing.T) {
 		require.Equal(t, 1, winners, "iteration %d: exactly one start claimed the handoff: %v", i, got)
 	}
 }
+
+// A V3 that completes with no Stop in flight keeps its succeeded action row and
+// leaves no guard (BR-035 AC8), and a Stop pressed after the run ended is
+// refused without changing anything.
+func TestCompletedV3RecordsSuccessWithoutGuard(t *testing.T) {
+	e := newRunNowEnv(t)
+	adm, err := e.pipeline.AdmitRunNow(e.ctx)
+	require.NoError(t, err)
+	adm.Execute(e.ctx)
+
+	v3, err := e.stateStore.GetVideoByExternalID(e.ctx, "V3")
+	require.NoError(t, err)
+	require.Equal(t, 1, e.count(t, `SELECT COUNT(*) FROM executed_action WHERE video_id=? AND run_id=? AND outcome='succeeded'`, v3.ID, adm.RunID()))
+	require.Zero(t, e.count(t, `SELECT COUNT(*) FROM playlist_send_guard`))
+
+	_, err = e.pipeline.StopRun(e.ctx, adm.RunID())
+	var refused *StopRefusedError
+	require.True(t, errors.As(err, &refused), "%v", err)
+	r := e.run(t, adm.RunID())
+	require.Nil(t, r.StopRequestedAt)
+	require.Equal(t, state.RunStatusCompleted, r.Status)
+	require.Equal(t, 1, e.count(t, `SELECT COUNT(*) FROM executed_action WHERE video_id=? AND run_id=? AND outcome='succeeded'`, v3.ID, adm.RunID()))
+}

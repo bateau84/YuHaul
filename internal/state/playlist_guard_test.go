@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,7 +12,11 @@ import (
 
 func guardFixture(t *testing.T) (*Store, PlaylistSendClaim) {
 	t.Helper()
-	db := openTestDB(t)
+	return guardFixtureOn(t, openTestDB(t))
+}
+
+func guardFixtureOn(t *testing.T, db *sql.DB) (*Store, PlaylistSendClaim) {
+	t.Helper()
 	s, err := NewStore(db)
 	if err != nil {
 		t.Fatal(err)
@@ -769,4 +774,53 @@ func TestPlaylistSendClaimContinuationHonoursHeldGuardAndLegacyVeto(t *testing.T
 			t.Fatalf("guards = %d, want 0", n)
 		}
 	})
+}
+
+// A Stop that commits after a known-success resolution has started must not
+// make the success record fail (BR-035 AC8, ADR-007): the writer lock is taken
+// up front, so the resolution waits for the Stop commit and then writes.
+func TestResolvePlaylistSendSurvivesConcurrentStopCommit(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stoprace.db")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s, c := guardFixtureOn(t, db)
+	now := timeNow()
+	_, g, err := s.ClaimPlaylistSend(ctx, c, now)
+	if err != nil || g == nil {
+		t.Fatalf("claim: %v", err)
+	}
+	other, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	stop, err := other.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop.Rollback()
+	if _, err := stop.ExecContext(ctx, `UPDATE run SET stop_requested_at=? WHERE id=?`, formatRunTime(now), c.RunID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.ResolvePlaylistSend(ctx, *g, ActionOutcomeSucceeded, nil, &now) }()
+	// The resolution starts while Stop holds the writer lock, then Stop commits.
+	time.Sleep(100 * time.Millisecond)
+	if err := stop.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("known success lost to a concurrent Stop commit: %v", err)
+	}
+	var guards, successes int
+	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM playlist_send_guard), (SELECT COUNT(*) FROM executed_action WHERE outcome='succeeded')`).Scan(&guards, &successes); err != nil {
+		t.Fatal(err)
+	}
+	if guards != 0 || successes != 1 {
+		t.Fatalf("guards=%d successes=%d, want 0 and 1", guards, successes)
+	}
 }

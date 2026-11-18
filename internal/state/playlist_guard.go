@@ -111,6 +111,9 @@ func (s *Store) ClaimPlaylistSend(ctx context.Context, c PlaylistSendClaim, now 
 		return "", nil, fmt.Errorf("beginning playlist claim: %w", err)
 	}
 	defer tx.Rollback()
+	if err := reserveWriter(ctx, tx); err != nil {
+		return "", nil, err
+	}
 	var runType, status string
 	var authVersion, mutationSafetyVersion int
 	err = tx.QueryRowContext(ctx, `SELECT run_type, status, action_authority_version, mutation_safety_version FROM run WHERE id = ?`, c.RunID).Scan(&runType, &status, &authVersion, &mutationSafetyVersion)
@@ -185,6 +188,17 @@ AND EXISTS (SELECT 1 FROM json_each(cv.snapshot, '$.routes') route,
 	return PlaylistClaimed, &PlaylistSendGuard{PlaylistSendClaim: c, PreparedAt: prepared}, nil
 }
 
+// reserveWriter takes SQLite's writer lock before any read. A deferred
+// read-then-write transaction otherwise fails with SQLITE_BUSY_SNAPSHOT when
+// another connection (for example StopRun) commits between its first read and
+// its first write; a known success record must not be lost that way.
+func reserveWriter(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE run SET id = id WHERE id = -1`); err != nil {
+		return fmt.Errorf("reserving writer: %w", err)
+	}
+	return nil
+}
+
 // ResolvePlaylistSend atomically writes conclusive action evidence and removes
 // the exact guard owned by this live receipt. Unknown outcomes are deliberately
 // not resolvable by this operation.
@@ -194,6 +208,9 @@ func (s *Store) ResolvePlaylistSend(ctx context.Context, g PlaylistSendGuard, ou
 		return fmt.Errorf("beginning playlist resolution: %w", err)
 	}
 	defer tx.Rollback()
+	if err := reserveWriter(ctx, tx); err != nil {
+		return err
+	}
 	if err := s.ResolvePlaylistSendTx(ctx, tx, g, outcome, reason, attemptedAt); err != nil {
 		return err
 	}

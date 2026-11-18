@@ -904,21 +904,31 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 	// A known success is recorded even if shutdown cancelled ctx meanwhile.
 	resolveCtx, cancelResolve := runFinalizationContext(ctx)
 	defer cancelResolve()
-	tx, err := e.db.BeginTx(resolveCtx, nil)
-	if err != nil {
-		return state.ActionOutcomeFailed, fmt.Errorf("begin guarded success resolution: %w", err)
-	}
-	defer tx.Rollback()
-	if err := guardStore.ResolvePlaylistSendTx(resolveCtx, tx, *receipt, state.ActionOutcomeSucceeded, nil, &attemptedAt); err != nil {
-		return state.ActionOutcomeFailed, err
-	}
-	if err := tx.Commit(); err != nil {
-		return state.ActionOutcomeFailed, fmt.Errorf("commit guarded success resolution: %w", err)
+	// The writer lock is taken before the first read so a concurrent StopRun
+	// commit cannot invalidate the transaction's snapshot.
+	if err := e.withWriterTx(resolveCtx, func(tx *sql.Tx) error {
+		return guardStore.ResolvePlaylistSendTx(resolveCtx, tx, *receipt, state.ActionOutcomeSucceeded, nil, &attemptedAt)
+	}); err != nil {
+		// The add reached YouTube; the guard stays. Never discard this silently,
+		// even when the caller will treat a cancelled ctx as a stop.
+		e.logger.ErrorContext(ctx, "record guarded playlist success failed; guard kept", "run_id", runID, "video_id", videoID, "diagnostic", diag.Encode(err, "action_execution", "execute_action"))
+		return state.ActionOutcomeFailed, fmt.Errorf("record guarded success resolution: %w", err)
 	}
 	if result.Accounting != nil {
 		return state.ActionOutcomeFailed, &successAccountingError{cause: result.Accounting}
 	}
 	return state.ActionOutcomeSucceeded, nil
+}
+
+// withWriterTx runs fn in a transaction that holds SQLite's writer lock from
+// the start (queue.WithRetryTx), so a concurrent StopRun commit cannot make a
+// later write fail with SQLITE_BUSY_SNAPSHOT.
+func (e *Executor) withWriterTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	qs, err := queue.NewStore(e.db)
+	if err != nil {
+		return err
+	}
+	return qs.WithRetryTx(ctx, fn)
 }
 
 // releaseCanceledClaim handles a caller context that ended after the guard
@@ -934,13 +944,9 @@ func (e *Executor) releaseCanceledClaim(ctx context.Context, guardStore *state.S
 	cause := ctx.Err()
 	finalizeCtx, cancel := runFinalizationContext(ctx)
 	defer cancel()
-	tx, err := e.db.BeginTx(finalizeCtx, nil)
-	if err == nil {
-		defer tx.Rollback()
-		if err = guardStore.ResolvePlaylistSendTx(finalizeCtx, tx, receipt, state.ActionOutcomeNotAttempted, nil, nil); err == nil {
-			err = tx.Commit()
-		}
-	}
+	err := e.withWriterTx(finalizeCtx, func(tx *sql.Tx) error {
+		return guardStore.ResolvePlaylistSendTx(finalizeCtx, tx, receipt, state.ActionOutcomeNotAttempted, nil, nil)
+	})
 	if err != nil {
 		e.logger.ErrorContext(ctx, "release canceled playlist claim failed; guard kept", "run_id", runID, "video_id", videoID, "diagnostic", diag.Encode(err, "action_execution", "execute_action"))
 		return state.ActionOutcomeFailed, fmt.Errorf("%w; guard kept: %v", cause, err)
