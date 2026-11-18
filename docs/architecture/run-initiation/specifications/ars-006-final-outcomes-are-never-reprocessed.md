@@ -6,7 +6,7 @@ tags: [architecture, specification, outcomes, lifecycle, retry, deferred-queue, 
 timestamp: 2026-11-12T00:00:00Z
 ---
 
-**Status:** accepted — exact implementation contract; steps 1, 2a, 2b and 3 (§1.1, §1.3, §2–§7) implemented; migration 028 and some K-series tests not yet (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
+**Status:** accepted — exact implementation contract; steps 1, 2a, 2b, 3 and 4 (§1, §2–§7) implemented; the K-series tests K6, K18, K20 and K21 not yet (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
 
 It amends:
 
@@ -512,7 +512,24 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
 
 **Continuation-pending tests.** The six integration tests that failed at 07c6429 (`TestV2_ScanAndSendTimeVetoAgree`, `TestRetryRecovery_CompletedTargetSurvivesFreshEvaluation`, `TestEndLegacyRunChangesOnlyStatusAndReason`, `TestEndedRunsAreOutsideStartupClassification`, `TestEndedRunNeverResumedAndNeverBlocks`, `TestEndableReadAndStaleTrue`) pass after step 3, with the `TestV2` fixture change above.
 
-Not implemented: §1.2 migration 028, F2, and the K-series tests K6, K18 and K20–K22.
+**Step 4 (migration 028) — implemented 2026-11-18**, after the claim reset became conditional on the video class (invariant 7, step 2a):
+
+- §1.2 `internal/store/migrations/028_final_outcome_triggers.up.sql` and `.down.sql`, as specified: `video_final_outcome_immutable` and `run_video_outcome_final_immutable`. They fire on `UPDATE OF final_outcome`, so an `ON CONFLICT DO UPDATE` upsert is covered too. Writing the same value passes. The existing suites ran with the triggers on and found no production writer that changes a final outcome.
+- Tests (`internal/store/final_outcome_triggers_migration_test.go`):
+  - **F2:** every final outcome refuses every other value (including NULL) on `video`, and `not_yet_evaluated` on `run_video_outcome`; the same value and `processing_state` alone pass; deferred → accepted, NULL → rejected, not_yet_evaluated → excluded, and (on `run_video_outcome`) NULL → accepted and deferred → accepted succeed; accepted → deferred aborts; an upsert over a final run outcome aborts; the down file removes both triggers.
+  - **K22:** with 028 applied, the pre-BR-039 unconditional reset aborts on a final video; after the down file it succeeds.
+  - Two more: `Steps(-1)` and `Steps(1)` through golang-migrate use the embedded down file, and an upgrade from 027 with a final video keeps its row and gains the triggers.
+- Schema version assertions moved from 27 to 28 (`store_test.go`, `exclusion_reference_migration_test.go`, `route_identity_test.go`). The outcome-site inventory (`internal/state/outcome_inventory_test.go`) lists 028's outcome list as handled.
+
+**Existing tests changed by 028:**
+
+- `TestRunStatusCheckWidenedByWritableSchemaStep`: the trigger count is 10, because `run_video_outcome_final_immutable` also matches `LIKE 'run_%'`.
+- `TestRunStatusCheckStepIsIdempotent`: it now migrates to 28 before it measures the widening steps, since 028 bumps `schema_version` too.
+- `TestWidenFinalOutcomeChecksAcceptsAndRejects`: the "bogus outcome" CHECK probe uses a non-final video, because the BEFORE trigger fires ahead of the CHECK on a final one.
+
+**Deviation (K22).** K22 runs the pre-BR-039 claim reset statement, copied verbatim, against the migrated schema. It does not check out and run the old binary. The statement is the only part of the old claim code that touches the trigger.
+
+Not implemented: the K-series tests K6, K18 and K20. K20 applies only if the interim hold ships, which it did not. K21 (statistics regression) is also not written.
 
 **Deviation.** `FinalVideo` wraps the column in `COALESCE(v.final_outcome, '')`. `video.final_outcome` is nullable, and without it a NULL outcome makes `FinalVideo`, `NOT FinalVideo` and `PartlyDoneVideo` NULL, so `RoutableByRun` would drop every video with a NULL outcome. Classification is otherwise as specified.
 

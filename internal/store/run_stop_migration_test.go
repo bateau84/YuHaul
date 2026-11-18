@@ -81,7 +81,7 @@ func TestRunStatusCheckWidenedByWritableSchemaStep(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&n))
 	require.Zero(t, n)
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name LIKE 'run_%'`).Scan(&n))
-	require.Equal(t, 9, n, "six 024 triggers and three 025 triggers")
+	require.Equal(t, 10, n, "six 024 triggers, three 025 triggers and run_video_outcome_final_immutable from 028")
 }
 
 // M4: the step is idempotent and bumps schema_version once.
@@ -95,9 +95,9 @@ func TestRunStatusCheckStepIsIdempotent(t *testing.T) {
 	require.Equal(t, v1, schemaVersion(t, db), "second step is a no-op")
 	require.NoError(t, db.Close())
 
-	// Migrate through 027 only (no widening steps). ApplyMigrations then runs
+	// Migrate through 028 only (no widening steps). ApplyMigrations then runs
 	// widenRunStatusCheck and widenFinalOutcomeChecks, one bump each.
-	pre := migrateTo(t, filepath.Join(t.TempDir(), "pre.db"), 27)
+	pre := migrateTo(t, filepath.Join(t.TempDir(), "pre.db"), 28)
 	before := schemaVersion(t, pre)
 	require.NoError(t, store.ApplyMigrations(pre))
 	require.Equal(t, before+2, schemaVersion(t, pre), "each widening step bumps schema_version by exactly one")

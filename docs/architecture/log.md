@@ -8,6 +8,10 @@ timestamp: 2026-11-11T00:00:00Z
 
 # Architecture Update Log
 
+## 2026-11-18
+
+**BR-039 migration 028 implemented (task b39-mig028, Plan revision 20):** [ARS-006 §1.2](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) is in the code as `028_final_outcome_triggers` (up and down). The database now refuses any change to a final outcome on `video` and `run_video_outcome`. It ships after the claim reset became conditional (invariant 7). Tests F2 and K22 are written, the schema version assertions are 28, and ARS-006 §12 records the step, three existing tests that 028 legitimately changed, and the K22 deviation. K6, K18, K20 and K21 remain.
+
 ## 2026-11-17
 
 **ARS-006 K10 corrected (gate b39-gate-ii finding MAJOR-1).** [ARS-006 §10.3](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) K10 said that after "Study" fails permanently a user retry sends only "Study". That contradicted BR-039 AC7 and AC11, authorization ARS-001 (only a success or a quota `not_applied` releases the send guard) and the code. K10 now says: after a non-quota rejection, V is `failed` with an Errors entry, "Lofi" stays `succeeded`, the "Study" guard stays as possibly applied under the original sending run's `unresolved_mutations`, and a user retry sends nothing, records "Study" as `not_attempted` with `mutation_application_uncertain`, and keeps V in the Errors queue. After a quota deferral, the next run and a user retry each send only "Study". This now agrees with the §12 note and `TestContinuationStillPartlyDoneK10`. The code is unchanged. BR-039 "Verified by" is aligned in the same change.

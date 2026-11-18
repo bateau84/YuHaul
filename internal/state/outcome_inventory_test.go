@@ -53,6 +53,8 @@ var outcomeInventory = []outcomeSite{
 	{"internal/store/migrations/001_initial_schema.up.sql", `decision TEXT|outcome TEXT`, inventoryNotApplicable, "route decision and executed_action outcome domains, not final outcomes"},
 	{"internal/store/migrations/015_run_video_outcome.up.sql", `CHECK \(final_outcome IS NULL OR final_outcome IN \('accepted','rejected','excluded','deferred','failed','not_yet_evaluated'\)\)|final_outcome = 'deferred' AND|final_outcome = 'failed' AND`, inventorySuperseded, "original run_video_outcome CHECK, widened by widenFinalOutcomeChecks; deferred/failed pairing CHECKs are unaffected"},
 
+	{"internal/store/migrations/028_final_outcome_triggers.up.sql", `WHEN OLD\.final_outcome IN`, inventoryHandled, "migration 028 treats unavailable_on_youtube as final: its value cannot change on video or run_video_outcome"},
+
 	// internal/state
 	{"internal/state/models.go", `^\s*case FinalOutcomeAccepted, FinalOutcomeRejected, FinalOutcomeExcluded,$|^\s*FinalOutcomeDeferred, FinalOutcomeFailed, FinalOutcomeNotYetEvaluated,$|^\s*FinalOutcomeUnavailableOnYouTube:$`, inventoryHandled, "VideoFinalOutcome.Valid accepts the value"},
 	{"internal/state/store.go", `completedAt|FinalOutcomeAccepted \|\| outcome|FinalOutcomeExcluded \|\| outcome|FinalOutcomeUnavailableOnYouTube \{`, inventoryHandled, "updateVideoState sets completed_at for every final outcome"},

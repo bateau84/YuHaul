@@ -144,7 +144,8 @@ func TestWidenFinalOutcomeChecksAcceptsAndRejects(t *testing.T) {
 	_, err = db.Exec(`INSERT INTO run_video_outcome (run_id, video_id, final_outcome, updated_at) VALUES (2,3,?,'2026-11-01T00:00:00Z')`, unavailable)
 	require.NoError(t, err)
 
-	_, err = db.Exec(`UPDATE video SET final_outcome='bogus' WHERE id=3`)
+	// Video 1 is not final, so the 028 trigger does not fire and the CHECK decides.
+	_, err = db.Exec(`UPDATE video SET final_outcome='bogus' WHERE id=1`)
 	require.ErrorContains(t, err, "CHECK constraint failed")
 	_, err = db.Exec(`INSERT INTO run_video_outcome (run_id, video_id, final_outcome, updated_at) VALUES (2,2,'bogus','2026-11-01T00:00:00Z')`)
 	require.ErrorContains(t, err, "CHECK constraint failed")
