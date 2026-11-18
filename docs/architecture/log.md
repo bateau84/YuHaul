@@ -10,6 +10,16 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-18
 
+**BR-039 rollback procedure corrected (gate b39-gate-iii MAJOR-1).** The rollback note in [ARS-006 §1.2](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) and [ADR-007](run-initiation/decisions/adr-007-final-outcomes-are-never-reprocessed.md) Decision 6 dropped the triggers but left `schema_migrations` at 28. As a result, the pre-028 binary failed with `no migration found for version 28`, and deploying the new binary again started with no triggers.
+
+- The procedure now drops the triggers and sets the version to the target binary's newest migration in one transaction.
+- It warns about the silent loss of the triggers and gives a check for them.
+- A rollback past 027 also needs `version = 27` set by hand before rolling forward. Otherwise 027 fails with `duplicate column name: closed_reason` and leaves the database dirty. The earlier claim that 027 needs no rollback was corrected for this.
+- K22 is extended to match.
+- [Video-search ARS-001 §10.9](video-search/specifications/ars-001-video-search-api-and-queries.md) already reset the version. It now says that the reset is required and links to the corrected procedure.
+
+Each step was checked with golang-migrate in a throwaway copy of the repository. Docs only; no code changed.
+
 **BR-039 migration 028 implemented (task b39-mig028, Plan revision 20):** [ARS-006 §1.2](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) is in the code as `028_final_outcome_triggers` (up and down). The database now refuses any change to a final outcome on `video` and `run_video_outcome`. It ships after the claim reset became conditional (invariant 7). Tests F2 and K22 are written, the schema version assertions are 28, and ARS-006 §12 records the step, three existing tests that 028 legitimately changed, and the K22 deviation. K6, K18, K20 and K21 remain.
 
 ## 2026-11-17

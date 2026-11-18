@@ -209,8 +209,11 @@ These are split into **migration 028**, separate from 027's columns (critic F3a)
 - **Why later.** Under today's unconditional claim reset, the trigger would abort a claim of a final video and roll back the whole run start, which breaks BR-035 AC15. So 028 ships in the same release as the claim classification, or later. It never ships before.
 - **Why only `final_outcome`.** The `video` trigger watches only `final_outcome`, following M4's strict definition. Changes to `processing_state` are left to the classification.
 - **Rollback.**
-  - `028_final_outcome_triggers.down.sql` drops both triggers. The application never runs down migrations, so an operator rolling the binary back past this release first applies that file's two `DROP TRIGGER` statements with `sqlite3`. Without that, the older binary's reset hits the trigger and every run start fails while a final video has an eligible item.
-  - 027's columns are harmless to an older binary: every insert names its columns, and the default is NULL.
+  - `028_final_outcome_triggers.down.sql` drops both triggers. The application never runs down migrations. An operator rolling back past this release stops the server and runs one `sqlite3` transaction. It holds that file's two `DROP TRIGGER` statements and `UPDATE schema_migrations SET version = <target binary's newest migration>, dirty = 0`. Both parts are needed:
+    - Without the `DROP TRIGGER` statements, the older binary's reset hits the trigger. Every run start then fails while a final video has an eligible item.
+    - Without the version change, the older binary refuses to start. golang-migrate fails with `no migration found for version 28 ... file does not exist`.
+  - **The triggers can disappear silently.** If the triggers are dropped but the version stays at 28, deploying the new binary again starts without error, with no immutability triggers. golang-migrate sees nothing to apply. With the version lowered, rolling forward applies 028 again and recreates the triggers. ARS-006 §1.2 gives the exact procedure and a check for the triggers.
+  - 027's columns are harmless to older code: every insert names its columns, and the default is NULL. They still raise the recorded version. A binary older than 027 needs the version set to its own newest migration. Before rolling forward, set the version to 27 by hand, because 027 cannot add its columns a second time (`duplicate column name: closed_reason`).
   - Items closed by the new binary stay closed.
 
 ## Decision 7 — continuation send under the original run's decision

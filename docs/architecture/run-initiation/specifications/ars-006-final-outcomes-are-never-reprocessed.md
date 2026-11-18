@@ -82,7 +82,25 @@ DROP TRIGGER IF EXISTS video_final_outcome_immutable;
 DROP TRIGGER IF EXISTS run_video_outcome_final_immutable;
 ```
 
-**Release note.** Before running a binary older than this release, apply the down file's two statements with `sqlite3`. Without them, the older binary's unconditional claim reset aborts on a final video, and every run start fails while any final video has an eligible item. Migration 027's columns need no rollback: older code names its insert columns, and the default is NULL.
+**Release note: rollback.** golang-migrate records the database's version in `schema_migrations`. A binary refuses to start when that version is higher than its own newest migration file. It fails with `no migration found for version 28: read down for version 28 .: file does not exist`. Dropping the triggers is therefore not enough. The recorded version must also go down to the target binary's newest migration. The application never runs down migrations itself.
+
+*Roll back to a binary whose newest migration is 027.* Stop the server, back up the database, and run the following in one `sqlite3` transaction:
+
+```sql
+BEGIN;
+DROP TRIGGER IF EXISTS video_final_outcome_immutable;
+DROP TRIGGER IF EXISTS run_video_outcome_final_immutable;
+UPDATE schema_migrations SET version = 27, dirty = 0;
+COMMIT;
+```
+
+Then start the older binary. Without the `DROP TRIGGER` statements, the older binary's unconditional claim reset aborts on a final video, and every run start fails while any final video has an eligible item. To roll forward again, start the new binary. It applies 028 again and recreates both triggers.
+
+*Roll back to a binary older than 027.* Keep 027's two `closed_reason` columns. They are harmless to the older code, which names its insert columns, and the default is NULL. Run the same transaction, but set `version` to that binary's newest migration (for example `26`). Before rolling forward, stop the server and run `UPDATE schema_migrations SET version = 27, dirty = 0;`, because 027's columns are already there. If you skip this, the new binary fails at start with `duplicate column name: closed_reason` and leaves the version at `27` with `dirty = 1`. The same `UPDATE` then repairs it. The new binary applies 028 on its next start.
+
+> **Warning: the triggers can disappear silently.** If you drop the triggers but leave `version = 28`, the older binary refuses to start. If you then deploy the new binary again, it starts without error, because golang-migrate sees nothing to apply. The database then has **no** immutability triggers, and nothing reports it. Always change the version in the same transaction as the `DROP TRIGGER` statements. After any rollback or roll-forward, check that `SELECT name FROM sqlite_master WHERE type='trigger' AND name IN ('video_final_outcome_immutable','run_video_outcome_final_immutable')` returns both names whenever the version is 28 or higher.
+
+Items closed by the new binary stay closed after a rollback: their `status` is `completed` or `resolved`.
 
 ### 1.3 Vocabulary
 
@@ -454,7 +472,7 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
 24. **K17 simulations (AC12, M1):** a dry run and a backtest over the K1 and K9 seeds report simulated results. `runExclusionGate` evaluates final videos as before, and the snapshot is unchanged.
 25. **K20 interim hold (only if shipped):** with §7 absent, a partly done video's item is not claimed, membership and state are unchanged, and a user retry → `409 continuation_unavailable`. The run does not fail.
 26. **K21 statistics regression:** on a fixture of existing runs, per-run route statistics are identical before and after §8.2.
-27. **K22 rollback:** apply 028, then its down file, then run the pre-BR-039 claim code against a final video. The start succeeds (the reset is the old behavior).
+27. **K22 rollback:** apply 028, then its down file, then run the pre-BR-039 claim code against a final video. The start succeeds (the reset is the old behavior). The full §1.2 procedure goes through golang-migrate. A source that ends at 027 fails on a database at version 28. After the rollback transaction, that source starts. The full source then recreates both triggers. Dropping the triggers without the version change leaves a database at version 28 with no triggers, and the full source starts on it without error. A source that ends at 026, with the version set to 26, starts too. Rolling forward without first setting version 27 fails with `duplicate column name` and leaves the database dirty. With version 27 set, the roll-forward succeeds.
 28. **K18 journey** (`-tags=integration ./e2e`): seed the BR-039 example's V and W; restart; run a scheduled run; retry W as the user; take the re-queue preview. Provider inserts = 1 ("Study"). W stays rejected, its item is closed with the reason, and run detail shows the continued action.
 
 ## 11. Revisions
@@ -474,6 +492,8 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
 - **Test numbering:** the K-series is no longer contiguous.
 
 **2026-11-12, send-guard owner review (task b39-sendguard-review):** §7.3 approved with conditions C1–C5 (§7.4). C5 adds six cases to test K12. No other section changes.
+
+**2026-11-18, gate b39-gate-iii MAJOR-1 (reviewer `ses_e108def55ffel6JlGSIwaKar9U`, HEAD `b7e4a75`):** the §1.2 rollback note was wrong. Dropping the triggers left `schema_migrations` at 28, so the older binary refused to start. Deploying the new binary again then started with no triggers. §1.2 now sets the recorded version in the same transaction, warns about the silent loss of the triggers, and gives the extra version step needed to roll back past 027 and forward again. The old claim that 027 "needs no rollback" ignored the version. K22 is extended to match. The architect checked each step with golang-migrate on 2026-11-18, in a throwaway copy of the repository, with migration sources capped at 027 and 026.
 
 ## 12. Implementation record and deviations
 

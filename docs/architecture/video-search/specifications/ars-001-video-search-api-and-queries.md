@@ -895,7 +895,7 @@ Search on the indexed path answers `500` (§10.7). This is a new availability de
      UPDATE schema_migrations SET version = 28, dirty = 0;
      ```
 
-     After this, the database is at BR-039's 028. Rolling back further follows ARS-006's release note. Re-upgrading later reapplies 029 and runs the backfill.
+     After this, the database is at BR-039's 028. The `UPDATE schema_migrations` line is required and must run in the same transaction as the drops. Without it, the older binary still refuses to start, and a later 029 binary would see nothing to apply. `[unverified]`: what `store.Open` does then. Rolling back further follows [run-initiation ARS-006 §1.2](../../run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md#12-migration-028_final_outcome_triggersupsql-and-downsql). That procedure also lowers the recorded version. Re-upgrading later reapplies 029 and runs the backfill.
 - Test F-R: open a database at 029 with a migration source that ends at 028. `store.Open` must fail. After the hand reset above, it must succeed, and `transient_metadata` is unchanged.
 
 **Tests and tools that call `ApplyMigrations` without `Open`.** They get an index that is not ready, so search uses the scan path. That is correct but slow, and it is logged as `scan`.
