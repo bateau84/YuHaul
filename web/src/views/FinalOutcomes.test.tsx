@@ -297,6 +297,25 @@ describe('Retry accessible names (SC 2.5.3, 2.4.6)', () => {
 })
 
 describe('Refusal focus and Deferred range', () => {
+  it('retains a refused last-page row while allowing navigation to the remaining items', async () => {
+    const item = deferredItem(51)
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    const get = vi.spyOn(deferredPageApi, 'getDeferredPage')
+    get.mockResolvedValueOnce(pageOf([item], { total: 51, queue_total: 51, page: { limit: 50, number: 2, total_pages: 2, first_position: 51, last_position: 51, next_after_id: null, prev_before_id: 51 } }))
+    get.mockResolvedValueOnce(pageOf([deferredItem(1)], { total: 50, queue_total: 50, page: { limit: 50, number: 1, total_pages: 1, first_position: 1, last_position: 50, next_after_id: null, prev_before_id: null } }))
+    vi.spyOn(queueApi, 'retryDeferred').mockRejectedValue(refused('accepted', { ...item, closed_reason: 'final_outcome', video_final_outcome: 'accepted' }))
+    renderErrors('?tab=deferred&page=2')
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry now: Video 51' }))
+    expect(await screen.findByRole('alert')).toHaveFocus()
+    expect(screen.getByText('Showing 0 of 50 items.')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Deferred (50)' })).toBeInTheDocument()
+    expect(within(screen.getByText('Video 51').closest('tr')!).getByText('Closed')).toBeInTheDocument()
+    expect(screen.getByText('Page 2 (no active items on this page)')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+    expect(await screen.findByText('Showing 1–50 of 50 items.')).toBeInTheDocument()
+    expect(get.mock.calls.at(-1)![0]).toEqual({ limit: 50, reason: undefined, beforeId: 51 })
+  })
+
   it('moves focus to the alert after a Deferred refusal', async () => {
     const items = [deferredItem(1)]
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])

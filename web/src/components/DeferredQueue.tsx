@@ -119,6 +119,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   // are taken out of the totals shown, because the API now counts them closed.
   const [closedHere, setClosedHere] = useState<Record<number, DeferredItem>>({})
   const closedHereCount = Object.keys(closedHere).length
+  const activePages = Math.max(1, Math.ceil(Math.max((data?.total ?? 0) - closedHereCount, 0) / PAGE_SIZE))
   const [reloads, setReloads] = useState(0)
   const [reasonDraft, setReasonDraft] = useState<string>(reason ?? '')
   const [jumpValue, setJumpValue] = useState('')
@@ -238,7 +239,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
 
   function submitJump(e: FormEvent) {
     e.preventDefault()
-    const pages = data?.page.total_pages ?? 1
+    const pages = activePages
     const n = positiveInt(jumpValue.trim())
     if (n === null || n > pages) {
       setJumpError(`Enter a page from 1 to ${fmt(pages)}.`)
@@ -341,12 +342,12 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   // ("Showing 1–1 of 0" when the only item closed).
   const shownTotal = Math.max(data.total - closedHereCount, 0)
   const shownLast = Math.min(last ?? 0, shownTotal)
-  const range = shownTotal === 0 ? 'Showing 0' : `Showing ${fmt(first ?? 0)}–${fmt(shownLast)}`
+  const range = shownTotal === 0 || (first !== null && first > shownLast) ? 'Showing 0' : `Showing ${fmt(first ?? 0)}–${fmt(shownLast)}`
   const showFirst = page.number > 1 && !pastEnd
   const showPrev = page.prev_before_id !== null
   const showNext = page.next_after_id !== null
-  const showLast = page.number < page.total_pages
-  const showNav = showFirst || showPrev || showNext || showLast || page.total_pages > 1
+  const showLast = page.number < activePages
+  const showNav = showFirst || showPrev || showNext || showLast || activePages > 1
 
   return (
     <div className="card">
@@ -485,7 +486,9 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
             </button>
           )}
           <span>
-            Page {fmt(page.number)} of {fmt(page.total_pages)}
+            {page.number > activePages
+              ? `Page ${fmt(page.number)} (no active items on this page)`
+              : `Page ${fmt(page.number)} of ${fmt(activePages)}`}
           </span>
           {showNext && (
             <button type="button" className="button" onClick={() => go((p) => p.set('after_id', String(page.next_after_id)))}>
@@ -497,7 +500,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
               Last page
             </button>
           )}
-          {page.total_pages > 1 && (
+          {activePages > 1 && (
             <form onSubmit={submitJump} noValidate style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <label htmlFor="deferred-go-to-page">Go to page</label>
               <input
@@ -506,7 +509,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                 type="number"
                 inputMode="numeric"
                 min={1}
-                max={page.total_pages}
+                max={activePages}
                 value={jumpValue}
                 aria-invalid={jumpError ? true : undefined}
                 aria-describedby={jumpError ? 'deferred-go-to-page-error' : undefined}
