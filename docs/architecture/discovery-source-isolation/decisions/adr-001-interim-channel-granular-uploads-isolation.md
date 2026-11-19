@@ -85,16 +85,28 @@ Implement Option 1 with exactly these rules.
 
 During the uploads scan of channel `ch`, `ListPlaylistItems` returns `err`. Treat it as source-local only if all of the following hold:
 
+- Isolation is enabled, which is true only on the `RunBound` (guarded) path. `runWithClient` gets an explicit flag. The legacy `Run` path passes false, so nothing is isolated there.
 - `ctx.Err() == nil`.
-- `errors.As(err, &re)` gives a `*youtube.ReadError`, and `re.Accounting == nil`, `re.Renewal == nil` and `re.Interruption == nil`.
-- `errors.As(re.Primary, &api)` gives a `*youtube.APIError`, and `api.Status == 404`.
-- `api.Reason == "playlistNotFound"`, and every entry in `api.Reasons` is `"playlistNotFound"`.
+- `errors.As(err, &re)` for `*youtube.ReadError` is **false**. The guarded reader returns a `*ReadError` only when accounting, renewal or interruption failed (`client.go:1141–1144`). Any `*ReadError` is therefore global, whatever it wraps. A clean, fully accounted 404 comes back as a bare `*APIError` wrapped by `ListPlaylistItems`.
+- `errors.As(err, &api)` gives a `*youtube.APIError` with:
+  - `api.Status == 404`;
+  - `api.Complete == true`;
+  - `len(api.Reasons) ≥ 1`;
+  - every entry in `api.Reasons` equal to `"playlistNotFound"`.
+
+  Don't check `api.Reason`. The adapter sets it only when there is exactly one reason, and clears `Reasons` when the response was incomplete, so `Reasons` plus `Complete` is the authoritative test.
 
 Never classify by `err.Error()`. Every other error keeps today's behavior unchanged:
 
 - Quota refusal and `ErrQuotaRefused` still break the channel loop.
-- Quota exceeded, authorization errors, accounting or renewal failure, transient/5xx/429, cancellation, invalid response, other 404 reasons and SQLite errors still return a discovery error and fail the run.
-- The unguarded legacy `Run` path cannot produce a `ReadError`, so nothing is isolated there.
+- These still return a discovery error and fail the run:
+  - any `*ReadError`, which covers accounting, renewal and interruption failures;
+  - quota exceeded and authorization errors;
+  - transient, 5xx and 429 errors;
+  - cancellation;
+  - an invalid response;
+  - a 404 with an incomplete or empty reason list, or with any other reason;
+  - SQLite errors.
 
 Isolating transient errors or other permanent reasons is out of scope.
 
@@ -105,6 +117,7 @@ Isolating transient errors or other permanent reasons is out of scope.
 - Each buffered item is tagged with the scanning channel's ID (`ch.ID`) as `SourceChannelID`, alongside the snippet `ChannelID` it keeps today.
 - A source-local failure discards the buffer and leaves `listed` untouched. So a video that both B and a later channel C list is still discovered through C.
 - A quota break mid-channel keeps today's behavior: the partial buffer is merged with `EnumerationComplete=false`, so the floor does not move.
+- **Budget breaks.** A failed `requireBudget` or an `ErrQuotaRefused` break exits only that channel's page loop and sets `ScanStopped`. The outer loop then reaches each later channel, and its first `requireBudget` check refuses it before any provider request is made. Such a channel is not attempted, made no request and has no ledger row. Its floor is unchanged. This interim does not add an early exit from the outer loop; it neither adds nor removes requests compared with today.
 
 ### D3. Floor safety
 
@@ -130,7 +143,7 @@ Channels with no uploads playlist are not attempted.
 After discovery, the pipeline decides as follows:
 
 - **All attempted channels failed locally (AC8).** This applies when `SourcesAttempted ≥ 1`, `SourcesCompleted == 0`, `SourcesFailedLocal == SourcesAttempted` and `!ScanStopped`.
-  - Discovery returns a typed error, `discovery.ErrNoSourceScanned`.
+  - Discovery checks `ctx.Err()` first, as defense in depth. If the context is done, it returns that cancellation error, which keeps the existing interruption handling. Only otherwise does it return the typed error `discovery.ErrNoSourceScanned`. Cancellation never becomes this terminal failure.
   - The existing phase-failure path stores `diag:v1 phase=discovery operation=discover code=no_source_scanned` through `FailRun`.
   - Add `no_source_scanned` to `diag`'s closed `codes`. It is valid only with phase `discovery`, operation `discover` and no other facts. `Classify` maps the typed error to it.
   - The run is terminal `failed`, as today's discovery failure is. Retention and other side effects are unchanged.
@@ -140,8 +153,9 @@ After discovery, the pipeline decides as follows:
 
 - The Run read projection adds `discovery_incomplete` (boolean). It is true for a production run (`scheduled`/`manual`) when `quota_ledger` has a row with that `run_id`, `operation_type='playlist_items_list'`, `outcome_category='permanent'` and `http_status=404`.
   - The ledger is durable, append-only, never pruned in source, and survives resume.
-  - For runs on this build, such a row exists only for an isolated D1 skip: any other permanent 404 fails the run, and the guarded path finalizes a ledger row before D1 can apply.
-  - It is a boolean, not a count: a same-run resume may re-scan, and the row identifies no channel.
+  - **Premise, guarded path only.** For production runs on this build, a completed run has such a row only after an isolated D1 skip. On `RunBound`, every admitted read is finalized into the ledger. D1 applies only when that finalization succeeded, because a finalization failure yields a `*ReadError`. Any other permanent 404 fails the run. The legacy `Run` path isolates nothing, and its `RecordCalls` rows carry no category or status, so it cannot satisfy the predicate. If another caller of `playlist_items_list` or another isolation path is added, revisit this derivation.
+  - It is a boolean, not a count. The row identifies no channel.
+  - **Accepted over-report on resume.** The flag can stay true after an interruption and resume, even if the resumed execution re-scans the previously failed channel successfully. The ledger row from the first execution remains. Run Detail can then show "incomplete" for a run whose final scan was complete. This is accepted for the interim because the note is true of the run's history, and the next run polls that channel as usual. It never under-reports. ARD-001's source records replace this derivation.
 - Run Detail shows a non-error note on a **Completed** run when `discovery_incomplete` is true. The note says that discovery was incomplete because at least one subscribed channel's uploads could not be read (YouTube: playlist not found). Those channels were skipped and will be polled again on the next run. The server log for this run identifies them. It must not say "No new uploads" or present the run as failed.
 - A **Failed** run renders `no_source_scanned` as "No channels were scanned successfully." The design owner owns the exact copy.
 - No Errors change: no fake entries and no source commands.
@@ -215,13 +229,17 @@ These are required tests. They are not executed.
    - `404 notFound`;
    - `403 playlistItemsNotAccessible`;
    - mixed `Reasons` (`playlistNotFound` plus `quotaExceeded`);
-   - a 404 wrapped with `Accounting` or `Renewal` errors;
-   - `Interruption` set, or the run context canceled;
+   - a 404 `playlistNotFound` with `Complete=false` or an empty `Reasons` list;
+   - a 404 `playlistNotFound` returned inside a `*ReadError` with `Accounting`, `Renewal` or `Interruption` set;
+   - the run context canceled, including when the provider returned a clean 404 `playlistNotFound`;
+   - the legacy `Run` path returning a clean 404 `playlistNotFound`;
    - 500/`backendError`;
    - `quotaExceeded`;
    - 401/`authError`.
 
-   A proactive refusal breaks the loop as today.
+   A proactive refusal breaks that channel's page loop. Later channels are refused before any request: no provider request, no ledger row and no attempt count for them. `ScanStopped` is set, and the run does not take the AC8 failure.
+
+   With the run context canceled after every channel returned 404, discovery returns the cancellation error, not `ErrNoSourceScanned`. The run is interrupted as today, not failed.
 5. **AC8.**
    - Every attempted channel returns `playlistNotFound`: the run is `failed` with `diag:v1 phase=discovery operation=discover code=no_source_scanned`, and Run Detail shows "No channels were scanned successfully".
    - The run stays `completed` with no `no_source_scanned` in each of these cases:

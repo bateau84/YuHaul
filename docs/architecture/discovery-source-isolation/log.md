@@ -12,6 +12,8 @@ timestamp: 2026-11-18T00:00:00Z
 
 **Interim decided:** [ADR-001](/docs/architecture/discovery-source-isolation/decisions/adr-001-interim-channel-granular-uploads-isolation.md) records a no-migration slice for the Run 52/53 failure on `debad57`. It isolates only exactly classified `404 playlistNotFound` uploads reads per channel, merges a channel's buffer only on completion, leaves a skipped channel's floor unchanged, derives Run Detail's incomplete-coverage note from the durable ledger, and adds closed code `no_source_scanned` for BR-002 AC8. User-owned gaps G1 (OC-001 Errors entry), G2 (AC9 partial pages) and G3 (channel ID in one log record) are open. ARD-001 and ARS-001 are unchanged and remain the full design. No implementation or runtime proof.
 
+**Corrected after critique (CHANGES REQUIRED):** [ADR-001](/docs/architecture/discovery-source-isolation/decisions/adr-001-interim-channel-granular-uploads-isolation.md) D1 now isolates only a bare `*APIError` (never any `*ReadError`) with status 404, `Complete`, at least one reason and every reason `playlistNotFound`, with `ctx.Err() == nil`, and only on `RunBound`. D6 states that its ledger premise holds only on the guarded path and accepts the resume over-report. D2 records that budget breaks exit the page loop and later channels are refused before any request. D5 checks `ctx.Err()` before `ErrNoSourceScanned`.
+
 ## 2026-11-18
 
 **Proposed:** [ARD-001](/docs/architecture/discovery-source-isolation/design/ard-001-isolate-uploads-source-failures.md) describes the Run 52 correction and downstream proof, including the accepted Errors and all-local-failure behavior. No production operation or implementation.
