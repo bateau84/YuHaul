@@ -8,6 +8,8 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-19
 
+- Decided in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (Plan r29): one accessible-name pattern for every Errors and Deferred row control (`Remove error: {T}`, `View video: {T}`, and so on, with `T` the title or `video {id}`), and how a Deferred row reads after a live hold clears (`Waiting for the next run.` with a not-live line; the live filter selects held rows only). Design only.
+
 - Added [admin interface design](/docs/design/yuhaul-admin-ui-design.md) section “Live and Upcoming Videos — Skipped Until Ended” for BR-042: the three cases (live now, upcoming, live status not confirmed) in Run Detail, Decision Detail, the Deferred row and its reason filter, the videos page, simulations (including `Live status unknown`) and long waits over repeated runs. Design only; the API is left open and capability needs are listed.
 
 - Decided two points from the Errors implementation review in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the `View account status` link is limited to `oauth_error`, `authorization_unavailable`, `authorization_changed` and `credential_persistence_failed`; and rows with the same title show `Video ID: {id}` and add `, video {id}` to their control names. Design only.

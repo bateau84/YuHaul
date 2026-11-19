@@ -627,7 +627,15 @@ The wording makes no promise about when. It never says rejected, excluded, faile
 - Under the label, the short line of the case from the latest check, when supplied: `Last check: upcoming.` Also, when supplied: `Checked in run {id}` as the link `View run {id}`, and `Waiting since {date and time}`, labelled and not reset by a recheck or a claim, as in the capacity amendment. Show `Checked in {n} runs` only when the API supplies a whole-item count, never one derived from a page.
 - Eligibility column: the existing indicator. Such an item has no waiting time, so it reads `Next run`.
 - Controls: `Retry now` and `Dismiss` as they are. The Dismiss confirmation is unchanged. A manual retry runs the same check: the item stays on its row if the video is still skipped, and the new run's detail shows the case.
-- A row with no case in the data shows only the label. A row whose data has the case but no run, time or count omits only that part.
+- A row whose data has the case but no run, time or count omits only that part. When the API says the live hold has cleared, the row reads as described under “After the live hold clears” below, not as a live skip.
+
+**After the live hold clears (2026-11-19; live-status ARS-001 §8.1 and ARD-001 open question 3).** An item made by a live skip keeps the stored reason `live_or_upcoming` after YouTube has confirmed the video is not live or upcoming, for example when a later quota or rate-limit deferral reuses it. The stored reason says how the item began, not why it waits now, the same limit as the known limitation on `Re-queued by user`. So the row follows the live status, not the stored reason alone:
+- *Hold present* (the API gives a live status of live now, upcoming or not confirmed): the label `Live or upcoming on YouTube` and the case line, as above.
+- *Hold cleared* (stored reason `live_or_upcoming` and no live status): the row does not say live or upcoming. It reads `Waiting for the next run.` with the persistent line `At its last check, YouTube reported this video is not live or upcoming.` The existing eligibility column states when it can be tried, and a `Not eligible yet.` note appears when the API says so, as for a re-queued row. No case line, no `Last check: …`, and no claim about why it now waits, because the stored reason does not say.
+- The reason filter `Live or upcoming on YouTube` selects held rows only. A cleared row is not found under it and appears under `All reasons`, so the label and the filter agree and the filter's count never includes a row that no longer reads as live.
+- The Videos page `Queue state` follows the same rule: `Reason: Live or upcoming on YouTube.` only while the hold is present; when cleared it reads `In the deferred queue — pending. Waiting for the next run.`
+- Run Detail and Decision Detail are not affected: they show the case recorded by that run, which stays true for that run.
+A row for an item with the stored reason but no live-status information at all (an older read) is treated as cleared, never as live. Controls are unchanged.
 
 **Videos page.** `Queue state` follows the existing table: `In the deferred queue — pending. Reason: Live or upcoming on YouTube.` with `View deferred queue`. The list `Runs that decided this video` also lists a run that only skipped the video, as the continuing-run row already does: `Run {id} · {run type} · Skipped for now: {short line} · {time}` in place of an outcome badge, linking to that run's Decision Detail for the video. The heading stays.
 
@@ -1344,6 +1352,19 @@ With an unknown outcome value: `Retry did nothing. This video already has a fina
 - *`invalid_text` copy: keep.* A browser box cannot send invalid text, but the endpoint is public to any client (scripts, proxies, other browsers, an edited link that bypasses the rewrite), and the SPA must not fall through to a generic failure when the server answers `invalid_text`. The cost is one string. Its acceptance step is now the API and component check in the acceptance observations above.
 - *`.form-error` contrast: fix now.* About 3.0:1 at 14 px fails WCAG 1.4.3, which this design requires (4.5:1). The class is used by the new 409 alert and by other form errors, so one darker error text color that reaches at least 4.5:1 on its background fixes all of them. Error meaning stays in text, not color alone.
 - *Errors-row Retry name: fix now.* The Retry button's accessible name must contain its target, as every other row control in this design does (SC 2.5.3, 2.4.6): `Retry {video title}`, or `Retry video {id}` when no title is held, and the same for the Deferred tab's retry and `Dismiss deferred item: …`. Without it, a list of identical “Retry” buttons is ambiguous to screen-reader and voice users. The visible label stays `Retry`.
+  - *One name pattern for every row control (2026-11-19, review d40e73da).* Every control in an Errors or Deferred row names its target, so no row has a bare `Remove`, `Dismiss` or `View video`. The visible label comes first (SC 2.5.3), then the target `T`. `T` is the video title; with no title it is `video {id}`; with a shared title it is `{title}, video {id}` (the rule above). The names are:
+
+    | Control | Accessible name |
+    |---|---|
+    | Errors `Retry` | `Retry {T}` |
+    | Errors `Remove` (ordinary entry, no dialog) | `Remove error: {T}` |
+    | Errors `Dismiss` (`original_decision_unavailable`) | `Dismiss error: {T}` |
+    | Deferred `Retry now` | `Retry now: {T}` |
+    | Deferred `Dismiss` | `Dismiss deferred item: {T}` |
+    | `View video` link, in any row, closed rows included | `View video: {T}` |
+    | `Technical details` | `Technical details for {T}` |
+
+    The object word (`error`, `deferred item`) tells `Remove` and `Dismiss` apart from removing the video itself. A closed row's `View video` link follows the same pattern; a list of identical links is ambiguous to a screen-reader links list and to voice users (SC 2.4.4, 2.4.6). Visible text does not change. Where the shipped names use the bare ID after a colon (`Dismiss error: {id}`, `Dismiss deferred item: {id}`), they change to `video {id}`.
   - *Same title on several rows (2026-11-19).* Titles are not unique, so a name made only from the title can repeat. When two or more rows in the list being shown (all rows in Errors, the current page in Deferred, closed rows included) have the same title, each of those rows adds its YouTube video ID, in both places: a visible second line `Video ID: {id}` under the title (as the Deferred tab already does for a row with no title), and the same words at the end of every control name in the row, for example `Retry Same Title, video {id}`, `Retry now: Same Title, video {id}`, `Dismiss deferred item: Same Title, video {id}` and `Technical details for Same Title, video {id}`. A row whose title is unique keeps the plain names, and a row with no title already uses its ID. The check is on exact title text in the rows shown, and is redone whenever the list changes. The visible words (`Retry`, `Retry now`, `Dismiss`, `Technical details`) stay first in each name (SC 2.5.3).
 Both are small and low risk; route them to a coder together.
 
