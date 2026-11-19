@@ -8,7 +8,7 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-19
 
-- Added the focus rule after a confirmed Errors `Dismiss` to [admin interface design](/docs/design/yuhaul-admin-ui-design.md): focus moves to the next row, or to the page heading when no next row exists, matching Deferred. Design only; the coder is implementing it.
+- Added the focus rule after a confirmed Errors `Dismiss` to [admin interface design](/docs/design/yuhaul-admin-ui-design.md): focus moves to the next row, or to the page heading when no next row exists, matching Deferred. Extended it to the ordinary Errors `Remove` button, to match the shipped code. Design only.
 
 - Decided two findings from the b39-gate-iii real-browser review in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the confirmation-dialog backdrop (black at 50%, solid dialog surface, at most 36 rem wide, centered) and a new section “Errors — Category and Reason Presentation” (plain sentence by diagnostic code, category labels, and a collapsed `Technical details` disclosure that keeps the exact support code). Found that the design had no Errors reason wording before, so the raw text is a design gap, not an implementation defect. Design only; no browser, accessibility or implementation check of the new text.
 
