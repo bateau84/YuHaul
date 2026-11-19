@@ -303,8 +303,8 @@ Both paths return rows with the same columns, read in the request's one read-onl
 ```sql
 SELECT m.video_id, m.title, m.is_active, m.expired_at, m.fetched_at, m.expires_at,
        v.discovered_at, v.id IS NOT NULL AS has_video
-FROM title_search s
-JOIN title_search_doc d ON d.doc_id = s.rowid
+FROM title_search
+JOIN title_search_doc d ON d.doc_id = title_search.rowid
 JOIN transient_metadata m ON m.video_id = d.video_id
 LEFT JOIN video v ON v.video_id = m.video_id
 WHERE title_search MATCH :phrase
@@ -317,7 +317,7 @@ WHERE title_search MATCH :phrase
                     AND (f.source = 'user_import' OR f.is_duplicate_reference = 1)));
 ```
 
-`:phrase` is the bound text `"` + `strings.ReplaceAll(N, "\"", "\"\"")` + `"`, an FTS5 string, so every character inside is literal (§10.6). The query plan must start at `title_search` (test D2).
+`:phrase` is the bound text `"` + `strings.ReplaceAll(N, "\"", "\"\"")` + `"`, an FTS5 string, so every character inside is literal (§10.6). The query plan must start at `title_search` (test D2). The FTS5 table has no alias: SQLite reports an aliased table as `SCAN s VIRTUAL TABLE INDEX`, so D2's expected plan text `SCAN title_search VIRTUAL TABLE INDEX` appears only without one.
 
 **Scan path:**
 
