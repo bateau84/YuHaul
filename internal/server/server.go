@@ -872,6 +872,9 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	runs, err := s.runStore.ListRuns(r.Context())
 	if err != nil {
+		if s.clientAborted(r.Context(), "list runs failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "list runs failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to list runs")
 		return
@@ -900,6 +903,9 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
+		if s.clientAborted(r.Context(), "get run failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "get run failed", "run_id", id, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load run")
 		return
@@ -910,6 +916,9 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	overview, err := s.overviewProvider.Overview(r.Context())
 	if err != nil {
+		if s.clientAborted(r.Context(), "overview failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "overview failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load overview")
 		return
@@ -1696,6 +1705,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		slog.Error("failed to encode response", "error", err)
 	}
+}
+
+// clientAborted reports whether err is the client abandoning the request: the
+// error is context.Canceled and the request context is itself done. It logs
+// that case at DEBUG and the caller must then write nothing more, because
+// nobody is listening and it is not a server fault. Any other error, including
+// a Canceled that did not come from this request's context, returns false and
+// stays the caller's ERROR to log.
+func (s *Server) clientAborted(ctx context.Context, msg string, err error, attrs ...any) bool {
+	if err == nil || !errors.Is(err, context.Canceled) || ctx.Err() == nil {
+		return false
+	}
+	s.logger.DebugContext(ctx, msg+": client aborted request", attrs...)
+	return true
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

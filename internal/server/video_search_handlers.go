@@ -57,6 +57,9 @@ func (s *Server) handleVideoSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_cursor")
 		return
 	case err != nil:
+		if s.clientAborted(r.Context(), "video search failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "video search failed",
 			"diagnostic", diag.Encode(err, "unknown", "video_search"))
 		writeError(w, http.StatusInternalServerError, "search_failed")
@@ -91,6 +94,9 @@ func (s *Server) handleGetVideo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "video_not_found")
 		return
 	case err != nil:
+		if s.clientAborted(r.Context(), "video view failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "video view failed",
 			"diagnostic", diag.Encode(err, "unknown", "video_search"))
 		writeError(w, http.StatusInternalServerError, "video_view_failed")

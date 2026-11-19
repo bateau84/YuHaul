@@ -234,6 +234,9 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
+		if s.clientAborted(r.Context(), "get run failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "get run failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load run")
 		return
@@ -255,6 +258,9 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 
 	videos, total, err := s.runVideoStore.ListRunVideos(r.Context(), runID, pageSize, offset, outcomeFilter)
 	if err != nil {
+		if s.clientAborted(r.Context(), "list run videos failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "list run videos failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to list run videos")
 		return
@@ -265,6 +271,9 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 	}
 	mutations, err := s.runVideoStore.ListUnresolvedMutations(r.Context(), runID, internalIDs)
 	if err != nil {
+		if s.clientAborted(r.Context(), "list unresolved mutations failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "list unresolved mutations failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to list run videos")
 		return
@@ -272,6 +281,9 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 
 	evidence, err := s.runRouteEvidence(r.Context(), run)
 	if err != nil {
+		if s.clientAborted(r.Context(), "resolve run route evidence failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "resolve run route evidence failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to resolve route identity")
 		return
@@ -287,6 +299,9 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 	for i, v := range videos {
 		decisions, err := s.runVideoStore.GetRouteDecisionsForVideoInRun(r.Context(), v.ID, runID)
 		if err != nil {
+			if s.clientAborted(r.Context(), "load route decisions failed", err) {
+				return
+			}
 			s.logger.ErrorContext(r.Context(), "load route decisions failed", "video_id", v.ID, "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 			writeError(w, http.StatusInternalServerError, "failed to load route decisions")
 			return
@@ -302,6 +317,9 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 	// One batched read of the condition audits' pass/fail for the whole page.
 	failedIndexes, err := s.runVideoStore.ListFailedConditionIndexes(r.Context(), notMatchedIDs)
 	if err != nil {
+		if s.clientAborted(r.Context(), "list failed conditions failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "list failed conditions failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load route decisions")
 		return
@@ -313,6 +331,9 @@ func (s *Server) handleListRunVideos(w http.ResponseWriter, r *http.Request) {
 			// A decision whose route has no identity mapping fails the
 			// whole response; it is never serialized with an integer or
 			// a name-only label (ARS-004 failure behavior).
+			if s.clientAborted(r.Context(), "serialize route decisions failed", err) {
+				return
+			}
 			s.logger.ErrorContext(r.Context(), "serialize route decisions failed", "video_id", v.ID, "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 			writeError(w, http.StatusInternalServerError, "failed to resolve route identity")
 			return
@@ -361,6 +382,9 @@ func (s *Server) handleGetRunVideo(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
+		if s.clientAborted(r.Context(), "get run failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "get run failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load run")
 		return
@@ -372,6 +396,9 @@ func (s *Server) handleGetRunVideo(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "video not found")
 			return
 		}
+		if s.clientAborted(r.Context(), "get run video failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "get run video failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load video")
 		return
@@ -379,6 +406,9 @@ func (s *Server) handleGetRunVideo(w http.ResponseWriter, r *http.Request) {
 
 	evidence, err := s.runRouteEvidence(r.Context(), run)
 	if err != nil {
+		if s.clientAborted(r.Context(), "resolve run route evidence failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "resolve run route evidence failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to resolve route identity")
 		return
@@ -386,6 +416,9 @@ func (s *Server) handleGetRunVideo(w http.ResponseWriter, r *http.Request) {
 
 	detail, err := s.buildVideoDetail(r.Context(), runID, *video, evidence, run.ConfigVersionID)
 	if err != nil {
+		if s.clientAborted(r.Context(), "build video detail failed", err) {
+			return
+		}
 		s.logger.ErrorContext(r.Context(), "build video detail failed", "video_id", video.ID, "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to build video detail")
 		return

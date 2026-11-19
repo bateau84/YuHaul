@@ -672,3 +672,61 @@ func TestReconcileLongestBatchWithExpiredTail(t *testing.T) {
 		last = time.Now()
 	}
 }
+
+// writerWaits runs small writers on their own connection (short busy_timeout)
+// until stop closes. It returns the longest wait and the first error.
+func writerWaits(t *testing.T, path string, stop <-chan struct{}) (maxWait <-chan time.Duration, firstErr <-chan error) {
+	t.Helper()
+	other, err := store.Open(context.Background(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = other.Close() })
+	_, err = other.Exec(`PRAGMA busy_timeout = 2000`)
+	require.NoError(t, err)
+	wait, errc := make(chan time.Duration, 1), make(chan error, 1)
+	go func() {
+		var longest time.Duration
+		var first error
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				wait <- longest
+				errc <- first
+				return
+			default:
+			}
+			start := time.Now()
+			_, err := other.Exec(`INSERT INTO transient_metadata (video_id, title, fetched_at, expires_at, is_active) VALUES (?, ?, ?, ?, 1)
+				ON CONFLICT(video_id) DO UPDATE SET fetched_at = excluded.fetched_at`,
+				fmt.Sprintf("w%03d", i%20), fmt.Sprintf("Writer title %d", i%20), idxNow.Add(-time.Minute), idxNow.Add(time.Hour))
+			if d := time.Since(start); d > longest {
+				longest = d
+			}
+			if err != nil && first == nil {
+				first = err
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	return wait, errc
+}
+
+// Another writer is not starved by a clean multi-batch reconcile: it sees no
+// SQLITE_BUSY and a bounded wait, and the reconcile reports its longest hold.
+func TestReconcileDoesNotStarveWriters(t *testing.T) {
+	setBatch(t, 5)
+	ms, path := openIndexDB(t)
+	// Enough rows that the reconcile needs many batches.
+	for i := 0; i < 600; i++ {
+		put(t, ms, fmt.Sprintf("v%04d", i), fmt.Sprintf("Video number %d with some words", i), nil)
+	}
+
+	stop := make(chan struct{})
+	wait, errc := writerWaits(t, path, stop)
+	stats, err := metadata.ReconcileSearchIndex(context.Background(), ms.DB(), idxNow)
+	close(stop)
+	require.NoError(t, err)
+	require.Greater(t, stats.Batches, 20, "the test needs many back-to-back batches")
+	assert.Positive(t, stats.LongestHold)
+	assert.NoError(t, <-errc, "a concurrent writer must not see SQLITE_BUSY")
+	assert.Less(t, <-wait, time.Second, "a concurrent writer must not wait long")
+}

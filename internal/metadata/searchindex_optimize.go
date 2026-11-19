@@ -24,7 +24,7 @@ type OptimizeStats struct {
 	// Complete is true only when FTS5 reported that no merge work remained. It
 	// is false when ctx ended, a step failed or OptimizeMaxSteps was reached.
 	Complete bool
-	// Longest is the longest single step transaction.
+	// Longest is the longest time one step held the write lock.
 	Longest time.Duration
 	// Total is the wall time of the call.
 	Total time.Duration
@@ -53,8 +53,7 @@ func OptimizeSearchIndex(ctx context.Context, db *sql.DB) (stats OptimizeStats, 
 			arg = -pages
 		}
 		var changed int64
-		stepStart := time.Now()
-		err := inWriteTx(ctx, db, func(c *sql.Conn) error {
+		held, err := inWriteTxHeld(ctx, db, func(c *sql.Conn) error {
 			var before, after int64
 			if err := c.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&before); err != nil {
 				return fmt.Errorf("metadata: read search index change count: %w", err)
@@ -73,12 +72,13 @@ func OptimizeSearchIndex(ctx context.Context, db *sql.DB) (stats OptimizeStats, 
 		}
 		// A step counts only after its COMMIT succeeded.
 		stats.Steps++
-		if d := time.Since(stepStart); d > stats.Longest {
-			stats.Longest = d
-		}
+		stats.Longest = max(stats.Longest, held)
 		if changed < 2 {
 			stats.Complete = true
 			return stats, nil
+		}
+		if err := yieldWriteLock(ctx, held); err != nil {
+			return stats, err
 		}
 	}
 	return stats, nil

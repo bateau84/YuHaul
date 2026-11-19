@@ -77,7 +77,7 @@ func TestPrepareSearchIndexRestartIsIdempotent(t *testing.T) {
 	stats, err := metadata.PrepareSearchIndex(ctx, db, now)
 	require.NoError(t, err)
 	assert.False(t, stats.Recreated)
-	assert.Equal(t, metadata.ReconcileStats{Batches: stats.Reconcile.Batches}, stats.Reconcile, "no change")
+	assert.Equal(t, metadata.ReconcileStats{Batches: stats.Reconcile.Batches, LongestHold: stats.Reconcile.LongestHold}, stats.Reconcile, "no change")
 	assert.Nil(t, stats.Optimize)
 	assert.Equal(t, before, entries(t, db))
 }

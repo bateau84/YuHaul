@@ -124,7 +124,7 @@ func (m *Manager) RunLifecycle(ctx context.Context) error {
 	}
 	m.logger.InfoContext(ctx, "metadata lifecycle reconciled search index",
 		"orphans_removed", rec.OrphansRemoved, "purged", rec.Purged, "added", rec.Added,
-		"batches", rec.Batches, "failed", err != nil)
+		"batches", rec.Batches, "longest_hold", rec.LongestHold, "failed", err != nil)
 
 	opt, err := OptimizeSearchIndex(ctx, db)
 	if err != nil {

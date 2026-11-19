@@ -37,6 +37,10 @@ type ReconcileStats struct {
 	Added int
 	// Batches counts committed batches.
 	Batches int
+	// LongestHold is the longest time one batch held the write lock, from
+	// BEGIN IMMEDIATE to the end of COMMIT. It excludes lock wait and the
+	// pauses between batches.
+	LongestHold time.Duration
 }
 
 // Indexable reports whether row may have an index entry when written at now:
@@ -185,7 +189,7 @@ func ReconcileSearchIndex(ctx context.Context, db *sql.DB, now time.Time) (Recon
 		var batch ReconcileStats
 		var final bool
 		saved := st
-		err := inWriteTx(ctx, db, func(c *sql.Conn) error {
+		held, err := inWriteTxHeld(ctx, db, func(c *sql.Conn) error {
 			var err error
 			batch, final, err = reconcileBatch(ctx, c, f, now.UTC(), &st, IndexWriteBatch)
 			if err != nil {
@@ -205,8 +209,12 @@ func ReconcileSearchIndex(ctx context.Context, db *sql.DB, now time.Time) (Recon
 		stats.Purged += batch.Purged
 		stats.Added += batch.Added
 		stats.Batches++
+		stats.LongestHold = max(stats.LongestHold, held)
 		if final {
 			return stats, nil
+		}
+		if err := yieldWriteLock(ctx, held); err != nil {
+			return stats, err
 		}
 	}
 }
@@ -456,10 +464,18 @@ var hooks testHooks
 // SQLite did execute. On any exit without a confirmed COMMIT it rolls back on
 // the same connection under a fresh bounded context. If closure cannot be
 // confirmed the physical connection is discarded rather than pooled.
-func inWriteTx(ctx context.Context, db *sql.DB, fn func(c *sql.Conn) error) (err error) {
+func inWriteTx(ctx context.Context, db *sql.DB, fn func(c *sql.Conn) error) error {
+	_, err := inWriteTxHeld(ctx, db, fn)
+	return err
+}
+
+// inWriteTxHeld is inWriteTx that also reports how long the write lock was
+// held: from the successful BEGIN IMMEDIATE to the end of COMMIT. Time spent
+// waiting for the lock is not included. It is zero when BEGIN failed.
+func inWriteTxHeld(ctx context.Context, db *sql.DB, fn func(c *sql.Conn) error) (held time.Duration, err error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("metadata: acquire search index connection: %w", err)
+		return 0, fmt.Errorf("metadata: acquire search index connection: %w", err)
 	}
 	discarded := false
 	defer func() {
@@ -495,10 +511,11 @@ func inWriteTx(ctx context.Context, db *sql.DB, fn func(c *sql.Conn) error) (err
 	}()
 
 	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return fmt.Errorf("metadata: begin search index transaction: %w", err)
+		return 0, fmt.Errorf("metadata: begin search index transaction: %w", err)
 	}
+	lockedAt := time.Now()
 	if err = fn(conn); err != nil {
-		return err
+		return time.Since(lockedAt), err
 	}
 	var commitErr error
 	if hooks.commit != nil {
@@ -508,8 +525,36 @@ func inWriteTx(ctx context.Context, db *sql.DB, fn func(c *sql.Conn) error) (err
 	}
 	if commitErr != nil {
 		// The commit may or may not have happened; never report it as done.
-		return fmt.Errorf("metadata: commit search index transaction: %w", commitErr)
+		return time.Since(lockedAt), fmt.Errorf("metadata: commit search index transaction: %w", commitErr)
 	}
+	held = time.Since(lockedAt)
 	committed = true
-	return nil
+	return held, nil
+}
+
+// Between two batches the write lock is free for a pause of about half the time
+// it was just held, so that another writer, whose SQLite busy handler only
+// polls, finds it free and does not wait out busy_timeout against a chain of
+// back-to-back transactions. The pause scales with the hold, so the cost stays
+// linear and a reconcile of cheap batches is barely slowed.
+const (
+	minBatchYield = time.Millisecond
+	maxBatchYield = 20 * time.Millisecond
+)
+
+func batchYield(held time.Duration) time.Duration {
+	return min(max(held/2, minBatchYield), maxBatchYield)
+}
+
+// yieldWriteLock sleeps for batchYield(held) or until ctx ends, and returns
+// ctx's error in the latter case.
+func yieldWriteLock(ctx context.Context, held time.Duration) error {
+	t := time.NewTimer(batchYield(held))
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }

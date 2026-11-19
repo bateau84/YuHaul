@@ -170,12 +170,17 @@ func (s *Server) readView(ctx context.Context) runReadView {
 	v := runReadView{executing: s.pipeline.ExecutingRuns()}
 	id, cause, ok, err := s.pipeline.DiscardableRun(ctx)
 	if err != nil {
+		if s.clientAborted(ctx, "discardable run read", err) {
+			return v
+		}
 		s.logger.ErrorContext(ctx, "discardable run read failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 	} else {
 		v.discardID, v.discardCause, v.discardOK, v.discardKnown = id, cause, ok, true
 	}
 	endable, err := s.pipeline.EndableRuns(ctx)
 	switch {
+	case s.clientAborted(ctx, "endable runs read", err):
+		// client gone: leave endableKnown false
 	case err != nil:
 		s.logger.ErrorContext(ctx, "endable runs read failed", "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 	case s.shuttingDown():

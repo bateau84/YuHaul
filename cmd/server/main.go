@@ -89,7 +89,8 @@ func main() {
 	} else {
 		attrs := []any{"recreated", prep.Recreated,
 			"orphans_removed", prep.Reconcile.OrphansRemoved, "purged", prep.Reconcile.Purged,
-			"added", prep.Reconcile.Added, "batches", prep.Reconcile.Batches, "optimized", prep.Optimize != nil}
+			"added", prep.Reconcile.Added, "batches", prep.Reconcile.Batches,
+			"reconcile_longest_hold", prep.Reconcile.LongestHold, "optimized", prep.Optimize != nil}
 		level := slog.LevelInfo
 		if o := prep.Optimize; o != nil {
 			attrs = append(attrs, "optimize_steps", o.Steps, "optimize_complete", o.Complete,
