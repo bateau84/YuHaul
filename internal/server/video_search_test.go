@@ -454,7 +454,7 @@ func TestVideoSearchScanPathWhenIndexNotReady_D2(t *testing.T) {
 		f.video(id, vsNow.Add(-time.Duration(i)*time.Hour), nil, nil)
 		f.held(id, fmt.Sprintf("Lofi Beats %d", i), "Chan")
 	}
-	// No reconcile: title_search_state.built_at is NULL.
+	// No reconcile: store.Open leaves the index unbuilt, so built_at is NULL.
 	r := f.search("lofi")
 	scan := r.search(t)
 	assert.Equal(t, "scan", r.path)

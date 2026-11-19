@@ -81,6 +81,27 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Build or repair the title search index before any worker or listener
+	// starts, so it is complete before any request (ARS-001 §10.4).
+	if prep, err := metadata.PrepareSearchIndex(ctx, db, time.Now().UTC()); err != nil {
+		logger.ErrorContext(ctx, "failed to prepare title search index", "error", err)
+		os.Exit(1)
+	} else {
+		attrs := []any{"recreated", prep.Recreated,
+			"orphans_removed", prep.Reconcile.OrphansRemoved, "purged", prep.Reconcile.Purged,
+			"added", prep.Reconcile.Added, "batches", prep.Reconcile.Batches, "optimized", prep.Optimize != nil}
+		level := slog.LevelInfo
+		if o := prep.Optimize; o != nil {
+			attrs = append(attrs, "optimize_steps", o.Steps, "optimize_complete", o.Complete,
+				"optimize_longest", o.Longest, "optimize_total", o.Total)
+			if !o.Complete {
+				// Removed trigrams stay in the segments until a complete optimize.
+				level = slog.LevelWarn
+			}
+		}
+		logger.Log(ctx, level, "title search index ready", attrs...)
+	}
+
 	var authSvc *auth.Service
 	if cfg.OAuthClientID != "" {
 		encKey, err := decodeKey(cfg.EncryptionKey)

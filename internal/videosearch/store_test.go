@@ -215,7 +215,8 @@ func TestSearchChoosesPathByIndexState_D2(t *testing.T) {
 	seedVideo(t, db, "held-video1", storeNow)
 	svc := NewService(db, func() time.Time { return storeNow })
 
-	// Not built: store.Open has not built the index in this build.
+	// Not built: store.Open leaves the index unbuilt; metadata.PrepareSearchIndex,
+	// which cmd/server calls after Open, builds it.
 	res, path := searchPath(t, svc, "lofi")
 	require.Equal(t, PathScan, path, "index not built")
 	require.Equal(t, 1, res.Results.Total)

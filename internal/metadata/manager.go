@@ -96,23 +96,57 @@ func NewManager(store *Store, fetcher Fetcher, ledger *quota.Ledger, opts ...Opt
 	return m
 }
 
-// RunLifecycle expires stale records and refreshes active routed records that
-// are nearing expiry. It is safe to call repeatedly (e.g., at the start of each
-// processing run). The hybrid policy implemented here refreshes routed videos
-// automatically; older/unrouted videos are refreshed only on demand.
+// RunLifecycle is the metadata sweep. It is safe to call repeatedly (e.g., at
+// the start of each processing run). In order (ARS-001 §10.4):
+//
+//  1. ExpireStale, in chunks of IndexWriteBatch;
+//  2. ReconcileSearchIndex, even when nothing expired or ExpireStale failed;
+//  3. OptimizeSearchIndex, every sweep, even when step 1 or 2 failed;
+//  4. RefreshRoutedNearExpiry, only when ExpireStale succeeded. The hybrid
+//     policy refreshes routed videos automatically; older/unrouted videos are
+//     refreshed only on demand.
+//
+// Every step runs or is skipped on those conditions alone; the errors of the
+// steps that ran are joined.
 func (m *Manager) RunLifecycle(ctx context.Context) error {
-	expired, err := m.ExpireStale(ctx)
-	if err != nil {
-		return err
-	}
-	m.logger.InfoContext(ctx, "metadata lifecycle expired stale records", "count", expired)
+	var errs []error
 
-	refreshed, err := m.RefreshRoutedNearExpiry(ctx)
-	if err != nil {
-		return err
+	expired, expireErr := m.ExpireStale(ctx)
+	if expireErr != nil {
+		errs = append(errs, expireErr)
 	}
-	m.logger.InfoContext(ctx, "metadata lifecycle refreshed routed records", "count", refreshed)
-	return nil
+	m.logger.InfoContext(ctx, "metadata lifecycle expired stale records", "count", expired, "failed", expireErr != nil)
+
+	db := m.store.DB()
+	rec, err := ReconcileSearchIndex(ctx, db, m.now().UTC())
+	if err != nil {
+		errs = append(errs, fmt.Errorf("metadata: reconcile search index: %w", err))
+	}
+	m.logger.InfoContext(ctx, "metadata lifecycle reconciled search index",
+		"orphans_removed", rec.OrphansRemoved, "purged", rec.Purged, "added", rec.Added,
+		"batches", rec.Batches, "failed", err != nil)
+
+	opt, err := OptimizeSearchIndex(ctx, db)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("metadata: optimize search index: %w", err))
+	}
+	level := slog.LevelInfo
+	if !opt.Complete {
+		// Removed trigrams stay in the segments until a complete optimize (I2b).
+		level = slog.LevelWarn
+	}
+	m.logger.Log(ctx, level, "metadata lifecycle optimized search index",
+		"steps", opt.Steps, "complete", opt.Complete, "longest", opt.Longest,
+		"total", opt.Total, "failed", err != nil)
+
+	if expireErr == nil {
+		refreshed, err := m.RefreshRoutedNearExpiry(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		m.logger.InfoContext(ctx, "metadata lifecycle refreshed routed records", "count", refreshed, "failed", err != nil)
+	}
+	return errors.Join(errs...)
 }
 
 // CleanupExpired deletes metadata records older than the configured TTL, at
@@ -126,20 +160,27 @@ func (m *Manager) CleanupExpired(ctx context.Context) (int, error) {
 }
 
 // ExpireStale marks active records past expires_at as expired, clearing raw
-// metadata fields. It returns the number of records expired.
+// metadata fields. It lists up to 10,000 IDs and expires them in chunks of at
+// most IndexWriteBatch, one transaction per chunk, so no write lock is held
+// for long (ARS-001 §10.10). It returns the number of records expired. If a
+// chunk fails it returns the count of the chunks already committed with the
+// error; those stay committed and the next sweep continues.
 func (m *Manager) ExpireStale(ctx context.Context) (int, error) {
 	now := m.now().UTC()
 	ids, err := m.store.ListActivePastExpiry(ctx, now, 10000)
 	if err != nil {
 		return 0, err
 	}
-	if len(ids) == 0 {
-		return 0, nil
+	expired := 0
+	for len(ids) > 0 {
+		n := min(IndexWriteBatch, len(ids))
+		if err := m.store.Expire(ctx, ids[:n], now); err != nil {
+			return expired, err
+		}
+		expired += n
+		ids = ids[n:]
 	}
-	if err := m.store.Expire(ctx, ids, now); err != nil {
-		return 0, err
-	}
-	return len(ids), nil
+	return expired, nil
 }
 
 // RefreshRoutedNearExpiry refreshes active records for routed videos whose
