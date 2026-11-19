@@ -19,7 +19,8 @@ What is implemented, as of 2026-11-12:
 - **Revised 2026-11-19 (§10.4, coder result `943f7124`):** the startup index step moves from `store.Open` to `metadata.PrepareSearchIndex`, which `cmd/server` calls right after `store.Open`. The reason is that `store` importing `metadata` (which now imports `auth`, `youtube` and `quota`) creates test import cycles in `internal/quota` and `internal/auth`. `store` stays the lowest layer. The ordering, the rebuild rule, abort on error and R5's optimize rule are unchanged; only the caller changes.
 - **Not built:** §10, which includes migration 029, the writer changes, the batched sweep, the reconcile and recreate, and tests R1–R9, D1, D2, F-R and G-O.
 - **Revised 2026-11-12 after critique (CHANGES REQUIRED, session `ses_e2e61920affeUTLBU835PmTm85`):** migration renumbered to 029; `BEFORE INSERT` purge trigger for `REPLACE`; write-cost spike, batched expiry, P3 write-side criteria and drop-and-recreate rebuild; damaged-index and rollback procedures; write-lock-first reconcile; a precise statement of what R1 proves; key version; per-stage P2 timing.
-- **Not passing or not run:** the P1–P4 gate must be rerun on the indexed path. SPA test T32 has not run.
+- **Gate run 2026-11-19 (fts-perf, commit `f170ce7`, Loom result `3c686b0b`, agent-reported):** on the i7-10510U, on disk, at 150,000 held titles, P1, P2, P4, P3(a), (b), (c), (f) and G-O pass. P2 p95 is 1031 ms on the first page and 1167 ms at page 100+. P3(d) is now diagnostic and is met by the §9.2 bound, so Copy C is not built. P3(e) is reported partial: the in-run optimize steps were measured, but the `ExpireStale` chunks only in G-O (longest 234 ms). §6.4–§6.5 gain the `run_video_outcome_video_run` index (§1.3), and P2 is rerun after it.
+- **Not passing or not run:** SPA test T32 has not run. P2's stage split is to be re-measured after the §1.3 index.
 
 Dependencies:
 
@@ -114,6 +115,7 @@ Out of scope:
 ### 1.3 Migrations
 
 - **Search adds migration 029** (`029_title_search_index.up.sql`, §10.2). Search releases only after BR-039's migrations 027 and 028, which own 027 and 028; see §10.2.
+- **029 also creates `CREATE INDEX run_video_outcome_video_run ON run_video_outcome(video_id, run_id);`** (decided 2026-11-19). `run_video_outcome`'s only key is `PRIMARY KEY (run_id, video_id)`, so the `video_id IN (…)` reads in §6.4 (links), §6.5 (latest outcome, including its correlated `MAX(run_id)`) and the view's per-video run list cannot seek by video. `EXPLAIN QUERY PLAN` on the migrated schema (SQLite 3.46.1 CLI) shows `SCAN run_video_outcome` for the links query and `SCAN o` for §6.5. That table gains rows for every video in every production run, so the page cost would grow with run history rather than page size. The index is part of 029 because 029 is not yet released; it is not one of the five Search objects that R6 and `RecreateSearchIndex` manage. Rollback drops it (§10.9).
 - Migration 026 is owned by run-initiation ARS-005 (§1). It creates `deferred_item_video_status ON deferred_item(video_id, status)` and `error_entry_video_status ON error_entry(video_id, status)`, and it adds the final-outcome CHECK step that admits `unavailable_on_youtube`.
 - ARS-005 §2.3 owns `queue.RemovedByUser`.
 
@@ -588,15 +590,17 @@ In P3 A and B, observe the expiry boundary after `ExpireStale` and **before** re
 
   `Service` records these as durations in `Stats`, which carries counts and timings only, never text. The handler adds `encode`. The operational log may include them.
 
-**P3 write-side measurements.** P3 runs the same production run on three copies of the seed:
+**P3 write-side measurements.** P3 runs the same production run on two copies of the seed:
 
 - **A:** with searches;
-- **B:** without searches (as before);
+- **B:** without searches (as before).
+
+**Copy C, the no-index control, is withdrawn (2026-11-19).** It was planned as follows; it is kept for the record and is not built:
 - **C:** without searches or the Search index. Use the same revision and equivalent application seed, controlled clock, provider script, run inputs, expiry chunks and transaction boundaries as B. Prepare this isolated control from the pre-backfill fixture: keep the migration version and all non-Search schema, drop the three Search purge triggers, then drop `title_search`, `title_search_doc` and `title_search_state`. Through explicit test-harness-only composition, omit only the Search startup backfill/recreate, writer index adds and lifecycle reconcile/optimize. Run the same production processing path and source writes, including the 5,000-row expiry. Assert the Search objects are absent, expiry and processing complete, and B and C have equal non-Search outcomes (same tables as A/B, ignoring timestamps). This control must not use a different revision, catch missing-table errors, or add a production bypass; missing or damaged index objects on the normal path still fail as in §10.9.
 
 It reports:
 
-- run wall duration for A, B and C;
+- run wall duration for A and B;
 - the longest single write transaction of the sweep (§10.10 batches and optimize steps);
 - the observed expiry and purge counts, and the optimize's steps, step p50, p95 and max, and total (§10.10);
 - every error or log record whose chain contains SQLite result code 5 (`SQLITE_BUSY`, including `SQLITE_BUSY_SNAPSHOT`) or 6 (`SQLITE_LOCKED`).
@@ -607,8 +611,29 @@ Titles use generated words. Planted tokens match exactly 20,000, 5,000, 500, 1 a
 |---|---|---|
 | P1 | ≥200 ID requests, one at a time: typed found and not found, all three link forms, through `/api/videos/search`; and ≥200 `GET /api/videos/{id}` | p95 ≤ 1 s for each endpoint (QS-001 AC1) |
 | P2 | ≥200 first-page name searches spread over the planted tokens; separately ≥200 requests for page ≥100, reached by following `next_cursor` on the 5,000- and 20,000-match tokens (only the page-100+ requests are timed) | p95 ≤ 2 s for each set at 150,000 held titles (AC2). **This is ADR-001's gate.** Option B failed it on 2026-11-12. Option C must pass it before release. If it still fails, follow ADR-001 "Confirmation and reconsideration"; do not weaken the re-check or `total` |
-| P3 | Repeat P1–P2 while a production run against the controlled provider processes ≥1,000 videos and its sweep expires 5,000 titles (copy A). Run the same run on copies B and C (above) | All of: (a) p95 limits hold on A; (b) `run_video_outcome`, `executed_action`, `deferred_item` and `error_entry` contents match between A and B, ignoring timestamps (AC3); (c) **no `SQLITE_BUSY` or `SQLITE_LOCKED`** in A or B, in any log record or returned error, from the run or from search; (d) **run-duration budget:** B's wall duration ≤ 1.15 × C's; (e) no sweep write transaction lasts longer than 1 s, including each optimize step; (f) **optimize cost:** the sweep's `OptimizeSearchIndex` reports `Complete`, and its total is ≤ 60 s; steps, step p95 and max, and total are reported. The thresholds in (d)–(f) are architecture defaults (finding O4). The spike did not measure optimize, so (f) and test G-O (§10.11) are the first check of it, and both must pass before release |
+| P3 | Repeat P1–P2 while a production run against the controlled provider processes ≥1,000 videos and its sweep expires 5,000 titles (copy A). Run the same run on copy B (above) | All of: (a) p95 limits hold on A; (b) `run_video_outcome`, `executed_action`, `deferred_item` and `error_entry` contents match between A and B, ignoring timestamps (AC3); (c) **no `SQLITE_BUSY` or `SQLITE_LOCKED`** in A or B, in any log record or returned error, from the run or from search; (d) **run-duration budget (diagnostic, not a release criterion):** the Search index's added write work is bounded below 15% of B's wall duration by the estimate under the table; (e) no sweep write transaction lasts longer than 1 s, including each optimize step; (f) **optimize cost:** the sweep's `OptimizeSearchIndex` reports `Complete`, and its total is ≤ 60 s; steps, step p95 and max, and total are reported. The thresholds in (d)–(f) are architecture defaults (finding O4). The spike did not measure optimize, so (f) and test G-O (§10.11) are the first check of it, and both must pass before release |
 | P4 | In P2–P3, every response is `200`, and the union of all pages for each token equals the generator's ground truth exactly | No time-out, error or omission (AC4) |
+
+**P3(d) decision (2026-11-19).** P3(d) is diagnostic. QS-001 AC3 requires that the AC1–AC2 limits hold during a run and that the run commits the same work. P3(a) and (b) test that. AC3 sets no limit on run duration; ADR-001 O4 already lists the 1.15× budget as an architecture default. A measured Copy C would need either a production bypass of index maintenance or a test-only seam in all six writers and `main`. That seam would be maintained only for this diagnostic, so it is not built. The budget is met instead by a conservative upper bound, built from measured costs. Every term counts the whole operation, including its non-index work:
+
+| Index-related work in one P3 run | Bound | Source |
+|---|---|---|
+| Sweep expiry of 5,000 rows, including trigger purges | ≤ 25 × 234 ms ≈ 5.9 s | G-O, 25 `Expire` transactions, longest 218–234 ms (current code) |
+| Sweep optimize | ≈ 0.53 s | P3(f), totals 526 and 506 ms |
+| Sweep reconcile with no work | ≤ 17.7 s | Bounded by the measured full 150,000-entry backfill. A reconcile with nothing to add reads the same rows and writes none |
+| Writer index adds | ≈ 0.63 ms p95 per written title, about 0.6 s per 1,000 written titles | Spike, disk, `secure-delete = 0` |
+| **Total** | **≤ about 25 s** for a run that writes up to a few thousand titles | |
+
+B ran for 15 min 46 s (946 s), so the index adds at most about 2.6% of the run, well under 15%. A ran for 15 min 40 s and B for 15 min 46 s. That pair shows only that search load does not slow the run. It does not measure index cost.
+
+Revisit this and build a test-only no-index control when:
+- a writer gains index work of a kind not measured above;
+- run wall time on the gate host grows by more than 15% against the last gate;
+- the requirements owner sets a write-side budget in QS-001 (O4).
+
+**P2 `project` stage (2026-11-19).** The run measured `project` at about 800–970 ms p50–p95 for a 50-row page, against about 185 ms for `candidates`. This is treated as a defect in the §6.4–§6.5 reads, not as accepted residual cost. The cause is the missing `run_video_outcome` index in §1.3. The plan evidence is certain; how much of the 800 ms it accounts for is `[unverified]`. The page still passes P2 with about 1.7× margin, so this blocks nothing.
+
+After the index, rerun P2 and record the stage split. If `project` p95 is still above 300 ms, time each §6.3–§6.6 query on the gate seed before changing anything else. The re-check, `total` and the projection's meaning stay unchanged.
 
 ## 10. Title search index (ADR-001 option C)
 
@@ -939,6 +964,7 @@ Search on the indexed path answers `500` (§10.7). This is a new availability de
      DROP TABLE title_search;
      DROP TABLE title_search_doc;
      DROP TABLE title_search_state;
+     DROP INDEX run_video_outcome_video_run;
      UPDATE schema_migrations SET version = 28, dirty = 0;
      ```
 
@@ -959,7 +985,7 @@ Search on the indexed path answers `500` (§10.7). This is a new availability de
   With secure-delete off, the spike measured a 200-row `Expire` transaction at p95 ≤ 0.48 s on disk, below P3's 1 s limit. The value stays 200. A change is recorded here.
 - **`ExpireStale`.** It still lists up to 10,000 IDs. It now calls `Expire` once per chunk of at most `IndexWriteBatch` IDs, each in its own transaction. If a chunk fails, it returns the number expired so far, joined with the error. The earlier chunks stay committed, and the next sweep continues.
 - **`CleanupExpired`.** `limit` is clamped to `IndexWriteBatch`.
-- **Discovery** purges only rows it overwrites and adds one entry per held title, inside its existing transaction. The spike measures this cost. P3's run-duration budget bounds it.
+- **Discovery** purges only rows it overwrites and adds one entry per held title, inside its existing transaction. The spike measures this cost. The §9.2 P3(d) estimate bounds it.
 
 **Spike (first implementation task, throwaway code, results recorded in this section and the log).** The spike runs on the gate host class.
 
@@ -1031,13 +1057,18 @@ Consequences:
   2. The first step runs `INSERT INTO title_search(title_search, rank) VALUES('merge', -OptimizeMergePages)`. The negative value starts a full merge of all existing segments. Every later step runs the same command with `+OptimizeMergePages`, which continues that merge without restarting it when other writers add segments meanwhile.
   3. The loop stops as **complete** when a step's `total_changes()` difference is below 2 (FTS5 found no more work).
   4. It stops as **incomplete** when `ctx` ends (checked between steps), a step fails (that step rolls back; earlier steps stay committed) or `OptimizeMaxSteps` steps have run. The next optimize call starts with a negative step again, which takes over the unfinished work.
-- **Batching.** `metadata.OptimizeMergePages = 500` pages of about 4 KB each (FTS5 `pgsz` default 4050), so about 2 MB of merged data per step. `metadata.OptimizeMaxSteps = 1000`. Both are initial values; the gate measurement (P3, G-O) may change `OptimizeMergePages`, and any change is recorded here.
+- **Batching.** `metadata.OptimizeMergePages = 500` pages of about 4 KB each (FTS5 `pgsz` default 4050), so about 2 MB of merged data per step. `metadata.OptimizeMaxSteps = 1000`. **Confirmed 2026-11-19 by G-O (commit `f170ce7`):**
+  - At 500 pages, a full optimize of the 150,000-entry index after 5,000 purges completes in 8 steps: step p50/p95/max 87/102/102 ms, total 586 ms, WAL peak 7 MB.
+  - At 100 pages it takes 33 steps: max 55 ms, total 884 ms.
+  - In P3(f), the sweep optimize took 8 steps, longest 86 ms, totals 526 and 506 ms.
+
+  Both settings are far inside the 1 s step limit and the 60 s total. 500 keeps the total lower and the step count small, so `OptimizeMergePages = 500` is the setting, and `OptimizeMaxSteps = 1000` stays.
 - **Lock behaviour.** Each step holds the write lock only for its own transaction. It releases the lock between steps, allowing other writers to interleave but not guaranteeing who acquires it next. WAL lets readers continue during a merge. P3 checks actual contention and limits each sweep write transaction to ≤ 1 s; `_busy_timeout` is 5 s.
 - **When.** After every sweep (§10.4, `RunLifecycle` step 3), and in `metadata.PrepareSearchIndex` at startup after a reconcile that removed entries. Not after `Refresh` or discovery purges outside the sweep. Their old trigrams wait for the next sweep's optimize (I2b).
 - **What it does not do.** It does not touch freed pages, WAL frames or backups (ADR-001 O2, a separate compliance question). It never changes which entries exist, so search results are the same before and after (D1 is rerun after an optimize).
 - **Logging.** Steps, `Complete`, the longest step and the total, never terms or keys.
 
-**Optimize cost is not yet measured.** The spike did not measure it. It must be measured before release, as part of the gate: P3 criterion (f) and test G-O (§10.11).
+**Optimize cost is measured** (2026-11-19, P3(f) and G-O, figures under Batching). Both pass.
 
 ### 10.11 Retention proof and index tests
 
