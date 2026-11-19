@@ -3,7 +3,7 @@ type: requirement
 title: BR-039 — Final Outcomes Are Never Reprocessed or Overwritten
 description: Only videos without a final outcome are ever routed again; a final outcome (accepted, rejected, excluded, unavailable on YouTube) never changes in either direction; a retry of a partly done video finishes only its missing actions under the original decision and never reverses a recorded success.
 tags: [requirement, outcomes, lifecycle, retry, deferred-queue, error-queue, send-guard, idempotency, priority:MUST]
-timestamp: 2026-11-12T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted
@@ -50,6 +50,8 @@ Video W was rejected in run 12. Later, a stale deferred item for W is claimed by
 9. **Outcome after finishing.** When every missing addition of a partly done video has a recorded success, the video's outcome SHALL be accepted, which is final. If a missing addition is deferred or fails, the video stays without a final outcome and is retained under the existing rules ([BR-013](br-013-quota-limited-work-deferral.md), [BR-014](br-014-failed-work-retention-and-retry.md), [BR-030](br-030-temporary-failure-work-preservation.md)), still as partly done, so AC7 applies to its next retry.
 10. **Original decision unreadable.** If the original decision of a partly done video cannot be identified or read, the system SHALL NOT decide the video's routes again and SHALL NOT send any addition for it. The video SHALL stay without a final outcome, retained with a reason that the user can see, and SHALL NOT be lost ([BR-030](br-030-temporary-failure-work-preservation.md) AC5).
 
+   *Capacity-eviction exception to retention in AC9–10 (2026-11-18):* [BR-041](br-041-bound-playlist-full-waiting-work.md) allows eviction only of its capacity-waiting missing add. Keep its inspectable history instead of active retention, with no automatic retry of that add. It is not a recorded success; finality, no rerouting of partly done videos, and the treatment of other missing adds and recorded successes are unchanged.
+
 ### Relation to existing rules
 
 11. **The send guard still applies, and is not the only protection.** The per-addition send safety rules ([BR-012](br-012-idempotent-playlist-actions.md), [OC-006](oc-006-refresh-authorization-and-call-safety.md)) keep refusing a repeated or possibly sent addition. They protect one addition to one playlist. AC1–3 additionally protect the video's outcome and routing as a whole: a final video is not routed even where no send guard would refuse an addition, for example a rejected video, which has no addition to guard.
@@ -59,6 +61,8 @@ Video W was rejected in run 12. Later, a stale deferred item for W is claimed by
 
 - **Statement, definitions, AC1–3, AC6–9, AC11:** the user's decision of 2026-11-12, relayed in the requirements assignment; the original human conversation was not independently inspected. The assignment says: only unfinished videos are ever re-evaluated, and a final outcome is never overwritten; a video with a committed final outcome (accepted, rejected, excluded, unavailable on YouTube) is never routed again by any queue claim, retry, handoff, re-queue or run; its outcome is never changed, in either direction ("this also goes the other way around"); a partly done video, for example two targets where one succeeded and one was deferred, is finished by a retry that completes only the missing actions under the original decision, does not re-decide routes and never removes or reverses a recorded success.
 - **Which outcomes are final.** Accepted, rejected, excluded and unavailable on YouTube are the outcomes named final in the assignment. Unavailable on YouTube is already final in [BR-032](br-032-processing-outcome-distinction.md) AC1 and [BR-037](br-037-requeue-stranded-videos.md) AC18. Deferred and failed are not final: [BR-013](br-013-quota-limited-work-deferral.md) and [BR-014](br-014-failed-work-retention-and-retry.md) keep them for retry, and [OC-002](oc-002-route-evaluation-outcome-semantics.md) Guarantee 8 gives "deferred in run N, accepted in run N+1" as an allowed change.
+- **Necessary consequences:**
+- The 2026-11-18 retention exception derives only from the user-approved [capacity eviction](br-041-bound-playlist-full-waiting-work.md), not from a change to the final-outcome or guard rules.
 - **Necessary consequences:**
   - AC3: if a later run committed its own outcome for a final video, the video's latest outcome and run counts would contradict AC2.
   - AC4: without it, a queue item for a final video would either route the video (contradicting AC1) or stay active for ever and be claimed again by every run.
@@ -80,7 +84,7 @@ Use the real server path with migrated SQLite and a controlled YouTube provider 
 - **Partly done (AC7–9):** seed the Example's video V with a recorded success to "Lofi" and a deferred addition to "Study", then change routes so V would match nothing. The next run sends exactly one addition, to "Study"; no route is evaluated; "Lofi" is not sent again and its success stays recorded; V becomes accepted. Repeat with the "Study" addition rejected for a reason other than quota: V is failed, in the Errors queue, and "Lofi" stays recorded. The "Study" addition stays guarded as possibly applied (AC7, AC11), so a user retry sends nothing, records "Study" as not attempted because its application is uncertain, and keeps V in the Errors queue. Separately, repeat with the "Study" addition deferred for quota: a later run and a user retry each send only "Study".
 - **Send safety still applies (AC7, AC11):** give the missing addition a held send guard: it is not sent and the video stays without a final outcome.
 - **Unreadable decision (AC10):** remove the original decision's readable configuration: nothing is sent, no route is evaluated, the video stays retained with a visible reason.
-- **Not partly done (AC6):** a deferred video with a decision and no recorded success is evaluated under the receiving run's configuration, as BR-035 AC14 and BR-037 AC11 require.
+- **Not partly done (AC6):** a quota-deferred video with a decision and no recorded success is evaluated under the receiving run's configuration, as BR-035 AC14 and BR-037 AC11 require. For a playlist-full waiting add, verify the target-scoped retry in [BR-041](br-041-bound-playlist-full-waiting-work.md) instead.
 - **Simulation (AC12):** a dry run and a backtest over the final videos report their simulated results; every production outcome, queue item and recorded success is unchanged.
 - **Races:** race a queue claim of a video against another run committing its final outcome, at least 100 times. Every result matches one serial order: either the claim routes the video before the outcome is committed, or the video is never routed after it. The final outcome is never replaced.
 

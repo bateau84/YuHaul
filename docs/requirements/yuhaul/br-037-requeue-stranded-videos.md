@@ -3,7 +3,7 @@ type: requirement
 title: BR-037 — Re-queue Stranded Videos
 description: The user can put every stranded known video into the deferred queue so normal runs process it, using daily quota with none reserved; videos whose playlist addition may already have been sent stay blocked and are reported; videos YouTube no longer returns end as "unavailable on YouTube"; no YouTube call by the action; requires a paged deferred queue.
 tags: [requirement, runs, deferred-queue, recovery, run-14, send-guard, stranded, priority:MUST]
-timestamp: 2026-11-11T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted
@@ -47,6 +47,8 @@ Terms from other requirements: *production run*, *active*, *simulation*, *candid
 
   The blocked set SHALL match what the send safety rules refuse when a run sends. If those rules would refuse an addition for the video, the video is blocked.
 - A video is *stranded* when it is known and unfinished, has no active queue item, was not removed by the user, all its runs have ended, and it is not blocked.
+
+  For capacity deferrals, live playlist-full waiting work is already active queue work. A capacity eviction is not user removal. It SHALL NOT make a video stranded on the basis of the evicted add or let this action revive that add, even if the video also has independently eligible work. See [BR-041](br-041-bound-playlist-full-waiting-work.md) (the user's 2026-11-18 capacity decision; existing committed outcome and blocked exclusions still apply).
 
 ## Acceptance criteria
 

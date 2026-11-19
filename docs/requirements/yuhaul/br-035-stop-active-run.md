@@ -3,7 +3,7 @@ type: requirement
 title: BR-035 — Stop an Active Run
 description: The user can stop any active run for good; its unfinished videos go to the deferred queue and the next new production run continues them automatically.
 tags: [requirement, runs, stop, deferred-queue, recovery, send-guard, priority:MUST]
-timestamp: 2026-11-11T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted
@@ -55,6 +55,8 @@ This section is the normative home for handing a run's unfinished videos to the 
     *Confirmed 2026-11-11 (user decision, variant K):* a provider failure that is not a quota refusal, such as an authorization lapse, a rate limit, a network or server error, or a malformed answer, is not a reason to stop claiming. The run keeps claiming under the conditions above. A claimed video that the run cannot process because of such a failure is released or retained under the existing rules.
 15. **An ended run never blocks later runs.** A stopped or discarded run, and any queue item it once claimed, SHALL NOT make a later run start, Run Now press or queue retry fail or be refused.
 16. **Nothing is stranded.** From the moment the stop or discard settles, no unfinished video of the ended run SHALL be without an active queue item, unless the user removed it (AC12). A video that is known to discovery but has no active queue item and no committed outcome is exactly the state that stranded run 14, and it is forbidden here.
+
+    *Capacity scope of AC10–16 (2026-11-18):* [BR-041](br-041-bound-playlist-full-waiting-work.md) governs already capacity-waiting adds. Handoff SHALL NOT duplicate, reset the age of, make immediately eligible without room, or bypass the cap for those adds. It SHALL NOT restore an evicted add; other unfinished work still follows AC10–16. This is the user's limited capacity exception, not a change to ordinary stop/discard handoff.
 
 ### Simulations
 
