@@ -351,6 +351,34 @@ func TestPipeline_FailRunSetsFailedStatus(t *testing.T) {
 	assert.Equal(t, "diag:v1 phase=discovery operation=discover code=unknown_error", *loaded.InterruptReason)
 }
 
+// Discovery ADR-001 D5/AC8: the typed error from discovery ends the run failed
+// with the registered no_source_scanned diagnostic, and the public run
+// projection still admits it.
+func TestPipeline_NoSourceScannedFailsRunWithRegisteredCode(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+
+	p.failRun(ctx, runID, "discovery phase failed", fmt.Errorf("discovery: %w", discovery.ErrNoSourceScanned))
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.NotNil(t, loaded.InterruptReason)
+	const want = "diag:v1 phase=discovery operation=discover code=no_source_scanned"
+	assert.Equal(t, want, *loaded.InterruptReason)
+	body, err := json.Marshal(loaded)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"interrupt_reason":"`+want+`"`)
+	assert.NotContains(t, string(body), "failure_reason_unavailable")
+}
+
 func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {
 	ctx := context.Background()
 	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)

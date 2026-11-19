@@ -119,9 +119,14 @@ type Run struct {
 	// VideosEvaluated is the number of distinct videos with persisted
 	// route-decision evidence for this run, derived at read time. It is not
 	// a stored counter and does not change videos_discovered (ARD-001).
-	VideosEvaluated int      `json:"videos_evaluated"`
-	QuotaCost       int      `json:"quota_cost"`
-	DurationSeconds *float64 `json:"duration_seconds"`
+	VideosEvaluated int `json:"videos_evaluated"`
+	// DiscoveryIncomplete is derived at read time from the quota ledger: true
+	// when at least one subscribed channel's uploads list was skipped as not
+	// found during this production run (discovery ADR-001 D6). It names no
+	// channel and is not stored.
+	DiscoveryIncomplete bool     `json:"discovery_incomplete"`
+	QuotaCost           int      `json:"quota_cost"`
+	DurationSeconds     *float64 `json:"duration_seconds"`
 	// InterruptReason is the internal run recovery reason. Its public JSON
 	// projection vettes the stored text (see MarshalJSON): unsafe legacy free
 	// text is withheld and flagged unavailable instead of serialized raw

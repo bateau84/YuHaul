@@ -339,6 +339,45 @@ describe('RunDetailView outcome filter (BR-032 AC5)', () => {
     expect(screen.queryByText('No videos match the current filters.')).not.toBeInTheDocument()
   })
 
+  describe('incomplete discovery note (discovery ADR-001 D6)', () => {
+    const NOTE = /Discovery was incomplete/
+
+    it('shows a non-error note on a completed run and does not call the run failed', async () => {
+      mockGetRun.mockResolvedValue({ ...runFixture, discovery_incomplete: true })
+      serveVideos([])
+      renderView()
+
+      const note = await screen.findByTestId('discovery-incomplete')
+      expect(note).toHaveTextContent(NOTE)
+      expect(note).toHaveTextContent('playlist not found')
+      expect(note).toHaveTextContent('polled again on the next run')
+      expect(screen.getByText('Run completed')).toBeInTheDocument()
+      expect(screen.queryByText('Run failed')).not.toBeInTheDocument()
+    })
+
+    it.each([
+      ['a clean run', { discovery_incomplete: false }],
+      ['an older server that omits the field', {}],
+      ['a failed run (legacy Run 52 style keeps its stored reason)', { status: 'failed' as const, discovery_incomplete: true, interrupt_reason: 'diag:v1 phase=discovery operation=discover code=provider_error status=404 reason=playlistNotFound' }],
+    ])('shows no note for %s', async (_name, patch) => {
+      mockGetRun.mockResolvedValue({ ...runFixture, ...patch })
+      serveVideos([])
+      renderView()
+
+      await screen.findByText(/Run (completed|failed)/)
+      expect(screen.queryByTestId('discovery-incomplete')).not.toBeInTheDocument()
+    })
+
+    it('renders no_source_scanned on a failed run as the accepted sentence', async () => {
+      mockGetRun.mockResolvedValue({ ...runFixture, status: 'failed', interrupt_reason: 'diag:v1 phase=discovery operation=discover code=no_source_scanned' })
+      serveVideos([])
+      renderView()
+
+      expect(await screen.findByText('No channels were scanned successfully.')).toBeInTheDocument()
+      expect(screen.queryByTestId('discovery-incomplete')).not.toBeInTheDocument()
+    })
+  })
+
   it('explains a completed dry-run with a recorded empty selection', async () => {
     mockGetRun.mockResolvedValue({
       ...runFixture,

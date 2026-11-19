@@ -337,3 +337,31 @@ func TestOriginalDecisionUnavailableVocabulary(t *testing.T) {
 		}
 	}
 }
+
+// Discovery ADR-001 D5: no_source_scanned is valid only for discovery/discover
+// with no other fact, and only WithCode can attach it to an error.
+func TestNoSourceScannedVocabulary(t *testing.T) {
+	const s = "diag:v1 phase=discovery operation=discover code=no_source_scanned"
+	if got, ok := AdmitStored(s); !ok || got != s {
+		t.Errorf("AdmitStored(%q) = %q, %v", s, got, ok)
+	}
+	if g := GuardErrorText(s); g != s {
+		t.Errorf("GuardErrorText(%q) = %q", s, g)
+	}
+	err := fmt.Errorf("discovery: %w", WithCode(errors.New("every source failed"), "no_source_scanned"))
+	if got := Reason(err, "discovery phase failed"); got != s {
+		t.Errorf("Reason = %q, want %q", got, s)
+	}
+	for _, f := range []Facts{
+		{Phase: "unknown", Operation: "discover", Code: "no_source_scanned"},
+		{Phase: "routing", Operation: "discover", Code: "no_source_scanned"},
+		{Phase: "discovery", Operation: "playlist_items_list", Code: "no_source_scanned"},
+		{Phase: "discovery", Operation: "discover", Code: "no_source_scanned", Status: "404"},
+		{Phase: "discovery", Operation: "discover", Code: "no_source_scanned", Reason: "playlistNotFound"},
+		{Phase: "discovery", Operation: "discover", Code: "no_source_scanned", SQLite: "SQLITE_BUSY"},
+	} {
+		if f.Valid() {
+			t.Errorf("Facts %+v must be invalid", f)
+		}
+	}
+}

@@ -27,7 +27,7 @@ export const DIAG_SQLITE = set(
   'SQLITE_ERROR SQLITE_BUSY SQLITE_LOCKED SQLITE_READONLY SQLITE_IOERR SQLITE_CORRUPT SQLITE_FULL SQLITE_CANTOPEN SQLITE_CONSTRAINT',
 )
 export const DIAG_CODES = set(
-  'unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user video_unavailable original_decision_unavailable',
+  'unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user video_unavailable original_decision_unavailable no_source_scanned',
 )
 const DISCARD_CODES = new Set(['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized'])
 
@@ -46,6 +46,9 @@ export function parseDiag(message: string | null | undefined): DiagFacts | null 
   if (!DIAG_PHASES.has(phase) || !DIAG_OPERATIONS.has(operation) || !DIAG_CODES.has(code)) return null
   if (code === 'original_decision_unavailable') {
     return phase === 'action_execution' && operation === 'load_run' && !status && !reason && !sqlite ? { code } : null
+  }
+  if (code === 'no_source_scanned') {
+    return phase === 'discovery' && operation === 'discover' && !status && !reason && !sqlite ? { code } : null
   }
   if (code === 'video_unavailable') {
     return phase === 'routing' && operation === 'load_metadata' && !status && !reason && !sqlite ? { code } : null
@@ -103,6 +106,7 @@ const BY_CODE: Record<string, string> = {
   action_authority_invalid: "YuHaul could not confirm that this run's saved routes allow this playlist change.",
   mutation_application_uncertain:
     'YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.',
+  no_source_scanned: 'No channels were scanned successfully.',
   video_unavailable: 'YouTube did not return this video when YuHaul asked for its details.',
   timeout: 'YuHaul stopped waiting because a step took too long.',
   transport_error: 'A network connection failed.',

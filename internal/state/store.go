@@ -118,6 +118,18 @@ func (s *Store) createRunWithGuard(ctx context.Context, db execer, run *Run, gua
 	return id, nil
 }
 
+// discoveryIncompleteSQL derives Run.DiscoveryIncomplete from durable ledger
+// facts (discovery ADR-001 D6). On this build a permanent 404 playlist_items_list
+// row exists only for an isolated uploads source: any other permanent 404 fails
+// the run. It is a flag, not a count, because a resume may re-scan a source and
+// the row names no channel. Known over-report: the ledger is append-only, so a
+// run that skipped a source, was interrupted, then resumed and scanned that
+// source successfully still reads incomplete. That is accepted.
+const discoveryIncompleteSQL = `(run.run_type IN ('manual','scheduled') AND EXISTS (
+		          SELECT 1 FROM quota_ledger ql
+		          WHERE ql.run_id = run.id AND ql.operation_type = 'playlist_items_list'
+		            AND ql.outcome_category = 'permanent' AND ql.http_status = 404)) AS discovery_incomplete`
+
 // ListRuns returns all runs ordered by started_at descending (newest first).
 func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -127,7 +139,8 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
-		         WHERE rd.run_id = run.id) AS videos_evaluated
+		         WHERE rd.run_id = run.id) AS videos_evaluated,
+		        `+discoveryIncompleteSQL+`
 		 FROM run ORDER BY started_at DESC;`)
 	if err != nil {
 		return nil, fmt.Errorf("listing runs: %w", err)
@@ -159,7 +172,8 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
-		         WHERE rd.run_id = run.id) AS videos_evaluated
+		         WHERE rd.run_id = run.id) AS videos_evaluated,
+		        `+discoveryIncompleteSQL+`
 		 FROM run WHERE status = ? AND completed_at IS NULL
 		   AND run_type IN ('manual','scheduled')
 		   AND mutation_safety_version = 1 AND action_authority_version = 1
@@ -192,7 +206,8 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
-		         WHERE rd.run_id = run.id) AS videos_evaluated
+		         WHERE rd.run_id = run.id) AS videos_evaluated,
+		        `+discoveryIncompleteSQL+`
 		 FROM run WHERE id = ?;`, id)
 	r, err := scanRun(row)
 	if err != nil {
@@ -1095,7 +1110,8 @@ func scanRun(sc interface {
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
 		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.VideosUnavailable,
 		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion,
-		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &stopRequestedAt, &r.VideosEvaluated)
+		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &stopRequestedAt, &r.VideosEvaluated,
+		&r.DiscoveryIncomplete)
 	if err != nil {
 		return nil, err
 	}

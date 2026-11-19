@@ -2,9 +2,12 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/bateau84/YuHaul/internal/quota"
 
 	"github.com/stretchr/testify/require"
 )
@@ -193,4 +196,55 @@ func ptrText(p *string) string {
 		return "<nil>"
 	}
 	return *p
+}
+
+// Discovery ADR-001 D6: discovery_incomplete is derived from the ledger, true
+// only for a production run with a permanent 404 playlist_items_list row.
+func TestRunDiscoveryIncompleteFromLedger(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	ledger := quota.New(s.db)
+	record := func(runID int64, op quota.Operation, cat quota.OutcomeCategory, status int64) {
+		t.Helper()
+		require.NoError(t, ledger.RecordAttempt(ctx, sql.NullInt64{Int64: runID, Valid: true}, op, time.Now(), cat, sql.NullInt64{Int64: status, Valid: true}))
+	}
+	mk := func(runType string) int64 {
+		t.Helper()
+		id, err := insertRunSQL(t, s, runType, "completed", nil, nil)
+		require.NoError(t, err)
+		return id
+	}
+
+	skipped := mk("manual")
+	record(skipped, quota.OpPlaylistItemsList, quota.OutcomePermanent, 404)
+	clean := mk("manual")
+	record(clean, quota.OpPlaylistItemsList, quota.OutcomeSuccess, 200)
+	otherOp := mk("scheduled")
+	record(otherOp, quota.OpVideosList, quota.OutcomePermanent, 404)
+	other403 := mk("scheduled")
+	record(other403, quota.OpPlaylistItemsList, quota.OutcomePermanent, 403)
+	dry := mk("dry_run")
+	record(dry, quota.OpPlaylistItemsList, quota.OutcomePermanent, 404)
+	untouched := mk("manual")
+
+	for id, want := range map[int64]bool{skipped: true, clean: false, otherOp: false, other403: false, dry: false, untouched: false} {
+		r, err := s.GetRun(ctx, id)
+		require.NoError(t, err)
+		require.Equal(t, want, r.DiscoveryIncomplete, "GetRun run %d", id)
+	}
+	runs, err := s.ListRuns(ctx)
+	require.NoError(t, err)
+	for _, r := range runs {
+		require.Equal(t, r.ID == skipped, r.DiscoveryIncomplete, "ListRuns run %d", r.ID)
+	}
+	b, err := json.Marshal(mustGet(t, s, skipped))
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"discovery_incomplete":true`)
+}
+
+func mustGet(t *testing.T, s *Store, id int64) *Run {
+	t.Helper()
+	r, err := s.GetRun(context.Background(), id)
+	require.NoError(t, err)
+	return r
 }

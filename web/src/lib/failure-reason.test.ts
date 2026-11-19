@@ -18,6 +18,7 @@ import {
 // A shape internal/diag admits for each code (some codes bind their own phase and operation).
 const SHAPE: Record<string, string> = {
   video_unavailable: 'phase=routing operation=load_metadata',
+  no_source_scanned: 'phase=discovery operation=discover',
   stopped_by_user: 'phase=unknown operation=stop_run',
   ended_by_user: 'phase=unknown operation=end_legacy_run',
   snapshot_unavailable: 'phase=unknown operation=discard_run',
@@ -67,6 +68,7 @@ describe('failureSentence', () => {
     ['credential_persistence_failed', 'YuHaul could not save renewed YouTube access.'],
     ['action_authority_invalid', "YuHaul could not confirm that this run's saved routes allow this playlist change."],
     ['mutation_application_uncertain', 'YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.'],
+    ['no_source_scanned', 'No channels were scanned successfully.'],
     ['video_unavailable', 'YouTube did not return this video when YuHaul asked for its details.'],
     ['timeout', 'YuHaul stopped waiting because a step took too long.'],
     ['transport_error', 'A network connection failed.'],
@@ -141,6 +143,8 @@ describe('closed diag:v1 value sets', () => {
       `${base} code=authorization_changed status=500`,
       'diag:v1 phase=unknown operation=discard_run code=timeout',
       'diag:v1 phase=action_execution operation=execute_action code=original_decision_unavailable',
+      `${base} code=no_source_scanned`,
+      'diag:v1 phase=discovery operation=discover code=no_source_scanned status=404',
     ]) {
       expect(parseDiag(text), text).toBeNull()
       expect(failureSentence(text), text).toBe(REASON_UNAVAILABLE)
@@ -154,6 +158,7 @@ describe('closed diag:v1 value sets', () => {
       `${base} code=sqlite_error sqlite=SQLITE_BUSY`,
       'diag:v1 phase=unknown operation=discard_run code=snapshot_unavailable',
       'diag:v1 phase=routing operation=load_metadata code=video_unavailable',
+      'diag:v1 phase=discovery operation=discover code=no_source_scanned',
     ]) expect(parseDiag(text), text).not.toBeNull()
   })
 })

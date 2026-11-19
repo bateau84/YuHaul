@@ -543,6 +543,11 @@ function RunDetailContent({ id }: { id?: string }) {
               </span>
             )}
           </div>
+          {run.status === 'completed' && run.discovery_incomplete === true && (
+            <p data-testid="discovery-incomplete" style={{ margin: '8px 0 0' }}>
+              Discovery was incomplete: at least one subscribed channel&apos;s uploads could not be read (YouTube: playlist not found). Those channels were skipped and will be polled again on the next run. The server log for this run identifies them.
+            </p>
+          )}
           {stopped && (
             <>
               <p style={{ margin: '8px 0 0' }}>

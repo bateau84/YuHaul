@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
@@ -123,7 +124,25 @@ type Result struct {
 	QuotaCost            int
 	Deferred             bool
 	DeferredReason       string
+
+	// SourcesAttempted counts channels for which at least one uploads
+	// request was made. SourcesCompleted counts those whose pagination
+	// finished (including channels with no new uploads). SourcesFailedLocal
+	// counts those skipped under the source-local rule (see isSourceLocal).
+	SourcesAttempted   int
+	SourcesCompleted   int
+	SourcesFailedLocal int
+	// ScanStopped is set when the uploads scan stopped early because of a
+	// budget or admission refusal.
+	ScanStopped bool
 }
+
+// ErrNoSourceScanned ends a run in which every attempted uploads source failed
+// locally and nothing stopped the scan (BR-002 AC8). It carries the registered
+// diagnostic code no_source_scanned.
+var ErrNoSourceScanned = diag.WithCode(errors.New("discovery: no channel was scanned successfully"), "no_source_scanned")
+
+var youtubeChannelID = regexp.MustCompile(`^UC[A-Za-z0-9_-]{22}$`)
 
 // Run discovers new videos and persists them as not_yet_evaluated. It returns
 // a summary of what was found and how much quota was consumed.
@@ -161,9 +180,17 @@ func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube
 		return nil, err
 	}
 
-	newVideos, err := e.fetchNewVideos(ctx, client, channels, result)
+	newVideos, err := e.fetchNewVideos(ctx, runID, client, channels, result, byID)
 	if err != nil {
 		return nil, err
+	}
+	if result.SourcesAttempted >= 1 && result.SourcesCompleted == 0 &&
+		result.SourcesFailedLocal == result.SourcesAttempted && !result.ScanStopped {
+		// A canceled run is interrupted, not "nothing scanned".
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("discovery: %w", err)
+		}
+		return nil, fmt.Errorf("discovery: %w", ErrNoSourceScanned)
 	}
 
 	if err := e.prefetchMetadata(ctx, client, newVideos, result, byID); err != nil {
@@ -287,8 +314,11 @@ func (e *Engine) fetchChannels(ctx context.Context, client *youtube.Client, chan
 // discoveredVideo captures the data known about a video before metadata
 // pre-fetch. The metadata field is populated when videos.list succeeds.
 type discoveredVideo struct {
-	VideoID             string
-	ChannelID           string
+	VideoID   string
+	ChannelID string
+	// SourceChannelID is the scanned channel whose uploads list returned this
+	// video. The floor advances only when it equals ChannelID.
+	SourceChannelID     string
 	ChannelName         string
 	Title               string
 	PublishedAt         time.Time
@@ -297,10 +327,67 @@ type discoveredVideo struct {
 	EnumerationComplete bool
 }
 
-func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, channels []youtube.Channel, result *Result) ([]*discoveredVideo, error) {
+// isSourceLocal reports whether a ListPlaylistItems error is a complete 404
+// whose every provider reason is playlistNotFound (ADR-001 D1, as corrected by
+// review). It classifies only by typed fields, never by error text.
+//
+// The guarded client returns a bare *APIError for a clean, accounted 404. A
+// *ReadError exists only when accounting, renewal or interruption failed, so
+// any ReadError is not source-local and fails the run as it always has.
+func isSourceLocal(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var re *youtube.ReadError
+	if errors.As(err, &re) {
+		return false
+	}
+	var api *youtube.APIError
+	if !errors.As(err, &api) || api.Status != http.StatusNotFound || !api.Complete || len(api.Reasons) == 0 {
+		return false
+	}
+	for _, r := range api.Reasons {
+		if r != "playlistNotFound" {
+			return false
+		}
+	}
+	return true
+}
+
+// logSourceSkipped records the one WARN per skipped source (ADR-001 D7). It
+// never logs err, the uploads playlist ID, a page token, the channel title or
+// a URL.
+func (e *Engine) logSourceSkipped(ctx context.Context, runID int64, ch youtube.Channel, err error, pagesDiscarded int) {
+	attrs := []any{
+		"run_id", runID,
+		"diagnostic", diag.Encode(err, "discovery", "playlist_items_list"),
+		"pages_discarded", pagesDiscarded,
+	}
+	// The validated channel ID may appear in this one server-log record (G3,
+	// accepted). Anything that fails validation is withheld.
+	if youtubeChannelID.MatchString(ch.ID) {
+		attrs = append(attrs, "source_channel_id", ch.ID)
+	} else {
+		attrs = append(attrs, "source_channel_id_valid", false)
+	}
+	var ref int64
+	if qerr := e.db.QueryRowContext(ctx, `SELECT id FROM channel WHERE channel_id = ?;`, ch.ID).Scan(&ref); qerr == nil {
+		attrs = append(attrs, "source_channel_ref", ref)
+	}
+	e.logger.WarnContext(ctx, "discovery: uploads source skipped", attrs...)
+}
+
+// fetchNewVideos scans each channel's uploads. isolate enables source-local
+// skipping and is set only on the guarded RunBound path: the legacy unguarded
+// Run never isolates a source.
+func (e *Engine) fetchNewVideos(ctx context.Context, runID int64, client *youtube.Client, channels []youtube.Channel, result *Result, isolate bool) ([]*discoveredVideo, error) {
 	var out []*discoveredVideo
 	// A video listed twice (in one playlist page or by two channels) is
-	// discovered once; persisting it twice would violate video.video_id.
+	// discovered once; persisting it twice would violate video.video_id. It
+	// holds only items merged from completed or quota-stopped channels, so a
+	// skipped channel never hides a video another channel lists.
+	// The budget check exits only the page loop; later channels are refused
+	// before any request, so they are never "attempted".
 	listed := make(map[string]bool)
 	for _, ch := range channels {
 		if ch.UploadsPlaylistID == "" {
@@ -312,21 +399,38 @@ func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, cha
 			return nil, fmt.Errorf("discovery: load watermark for %s: %w", ch.ID, err)
 		}
 
+		// The channel's items stay in a local buffer until its pagination
+		// ends, so a source-local failure leaves no page behind.
+		var buf []*discoveredVideo
+		bufSeen := make(map[string]bool)
 		var pageToken string
-		complete := false
+		complete, attempted, skipped, pages := false, false, false, 0
 		for {
 			if err := e.requireBudget(ctx, quota.OpPlaylistItemsList, 1); err != nil {
 				e.logger.WarnContext(ctx, "discovery: insufficient quota for playlist items",
 					"diagnostic", diag.Encode(err, "discovery", "playlist_items_list"))
+				result.ScanStopped = true
 				break
+			}
+			if !attempted {
+				attempted = true
+				result.SourcesAttempted++
 			}
 			items, next, err := client.ListPlaylistItems(ctx, ch.UploadsPlaylistID, pageToken)
 			if err != nil {
 				if errors.Is(err, auth.ErrQuotaRefused) {
+					result.ScanStopped = true
+					break
+				}
+				if isolate && isSourceLocal(ctx, err) {
+					result.SourcesFailedLocal++
+					e.logSourceSkipped(ctx, runID, ch, err, pages)
+					skipped = true
 					break
 				}
 				return nil, fmt.Errorf("discovery: list playlist items for %s: %w", ch.ID, err)
 			}
+			pages++
 
 			for _, it := range items {
 				if watermark != nil && !it.PublishedAt.After(*watermark) {
@@ -336,33 +440,42 @@ func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, cha
 				if err != nil {
 					return nil, err
 				}
-				if exists || listed[it.VideoID] {
+				if exists || bufSeen[it.VideoID] {
 					continue
 				}
-				listed[it.VideoID] = true
-				out = append(out, &discoveredVideo{
-					VideoID:      it.VideoID,
-					ChannelID:    it.ChannelID,
-					ChannelName:  ch.Title,
-					Title:        it.Title,
-					PublishedAt:  it.PublishedAt,
-					ThumbnailURL: it.ThumbnailURL,
+				bufSeen[it.VideoID] = true
+				buf = append(buf, &discoveredVideo{
+					VideoID:         it.VideoID,
+					ChannelID:       it.ChannelID,
+					SourceChannelID: ch.ID,
+					ChannelName:     ch.Title,
+					Title:           it.Title,
+					PublishedAt:     it.PublishedAt,
+					ThumbnailURL:    it.ThumbnailURL,
 				})
 			}
 
 			pageToken = next
 			if pageToken == "" {
 				complete = true
+				result.SourcesCompleted++
 				break
 			}
 		}
+		if skipped {
+			continue
+		}
 		// A run-time timestamp is a safe watermark only after the uploads
-		// playlist was fully enumerated. Otherwise older unseen pages could
-		// be filtered forever on the next run.
-		for _, v := range out {
-			if v.ChannelID == ch.ID {
-				v.EnumerationComplete = complete
+		// playlist was fully enumerated, and only for the scanned channel's
+		// own videos. Otherwise older unseen pages could be filtered forever
+		// on the next run.
+		for _, v := range buf {
+			if listed[v.VideoID] {
+				continue
 			}
+			listed[v.VideoID] = true
+			v.EnumerationComplete = complete && v.ChannelID == v.SourceChannelID
+			out = append(out, v)
 		}
 	}
 	return out, nil

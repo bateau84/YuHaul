@@ -121,6 +121,10 @@ export interface Run {
   // Set by the server when a stored interrupt/failure reason existed but was
   // withheld by safe-diagnostic vetting; the raw text is never sent (ARD-001).
   failure_reason_unavailable?: boolean
+  // True when a completed production run skipped at least one subscribed
+  // channel whose uploads list YouTube reported as not found. It names no
+  // channel. Absent from older servers; treat absence as false.
+  discovery_incomplete?: boolean
   // Closed-set provenance, always present in server JSON and null when unknown
   // or legacy. Run Detail uses both only to tell a manual Run Now run that
   // stopped at its time limit apart from every other interrupted run.
