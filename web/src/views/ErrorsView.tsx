@@ -9,7 +9,7 @@ import { DeferredQueue } from '../components/DeferredQueue'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
 import { categoryLabel, offersAccountStatus } from '../lib/failure-reason'
-import { duplicateTitles, videoIdSuffix } from '../lib/same-title'
+import { duplicateTitles, targetName, videoIdSuffix } from '../lib/same-title'
 import {
   diagCode,
   isClosedEntry,
@@ -202,6 +202,7 @@ export function ErrorsView() {
                       const videoKey = e.external_video_id
                       const idText = String(e.external_video_id ?? e.video_id)
                       const suffix = videoIdSuffix(e.video_title, sharedTitles, idText)
+                      const target = targetName(e.video_title, sharedTitles, idText)
                       return (
                         <Fragment key={e.id}>
                           {e.id in refusals && (
@@ -222,7 +223,7 @@ export function ErrorsView() {
                                 originalDecisionUnavailable.detail
                               ) : e.error_message ? (
                                 <>
-                                  <FailureReason message={e.error_message} subject={`${e.video_title ?? e.external_video_id ?? String(e.video_id)}${suffix}`} />
+                                  <FailureReason message={e.error_message} subject={target} />
                                   {offersAccountStatus(e.error_message) && (
                                     <div>
                                       <Link to="/settings" aria-label={suffix ? `View account status${suffix}` : undefined}>
@@ -237,18 +238,18 @@ export function ErrorsView() {
                             </td>
                             <td data-label="Actions">
                               {closed ? (
-                                <ClosedNotice outcome={e.video_final_outcome} videoId={videoKey} />
+                                <ClosedNotice outcome={e.video_final_outcome} videoId={videoKey} target={target} />
                               ) : unreadable ? (
                                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                                   <button
                                     className="button"
-                                    aria-label={`Dismiss error: ${e.video_title ?? e.external_video_id ?? e.video_id}${suffix}`}
+                                    aria-label={`Dismiss error: ${target}`}
                                     onClick={() => setConfirmDismiss(e)}
                                   >
                                     Dismiss
                                   </button>
                                   {videoKey && (
-                                    <Link to={`/videos/${encodeURIComponent(videoKey)}`} aria-label={suffix ? `View video${suffix}` : undefined}>
+                                    <Link to={`/videos/${encodeURIComponent(videoKey)}`} aria-label={`View video: ${target}`}>
                                       View video
                                     </Link>
                                   )}
@@ -258,12 +259,12 @@ export function ErrorsView() {
                                 <div style={{ display: 'flex', gap: 8 }}>
                                   <button
                                     className="button"
-                                    aria-label={`Retry ${e.video_title ?? `video ${e.external_video_id ?? e.video_id}`}${suffix}`}
+                                    aria-label={`Retry ${target}`}
                                     onClick={() => retryError(e.id)}
                                   >
                                     Retry
                                   </button>
-                                  <button className="button" aria-label={suffix ? `Remove${suffix}` : undefined} onClick={() => dismissError(e.id)}>
+                                  <button className="button" aria-label={`Remove error: ${target}`} onClick={() => dismissError(e.id)}>
                                     Remove
                                   </button>
                                 </div>

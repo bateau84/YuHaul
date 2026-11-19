@@ -108,7 +108,7 @@ describe('Errors: Retry refused with video_already_final', () => {
     expect(within(closedRow).getByText('Closed')).toBeInTheDocument()
     expect(within(closedRow).getByText(CLOSED_ACCEPTED)).toBeInTheDocument()
     expect(within(closedRow).queryByRole('button')).toBeNull()
-    expect(within(closedRow).getByRole('link', { name: 'View video' })).toHaveAttribute('href', '/videos/dQw4w9WgXcQ')
+    expect(within(closedRow).getByRole('link', { name: 'View video: Final Video' })).toHaveAttribute('href', '/videos/dQw4w9WgXcQ')
     // The closed row keeps its original reason and is not counted as active.
     expect(within(closedRow).getByText('diag:v1 phase=routing operation=load_metadata code=provider_error')).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: 'Errors (1)' })).toBeInTheDocument()
@@ -178,7 +178,7 @@ describe('Errors: original_decision_unavailable', () => {
     ).toBeInTheDocument()
     expect(within(row).queryByRole('button', { name: /^Retry / })).toBeNull()
     expect(within(row).getByText('Retry is not offered: it would fail the same way.')).toBeInTheDocument()
-    expect(within(row).getByRole('link', { name: 'View video' })).toHaveAttribute('href', '/videos/dQw4w9WgXcQ')
+    expect(within(row).getByRole('link', { name: 'View video: Final Video' })).toHaveAttribute('href', '/videos/dQw4w9WgXcQ')
     expect(within(row).getAllByRole('button')).toHaveLength(1)
     expect(screen.queryByText(/diag:v1|original_decision_unavailable/)).toBeNull()
   })
@@ -223,7 +223,7 @@ describe('Deferred: Retry refused with video_already_final', () => {
     expect(within(closedRow).getByText('Closed')).toBeInTheDocument()
     expect(within(closedRow).getByText(CLOSED_ACCEPTED)).toBeInTheDocument()
     expect(within(closedRow).queryByRole('button')).toBeNull()
-    expect(within(closedRow).getByRole('link', { name: 'View video' })).toHaveAttribute('href', '/videos/vid00000001')
+    expect(within(closedRow).getByRole('link', { name: 'View video: Video 1' })).toHaveAttribute('href', '/videos/vid00000001')
     // The closed item is not pending: the tab count and the count line fall by one.
     expect(await screen.findByRole('tab', { name: 'Deferred (119)' })).toBeInTheDocument()
     expect(screen.getByText('Showing 1–1 of 119 items.')).toBeInTheDocument()
@@ -386,7 +386,7 @@ describe('Focus after Dismiss', () => {
     vi.spyOn(queueApi, 'dismissError').mockResolvedValue(errorEntry())
     renderErrors()
     const row = (await screen.findByText('Final Video')).closest('tr')!
-    fireEvent.click(within(row).getByRole('button', { name: 'Remove' }))
+    fireEvent.click(within(row).getByRole('button', { name: 'Remove error: Final Video' }))
     await waitFor(() => expect(screen.getByText('Other').closest('tr')).toHaveFocus())
   })
 

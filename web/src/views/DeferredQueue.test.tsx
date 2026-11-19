@@ -214,7 +214,7 @@ describe('Deferred rows and Dismiss (G4)', () => {
     // The provider's video ID is shown, never the internal row id (1006).
     expect(screen.getByText('Video ID: dQw4w9WgXcQ')).toBeInTheDocument()
     expect(screen.queryByText(/1006/)).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Dismiss deferred item: dQw4w9WgXcQ' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dismiss deferred item: video dQw4w9WgXcQ' })).toBeInTheDocument()
   })
 
   it('reloads the same position after Dismiss and moves focus to the row that took its place', async () => {

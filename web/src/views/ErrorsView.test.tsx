@@ -45,7 +45,7 @@ describe('ErrorsView', () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValueOnce([entry])
     renderWithProviders(<ErrorsView />)
     const secondRow = await waitFor(() => screen.getByText('yt-safe-id').closest('tr'))
-    fireEvent.click(within(secondRow!).getByRole('button', { name: 'Remove' }))
+    fireEvent.click(within(secondRow!).getByRole('button', { name: 'Remove error: video yt-safe-id' }))
     await waitFor(() => expect(dismiss).toHaveBeenCalledWith(427))
   })
 
@@ -93,7 +93,7 @@ describe('ErrorsView', () => {
     const discarded = screen.getByText('Discarded One').closest('tr')!
     expect(within(discarded).getByText('Waiting for the next run. Run 42 was discarded.')).toBeInTheDocument()
     expect(screen.getByText('Waiting for the next run.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Dismiss deferred item: 5' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dismiss deferred item: video 5' })).toBeInTheDocument()
   })
 
   it('opens the Deferred tab from ?tab=deferred', async () => {

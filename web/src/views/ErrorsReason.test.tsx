@@ -68,7 +68,7 @@ describe('Errors Category and Reason presentation', () => {
       entry({ id: 3, video_title: 'Titled', external_video_id: 'ccccccccccc' }),
     ])
     renderErrors()
-    for (const name of ['Technical details for aaaaaaaaaaa', 'Technical details for bbbbbbbbbbb', 'Technical details for Titled']) {
+    for (const name of ['Technical details for video aaaaaaaaaaa', 'Technical details for video bbbbbbbbbbb', 'Technical details for Titled']) {
       const summary = await screen.findByText('Technical details', { selector: `summary[aria-label="${name}"]` })
       expect(summary.getAttribute('aria-label')).toContain(summary.textContent!)
     }
@@ -153,7 +153,7 @@ describe('Same title on several rows', () => {
 
     expect(within(first).getByText('Video ID: aaaaaaaaaaa')).toBeInTheDocument()
     expect(within(first).getByRole('button', { name: 'Retry Twin, video aaaaaaaaaaa' })).toHaveTextContent(/^Retry$/)
-    expect(within(first).getByRole('button', { name: 'Remove, video aaaaaaaaaaa' })).toHaveTextContent(/^Remove$/)
+    expect(within(first).getByRole('button', { name: 'Remove error: Twin, video aaaaaaaaaaa' })).toHaveTextContent(/^Remove$/)
     expect(within(first).getByRole('link', { name: 'View account status, video aaaaaaaaaaa' })).toBeInTheDocument()
     expect(within(first).getByText('Technical details')).toHaveAttribute('aria-label', 'Technical details for Twin, video aaaaaaaaaaa')
 
@@ -162,7 +162,7 @@ describe('Same title on several rows', () => {
 
     expect(within(solo).queryByText(/Video ID:/)).toBeNull()
     expect(within(solo).getByRole('button', { name: 'Retry Solo' })).toBeInTheDocument()
-    expect(within(solo).getByRole('button', { name: 'Remove' })).toBeInTheDocument()
+    expect(within(solo).getByRole('button', { name: 'Remove error: Solo' })).toBeInTheDocument()
     expect(within(solo).getByRole('link', { name: 'View account status' })).toBeInTheDocument()
     expect(within(solo).getByText('Technical details')).toHaveAttribute('aria-label', 'Technical details for Solo')
   })
@@ -172,7 +172,7 @@ describe('Same title on several rows', () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue(rows)
     vi.spyOn(queueApi, 'dismissError').mockResolvedValue(rows[0])
     renderErrors()
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove, video aaaaaaaaaaa' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove error: Twin, video aaaaaaaaaaa' }))
     expect(await screen.findByRole('button', { name: 'Retry Twin' })).toBeInTheDocument()
     expect(screen.queryByText(/Video ID:/)).toBeNull()
   })
@@ -185,7 +185,7 @@ describe('Same title on several rows', () => {
     ])
     renderErrors()
     expect(await screen.findByRole('button', { name: 'Dismiss error: Twin, video aaaaaaaaaaa' })).toHaveTextContent(/^Dismiss$/)
-    expect(screen.getByRole('link', { name: 'View video, video aaaaaaaaaaa' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'View video: Twin, video aaaaaaaaaaa' })).toBeInTheDocument()
   })
 })
 
@@ -218,6 +218,30 @@ describe('Same title on the Deferred page', () => {
     expect(screen.getByText('Video ID: vid2')).toBeInTheDocument() // closed rows count
     expect(screen.getByRole('button', { name: 'Retry now: Solo' })).toBeInTheDocument()
     expect(screen.queryByText('Video ID: vid3')).toBeNull()
+  })
+})
+
+describe('Row control names use one target pattern', () => {
+  const unreadable = 'diag:v1 phase=action_execution operation=load_run code=original_decision_unavailable'
+  it('names untitled rows with "video {id}" for Dismiss, View video and a closed row', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([
+      entry({ id: 1, video_title: undefined, external_video_id: 'aaaaaaaaaaa', error_message: unreadable }),
+      entry({ id: 2, video_title: undefined, external_video_id: 'bbbbbbbbbbb', closed_reason: 'final_outcome', video_final_outcome: 'accepted' }),
+    ])
+    renderErrors()
+    expect(await screen.findByRole('button', { name: 'Dismiss error: video aaaaaaaaaaa' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'View video: video aaaaaaaaaaa' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'View video: video bbbbbbbbbbb' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'View video' })).toBeNull()
+  })
+
+  it('names a closed row with a shared title as "{title}, video {id}"', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([
+      entry({ id: 1, video_title: 'Twin', external_video_id: 'aaaaaaaaaaa' }),
+      entry({ id: 2, video_title: 'Twin', external_video_id: 'bbbbbbbbbbb', closed_reason: 'final_outcome', video_final_outcome: 'accepted' }),
+    ])
+    renderErrors()
+    expect(await screen.findByRole('link', { name: 'View video: Twin, video bbbbbbbbbbb' })).toHaveTextContent(/^View video$/)
   })
 })
 

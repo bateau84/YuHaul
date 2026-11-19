@@ -5,7 +5,7 @@ import { closedText } from '../lib/final-outcome'
 
 // A queue entry closed because its video already has a final outcome (BR-039).
 // Text plus an icon, never colour alone; no Retry or Dismiss (nothing to do).
-export function ClosedNotice({ outcome, videoId }: { outcome: string | null | undefined; videoId?: string }) {
+export function ClosedNotice({ outcome, videoId, target }: { outcome: string | null | undefined; videoId?: string; target: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
       <span className="badge badge--not-evaluated">
@@ -14,7 +14,7 @@ export function ClosedNotice({ outcome, videoId }: { outcome: string | null | un
       </span>
       <span>{closedText(outcome)}</span>
       {videoId && (
-        <Link to={`/videos/${encodeURIComponent(videoId)}`} style={{ display: 'inline-block', minHeight: 24 }}>
+        <Link to={`/videos/${encodeURIComponent(videoId)}`} aria-label={`View video: ${target}`} style={{ display: 'inline-block', minHeight: 24 }}>
           View video
         </Link>
       )}

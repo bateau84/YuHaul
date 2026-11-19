@@ -14,6 +14,13 @@ export function duplicateTitles(rows: ReadonlyArray<{ video_title?: string }>): 
   return dup
 }
 
+// The target T that every row control names: the title; `video {id}` with no
+// title; `{title}, video {id}` when the title is shared.
+export function targetName(title: string | undefined, dups: Set<string>, id: string | number): string {
+  if (!title) return `video ${id}`
+  return `${title}${videoIdSuffix(title, dups, id)}`
+}
+
 // ", video {id}" for a row whose title is shared, otherwise "".
 export function videoIdSuffix(title: string | undefined, dups: Set<string>, id: string | number): string {
   return title && dups.has(title) ? `, video ${id}` : ''

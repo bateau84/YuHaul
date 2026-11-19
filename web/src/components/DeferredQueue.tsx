@@ -12,7 +12,7 @@ import { ClosedNotice, RefusalAlert } from './ClosedNotice'
 import { ConfirmDialog } from './ConfirmDialog'
 import { FetchErrorRegion } from './FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
-import { duplicateTitles, videoIdSuffix } from '../lib/same-title'
+import { duplicateTitles, targetName, videoIdSuffix } from '../lib/same-title'
 
 const PAGE_SIZE = 50
 const nf = new Intl.NumberFormat()
@@ -430,6 +430,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                 const closed = isClosedEntry(d)
                 const idText = String(d.external_video_id ?? d.video_id)
                 const suffix = videoIdSuffix(d.video_title, sharedTitles, idText)
+                const target = targetName(d.video_title, sharedTitles, idText)
                 return (
                   <Fragment key={d.id}>
                     {row.id in closedHere && (
@@ -456,19 +457,19 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                       <td data-label="Retry after">{closed ? '' : eligibilityText(d)}</td>
                       <td data-label="Actions">
                         {closed ? (
-                          <ClosedNotice outcome={d.video_final_outcome} videoId={d.external_video_id} />
+                          <ClosedNotice outcome={d.video_final_outcome} videoId={d.external_video_id} target={target} />
                         ) : (
                           <div style={{ display: 'flex', gap: 8 }}>
                             <button
                               className="button"
-                              aria-label={`Retry now: ${d.video_title ?? `video ${d.external_video_id ?? d.video_id}`}${suffix}`}
+                              aria-label={`Retry now: ${target}`}
                               onClick={() => void retryItem(d, i)}
                             >
                               Retry now
                             </button>
                             <button
                               className="button"
-                              aria-label={`Dismiss deferred item: ${d.video_title ?? d.external_video_id ?? d.video_id}${suffix}`}
+                              aria-label={`Dismiss deferred item: ${target}`}
                               onClick={() => (isHandedOver(d) ? setConfirmDismiss({ item: d, index: i }) : void discard(d, i))}
                             >
                               Dismiss
