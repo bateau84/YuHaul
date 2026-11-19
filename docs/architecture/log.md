@@ -10,6 +10,8 @@ timestamp: 2026-11-11T00:00:00Z
 
 ## 2026-11-19
 
+**§6.1.1 clarified after critic `ses_e0cc26e27ffeKGNU9EOMRb4itV`.** [Run-initiation ARS-005 §6.1.1](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) now states five things. Writers keep the true field presence from the by-ID read and write `NULL` only for a field that was not supplied. An invalid discovery by-ID response means "not supplied", and discovery continues. In ordinary routing a `NULL` duration means no match, while a version-0 run with a duration exclusion takes authority-failure retention. A dedicated data-only migration is the fallback if no receipt migration exists. Empty titles are not cleared. Three new evidence items cover real `''` and `P0D` values, invalid responses and the routing differences. The decision is unchanged.
+
 **Legacy Store A defaults (`rq-metadata-fetch`, review `516b34d2` F1).** [Run-initiation ARS-005 §6.1.1](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) adds a one-time clearing step. Old `transient_metadata` rows can hold `''` for a missing description or channel name and `0` for a missing duration. These become `NULL` in the receipt-provenance migration, so the readiness check cannot accept them as real inputs. A real empty or zero value in an old row is cleared too, and the bound fetch reads it again. TTL alone, a cutoff and a provenance column were rejected. Contract only; it is not implemented.
 
 ## 2026-11-18
