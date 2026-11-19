@@ -115,8 +115,10 @@ func (m *Manager) RunLifecycle(ctx context.Context) error {
 	return nil
 }
 
-// CleanupExpired deletes metadata records older than the configured TTL.
-// It performs only local DELETE operations and never consumes API quota.
+// CleanupExpired deletes metadata records older than the configured TTL, at
+// most IndexWriteBatch (200) per call, so one call purges one batch of search
+// entries (ARS-001 §10.10). Call it again while it returns IndexWriteBatch. It
+// performs only local DELETE operations and never consumes API quota.
 // Returns the number of records deleted.
 func (m *Manager) CleanupExpired(ctx context.Context) (int, error) {
 	cutoff := m.now().UTC().Add(-m.ttl)

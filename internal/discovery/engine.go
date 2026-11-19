@@ -19,8 +19,10 @@ import (
 	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/duplicate"
+	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/state"
+	"github.com/bateau84/YuHaul/internal/titlekey"
 	"github.com/bateau84/YuHaul/internal/youtube"
 
 	"golang.org/x/oauth2"
@@ -542,6 +544,7 @@ func (e *Engine) videoExists(ctx context.Context, videoID string) (bool, error) 
 // upsertTransientMetadata stores the Store A row. A nil description or duration
 // is written as NULL ("not validly supplied"); a non-nil one is a real value,
 // including "" and 0. Blank title, channel name and thumbnail are NULL too.
+// It also rewrites the video's title search entry in tx.
 func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoID, title, channelName string, description *string,
 	duration *int, thumbnailURL string, publishedAt, fetchedAt time.Time) error {
 
@@ -578,7 +581,12 @@ func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoI
 		videoID, nullString(title), nullString(channelName), descriptionArg, publishedAt.UTC(), durationArg,
 		nullString(thumbnailURL), fetchedAt.UTC(), fetchedAt.UTC(), expiresAt.UTC(), true,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Same transaction (ARS-001 §10.3): the index entry follows the stored row,
+	// so a kept expired_at or a blank title leaves no entry.
+	return metadata.IndexTitleTx(ctx, tx, titlekey.NewFolder(), videoID, fetchedAt.UTC())
 }
 
 func (e *Engine) upsertChannel(ctx context.Context, tx *sql.Tx, channelID, channelName string, discoveredAt time.Time, enumerationComplete bool) error {

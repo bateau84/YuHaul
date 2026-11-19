@@ -8,6 +8,7 @@ import (
 
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/titlekey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -107,9 +108,12 @@ func TestR9ColdConnectionWriterContention(t *testing.T) {
 			}, time.Hour, idxNow)
 		},
 		"Upsert": func(ms *metadata.Store) error {
+			// Upsert judges its entry at the current time, so the row must be
+			// held now.
+			now := time.Now().UTC()
 			for _, id := range []string{"v1", "v2"} {
 				if err := ms.Upsert(context.Background(), metadata.TransientMetadata{
-					VideoID: id, Title: &title, FetchedAt: idxNow, ExpiresAt: idxNow.Add(time.Hour), IsActive: true,
+					VideoID: id, Title: &title, FetchedAt: now, ExpiresAt: now.Add(time.Hour), IsActive: true,
 				}); err != nil {
 					return err
 				}
@@ -128,14 +132,19 @@ func TestR9ColdConnectionWriterContention(t *testing.T) {
 			require.NoError(t, write(fresh))
 			lock.finishedAfterRelease(t)
 
-			// Purge side only: the triggers delete the old entries and leave
-			// no document or FTS row orphaned. ARS-001 §10.3 requires Refresh
-			// and Upsert to re-index in their own transaction, but they do not
-			// yet (node fts-writers), so re-indexing is not asserted here.
-			// require.Empty(entries) below must change when §10.3 lands.
-			require.Empty(t, entries(t, ms.DB()))
-			require.Zero(t, count(t, ms.DB(), "title_search_doc"))
-			require.Zero(t, count(t, ms.DB(), "title_search"))
+			// Index effect (I1, I3): Expire purges through the triggers and
+			// adds nothing. Refresh and Upsert (ARS-001 §10.3) replace each
+			// old entry with exactly one entry for the new title, in the same
+			// transaction, leaving no orphaned document or FTS row.
+			if name == "Expire" {
+				require.Empty(t, entries(t, ms.DB()))
+				require.Zero(t, count(t, ms.DB(), "title_search_doc"))
+				require.Zero(t, count(t, ms.DB(), "title_search"))
+			} else {
+				require.Equal(t, map[string]string{"v1": titlekey.Key(title), "v2": titlekey.Key(title)}, entries(t, ms.DB()))
+				require.Equal(t, 2, count(t, ms.DB(), "title_search_doc"))
+				require.Equal(t, 2, count(t, ms.DB(), "title_search"))
+			}
 			for _, id := range []string{"v1", "v2"} {
 				got, err := ms.Get(context.Background(), id)
 				require.NoError(t, err)

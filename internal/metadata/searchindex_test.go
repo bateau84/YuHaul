@@ -38,8 +38,10 @@ func setBatch(t *testing.T, n int) {
 	t.Cleanup(func() { metadata.IndexWriteBatch = old })
 }
 
-// put stores a held-by-default row. It writes through Store.Upsert, which does
-// not index, so the row starts without an entry.
+// put stores a held-by-default row. It writes through Store.Upsert, which
+// indexes at the current time. The row is dated around idxNow (March 2026),
+// which is already past its expiry, so Upsert adds no entry and the row starts
+// without one.
 func put(t *testing.T, ms *metadata.Store, id, title string, mod func(*metadata.TransientMetadata)) {
 	t.Helper()
 	m := metadata.TransientMetadata{VideoID: id, FetchedAt: idxNow.Add(-time.Hour), ExpiresAt: idxNow.Add(10 * time.Hour), IsActive: true}

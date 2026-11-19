@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bateau84/YuHaul/internal/titlekey"
 )
 
 // Store provides persistence for TransientMetadata records.
@@ -23,9 +25,13 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// Upsert inserts or updates a Store A record.
+// Upsert inserts or updates a Store A record and keeps its title search entry
+// current. The write and the index update share one write-lock-first
+// transaction (ARS-001 §10.3, §10.5); the entry is judged at the current time.
 func (s *Store) Upsert(ctx context.Context, m TransientMetadata) error {
-	_, err := s.db.ExecContext(ctx, `
+	f := titlekey.NewFolder()
+	err := inWriteTx(ctx, s.db, func(c *sql.Conn) error {
+		if _, err := c.ExecContext(ctx, `
 		INSERT INTO transient_metadata (
 			video_id, title, channel_name, description, published_at,
 			duration_seconds, thumbnail_url, fetched_at, refreshed_at,
@@ -43,10 +49,14 @@ func (s *Store) Upsert(ctx context.Context, m TransientMetadata) error {
 			expires_at = excluded.expires_at,
 			expired_at = excluded.expired_at,
 			is_active = excluded.is_active;`,
-		m.VideoID, m.Title, m.ChannelName, m.Description, m.PublishedAt,
-		m.DurationSeconds, m.ThumbnailURL, m.FetchedAt, m.RefreshedAt,
-		m.ExpiresAt, m.ExpiredAt, m.IsActive,
-	)
+			m.VideoID, m.Title, m.ChannelName, m.Description, m.PublishedAt,
+			m.DurationSeconds, m.ThumbnailURL, m.FetchedAt, m.RefreshedAt,
+			m.ExpiresAt, m.ExpiredAt, m.IsActive,
+		); err != nil {
+			return err
+		}
+		return indexTitle(ctx, c, f, m.VideoID, time.Now().UTC())
+	})
 	if err != nil {
 		return fmt.Errorf("metadata: upsert %s: %w", m.VideoID, err)
 	}
@@ -128,10 +138,12 @@ var ErrNotFound = errors.New("metadata not found")
 
 // CleanupExpired deletes transient_metadata records whose fetched_at is before
 // cutoff. It performs only local database operations and consumes no API quota.
+// limit is clamped to IndexWriteBatch (ARS-001 §10.10), so one call purges at
+// most one batch of search entries; a non-positive limit means one batch.
 // Returns the number of records deleted.
 func (s *Store) CleanupExpired(ctx context.Context, cutoff time.Time, limit int) (int, error) {
-	if limit <= 0 {
-		limit = 10000
+	if limit <= 0 || limit > IndexWriteBatch {
+		limit = IndexWriteBatch
 	}
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM transient_metadata
@@ -293,7 +305,9 @@ func (s *Store) Refresh(ctx context.Context, items []TransientMetadata, ttl time
 	}
 	fetchedAt := now.UTC()
 	expiresAt := fetchedAt.Add(ttl)
-	// Write lock first; see Expire.
+	// Write lock first; see Expire. Each UPDATE is followed by IndexTitleTx's
+	// logic in the same transaction (ARS-001 §10.3).
+	f := titlekey.NewFolder()
 	err := inWriteTx(ctx, s.db, func(c *sql.Conn) error {
 		stmt, err := c.PrepareContext(ctx, `
 		UPDATE transient_metadata
@@ -321,6 +335,9 @@ func (s *Store) Refresh(ctx context.Context, items []TransientMetadata, ttl time
 			); err != nil {
 				return fmt.Errorf("metadata: refresh %s: %w", m.VideoID, err)
 			}
+			if err := indexTitle(ctx, c, f, m.VideoID, fetchedAt); err != nil {
+				return fmt.Errorf("metadata: refresh %s: %w", m.VideoID, err)
+			}
 		}
 		return nil
 	})
@@ -334,8 +351,8 @@ func (s *Store) Refresh(ctx context.Context, items []TransientMetadata, ttl time
 // transaction, inserting a row that was evicted or never held and updating one
 // that exists. A nil field is written as NULL, never as a default, so a missing
 // or invalid input stays distinguishable from a real empty or zero one. TTL
-// fields are reset from now and ttl. The title-search triggers fire inside the
-// same transaction. It returns the number of rows written, and fails if any
+// fields are reset from now and ttl. The title-search triggers fire and each
+// row's search entry is rewritten inside the same transaction. It returns the number of rows written, and fails if any
 // statement does not write exactly one row.
 func (s *Store) UpsertFetched(ctx context.Context, items []TransientMetadata, ttl time.Duration, now time.Time) (int, error) {
 	if len(items) == 0 {
@@ -344,6 +361,7 @@ func (s *Store) UpsertFetched(ctx context.Context, items []TransientMetadata, tt
 	fetchedAt := now.UTC()
 	expiresAt := fetchedAt.Add(ttl)
 	saved := 0
+	f := titlekey.NewFolder()
 	err := inWriteTx(ctx, s.db, func(c *sql.Conn) error {
 		stmt, err := c.PrepareContext(ctx, `
 		INSERT INTO transient_metadata (
@@ -380,6 +398,9 @@ func (s *Store) UpsertFetched(ctx context.Context, items []TransientMetadata, tt
 			}
 			if n != 1 {
 				return fmt.Errorf("metadata: upsert fetched %s wrote %d rows", m.VideoID, n)
+			}
+			if err := indexTitle(ctx, c, f, m.VideoID, fetchedAt); err != nil {
+				return fmt.Errorf("metadata: upsert fetched %s: %w", m.VideoID, err)
 			}
 			saved++
 		}

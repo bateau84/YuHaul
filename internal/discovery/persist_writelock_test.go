@@ -10,6 +10,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/state"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/titlekey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -74,6 +75,19 @@ func TestR9DiscoveryPersistColdConnectionWriterContention(t *testing.T) {
 			var title string
 			require.NoError(t, db.QueryRowContext(ctx, `SELECT title FROM transient_metadata WHERE video_id = 'vid1'`).Scan(&title))
 			require.Equal(t, "New title", title)
+
+			// Index effect (I1, I3): exactly one entry, for the new title.
+			rows, err := db.QueryContext(ctx, `SELECT d.video_id, s.k FROM title_search_doc d JOIN title_search s ON s.rowid = d.doc_id`)
+			require.NoError(t, err)
+			defer rows.Close()
+			got := map[string]string{}
+			for rows.Next() {
+				var id, k string
+				require.NoError(t, rows.Scan(&id, &k))
+				got[id] = k
+			}
+			require.NoError(t, rows.Err())
+			require.Equal(t, map[string]string{"vid1": titlekey.Key("New title")}, got)
 		})
 	}
 }
