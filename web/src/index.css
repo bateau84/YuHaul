@@ -491,6 +491,45 @@ dialog.card::backdrop {
   color: var(--color-interactive-primary);
 }
 
+/* The "More" control is a <button>: without this it keeps the browser's grey
+   button face under the light text (about 1.3:1). Same surface and text as the bar. */
+button.bottom-nav-link {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+  border: 0;
+  padding: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+button.bottom-nav-link:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* Videos search paging (design: Videos, Mobile). */
+.videos-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+@media (max-width: 640px) {
+  .videos-pager {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .videos-pager .button {
+    width: 100%;
+  }
+
+  .videos-pager > span {
+    text-align: center;
+  }
+}
+
 /* Responsive breakpoints */
 @media (min-width: 768px) {
   .field-row {

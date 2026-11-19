@@ -26,6 +26,20 @@ describe('colour contrast (WCAG 1.4.3, 4.5:1)', () => {
     expect(ratio(v(light, '--color-text-error'), v(light, '--color-surface-card'))).toBeGreaterThanOrEqual(4.5)
     expect(ratio(v(dark, '--color-text-error'), v(dark, '--color-surface-card'))).toBeGreaterThanOrEqual(4.5)
   })
+  it('the mobile More button uses the bar surface and the app text colour, not the browser face', () => {
+    const rule = css.match(/\nbutton\.bottom-nav-link\s*\{([^}]*)\}/)![1]
+    expect(rule).toMatch(/background:\s*var\(--color-surface-elevated\)/)
+    expect(rule).toMatch(/color:\s*var\(--color-text-primary\)/)
+    // The bar itself is painted with --color-surface-elevated.
+    expect(css).toMatch(/\.bottom-nav\s*\{[^}]*background:\s*var\(--color-surface-elevated\)/)
+    for (const block of [light, dark]) {
+      expect(ratio(v(block, '--color-text-primary'), v(block, '--color-surface-elevated'))).toBeGreaterThanOrEqual(4.5)
+    }
+  })
+  it('the More button shows a visible focus ring', () => {
+    expect(css).toMatch(/button\.bottom-nav-link:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--color-focus-ring\)/)
+    expect(ratio(v(light, '--color-focus-ring'), v(light, '--color-surface-elevated'))).toBeGreaterThanOrEqual(3)
+  })
   it('dialogs take the app text colour instead of the browser black', () => {
     expect(css).toMatch(/dialog\.card\s*\{\s*color:\s*var\(--color-text-primary\)/)
     expect(ratio(v(dark, '--color-text-primary'), v(dark, '--color-surface-card'))).toBeGreaterThanOrEqual(4.5)

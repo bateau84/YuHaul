@@ -48,5 +48,10 @@ export function QueueShort({ state }: { state: VideoQueueState }) {
 }
 
 export function RunLink({ id }: { id: number }) {
-  return <Link to={`/runs/${id}`}>{runLabel(id)}</Link>
+  // At least 24 CSS px tall (SC 2.5.8), like the other links in a result card.
+  return (
+    <Link to={`/runs/${id}`} style={{ display: 'inline-block', minHeight: 24 }}>
+      {runLabel(id)}
+    </Link>
+  )
 }

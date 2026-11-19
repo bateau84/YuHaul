@@ -135,12 +135,17 @@ export function VideosView() {
         if (response.kind === 'results' || (response.kind === 'id_not_found' && response.results)) {
           const r = response.results!
           const n = r.items.length
+          // The no-match and empty-page states are announced once by their own
+          // role="status" message (design copy); the count line would be a second,
+          // contradictory announcement ("0 videos on this page.").
           setAnnounce(
-            wantsFocus && r.first_position !== null && r.last_position !== null
-              ? `Page ${r.number}, showing ${r.first_position}–${r.last_position}.`
-              : n === 1
-                ? '1 video on this page.'
-                : `${n} videos on this page.`
+            n === 0
+              ? ''
+              : wantsFocus && r.first_position !== null && r.last_position !== null
+                ? `Page ${r.number}, showing ${r.first_position}–${r.last_position}.`
+                : n === 1
+                  ? '1 video on this page.'
+                  : `${n} videos on this page.`
           )
         }
       })
@@ -235,7 +240,7 @@ export function VideosView() {
           }
         } else if (response.results.items.length === 0) {
           message = {
-            text: 'This page has no results. Held titles may have changed since this search began. Go to page 1.',
+            text: 'This page has no results. Held titles may have changed since this search. Go to page 1.',
             role: 'status',
           }
         }
@@ -334,7 +339,7 @@ export function VideosView() {
               <ResultItem key={v.video_id} video={v} from={from} />
             ))}
           </ul>
-          <nav aria-label="Search result pages" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 }}>
+          <nav aria-label="Search result pages" className="videos-pager">
             {page.number > 1 && (
               <button type="button" className="button" style={{ minHeight: 44 }} onClick={() => goToPage(page.number - 1, page.prev_cursor)}>
                 Previous page

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { VideosView, VIDEOS_NOTICE } from './VideosView'
 import type { VideoSearchPage, VideoSummary } from '../types'
@@ -140,6 +142,32 @@ describe('VideosView (design: Videos — Find a Video by Title or ID)', () => {
     expect(msg).toHaveTextContent(`“${'x'.repeat(60)}…”. Videos whose titles are no longer held can still be found by video ID or YouTube link.`)
     expect(msg).toHaveAttribute('role', 'status')
     expect(screen.queryByText(/^Showing/)).toBeNull()
+    // Announced once, with the design copy only: no "0 videos on this page."
+    expect(screen.getAllByRole('status').map((s) => s.textContent).filter(Boolean)).toEqual([msg.textContent])
+    expect(screen.queryByText(/0 videos on this page/)).toBeNull()
+  })
+
+  it('makes the Run link in a result card at least 24 CSS px tall', async () => {
+    fetchMock.mockResolvedValue(json({ kind: 'results', results: pageOf() }))
+    renderAt('/videos?q=title')
+    const link = await screen.findByRole('link', { name: 'Run 58' })
+    expect(link).toHaveStyle({ display: 'inline-block', minHeight: '24px' })
+  })
+
+  // jsdom applies no stylesheet, so read index.css (as contrast.test.ts does).
+  it('stacks the paging controls full width on mobile, with Next page last', async () => {
+    const css = readFileSync(join(process.cwd(), 'src/index.css'), 'utf8')
+    const mobile = css.match(/@media \(max-width: 640px\) \{([\s\S]*?)\n\}\n/)![1]
+    expect(mobile).toMatch(/\.videos-pager\s*\{[^}]*flex-direction:\s*column/)
+    expect(mobile).toMatch(/\.videos-pager \.button\s*\{[^}]*width:\s*100%/)
+    fetchMock.mockResolvedValue(
+      json({ kind: 'results', results: pageOf({ number: 2, total: 130, first_position: 51, last_position: 100, next_cursor: 'n', prev_cursor: 'p' }) })
+    )
+    renderAt('/videos?q=title&page=2')
+    const nav = await screen.findByRole('navigation', { name: 'Search result pages' })
+    expect(nav).toHaveClass('videos-pager')
+    const buttons = within(nav).getAllByRole('button').map((b) => b.textContent)
+    expect(buttons).toEqual(['Previous page', 'Next page'])
   })
 
   it('shows typed text as plain text, never markup', async () => {
@@ -371,9 +399,11 @@ describe('VideosView (design: Videos — Find a Video by Title or ID)', () => {
       .mockResolvedValueOnce(json({ kind: 'results', results: pageOf({ items: [], number: 4, total: 130, first_position: null, last_position: null }) }))
       .mockResolvedValueOnce(json({ kind: 'results', results: pageOf() }))
     renderAt('/videos?q=title&page=4')
-    expect(
-      await screen.findByText('This page has no results. Held titles may have changed since this search began. Go to page 1.')
-    ).toBeInTheDocument()
+    const message = await screen.findByText('This page has no results. Held titles may have changed since this search. Go to page 1.')
+    expect(message).toHaveAttribute('role', 'status')
+    // Announced once, by that message alone (design: Videos, paging).
+    expect(screen.getAllByRole('status').map((s) => s.textContent).filter(Boolean)).toEqual([message.textContent])
+    expect(screen.queryByText(/0 videos on this page/)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Go to page 1' }))
     expect(await screen.findByText('Showing 1–1 of 1. Newest discovery first.')).toBeInTheDocument()
     expect(screen.getByTestId('where')).toHaveTextContent('/videos?q=title')
