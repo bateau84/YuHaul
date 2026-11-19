@@ -226,7 +226,7 @@ describe('Deferred: Retry refused with video_already_final', () => {
     expect(within(closedRow).getByRole('link', { name: 'View video' })).toHaveAttribute('href', '/videos/vid00000001')
     // The closed item is not pending: the tab count and the count line fall by one.
     expect(await screen.findByRole('tab', { name: 'Deferred (119)' })).toBeInTheDocument()
-    expect(screen.getByText('Showing 1–2 of 119 items.')).toBeInTheDocument()
+    expect(screen.getByText('Showing 1–1 of 119 items.')).toBeInTheDocument()
     // No toast, no reload, and the other row keeps its controls.
     expect(page).toHaveBeenCalledTimes(1)
     expect(retry).toHaveBeenCalledTimes(1)
@@ -336,5 +336,71 @@ describe('Refusal focus and Deferred range', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Retry now: / }))
     expect(await screen.findByText('Showing 0 of 0 items.')).toBeInTheDocument()
     expect(screen.queryByText(/1–1 of 0/)).toBeNull()
+  })
+})
+
+describe('Refusal on page 1 of 51 deferred items', () => {
+  // The server counts the closed item out only on the next read, so its next
+  // cursor still points past the closed row. The page must not claim "1 of 1".
+  it('shows no page total next to an enabled Next page, and counts only the active rows', async () => {
+    const items = Array.from({ length: 50 }, (_, i) => deferredItem(i + 1))
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    const get = vi.spyOn(deferredPageApi, 'getDeferredPage')
+    get.mockResolvedValueOnce(pageOf(items, { total: 51, queue_total: 51, page: { limit: 50, number: 1, total_pages: 2, first_position: 1, last_position: 50, next_after_id: 50, prev_before_id: null } }))
+    get.mockResolvedValueOnce(pageOf([deferredItem(51)], { total: 50, queue_total: 50, page: { limit: 50, number: 1, total_pages: 1, first_position: 50, last_position: 50, next_after_id: null, prev_before_id: 51 } }))
+    vi.spyOn(queueApi, 'retryDeferred').mockRejectedValue(refused('accepted', { ...items[0], closed_reason: 'final_outcome', video_final_outcome: 'accepted' }))
+    renderErrors('?tab=deferred')
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry now: Video 1' }))
+    await screen.findByRole('alert')
+    expect(screen.getByText('Showing 1–49 of 50 items.')).toBeInTheDocument()
+    const nav = screen.getByRole('navigation', { name: 'Deferred queue pages' })
+    expect(within(nav).getByRole('button', { name: 'Next page' })).toBeInTheDocument()
+    expect(within(nav).queryByText('Page 1 of 1')).toBeNull()
+    expect(within(nav).getByText('Page 1')).toBeInTheDocument()
+
+    fireEvent.click(within(nav).getByRole('button', { name: 'Next page' }))
+    expect(await screen.findByText('Showing 50–50 of 50 items.')).toBeInTheDocument()
+    expect(get.mock.calls.at(-1)![0]).toEqual({ limit: 50, reason: undefined, afterId: 50 })
+  })
+})
+
+describe('Focus after Dismiss', () => {
+  it('Errors: moves focus to the row that took its place, then to the heading when none is left', async () => {
+    const unreadable = (id: number, title: string) =>
+      errorEntry({ id, video_title: title, external_video_id: `ext${id}`, error_message: 'diag:v1 phase=action_execution operation=load_run code=original_decision_unavailable' })
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([unreadable(1, 'First'), unreadable(2, 'Second')])
+    vi.spyOn(queueApi, 'dismissError').mockResolvedValue(unreadable(1, 'First'))
+    renderErrors()
+    for (const [name, next] of [['First', 'Second'], ['Second', null]] as const) {
+      fireEvent.click(await screen.findByRole('button', { name: `Dismiss error: ${name}` }))
+      const dialog = await screen.findByRole('dialog', { name: 'Dismiss this item from the error queue?' })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss' }))
+      await waitFor(() => expect(screen.queryByText(name)).toBeNull())
+      if (next) await waitFor(() => expect(screen.getByText(next).closest('tr')).toHaveFocus())
+      else await waitFor(() => expect(screen.getByRole('heading', { name: 'Errors & Deferred' })).toHaveFocus())
+    }
+  })
+
+  it('Errors: Remove on a plain row moves focus to the next row', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([errorEntry(), errorEntry({ id: 2, video_title: 'Other', external_video_id: 'bbbbbbbbbbb' })])
+    vi.spyOn(queueApi, 'dismissError').mockResolvedValue(errorEntry())
+    renderErrors()
+    const row = (await screen.findByText('Final Video')).closest('tr')!
+    fireEvent.click(within(row).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(screen.getByText('Other').closest('tr')).toHaveFocus())
+  })
+
+  it('Deferred: moves focus to the next row, or the list heading when none is left', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    const get = vi.spyOn(deferredPageApi, 'getDeferredPage')
+    get.mockResolvedValueOnce(pageOf([deferredItem(1), deferredItem(2)]))
+    get.mockResolvedValueOnce(pageOf([deferredItem(2)]))
+    get.mockResolvedValueOnce(pageOf([], { total: 0, queue_total: 0 }))
+    vi.spyOn(queueApi, 'discardDeferred').mockResolvedValue(deferredItem(1))
+    renderErrors('?tab=deferred')
+    fireEvent.click(await screen.findByRole('button', { name: 'Dismiss deferred item: Video 1' }))
+    await waitFor(() => expect(screen.getByText('Video 2').closest('tr')).toHaveFocus())
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss deferred item: Video 2' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Deferred queue' })).toHaveFocus())
   })
 })

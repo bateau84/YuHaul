@@ -341,7 +341,9 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   // Closed-here rows leave the total, so the range may not run past it
   // ("Showing 1–1 of 0" when the only item closed).
   const shownTotal = Math.max(data.total - closedHereCount, 0)
-  const shownLast = Math.min(last ?? 0, shownTotal)
+  // Closed-here rows still sit on this page but are no longer counted, so the
+  // range covers only the active rows shown.
+  const shownLast = Math.min((last ?? 0) - closedHereCount, shownTotal)
   const range = shownTotal === 0 || (first !== null && first > shownLast) ? 'Showing 0' : `Showing ${fmt(first ?? 0)}–${fmt(shownLast)}`
   const showFirst = page.number > 1 && !pastEnd
   const showPrev = page.prev_before_id !== null
@@ -488,7 +490,11 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
           <span>
             {page.number > activePages
               ? `Page ${fmt(page.number)} (no active items on this page)`
-              : `Page ${fmt(page.number)} of ${fmt(activePages)}`}
+              : showNext && page.number >= activePages
+                ? // A closed row left the count but the cursor still leads to more
+                  // items; the page count settles on the next read.
+                  `Page ${fmt(page.number)}`
+                : `Page ${fmt(page.number)} of ${fmt(activePages)}`}
           </span>
           {showNext && (
             <button type="button" className="button" onClick={() => go((p) => p.set('after_id', String(page.next_after_id)))}>

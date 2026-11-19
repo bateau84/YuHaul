@@ -39,6 +39,10 @@ export function ErrorsView() {
   const [confirmDismiss, setConfirmDismiss] = useState<ErrorEntry | null>(null)
   const retryButtonRef = useRef<HTMLButtonElement>(null)
   const firstRowRef = useRef<HTMLTableRowElement>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const bodyRef = useRef<HTMLTableSectionElement>(null)
+  // Row index to focus once a dismissed row has left the list.
+  const focusAfterDismiss = useRef<number | null>(null)
   const recoveredRef = useRef(false)
   const { addToast } = useToast()
 
@@ -73,6 +77,17 @@ export function ErrorsView() {
     recoveredRef.current = false
     firstRowRef.current?.focus()
   })
+
+  // After Dismiss the row is gone and focus would fall to <body>: move it to the
+  // row that took its place, or to the page heading when no row is left.
+  useEffect(() => {
+    const index = focusAfterDismiss.current
+    if (index === null) return
+    focusAfterDismiss.current = null
+    const row = bodyRef.current?.querySelectorAll<HTMLTableRowElement>('tr[data-error-row]')[index]
+    if (row) row.focus()
+    else headingRef.current?.focus()
+  }, [errors])
 
   async function handleRetry() {
     setRetrying(true)
@@ -113,6 +128,7 @@ export function ErrorsView() {
   async function dismissError(id: number, toast = 'Error dismissed') {
     try {
       await api.dismissError(id)
+      focusAfterDismiss.current = errors.findIndex((e) => e.id === id)
       setErrors((prev) => prev.filter((e) => e.id !== id))
       addToast(toast, 'success')
     } catch (err) {
@@ -125,7 +141,7 @@ export function ErrorsView() {
   return (
     <>
       <div className="page-header">
-        <h1 className="page-title">Errors & Deferred</h1>
+        <h1 className="page-title" ref={headingRef} tabIndex={-1}>Errors & Deferred</h1>
       </div>
       {/* Tab controls stay visible but disabled while the fetch has failed. */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }} role="tablist">
@@ -172,7 +188,7 @@ export function ErrorsView() {
                       <th scope="col">Actions</th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody ref={bodyRef}>
                     {errors.map((e, i) => {
                       const closed = isClosedEntry(e)
                       const unreadable = !closed && isUnreadableDecision(e)
@@ -186,7 +202,7 @@ export function ErrorsView() {
                               </td>
                             </tr>
                           )}
-                          <tr ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
+                          <tr ref={i === 0 ? firstRowRef : undefined} tabIndex={-1} data-error-row>
                             <td data-label="Video">{e.video_title ?? e.external_video_id ?? e.video_id}</td>
                             <td data-label="Category">{unreadable ? originalDecisionUnavailable.type : e.error_category}</td>
                             <td data-label="Reason">
