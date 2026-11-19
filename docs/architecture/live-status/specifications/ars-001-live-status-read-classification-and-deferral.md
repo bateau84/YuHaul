@@ -224,7 +224,9 @@ One forward migration:
 - **L17. New discovery without a report.** The prefetch and the gate read are quota-refused, failed or returned an invalid envelope. The video ends `deferred` with an existing reason or `metadata_unavailable`, with exactly one pending item, and a later run claims it. It is never `not_yet_evaluated` without an item.
 - **Upgrade.** Seeded rows: IDs, the AUTOINCREMENT high-water mark, `closed_reason`, indexes, the `028` and `029` triggers and the search rows are unchanged, and the new columns are `NULL`.
 
-## 10. Amendments to other contracts (applied on acceptance)
+## 10. Amendments to other contracts (applied 2026-11-19)
+
+Each target section now states its amendment and links back here. The capacity ARD-001 and Discovery ARS-001 amendments are in those documents' working-tree copies. Those documents are not yet committed, so their owners commit them.
 
 - [ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md):
   - §6.1: the `Live` requirement, `liveStreamingDetails`, and `Live` in `VideoIDs`, `FetchResult` and `FetchOutcome`.

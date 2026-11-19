@@ -30,3 +30,12 @@ timestamp: 2026-11-19T00:00:00Z
 - §4: the discovery prefetch must keep the returned IDs (`engine.go:402`).
 
 The §10 cross-document amendments are not yet applied.
+
+**§10 amendments applied (Plan r29 `b42-amend`).**
+- [ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.1.2 and §6.2 *Live gate*.
+- [ARS-006](/docs/architecture/run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) §7.2 *Live-status gate before continuation*.
+- [Authorization ARS-001](/docs/architecture/youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md) *Live-status clearance at the send*.
+- [Safe-diagnostic ARS-001](/docs/architecture/run-outcome-diagnostics/specifications/ars-001-safe-diagnostic-contract.md) live-status registrations.
+- Capacity ARD-001 and Discovery ARS-001 working-tree copies, uncommitted because those documents are still untracked.
+
+No new decision. No conflict with a target contract was found.

@@ -543,6 +543,19 @@ UPDATE transient_metadata SET duration_seconds = NULL WHERE duration_seconds = 0
 7. **Ordinary routing.** With `NULL` duration and description, a duration minimum or maximum exclusion does not exclude the video and a condition on those fields does not match. A version-0 run with a duration exclusion and a cleared duration takes `retainAuthorityFailure` with no provider call.
 8. **Release chain.** The embedded migration chain of the binary that enables the first production `FetchForEvaluation` caller contains these statements, in the receipt migration or the fallback migration.
 
+### 6.1.2 Live-status additions (BR-042, amended 2026-11-19)
+
+[Live ARS-001](../../live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) §2–3 extends this read. Nothing above changes for a requirement without `Live`.
+
+- `GetVideosWithReturnedIDs` sends `part=snippet,contentDetails,liveStreamingDetails`. `VideoIDs` gains `Live map[string]LiveStatus` (`none`, `live`, `upcoming`, `unconfirmed`), with one entry per returned ID. It is computed before the `publishedAt` skip, by the fail-closed rules of Live ARS-001 §2. Envelope validation, `Complete` and `absent` are unchanged, and so is `GetVideos`.
+- `InputRequirement` gains `Live bool`. A stored row never makes a `Live` requirement `current`, so the ID is always read, even when its other inputs are held.
+- Two fields carry the classification alongside `Statuses`:
+  - `FetchResult.Live`, which `FetchMetadataBound` copies from `returned.Live`;
+  - `FetchOutcome.Live`, which holds only IDs returned by a read in this call.
+
+  Per-ID statuses keep the meanings above. The Store A schema and its writers are unchanged. The caller records the result on the run's own row (Live ARS-001 §4).
+- Cost: a claimed open or partly-done item is read on every run that claims it, even when its route inputs are current ([Live ARD-001](../../live-status/design/ard-001-fresh-live-status-gate.md) *Consequences*).
+
 ### 6.2 Pipeline precondition (per claimed pass)
 
 - **BR-039 first (§15):** classify each video of `ids` with `state.ClassifyVideoTx`. Only `open` videos enter this precondition and its dispositions. `final` videos are closed and `partly_done` videos are continued, as ARS-006 §5 and §7 say.
@@ -573,6 +586,19 @@ A same-owner resumed claim that is already past `not_yet_evaluated` uses its cur
 The item keeps its original `deferral_reason` (for example `requeued_by_user`) while the run outcome records the deferral reason. How the Deferred view shows this is for the Designer to decide (ADR-006 Findings). Nothing is changed here.
 
 **Backstop.** `processRetryVideo` sets `requireInputsKey{}`. With it set, `videoContextForExclusion`, `detectVideos` and `routeVideos` return `errInputsUnavailable` instead of substituting an empty `TransientMetadata`. `processRetryVideo` maps that error to the `failed` row (released unchanged, no outcome). Without the key, behavior is unchanged.
+
+**Live gate (BR-042, amended 2026-11-19).** `liveGateClaimed` ([Live ARS-001](../../live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) §5.3) runs inside this precondition, after BR-039 classification and the dispatch-stop resolution above. Live ARD-001 P1 makes this precondition a hard prerequisite of the BR-042 claimed paths.
+
+- For each claimed `open` or `partly_done` receipt whose receiving-run `run_video_outcome.live_status` is `NULL`, add `Live` to its requirement. Partly-done, capacity-only and continuation receipts request `Live` only. Record each returned classification with `RecordLiveStatusTx` for the receiving run before any disposition. A resumed receipt uses its stored value, with no read.
+- **The live row.** Insert one row ahead of the `current`/`fetched` and `unusable` rows of the table. A recorded `live ≠ none` → `liveSkip` with the receipt (Live ARS-001 §6.1), which:
+  1. records the run outcome `deferred` with `live_now`, `live_upcoming` or `live_unconfirmed`;
+  2. sets `live_hold` on the owned video-scoped row, or creates exactly one sink with `deferral_reason = live_or_upcoming`, even when the receipt owns only capacity rows;
+  3. releases owned capacity rows unchanged;
+  4. calls `AcknowledgeRetryDeferralReceiptTx`.
+
+  The rows for `absent`, `quota_refused`, `authorization_pending`, `rate_limited`, `failed`, and `unusable` without a `Live` entry are unchanged.
+- **Hold clearing.** When the receiving run records `none`, set `live_hold = NULL` on the receipt's owned video-scoped rows in the transaction that moves the video to `evaluating` or starts `continueOriginalDecision`. No other writer clears it.
+- Evaluation and sends in `processRetryVideo` also require `LiveClearedTx(receiving run, video)` (Live ARS-001 §7). A refusal is a live deferral, never a release, an authority failure or a failure.
 
 ### 6.3 `commitUnavailableTx(ctx, tx, runID, videoID, receipt)` — one `WithRetryTx`
 

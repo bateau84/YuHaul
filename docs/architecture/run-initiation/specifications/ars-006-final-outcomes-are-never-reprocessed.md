@@ -278,6 +278,13 @@ Any failure → `ErrOriginalDecisionUnavailable`. `productionAuthority` itself i
    - On any `ErrOriginalDecisionUnavailable`, in one `WithRetryTx`: `ValidateRetryReceiptTx`, `FinishRetryFailureTx`, and `recordRetryVideoFailureTx` with `diag:v1 phase=action_execution operation=load_run code=original_decision_unavailable`. No send. Return nil.
 2. `_, workErr := p.executeDecision(ctx, runID, v, od.RunID, od.Matched)`. `processRetryVideo`'s existing disposition and failure handling apply.
 
+**Live-status gate before continuation (BR-042, amended 2026-11-19).** Before `continueOriginalDecision` sends any missing addition, the receiving run applies `liveGateClaimed` with a `Live`-only requirement ([Live ARS-001](../../live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) §5.3). Route inputs are not hydrated, and the gate runs before step 1.
+
+- A final video is still closed before any read (§5).
+- Only a recorded `none` for the receiving run continues to step 1.
+- `live`, `upcoming` or `unconfirmed` → `liveSkip` (Live ARS-001 §6.1). The video is `deferred` with a live reason, and no guard is prepared. The missing additions stay retained under the original decision, with their exact sources unchanged. No `ErrOriginalDecisionUnavailable` failure is recorded on account of live status.
+- After confirmation, only the missing additions are sent, under the original decision. `ClaimPlaylistSend` checks the clearance again (authorization ARS-001, *Live-status clearance at the send*).
+
 ### 7.3 Executor and `ClaimPlaylistSend` (amends authorization ARS-001)
 
 - **`executeDecision(ctx, runID, v, decisionRunID, matched)`:** `executeVideoActions(ctx, runID, v)` becomes the case `decisionRunID == runID` with matched = this run's decisions, unchanged. When `decisionRunID != runID`, routes for `matchedActionsComplete` come from `decisionAuthority(decisionRunID)`. The `failed` and `completed` reconciliation and the state transitions use the receiving run, as today.

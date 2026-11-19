@@ -234,6 +234,22 @@ For success, the required atomic pair remains succeeded action plus owned deleti
 
 Queue Retry, Dismiss and Remove are not guard resolution and supply no legacy non-application evidence. The mutation-admission check must not disappear when an error is dismissed, deferred work is discarded, or retry ownership moves to another run. During handoff, recheck queue status/ownership in the same writer transaction; a dismissed/discarded row is neither active retained work nor successful acknowledgement. Preserve explicit removal and existing queue history; this clarification does not define removal as cancellation of an already admitted request or authorize resurrecting removed work. The independent durable guard survives removal. Unfinished retry-group release/acknowledgement follows the existing queue contract, never merely an insertion method's nil return.
 
+### Live-status clearance at the send (BR-042, amended 2026-11-19)
+
+[Live ARS-001](../../live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) §4, §6.2 and §7.
+
+- **Two checks.** `ClaimPlaylistSend` calls `state.LiveClearedTx(sendingRunID, video)` at its authority step, before exact-target success and before any guard write. The same check runs again at final POST admission, under the capacity lifecycle gate where that applies.
+- **What clears.** The check passes only when the sending run's `run_video_outcome.live_status` is `none`. No Store A value, other run or duration counts.
+- **Scope.** It applies equally to ordinary, retry, partly-done continuation and capacity adds. It runs alongside the existing exact-receipt, finality, success, legacy and guard vetoes, and does not replace or relax any of them.
+- **On failure:** return the typed `state.ErrLiveNotCleared`. There is no guard, no POST, no attempt and no debit.
+- **Executor mapping.** Before `isRetryAdmissionRefusal` and the generic `ActionOutcomeFailed` branch, map `ErrLiveNotCleared` to `liveDeferAfterEvaluation(…, unconfirmed)`. That is one `WithRetryTx` that:
+  - runs the live handoff, with queue reason `live_or_upcoming` plus `live_hold` and run reason `live_unconfirmed`;
+  - records the remaining actions as `not_attempted / live_or_upcoming`;
+  - acknowledges the receipt.
+
+  It then returns `(FinalOutcomeDeferred, nil)`. It never uses `deferActions`, `retainAuthorityFailure`, `guardedRetryHandoffError`, `videoActionFailure`, `ActionOutcomeFailed`, `FinalOutcomeFailed` or an Errors entry. It logs `diag:v1 phase=routing operation=check_live_status code=live_status_not_current`.
+- The existing quota, auth and rate handoffs keep their single-reason signature.
+
 ## Evidence, retention and public uncertainty
 
 Keep existing action outcomes. An actually issued uncertain operation records `failed` with canonical diagnostic `code=mutation_application_uncertain`, preserving the actual admitted attempt time when known. This reports failure to confirm, **not** certain non-application. An operation blocked by an existing guard records `not_attempted`, reason `mutation_application_uncertain`, no executed-at. Auth failure before issue records `deferred`, reason `authorization_pending`, no executed-at. A guard alone never increments ActionsExecuted or creates an attempt timestamp.

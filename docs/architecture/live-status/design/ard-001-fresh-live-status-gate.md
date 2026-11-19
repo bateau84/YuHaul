@@ -6,7 +6,7 @@ tags: [architecture, design, live, upcoming, deferral, deferred-queue, metadata,
 timestamp: 2026-11-19T00:00:00Z
 ---
 
-**Status:** proposed technical realization of accepted BR-042 and the amended OC-002 Guarantee 5. Revised 2026-11-19 after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH` (CHANGES REQUIRED; see *Review disposition*). AC7 (time limit) is designed for its default (no limit) and leaves room for a later cap. Accepted by the critic after the focused recheck, with the ARS-001 precision fixes for §4, §5.1 and §6.2 applied. Not implemented. The §10 amendments to other contracts are not yet applied.
+**Status:** proposed technical realization of accepted BR-042 and the amended OC-002 Guarantee 5. Revised 2026-11-19 after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH` (CHANGES REQUIRED; see *Review disposition*). AC7 (time limit) is designed for its default (no limit) and leaves room for a later cap. Accepted by the critic after the focused recheck, with the ARS-001 precision fixes for §4, §5.1 and §6.2 applied. Not implemented. The ARS-001 §10 amendments were applied on 2026-11-19 (Plan r29 node `b42-amend`). Those to ARS-005, ARS-006, authorization ARS-001 and safe-diagnostic ARS-001 are committed. Those to capacity ARD-001 and Discovery ARS-001 sit in their still-untracked documents, for those documents' owners to commit.
 
 ## Summary
 
