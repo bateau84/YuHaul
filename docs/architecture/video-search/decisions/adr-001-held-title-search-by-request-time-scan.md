@@ -3,7 +3,7 @@ type: decision
 title: ADR-001 — Search Held Titles Through an FTS5 Trigram Prefilter With a Go Re-check (Request-Time Scan Failed Its Gate)
 description: Realize BR-038 name search with a regular FTS5 trigram index over Go-folded keys of held titles, keyed by a stable integer document map, with SQL purge triggers on transient_metadata and an incremental FTS5 optimize after each sweep (secure-delete off, decision O5 = S1, 2026-11-16). Go writers add entries in the same transaction as the title write; triggers remove them on every update or delete. A startup and sweep reconcile repairs gaps. Every candidate is re-checked in Go with the exact matcher and the held rule, and total counts only re-checked matches. The request-time scan (option B) was chosen first and failed its measured gate (P2) at 150,000 held titles; it remains the path for keys shorter than 3 code points and for an unbuilt index.
 tags: [architecture, decision, videos, search, retention, sqlite, fts5, performance, unicode]
-timestamp: 2026-11-16T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted 2026-11-12 — option C replaces option B. The decision realizes [BR-038](../../../requirements/yuhaul/br-038-video-search-by-title-or-id.md) AC6, AC7, AC11 and AC14–AC18, and [QS-001](../../../requirements/yuhaul/qs-001-video-search-response-time.md). Option C is not implemented yet. The exact contract is [ARS-001](../specifications/ars-001-video-search-api-and-queries.md) §10. The file path is unchanged so that existing links still work.
@@ -22,6 +22,7 @@ History:
   - a key version.
 - 2026-11-12: the write-cost spike failed with secure-delete on (commit `acf141b`, ARS-001 §10.10). Decision O5 opened.
 - 2026-11-16: **O5 closed with S1.** The user chose S1: secure-delete off, plus an FTS5 optimize after each sweep. The choice was relayed to the architect by the coordinating session. Secure-delete is removed from the contract.
+- 2026-11-18: ARS-001 clarifies destination purges on ID replacement, cancellation-safe transaction cleanup, and proof of the expiry workload and no-index control. S1 and release gates are unchanged. Targeted recheck is pending.
 
 Get an independent critique of §10 before implementation.
 
@@ -125,7 +126,7 @@ Rejected, as before. It folds only ASCII letters (fails AC7), and a leading `%` 
   - a **regular** (content-storing) FTS5 table `title_search(k)` with `tokenize='trigram case_sensitive 1'` and `secure-delete` off (O5);
   - a document map `title_search_doc(doc_id INTEGER PRIMARY KEY, video_id TEXT UNIQUE)` that supplies stable integer rowids;
   - **adds** are explicit Go writes in the same transaction as the title write, because only Go can compute `Key`;
-  - **Removals** are SQL triggers on `transient_metadata`: before insert (which covers `REPLACE`, whose implicit delete fires no delete trigger), after update and after delete. So they cannot be bypassed;
+  - **Removals** are SQL triggers on `transient_metadata`: before insert, after update and after delete. On an ID move, the update trigger purges both the old and destination entries, including when `UPDATE OR REPLACE` silently deletes the destination with recursive triggers off;
   - a Go **reconcile** at `store.Open` and at the sweep removes entries that are not indexable and adds missing ones;
   - an incremental FTS5 **optimize** (`merge` steps, one short write-lock-first transaction each) after every sweep and after every reconcile that removes entries, so removed trigrams leave the segments;
   - search sends `Key(text)` as a quoted FTS5 phrase and re-checks every hit in Go.
@@ -178,7 +179,7 @@ The following constraints are part of the design:
    No other component may store, cache, log or copy one. Logs may record counts, timings and the search path, but never search text, keys or titles.
 2. **Purges in SQL.** These purge that video's index entry through a trigger in the same statement:
    - every `INSERT` into `transient_metadata`, in every conflict form, before the row is written, by `NEW.video_id`;
-   - every `UPDATE` of `video_id`, `title`, `is_active`, `expired_at`, `fetched_at` or `expires_at`;
+   - every `UPDATE` of `video_id`, `title`, `is_active`, `expired_at`, `fetched_at` or `expires_at`, by both old and new ID so a displaced destination is purged too;
    - every `DELETE`.
 
    No Go code is needed for a purge to happen.
@@ -189,7 +190,7 @@ The following constraints are part of the design:
 7. **Isolation stays.** The search package must not depend on `internal/youtube`, `internal/quota` or any metadata refresh or fetch method.
 8. **Ordering.** BR-039 owns migrations 027 and 028. Search's migration is 029, and search releases only after BR-039's 028 (ARS-001 §10.2).
 9. **Rebuild only by drop-and-recreate.** Never by `DELETE` of every entry, which leaves every trigram behind delete markers until an optimize, and never by FTS5 `'rebuild'`.
-10. **Reconcile, recreate and optimize steps take the write lock first** (`BEGIN IMMEDIATE` on a dedicated connection). Every index-writing transaction is bounded: `IndexWriteBatch` rows, or `OptimizeMergePages` pages per optimize step.
+10. **Reconcile, recreate and optimize steps take the write lock first** (`BEGIN IMMEDIATE` on a dedicated connection). Cleanup does not depend on the caller's canceled context, and a connection with unconfirmed transaction closure is discarded, not pooled. These writes are bounded by `IndexWriteBatch` rows per reconcile batch or `OptimizeMergePages` pages per optimize step; recreate remains a single DDL transaction.
 11. **Key version.** Search uses the index only when `title_search_state.key_version` equals `titlekey.Version()`.
 
 ## Consequences
@@ -211,7 +212,7 @@ The following constraints are part of the design:
 ## Confirmation and reconsideration
 
 - **Spike (done):** failed with secure-delete on and passed with it off (commit `acf141b`). O5 was decided as S1 on 2026-11-16.
-- **Confirmation (gate):** ARS-001 P1–P4 pass at the 150,000-held-title seed on the i7-10510U host or the deployment host. P3 now also requires no `SQLITE_BUSY`, the run-duration budget, sweep transactions (including optimize steps) of at most 1 s, and a complete optimize within 60 s. The seed is reconciled after it is inserted (ARS-001 §9.2). R1–R8, D1, D2, F-R and G-O pass on the bundled modernc SQLite. G-O is the first measurement of the optimize cost and must pass before release.
+- **Confirmation (gate):** ARS-001 P1–P4 must pass at the 150,000-held-title load on the i7-10510U host or the deployment host. P3 requires no `SQLITE_BUSY` or `SQLITE_LOCKED`, the run-duration budget against an equivalent no-index run, sweep transactions (including optimize steps) of at most 1 s, and a complete optimize within 60 s. P3 and G-O must show that expiry purged 5,000 entries that actually existed before the sweep (ARS-001 §9.2). R1–R8, D1, D2, F-R and G-O must pass on the bundled modernc SQLite. P3(f) and G-O measure the optimize cost before release.
 - **If P2 still fails with option C:** look at the per-stage split that P2 reports (`begin`, `candidates`, `recheck`, `sort`, `project`, `encode`). Do not drop the Go re-check or count FTS hits as `total`. A remaining cost of the 20,000-match sort is a QS-001 matter for the requirements owner, not a reason to weaken AC7 or AC4.
 - **Revisit** if the requirements owner reads AC16 as forbidding any second copy, or widens searchable text (for example to fingerprints or channel names).
 
