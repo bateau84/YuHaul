@@ -244,6 +244,10 @@ Unchanged:
    - The AC8 run shows "No channels were scanned successfully."
    - Keyboard, 320 px and screen reader checks are as in the design.
 
+## Release notes
+
+- **Rollback after `030`:** once migration `030` has been applied, any image built before `030` fails at startup, because its embedded migration chain ends at `029` and it refuses the version-30 database. Rolling back the image alone does not work. To roll back, stop the writers, restore a database backup taken before `030` was applied, then start the older image. Take that backup immediately before deploying the first `030` image. This applies to every later migration too.
+
 ## Open questions
 
 - **Designer, non-blocking:** the zero-row Run Detail copy in §4.4.

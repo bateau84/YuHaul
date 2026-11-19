@@ -1,14 +1,14 @@
 ---
 type: decision
 title: ADR-001 — Interim Channel-Granular Isolation of Unavailable Uploads Sources
-description: No-migration interim that skips a channel whose uploads read returns 404 playlistNotFound, keeps completed channels' discoveries and floors, and reports incomplete coverage, pending the full ARD-001/ARS-001 realization.
+description: Channel-granular interim that skips a channel whose uploads read returns 404 playlistNotFound, keeps completed channels' discoveries and floors, and reports incomplete coverage. Ships with ARS-002's migration 030 source-failure record, pending the full ARD-001/ARS-001 realization.
 tags: [architecture, decision, discovery, interim, recovery, diagnostics]
 timestamp: 2026-11-20T00:00:00Z
 ---
 
 **Status:** accepted as an interim (architecture). User answers on 2026-11-20 (relayed by the dispatcher): G2 and G3 accepted; G1 declined ("there is no rush, implement the proper fix"). G1 is therefore closed by [ARS-002](../specifications/ars-002-durable-source-failure-record.md), which ships with this interim and adds migration `030`. That supersedes Option 1's "no migration" premise and withdraws D6. D1–D5 and D7 stand. It does not supersede [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) or [ARS-001](../specifications/ars-001-durable-discovery-page-handoff.md). Nothing here is implemented yet.
 
-Production builds up to `debad57` fail every run when one subscribed channel's uploads list returns `404 playlistNotFound`. Runs 52 and 53 each failed after about 13 minutes of reads. This interim keeps the run alive. If channels A and C list successfully and B returns `404 playlistNotFound`, the run saves and routes A's and C's new videos and advances only their floors. It keeps none of B's pages and does not move B's floor. It ends **Completed** with an explicit incomplete-discovery note, and the next fresh run polls B again. If every attempted channel fails this way and no run-wide stop happened, the run ends **Failed** with "No channels were scanned successfully." It needs no schema migration.
+Production builds up to `debad57` fail every run when one subscribed channel's uploads list returns `404 playlistNotFound`. Runs 52 and 53 each failed after about 13 minutes of reads. This interim keeps the run alive. If channels A and C list successfully and B returns `404 playlistNotFound`, the run saves and routes A's and C's new videos and advances only their floors. It keeps none of B's pages and does not move B's floor. It records B's failure durably ([ARS-002](../specifications/ars-002-durable-source-failure-record.md)), ends **Completed** with an explicit incomplete-discovery note, and the next fresh run polls B again. If every attempted channel fails this way and no run-wide stop happened, the run ends **Failed** with "No channels were scanned successfully." This decision was first written to need no schema migration. After the user declined G1 on 2026-11-20, it ships with [ARS-002](../specifications/ars-002-durable-source-failure-record.md), which adds migration `030`. The decision rules below (D1–D5, D7) need no schema of their own.
 
 ## Derived from
 
@@ -42,12 +42,12 @@ Production builds up to `debad57` fail every run when one subscribed channel's u
 
 ## Decision question
 
-What is the smallest sound change, implementable now without a migration, that stops one unavailable uploads source from failing every production run, while satisfying as much of BR-002 AC7–10 and OC-001 as possible?
+What is the smallest sound change, implementable now and originally constrained to need no migration, that stops one unavailable uploads source from failing every production run, while satisfying as much of BR-002 AC7–10 and OC-001 as possible?
 
 ## Drivers and constraints
 
 - Every production run fails today. Delivery time dominates.
-- No new migration. Migration numbering is unassigned, and `029` is taken by search.
+- ~~No new migration.~~ *Superseded 2026-11-20:* the user declined G1, so [ARS-002](../specifications/ars-002-durable-source-failure-record.md) adds migration `030` under the central allocation in its §6. This driver no longer applies; it explains why Option 2 was deferred at first.
 - The safe diagnostic contract: no provider IDs or prose in diagnostics or logs; only closed vocabularies.
 - Floor safety: never advance a channel's floor past observations that were not durably saved.
 - Don't fabricate videos or error entries. Don't change quota, authorization, accounting or cancellation dispositions.
@@ -62,7 +62,7 @@ What is the smallest sound change, implementable now without a migration, that s
 2. **Option 1 plus a small additive `discovery_source_failure` table.** One row per isolated failure, keyed by run and channel, projected read-only in Errors.
    - Benefits: closes G1 and gives durable identity on Run Detail.
    - Costs: a migration number, an Errors projection and API, and contract alignment with ARD-001's run/source record. That record also holds completion and floor cutoffs, so an early partial table either duplicates it or pre-empts its shape.
-   - Blocked today on migration ordering. Recommended as the first full-design slice once a number is assigned.
+   - At first blocked on migration ordering. *Realized 2026-11-20 as [ARS-002](../specifications/ars-002-durable-source-failure-record.md) (migration `030`), which ships with Option 1.*
 3. **Store the note in `run.interrupt_reason` on a completed run.**
    - Rejected. `run_now.go:253` clears the column on resume, so the note is lost if a run is interrupted after discovery. It also overloads a recovery column for completed runs.
 4. **Reuse `error_entry`, `advisory` or `settings`.**
@@ -75,7 +75,7 @@ What is the smallest sound change, implementable now without a migration, that s
 
 ## Comparison
 
-Only options 1 and 2 preserve every accepted guarantee except the named gaps. Option 1 can ship now. Option 2 needs a schema slot nobody can allocate today. Option 1 leaves nothing that the full design must migrate: no new rows, columns or codes beyond one closed diagnostic code. So it is the least complex complete interim, as long as the user accepts G1 and G2.
+Only options 1 and 2 preserve every accepted guarantee except the named gaps. Option 1 can ship now. Option 2 needs a schema slot nobody can allocate today. Option 1 leaves nothing that the full design must migrate: no new rows, columns or codes beyond one closed diagnostic code. So it is the least complex complete interim, as long as the user accepts G1 and G2. *(2026-11-20: G2 accepted, G1 declined. Option 1 now ships together with Option 2, realized as [ARS-002](../specifications/ars-002-durable-source-failure-record.md).)*
 
 ## Decision
 
@@ -98,7 +98,7 @@ During the uploads scan of channel `ch`, `ListPlaylistItems` returns `err`. Trea
 
 Never classify by `err.Error()`. Every other error keeps today's behavior unchanged:
 
-- Quota refusal and `ErrQuotaRefused` still break the channel loop.
+- Quota refusal and `ErrQuotaRefused` still break that channel's page loop, as today. Later channels are then refused by their own budget check before any request (D2 "Budget breaks").
 - These still return a discovery error and fail the run:
   - any `*ReadError`, which covers accounting, renewal and interruption failures;
   - quota exceeded and authorization errors;
@@ -189,13 +189,12 @@ The only writes and changes this interim makes:
 - `internal/discovery/engine.go`: buffer, merge, predicate, result facts, floor tightening and the log.
 - The discovery handling in `internal/pipeline/pipeline.go` (`phaseDiscovery` and its failure classification).
 - `internal/diag/diag.go`: one code.
-- The Run read query and projection (`internal/stats/store.go` run select and `internal/state/models.go` public run), adding one derived field.
+- ~~The Run read query and projection, adding one derived field.~~ Withdrawn with D6; Run Detail reads ARS-002's run-scoped endpoint instead.
 - `web/src/views/RunDetailView.tsx` and `web/src/lib/failure-reason*`: the note and the code's copy.
 
 Explicitly unchanged:
 
-- Schema and migrations.
-- `error_entry` and the Errors view and API.
+- Existing migrations, plus `error_entry` and the video Errors list, API and commands. *Amended 2026-11-20:* ARS-002 §5 adds migration `030`, `internal/state/source_failure.go`, the source-error endpoints and the read-only Errors source section. Its write boundary governs those additions.
 - The quota, authorization and `youtube` packages.
 - Metadata prefetch, apart from receiving the smaller merged set.
 - Persist transactions, apart from the D3 floor argument.
@@ -203,13 +202,13 @@ Explicitly unchanged:
 
 ## Consequences
 
-- **Positive:** One unavailable channel no longer fails every run. Successful channels' discoveries and floors are kept. AC8 becomes explicit. The ledger-derived note survives resume. No schema debt for the full design.
+- **Positive:** One unavailable channel no longer fails every run. Successful channels' discoveries and floors are kept. AC8 becomes explicit. The durable [ARS-002](../specifications/ars-002-durable-source-failure-record.md) record names the skipped channel in Errors and Run Detail, survives restart and resume, and is reused by the full design. *(The earlier ledger-derived note is withdrawn with D6.)*
 - **Negative:**
   - G1: no Errors entry.
   - G2: a later-page failure re-fetches the channel's earlier pages next run. A video removed upstream in between is missed; in practice `playlistNotFound` occurs on page 1.
   - G3: identity comes only from logs, which are not durable product evidence.
   - A permanently missing playlist costs one unit per run until the user unsubscribes. This matches the accepted "retain ordinary polling".
-- **Neutral:** Runs 52 and 53 are not recovered or reinterpreted. The full ARD-001 design replaces D2–D6. Its Run Detail must keep rendering `discovery_incomplete` (or "source evidence unavailable") for runs from this build, which have no source records.
+- **Neutral:** Runs 52 and 53 are not recovered or reinterpreted. The full ARD-001 design replaces D2–D6. Runs from this build do have source-failure records ([ARS-002](../specifications/ars-002-durable-source-failure-record.md)), and the full design keeps reading them. Only runs from builds without migration `030` lack them, and the readers show that evidence as unavailable.
 - **Concurrent work:**
   - `debad57` has no live-status recording in discovery: `prefetchMetadata` still discards `VideoIDs`. If [Live ARS-001](../../live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) §4 lands in the same file, it must attach `Live` only to merged items, and `RecordLiveStatusTx` stays in the per-video persist transaction. A skipped channel produces no `run_video_outcome` row, so no `live_status` and no gate input.
   - The capacity and retry-receipt work in the uncommitted `internal/pipeline` files is disjoint, except for `pipeline.go`. Merge carefully there.
@@ -261,7 +260,7 @@ These are required tests. They are not executed.
 Reconsider the interim when any of these happens:
 
 - Production shows a source-local error other than `404 playlistNotFound` repeatedly failing runs. That would widen D1, with evidence.
-- A migration slot is assigned. Then implement Option 2 or ARD-001's source record and retire D6's ledger derivation for new runs.
+- ~~A migration slot is assigned.~~ *Done 2026-11-20:* `030` is assigned and [ARS-002](../specifications/ars-002-durable-source-failure-record.md) replaces D6.
 - The user declines G1 or G2.
 
 ## Open questions
