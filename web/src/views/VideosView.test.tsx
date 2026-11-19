@@ -266,10 +266,9 @@ describe('VideosView (design: Videos — Find a Video by Title or ID)', () => {
     expect(storageSpy[0]).not.toHaveBeenCalled()
   })
 
-  // The focus request belongs to the load that paging started. A late passive
-  // effect from the page 1 outcome must not consume it, or page 2 announces the
-  // plain count and its heading never takes focus.
-  it('announces page 2 and focuses its heading when the page 1 effects are still pending at the click', async () => {
+  // Behavior check, not a race regression test: it passes on the old code too. The
+  // race is pinned by the MutationObserver test below.
+  it('announces page 2 and focuses its heading when page 2 loads slowly', async () => {
     const p1 = pageOf({ total: 130, total_pages: 3, last_position: 50, next_cursor: 'n1', items: [video('aaaaaaaaaaa')] })
     const p2 = pageOf({ total: 130, total_pages: 3, number: 2, first_position: 51, last_position: 100, next_cursor: 'n2', prev_cursor: 'p2', items: [video('bbbbbbbbbbb')] })
     let release!: (r: Response) => void
@@ -288,6 +287,21 @@ describe('VideosView (design: Videos — Find a Video by Title or ID)', () => {
     expect(await screen.findByText('Showing 51–100 of 130. Newest discovery first.')).toBeInTheDocument()
     expect(status()).toHaveTextContent('Page 2, showing 51–100.')
     expect(status()).not.toHaveTextContent('1 video on this page.')
+    await waitFor(() => expect(screen.getByRole('heading', { level: 2 })).toHaveFocus())
+  })
+
+  it('keeps the focus request through a failed page load, so Retry search announces and focuses page 2', async () => {
+    const p1 = pageOf({ total: 130, total_pages: 3, last_position: 50, next_cursor: 'n1' })
+    const p2 = pageOf({ total: 130, total_pages: 3, number: 2, first_position: 51, last_position: 100, prev_cursor: 'p2', items: [video('bbbbbbbbbbb')] })
+    fetchMock
+      .mockResolvedValueOnce(json({ kind: 'results', results: p1 }))
+      .mockResolvedValueOnce(json({ error: 'boom' }, 500))
+      .mockResolvedValueOnce(json({ kind: 'results', results: p2 }))
+    renderAt('/videos?q=title')
+    fireEvent.click(await screen.findByRole('button', { name: 'Next page' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry search' }))
+    await screen.findByText('Showing 51–100 of 130. Newest discovery first.')
+    expect(screen.getByRole('status')).toHaveTextContent('Page 2, showing 51–100.')
     await waitFor(() => expect(screen.getByRole('heading', { level: 2 })).toHaveFocus())
   })
 

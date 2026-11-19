@@ -31,7 +31,8 @@ type Outcome =
   // focus: this load was asked for by paging or Search again, so its own result
   // takes the heading focus. The request travels with the outcome it belongs to.
   | { phase: 'done'; response: VideoSearchResponse; focus: boolean }
-  | { phase: 'failed'; stale: boolean }
+  // focus is kept on a failure so Retry search can ask again for the same focus.
+  | { phase: 'failed'; stale: boolean; focus: boolean }
 
 function parsePage(raw: string | null): number | undefined {
   if (raw === null) return undefined
@@ -146,7 +147,7 @@ export function VideosView() {
       .catch((err: unknown) => {
         if (cancelled) return
         const stale = err instanceof ApiError && err.status === 400 && (err.message === 'invalid_cursor' || err.message === 'invalid_page')
-        setOutcome({ phase: 'failed', stale })
+        setOutcome({ phase: 'failed', stale, focus: wantsFocus })
       })
     return () => {
       cancelled = true
@@ -297,7 +298,14 @@ export function VideosView() {
           </button>
         )}
         {outcome.phase === 'failed' && !outcome.stale && (
-          <button type="button" className="button" onClick={() => setNonce((n) => n + 1)}>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              focusHeading.current = outcome.focus
+              setNonce((n) => n + 1)
+            }}
+          >
             Retry search
           </button>
         )}
