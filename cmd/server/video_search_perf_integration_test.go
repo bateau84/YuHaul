@@ -39,6 +39,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -65,14 +66,77 @@ const (
 // its numbers are not evidence for ARS-001.
 var (
 	perfKnownHeld    = 150_000
-	perfKnownExpired = 100_000
+	perfKnownExpired = 20_000 // ARS-001 §9.2: outside QS-001's load
 	perfImported     = 150_000
+	perfCohort       = 5_000 // ARS-001 §9.2 expiry cohort for P3 and G-O
 )
 
 func init() {
 	if os.Getenv("YUHAUL_PERF_SMOKE") == "1" {
-		perfKnownHeld, perfKnownExpired, perfImported = 3_000, 2_000, 2_000
+		perfKnownHeld, perfKnownExpired, perfImported, perfCohort = 3_000, 2_000, 2_000, 100
 		perfTokens[0].matches, perfTokens[1].matches, perfTokens[2].matches = 200, 50, 10
+	}
+}
+
+// perfLoadLimit is the 1-minute load average below which a timed run may
+// start: the host is shared, and a busy host makes a timing meaningless.
+const perfLoadLimit = 1.5
+
+// perfScratch makes a scratch directory on a disk-backed filesystem (default
+// /var/tmp) and removes it afterwards. tmpfs is refused: ARS-001 §10.11 G-O is
+// an on-disk measurement.
+func perfScratch(t *testing.T) string {
+	t.Helper()
+	root := os.Getenv("YUHAUL_PERF_TMP")
+	if root == "" {
+		root = "/var/tmp"
+	}
+	dir, err := os.MkdirTemp(root, "yuhaul-perf-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	var fs syscall.Statfs_t
+	require.NoError(t, syscall.Statfs(dir, &fs))
+	const tmpfsMagic = 0x01021994
+	require.NotEqual(t, int64(tmpfsMagic), int64(fs.Type), "%s is tmpfs; the timing tests need a disk", dir)
+	t.Logf("scratch directory %s (statfs type 0x%x, not tmpfs)", dir, fs.Type)
+	return dir
+}
+
+var perfLoads []string
+
+// perfWaitQuiet blocks until the 1-minute load average is below perfLoadLimit
+// and records it under label. It gives up after an hour.
+func perfWaitQuiet(t *testing.T, label string) float64 {
+	t.Helper()
+	deadline := time.Now().Add(time.Hour)
+	for {
+		raw, err := os.ReadFile("/proc/loadavg")
+		require.NoError(t, err)
+		f := strings.Fields(string(raw))
+		l1, err := strconv.ParseFloat(f[0], 64)
+		require.NoError(t, err)
+		if l1 < perfLoadLimit {
+			line := fmt.Sprintf("%s: load average at start %s (1 min), %s (5 min), %s (15 min)", label, f[0], f[1], f[2])
+			t.Log(line)
+			perfLoads = append(perfLoads, line)
+			return l1
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: host never became quiet (1-minute load %.2f, limit %.1f)", label, l1, perfLoadLimit)
+		}
+		t.Logf("%s: 1-minute load %.2f >= %.1f, waiting", label, l1, perfLoadLimit)
+		time.Sleep(20 * time.Second)
+	}
+}
+
+// perfLoadNow records the load after a run, for the report.
+func perfLoadNow(t *testing.T, label string) {
+	t.Helper()
+	if raw, err := os.ReadFile("/proc/loadavg"); err == nil {
+		f := strings.Fields(string(raw))
+		line := fmt.Sprintf("%s: load average at end %s (1 min), %s (5 min), %s (15 min)", label, f[0], f[1], f[2])
+		t.Log(line)
+		perfLoads = append(perfLoads, line)
 	}
 }
 
@@ -95,30 +159,46 @@ func perfNeedle(word string) string { return strings.ToLower(word) }
 type perfTruth struct {
 	expected map[string][]string // needle -> IDs in the §7.1 order
 	held     []string
+	plain    []string // held IDs that carry no planted token (cohort candidates)
 	expired  []string
 	imported []string
+	vocab    []string
+	t0       time.Time // build time of the fixture (the controlled clock's T0)
 }
 
 func TestVideoSearchPerf(t *testing.T) {
 	if os.Getenv("YUHAUL_PERF") != "1" {
 		t.Skip("set YUHAUL_PERF=1 to run the ARS-001 timing tests")
 	}
-	dir := t.TempDir()
-	seedPath := filepath.Join(dir, "seed.db")
+	dir := perfScratch(t)
+	seedPath := filepath.Join(dir, "seed.db") // pre-backfill fixture: migrated, titles held, index empty
 	began := time.Now()
 	truth := seedPerfDB(t, seedPath)
 	t.Log(machineInfo())
 	t.Logf("seeded in %s", time.Since(began).Round(time.Second))
 	fi, err := os.Stat(seedPath)
 	require.NoError(t, err)
-	t.Logf("seed database: %d MB", fi.Size()>>20)
+	t.Logf("seed database before backfill: %d MB", fi.Size()>>20)
 
+	// First-start backfill, through the real store.Open and PrepareSearchIndex.
+	idxPath := filepath.Join(dir, "seed_indexed.db")
+	copyFile(t, seedPath, idxPath)
+	perfWaitQuiet(t, "base backfill")
+	prep, backfill := perfBackfill(t, idxPath, truth.t0)
+	require.Equal(t, perfKnownHeld, prep.Reconcile.Added, "the base seed must add one entry per held title")
+	require.Nil(t, prep.Optimize, "a pure backfill removes nothing, so no optimize runs")
+	fi, err = os.Stat(idxPath)
+	require.NoError(t, err)
+	t.Logf("BACKFILL: %d entries added in %s (%d batches); database after backfill %d MB",
+		prep.Reconcile.Added, backfill.Round(time.Millisecond), prep.Reconcile.Batches, fi.Size()>>20)
 	st := newPerfStats()
+	st.extra = append(st.extra, fmt.Sprintf("First-start backfill (PrepareSearchIndex, %d held titles): %d entries in %s, %d batches, database %d MB",
+		perfKnownHeld, prep.Reconcile.Added, backfill.Round(time.Millisecond), prep.Reconcile.Batches, fi.Size()>>20))
 	var p12Elapsed time.Duration
 
 	t.Run("P1_P2_P4", func(t *testing.T) {
 		dbPath := filepath.Join(dir, "p12.db")
-		copyFile(t, seedPath, dbPath)
+		copyFile(t, idxPath, dbPath)
 		yt := newFakeYouTube(t)
 		srv := startServer(t, dbPath, yt.srv.URL, "YUHAUL_DAILY_QUOTA=100000000")
 		perfWaitOverview(t, srv)
@@ -129,7 +209,10 @@ func TestVideoSearchPerf(t *testing.T) {
 			_, code, _, err := pc.get(searchPath(w, ""))
 			require.NoError(t, err)
 			require.Equal(t, 200, code)
+			st.nameLabels = append(st.nameLabels, "warm-up")
 		}
+		perfWaitQuiet(t, "P1/P2/P4")
+		defer perfLoadNow(t, "P1/P2/P4")
 		start := time.Now()
 
 		// P1.
@@ -174,6 +257,8 @@ func TestVideoSearchPerf(t *testing.T) {
 		}
 		p12Elapsed = time.Since(start)
 		perfSavedCursors = cursors
+		st.stageReport = perfStageReport(t, srv, st.nameLabels)
+		require.Empty(t, perfBusyHits(srv.out.String()), "P1/P2: SQLITE_BUSY/LOCKED in the server log")
 	})
 
 	if t.Failed() {
@@ -194,21 +279,28 @@ func TestVideoSearchPerf(t *testing.T) {
 		}
 		t.Logf("P1/P2 phase took %s; production run POST latency set to %s", est.Round(time.Second), delay)
 
-		base := runProduction(t, dir, seedPath, "base", delay, nil, nil, truth)
+		// B first (no searches), then A (with searches). Copy C, the no-index
+		// control of ARS-001 §9.2, is not run: see the report.
+		base := runProduction(t, dir, idxPath, "B_no_search", delay, nil, nil, truth)
 		var loaded prodResult
 		{
 			rng := rand.New(rand.NewPCG(perfSeedValue, 3))
 			work := p3Workload(truth, rng, perfSavedCursors)
-			loaded = runProduction(t, dir, seedPath, "loaded", delay, work, st, truth)
+			loaded = runProduction(t, dir, idxPath, "A_with_search", delay, work, st, truth)
 		}
-		t.Logf("production run without searches: %s, with searches: %s (%d searches issued while it ran)",
+		t.Logf("production run without searches (B): %s, with searches (A): %s (%d searches issued while it ran)",
 			base.duration.Round(time.Second), loaded.duration.Round(time.Second), loaded.searches)
+		st.extra = append(st.extra,
+			fmt.Sprintf("P3 run wall duration: B (no searches) %s, A (searches) %s, %d searches issued during A",
+				base.duration.Round(time.Millisecond), loaded.duration.Round(time.Millisecond), loaded.searches),
+			"P3 B sweep: "+base.sweep, "P3 A sweep: "+loaded.sweep)
 		require.GreaterOrEqual(t, base.processed, perfProdVideos)
 		require.GreaterOrEqual(t, loaded.processed, perfProdVideos)
 		diffTables(t, base.tables, loaded.tables)
 	})
 
 	rep := st.report(true)
+	rep += "\n" + strings.Join(st.extra, "\n") + "\n\n" + st.stageReport + "\n" + strings.Join(perfLoads, "\n") + "\n"
 	t.Log("\n" + rep)
 	if p := os.Getenv("YUHAUL_PERF_REPORT"); p != "" {
 		require.NoError(t, os.WriteFile(p, []byte(machineInfo()+"\n"+rep), 0o644))
@@ -304,7 +396,7 @@ func seedPerfDB(t *testing.T, dbPath string) *perfTruth {
 				}
 			}
 			s := string(b)
-			if !used[s] && !strings.HasPrefix(s, "pv") && !strings.HasPrefix(s, "nf") {
+			if !used[s] && !strings.HasPrefix(s, "pv") && !strings.HasPrefix(s, "nf") && !strings.HasPrefix(s, "co") {
 				used[s] = true
 				return s
 			}
@@ -325,7 +417,7 @@ func seedPerfDB(t *testing.T, dbPath string) *perfTruth {
 		}
 	}
 
-	truth := &perfTruth{expected: map[string][]string{}}
+	truth := &perfTruth{expected: map[string][]string{}, vocab: vocab, t0: now}
 	type matched struct{ disc, id string }
 	matches := map[int][]matched{}
 
@@ -409,11 +501,16 @@ func seedPerfDB(t *testing.T, dbPath string) *perfTruth {
 				words = append(words[:at], append([]string{perfTokens[ti].word}, words[at:]...)...)
 				matches[ti] = append(matches[ti], matched{disc, id})
 			}
-			must(metaStmt.Exec(id, strings.Join(words, " "), "Channel "+strconv.Itoa(i%500), rfc(fetched), rfc(fetched.Add(30*24*time.Hour)), nil, 1))
+			// time.Time values, as the production writers bind them, so the
+			// expiry selector reads the production layout (ARS-001 §9.2).
+			must(metaStmt.Exec(id, strings.Join(words, " "), "Channel "+strconv.Itoa(i%500), fetched, fetched.Add(30*24*time.Hour), nil, 1))
 			truth.held = append(truth.held, id)
+			if plant[i] < 0 {
+				truth.plain = append(truth.plain, id)
+			}
 		} else {
 			expiredAt := now.Add(-time.Duration(1+rng.IntN(29*24)) * time.Hour)
-			must(metaStmt.Exec(id, nil, nil, rfc(expiredAt.Add(-30*24*time.Hour)), rfc(expiredAt), rfc(expiredAt), 0))
+			must(metaStmt.Exec(id, nil, nil, expiredAt.Add(-30*24*time.Hour), expiredAt, expiredAt, 0))
 			truth.expired = append(truth.expired, id)
 		}
 	}
@@ -545,6 +642,11 @@ type perfReq struct {
 func (pc *perfClient) do(st *perfStats, r perfReq) {
 	d, code, body, err := pc.get(r.path)
 	st.add(r.group, d)
+	if strings.HasPrefix(r.group, "P2 first page") {
+		st.nameLabels = append(st.nameLabels, "first page")
+	} else if strings.HasPrefix(r.group, "P2 page>=100") {
+		st.nameLabels = append(st.nameLabels, "page>=100")
+	}
 	switch {
 	case err != nil:
 		st.fail(r.group, "transport: "+err.Error())
@@ -709,8 +811,10 @@ func walkToken(t *testing.T, pc *perfClient, st *perfStats, tr *perfTruth, needl
 		g := group
 		if n < 100 || group == "" {
 			g = "walk (untimed) " + needle
+			st.nameLabels = append(st.nameLabels, "untimed")
 		} else {
 			st.add(group, d)
+			st.nameLabels = append(st.nameLabels, "page>=100")
 		}
 		switch {
 		case err != nil:
@@ -759,6 +863,7 @@ type prodResult struct {
 	searches  int
 	processed int
 	tables    map[string][]string
+	sweep     string // the sweep's expiry, purge and optimize numbers, for the report
 }
 
 // runProduction starts a fresh server on a copy of the seed, runs one
@@ -769,6 +874,7 @@ func runProduction(t *testing.T, dir, seedPath, name string, postDelay time.Dura
 	t.Helper()
 	dbPath := filepath.Join(dir, name+".db")
 	copyFile(t, seedPath, dbPath)
+	cohort := addAgingCohort(t, dbPath, tr)
 
 	ids := make([]string, perfProdVideos)
 	for i := range ids {
@@ -798,6 +904,19 @@ func runProduction(t *testing.T, dir, seedPath, name string, postDelay time.Dura
 	srv := startServer(t, dbPath, yt.srv.URL, "YUHAUL_DAILY_QUOTA=100000000", childRunTimeLimitEnv+"=3h")
 	perfWaitOverview(t, srv)
 	db := openReadDB(t, dbPath)
+
+	// The server's own startup reconcile ran at real time and must have found
+	// the cohort still held; then every cohort entry must be indexed now.
+	startup := perfLogLine(t, srv.out.String(), "title search index ready")
+	require.EqualValues(t, 0, startup["purged"], "the startup reconcile purged entries before the measured expiry: rerun")
+	require.EqualValues(t, 0, startup["orphans_removed"], "the startup reconcile removed orphans before the measured expiry: rerun")
+	cohort.assertIndexed(t, db, "before the sweep")
+	if wait := time.Until(cohort.lastExpiry.Add(2 * time.Second)); wait > 0 {
+		t.Logf("%s: waiting %s for the cohort's expiry times to pass (real clock)", name, wait.Round(time.Second))
+		time.Sleep(wait)
+	}
+	perfWaitQuiet(t, "P3 "+name)
+	defer perfLoadNow(t, "P3 "+name)
 
 	var runID int64
 	deadline := time.Now().Add(2 * time.Minute)
@@ -857,6 +976,8 @@ func runProduction(t *testing.T, dir, seedPath, name string, postDelay time.Dura
 		processed: scalar[int](t, db, `SELECT count(*) FROM run_video_outcome WHERE run_id=?`, runID),
 		tables:    snapshotOutcomes(t, db),
 	}
+	res.sweep = cohort.observeSweep(t, db, srv.out.String(), name)
+	require.Empty(t, perfBusyHits(srv.out.String()), "P3 %s: SQLITE_BUSY/LOCKED in a log record or error", name)
 	t.Logf("%s: run %d completed in %s, %d videos with an outcome, %d playlist POSTs, searches issued %d of %d",
 		name, runID, dur.Round(time.Second), res.processed, scalar[int](t, db, `SELECT count(*) FROM executed_action WHERE run_id=?`, runID), searches, len(work))
 	srv.sigterm()
@@ -930,6 +1051,14 @@ type perfStats struct {
 	samples  map[string][]time.Duration
 	order    []string
 	failures map[string][]string
+
+	// nameLabels has one entry per name search sent to the P1/P2 server, in
+	// order, naming the timed set it belongs to ("first page", "page>=100") or
+	// "untimed". The server logs one stage record per name search in the same
+	// order, so the two lists zip (one request at a time).
+	nameLabels  []string
+	extra       []string
+	stageReport string
 }
 
 func newPerfStats() *perfStats {
