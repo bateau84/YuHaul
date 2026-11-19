@@ -141,7 +141,7 @@ Rejected, as before. It folds only ASCII letters (fails AC7), and a leading `%` 
   - **Write cost.** Secure-delete measured 5–7 ms per purge on realistic titles and failed the spike, so it was dropped (O5 = S1). With it off, a purge costs about 0.2 ms. Expiry stays batched at 200 rows per transaction. The optimize cost is not yet measured: P3 (f) and test G-O measure it before release.
   - **Removed trigrams linger until the optimize.** Between a purge and the next complete optimize, the trigrams of a removed title stay in the segments, behind delete markers. They are invisible to every query and to `fts5vocab`, but readable by someone who decodes the raw `title_search_data` blobs. An optimize that is interrupted or fails extends this until the next sweep.
   - **A damaged index blocks metadata writes.** The triggers make every write to `transient_metadata` also write the index. Recovery is drop-and-recreate (ARS-001 §10.9). This dependency is accepted, because writes that bypass the index would leave title copies behind.
-  - **Unicode or `Key` change.** Entries built with an older `Key` could miss matches. `title_search_state.key_version` records the version; search uses the scan path until a rebuild finishes, and `store.Open` rebuilds.
+  - **Unicode or `Key` change.** Entries built with an older `Key` could miss matches. `title_search_state.key_version` records the version; search uses the scan path until a rebuild finishes. The rebuild runs at server startup in `metadata.PrepareSearchIndex`, which `cmd/server` calls right after `store.Open` (constraint 12).
 
 ### C′ variants rejected inside option C
 

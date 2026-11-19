@@ -6,6 +6,7 @@ type: Log
 
 ## 2026-11-19
 
+- Fixed stale text found by review `4948ec4f` so it matches the 2026-11-19 §10.4 amendment (`89c0937`). [ARS-001](/docs/architecture/video-search/specifications/ars-001-video-search-api-and-queries.md) R4 and [ADR-001](/docs/architecture/video-search/decisions/adr-001-held-title-search-by-request-time-scan.md)'s key-change risk now name `metadata.PrepareSearchIndex`, called by `cmd/server`, as the rebuild point instead of `store.Open`. ARS-001 §10.3's discovery row no longer says `metadata` imports only `quota` and `titlekey`: it may import `store`, `auth`, `youtube`, `quota` and `titlekey`, and `discovery` → `metadata` stays acyclic. No contract change.
 - Decided the startup index boundary for fts-lifecycle (coder result `943f7124`, session `ses_e0c6f319effekmpNk4DxdS6MkR`). [ARS-001](/docs/architecture/video-search/specifications/ars-001-video-search-api-and-queries.md) §10.4 and [ADR-001](/docs/architecture/video-search/decisions/adr-001-held-title-search-by-request-time-scan.md) constraint 12 now say this:
   - A new `metadata.PrepareSearchIndex` runs the startup steps in order: recreate on a key-version mismatch, then reconcile, then optimize only if the reconcile removed entries.
   - `cmd/server` calls it right after `store.Open`, before any service, worker or listener starts.
