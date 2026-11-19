@@ -3,7 +3,7 @@ type: requirement
 title: BR-035 — Stop an Active Run
 description: The user can stop any active run for good; its unfinished videos go to the deferred queue and the next new production run continues them automatically.
 tags: [requirement, runs, stop, deferred-queue, recovery, send-guard, priority:MUST]
-timestamp: 2026-11-18T00:00:00Z
+timestamp: 2026-11-19T00:00:00Z
 ---
 
 **Status:** accepted
@@ -51,6 +51,7 @@ This section is the normative home for handing a run's unfinished videos to the 
 13. **No waiting and no leftover claims.** Each item from AC10 SHALL be eligible for the next run at once, with no waiting time. When the stop or discard has settled, no queue item SHALL still be claimed by the ended run.
 14. **The next new run claims and processes the videos.** The next production run that starts as a new run, manual or scheduled, SHALL claim the items from AC10 and process each claimed video in that run: route evaluation and playlist actions, under their send guards. This SHALL happen even though discovery does not report these videos as new, because they are already known. Claimed videos SHALL appear in that run's inspection. A Run Now press that resumes an earlier run instead (BR-017 AC7) does not have to claim them, and they wait for the next new run. If that run cannot finish a video, for example because quota runs out, the video is retained again under its existing rules ([BR-013](br-013-quota-limited-work-deferral.md), [BR-014](br-014-failed-work-retention-and-retry.md)).
     *Amended 2026-11-11, claiming while quota remains:* the run SHALL keep claiming eligible items while it has quota left, has not been stopped, interrupted or shut down, and eligible items remain. It MAY stop claiming once its quota is exhausted, or when it is stopped, interrupted or shut down. Items it did not claim SHALL stay pending and eligible at once, with their identity, reason and history unchanged, and later new runs claim them under this criterion. Runs SHALL NOT pass over an eligible item in favor of one that became eligible later. So every item is eventually claimed by a run that has quota to process it.
+    *Live check limit (2026-11-19, user decision):* a live-skipped item whose check window has ended is not eligible for automatic claiming and does not count as passed over; see [BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md) AC7.
     *Limited 2026-11-12 (user decision):* "route evaluation and playlist actions" applies only to a claimed video without a final outcome. A video that already has a final outcome is not routed, and a partly done video finishes only its missing additions under its original decision, as [BR-039](br-039-final-outcomes-are-never-reprocessed.md) requires.
     *Confirmed 2026-11-11 (user decision, variant K):* a provider failure that is not a quota refusal, such as an authorization lapse, a rate limit, a network or server error, or a malformed answer, is not a reason to stop claiming. The run keeps claiming under the conditions above. A claimed video that the run cannot process because of such a failure is released or retained under the existing rules.
 15. **An ended run never blocks later runs.** A stopped or discarded run, and any queue item it once claimed, SHALL NOT make a later run start, Run Now press or queue retry fail or be refused.

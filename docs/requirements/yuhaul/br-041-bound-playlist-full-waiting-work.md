@@ -3,7 +3,7 @@ type: requirement
 title: BR-041 — Bound Playlist-Full Waiting Work
 description: Keep at most 5,000 distinct waiting videos per actual playlist, with targeted continuation and visible oldest-first eviction.
 tags: [requirement, playlist, capacity, deferred-queue, retry, eviction]
-timestamp: 2026-11-18T00:00:00Z
+timestamp: 2026-11-19T00:00:00Z
 ---
 
 **Status:** accepted  
@@ -22,7 +22,18 @@ YuHaul SHALL keep a playlist-full waiting list for each actual YouTube playlist,
 5. **Eviction is not a recovery signal.** Neither later room, rediscovery, retry of other work for the video, startup, resume, stop/discard handoff, nor [BR-037](br-037-requeue-stranded-videos.md) SHALL cause the evicted missing add to be automatically attempted or requeued. A stale claim cannot reinstate work or authorize a new send after eviction. Eviction does not recall an already admitted send, supply proof of non-application, or clear an unresolved guard. Record the actual result of any already admitted send under its existing authority, without recreating an evicted waiting entry. A remaining evicted add is still missing, not successful; other successful adds alone do not make the video accepted under BR-039.
 6. **Keep other blockers distinct.** A later quota, authorization or temporary failure that prevents checking or using room is not evidence that the playlist has room. It SHALL NOT on its own remove established capacity waiting work, change its age, or create a second active capacity entry. Processing separate work for the same video SHALL NOT treat a live capacity-waiting add as completed or erase it because the routes changed. Existing quota and retry precedence still applies among eligible work; oldest-first here is an eviction rule, not a new promise of a send order or priority over other work.
 
+7. **Outcome when only an evicted add is left.** *(Added 2026-11-19 by user decision.)* Example: a decision for video V requires adds to playlists A and B. A's waiting add is evicted. A later run adds V to B. When a production run records success for every other missing add of a video's decision and at least one missing add of that decision is evicted:
+   - the run SHALL classify the video as **deferred** in that run. Deferred here means the decision is incomplete and not final; it does not promise a retry ([OC-002](oc-002-route-evaluation-outcome-semantics.md) Guarantees 1 and 5). The video SHALL NOT be committed as accepted, failed or any final outcome;
+   - the run's inspection SHALL explain both facts, in words like "Added to B. The add to A was removed from the queue and won't be retried automatically";
+   - the evicted add SHALL get no active queue item and no retry (AC5);
+   - the run SHALL NOT record a new playlist-full finding, capacity check or capacity deferral for the evicted add;
+   - B's success SHALL be recorded under the original decision ([BR-039](br-039-final-outcomes-are-never-reprocessed.md) AC7), and stays recorded.
+
+   The video then has no active queue item for that decision. This is not stranding: the re-queue action does not revive the evicted add ([BR-037](br-037-requeue-stranded-videos.md), capacity note), and no other rule retries it.
+
 ## Derived from
+
+- AC7: the user's "yes" of 2026-11-19 (Loom answer `fb9c7283-2b75-49fa-99aa-f14f22e2ee84`, Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`) to the receiving-run case: Deferred, not final, with the quoted kind of explanation; no active entry or retry for A; no new playlist-full finding; B's success under the original decision. The user explicitly extended Deferred to an incomplete decision that has no active retry for the missing add. The original human conversation was not independently inspected. *Specification choice:* the rule is stated for every run that finishes all other missing adds while an evicted add remains, of which the user's A/B case is one; the quoted sentence illustrates meaning, not required copy.
 
 - AC1–5: user decisions relayed in the 2026-11-18 specification assignment (Loom Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`): 5,000 waiting videos **per actual YouTube playlist**, shared across routes/rules; evict the oldest on overflow, keep visible history, do not automatically retry or requeue an evicted missing add, do not make a final result out of eviction or erase successful adds, and do not count other deferral reasons. The original human conversation was not independently inspected.
 - Necessary consequences: count each video once per target; retries may not use sibling work to evade eviction; preserve exact target and decision authority to make the intended missing-add-only retry possible. Displacing the oldest without recording the new add, or retaining the new add without displacing the oldest, breaks the accepted policy.
@@ -35,6 +46,8 @@ YuHaul SHALL keep a playlist-full waiting list for each actual YouTube playlist,
 - Overlap admissions and repeat them; inject save failure at the admission/eviction boundary. Pause a claim before send, evict it, then continue; no add or requeue based on the evicted claim. Separately use an already admitted send to verify actual evidence survives without resurrection. After room opens, normal production sends retained adds under the existing guard and quota rules and omits the evicted target, including when a different live queue item for its video is processed or Re-queue stranded videos is invoked. No historical run outcome or recorded success changes due to eviction.
 - Defer a video with one success and two missing targets; remove or change its current routes, make room on one target and leave the other full. The retry uses the original decision, sends only the eligible missing add, does not repeat the success, and retains only still-authorized waiting work. Repeat with no prior success. Exercise each BR-039 final outcome and an unreadable original decision as no-send controls.
 - Prevent the capacity recheck for the oldest entry with quota or authorization refusal. It stays waiting at the original age, no add is sent, and the blocking cause is not shown as new evidence of fullness.
+
+- AC7: seed V with a decision for A and B, evict A's waiting add, then make room on B. The next run sends only B, records its success under the original decision, classifies V as deferred with both facts explained, creates no queue item for A, records no playlist-full finding or capacity check for A, and V is never accepted or final. Reopen after restart: unchanged. Later runs and the re-queue action send nothing for A.
 
 ## Depends on
 
