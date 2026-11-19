@@ -3,10 +3,14 @@ type: Log
 title: YuHaul Requirements Change Log
 description: Chronological record of changes to the YuHaul behavioral requirement bundle.
 tags: [changelog, log, okf, requirements, yuhaul]
-timestamp: 2026-11-12T00:00:00Z
+timestamp: 2026-11-19T00:00:00Z
 ---
 
 # YuHaul Requirements Update Log
+
+## 2026-11-19
+
+**Live and upcoming videos are skipped until they have ended (new BR-042); OC-002 Guarantee 5 amended.** Source: the user's decision of 2026-11-19, relayed in the specification assignment (Loom Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`): a video that is live now or upcoming is skipped for now and checked again on a later run, gets no final outcome and is not excluded; an ended stream's recording is a normal video. The user's follow-up, relayed with the researcher's findings (session `ses_e0cb38c9effeuoJ0R85AY1zKbq`), requires a fresh live status at routing time and treats any ambiguity as not ended. The original human conversation was not independently inspected. [BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md) AC1–16: skipped means deferred with its own reason and one active deferred item; checked before exclusions, duplicate detection, routes and capacity; no final outcome while skipped; no time limit by default; partly done videos finish under their original decision only once ended; nothing is removed from playlists; simulations show the skip and change nothing. [OC-002](oc-002-route-evaluation-outcome-semantics.md) Guarantee 5 records the shared deferred meaning; no outcome category was added. [Index](index.md): summary, table row, one non-blocking user question (very long upcoming or live streams; default no limit) and a downstream note. No field names, architecture or design chosen. Docs only.
 
 ## 2026-11-17
 

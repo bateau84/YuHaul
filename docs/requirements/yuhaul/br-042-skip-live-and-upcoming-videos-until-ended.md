@@ -1,0 +1,114 @@
+---
+type: requirement
+title: BR-042 — Skip Live and Upcoming Videos Until They Have Ended
+description: A video YouTube reports as live now or upcoming, or whose live status is not confirmed, is deferred and checked again on a later run, with no final outcome and no playlist add; once a fresh report confirms it is not live and not upcoming, it is processed as a normal video.
+tags: [requirement, live, upcoming, deferral, deferred-queue, routing, playlist, priority:MUST]
+timestamp: 2026-11-19T00:00:00Z
+---
+
+**Status:** accepted
+**Priority:** MUST
+
+## Statement
+
+Before a production run evaluates a video's exclusions or routes, or sends any playlist add for it, the system SHALL obtain the video's current live status from YouTube in that run. If that report says the video is live now or upcoming, or does not confirm that it is neither, the system SHALL skip the video for now: it SHALL NOT evaluate or add it, SHALL record it as **deferred** with the reason *live or upcoming on YouTube*, and SHALL keep it in the deferred queue so that a later production run checks it again. Such a video never gets a final outcome while it is skipped. Once a fresh report confirms that the video is not live and not upcoming, including the recording of a stream that has ended, the system SHALL process it as a normal video.
+
+## Example
+
+On Monday, run 60 discovers video L, a stream that is live right now, and video P, a premiere scheduled for Friday. Run 60 evaluates no routes for L or P and sends nothing for them. Its details show both as deferred, L as "live now" and P as "upcoming". Each has one pending item in the deferred queue. On Tuesday, run 61 claims both items and asks YouTube again. L's stream has ended and YouTube now reports L as not live and not upcoming, so run 61 evaluates L under Tuesday's routes, like any other video, and adds it to "Lofi". P is still upcoming, so it stays deferred, with the same queue item. Run 62 and later runs keep checking P. After Friday, when P is reported as neither live nor upcoming, the next run processes it normally.
+
+A failure case: run 63 claims P, but the day's quota is spent before it can ask YouTube. P is not evaluated and nothing is sent. P stays deferred and is not rejected, excluded or failed.
+
+## Definitions
+
+- *Live status* is what YouTube reports, for one video, about whether it is a broadcast that is **live now**, **upcoming** (scheduled, a scheduled stream or premiere not yet started), or **neither**. "Neither" covers an ordinary upload and the recording of a broadcast that has ended.
+- A *current report* is a successful YouTube answer about the video's details obtained by the production run that is routing the video, during that run. Live status saved by an earlier run, saved at discovery in an earlier run, or inferred from other stored data is never a current report.
+- A report *confirms ended or not live* only when it is a current report, it says the video is neither live now nor upcoming, and nothing else in the same report indicates that a broadcast for the video is scheduled or has started without having ended. Every other current report is *not confirmed*, for example: no live status in the answer, a value the system does not recognize, or contradictory details. When the run has no current report at all, AC3 applies.
+- A *live skip* is the handling in AC2: deferred with the reason *live or upcoming on YouTube*.
+- *Production run*, *simulation*, *active queue item* and *claim* have the meanings in [BR-035](br-035-stop-active-run.md) and [BR-037](br-037-requeue-stranded-videos.md). *Final outcome*, *partly done*, *original decision* and *recorded success* have the meanings in [BR-039](br-039-final-outcomes-are-never-reprocessed.md).
+
+## Acceptance criteria
+
+### The check
+
+1. **Fresh status before routing.** For each video a production run processes, the run SHALL obtain a current report before it evaluates the video's exclusions, duplicate detection or routes, and before it sends any playlist add for the video. This applies to newly discovered videos and to videos reached through a deferred-queue claim, an Errors-queue retry, a stop or discard handoff, a re-queue, a resumed run, startup recovery and a capacity retry ([BR-041](br-041-bound-playlist-full-waiting-work.md) AC4). A live status saved from an earlier run SHALL NOT permit the video to be processed. A stored duration of zero, or a missing duration, SHALL NOT by itself be taken to mean either live or not live.
+2. **Skip unless confirmed.** Unless the current report confirms ended or not live, the run SHALL:
+   - not evaluate the video's exclusions, duplicate detection or routes, and not send any playlist add for it;
+   - record the video's outcome in that run as **deferred**, with the reason *live or upcoming on YouTube*. Run inspection SHALL show which of these applied: live now, upcoming, or live status not confirmed;
+   - leave the video with exactly one active deferred item (AC5).
+
+   An ambiguous or unrecognized report is handled as not confirmed, so the video is skipped, never routed.
+3. **No current report.** If the run cannot obtain a current report, for example because quota, authorization, a rate limit or a failed request prevents it, the video SHALL NOT be evaluated and no add SHALL be sent for it. It is retained under the existing rule for that cause ([BR-013](br-013-quota-limited-work-deferral.md), [BR-030](br-030-temporary-failure-work-preservation.md), [OC-001](oc-001-youtube-api-quota-and-failure-semantics.md)). It SHALL NOT be committed as rejected, excluded, failed or any final outcome because its live status is unknown.
+4. **Confirmed: a normal video.** When the current report confirms ended or not live, the run SHALL process the video exactly as it processes any other video, with no live-specific rule: exclusions, duplicate detection, routes and playlist adds under the receiving run's configuration and all existing safeguards. A video that was once live or upcoming has no other difference.
+
+### Never final while skipped
+
+5. **One active deferred item, checked again later.** A live-skipped video SHALL have exactly one active deferred item. A repeated skip reuses that item, keeping its identity, origin and history; it SHALL NOT create a second item. The item SHALL be eligible for the next new production run with no waiting time, and production runs SHALL claim it under [BR-035](br-035-stop-active-run.md) AC14, as any other eligible deferred item. A run SHALL check a given video at most once. Discovery not reporting the video as new SHALL NOT prevent the later check. If the video was reached through an Errors-queue retry, that entry SHALL stop being active, with its history kept, as in [BR-035](br-035-stop-active-run.md) AC11.
+6. **No final outcome while skipped.** While a video is live-skipped, no run SHALL commit accepted, rejected, excluded, failed or unavailable on YouTube for it on account of its live status, and the skip SHALL NOT count as a rejection, an exclusion or a failure in any run count, statistic or inspection view ([BR-032](br-032-processing-outcome-distinction.md), [OC-002](oc-002-route-evaluation-outcome-semantics.md)). A live skip SHALL NOT fail the run or stop it processing other videos.
+7. **No time limit.** The system SHALL keep checking a live-skipped video on later runs for as long as it stays live, upcoming or not confirmed. It SHALL NOT end, drop or finalize the item because of how long it has waited. The user can still remove the item with Dismiss ([BR-014](br-014-failed-work-retention-and-retry.md) AC4); it then stays removed, as BR-037 defines. *This is the default for an open user choice; see the index.*
+8. **No longer returned by YouTube.** If a current report is a successful answer that does not include the video (for example, a stream that was deleted or made private, or a cancelled scheduled stream that was removed), the video is not live-skipped. It follows the existing rule for a deferred video that YouTube no longer returns. This requirement does not decide that rule; see the open question "Unavailable on YouTube beyond re-queued videos" in the index.
+
+### Interaction with other rules
+
+9. **Before exclusions, duplicates and routes.** The live check comes first. A live-skipped video SHALL NOT be committed as excluded, even if an exclusion rule would match it, and SHALL NOT produce duplicate-match or provenance evidence in that run. After it is confirmed, exclusions, duplicate detection and routes apply normally.
+10. **Routes are those of the run that processes it.** A confirmed video that was never evaluated is evaluated under the configuration of the run that processes it, not of the run that first skipped it ([BR-039](br-039-final-outcomes-are-never-reprocessed.md) AC6). This is a first evaluation, not a re-evaluation of history ([Historical Re-evaluation](historical-reevaluation.md) AC1).
+11. **Partly done and final videos.** A video with a final outcome is not processed at all ([BR-039](br-039-final-outcomes-are-never-reprocessed.md) AC1), so this requirement does not apply to it and does not change it. For a partly done video, AC1–2 apply to its missing additions: none is sent until a current report confirms ended or not live; then they are finished under its original decision (BR-039 AC7).
+12. **Earlier additions are not undone.** This requirement SHALL NOT remove a video from a YouTube playlist, reverse a recorded success, or change an outcome committed before it took effect, including for a live or upcoming video added earlier.
+13. **Playlist capacity.** The live check comes before the capacity check ([BR-040](br-040-respect-youtube-playlist-capacity.md)). A live-skipped video SHALL NOT be checked for room, SHALL NOT be admitted to a playlist-full waiting list, and SHALL NOT count toward the 5,000-video waiting cap ([BR-041](br-041-bound-playlist-full-waiting-work.md) AC1). If an add that is already capacity-waiting belongs to a video whose current report does not confirm ended or not live, no add SHALL be sent; that waiting entry keeps its identity and age and is otherwise unchanged.
+14. **Handoffs and re-queue.** A live-skipped video has an active queue item, so the re-queue action does not treat it as stranded ([BR-037](br-037-requeue-stranded-videos.md)). A stop or discard hands its claimed item back under [BR-035](br-035-stop-active-run.md) AC10–13, keeping the live reason.
+15. **Distinct reason.** Deferred-queue and run inspection SHALL distinguish *live or upcoming on YouTube* from every other deferred reason, including quota exhaustion, rate limiting, pending authorization, stopped by user, discarded by user, re-queued by user and playlist full. The reason and diagnostics SHALL NOT expose raw provider bodies or errors.
+
+### Simulations
+
+16. **Simulations show the skip and change nothing.** A dry run, replay or backtest SHALL report a video as skipped for live status, not as accepted, rejected, excluded or failed, when the live status available to it does not confirm ended or not live. A dry run may obtain a current report through a read-only call ([BR-026](br-026-dry-run-evaluation.md) AC4). A replay or backtest SHALL NOT call YouTube ([BR-027](br-027-historical-backtesting.md) AC4) and uses the live status available locally, labelled as current/local information ([BR-015](br-015-explainable-route-decisions.md) AC7). A video with no local live status at all is evaluated normally in a replay or backtest, and its result SHALL show that its live status is unknown. No simulation SHALL create, claim or change a queue item, production outcome, send guard or recorded success because of this requirement.
+
+## Derived from
+
+- **Statement, AC2, AC4, AC6, AC9 (not excluded):** the user's decision of 2026-11-19, relayed in the specification assignment for Loom Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`; the original human conversation was not independently inspected. The user's reason: "It makes no sense to add a live session to a playlist. It might not be live any longer when the user listens to it." Decided: (1) a video that is live right now or upcoming (a scheduled stream or premiere not yet started) is skipped for now and checked again on a later run; it gets no final outcome and is not excluded; (2) a video that was a live stream and has ended is treated as a normal video.
+- **AC1–3 (fresh status; ambiguity means skip):** the user's follow-up direction of 2026-11-19, relayed with the researcher's findings (session `ses_e0cb38c9effeuoJ0R85AY1zKbq`): decide on YouTube's live status at the time of routing, refresh it before routing rather than using stale stored data, and treat any ambiguity as not yet ended, so skip. The researcher found, as documented YouTube behavior, that a video-details read reports live, upcoming or none and broadcast timing details (scheduled start, actual start, actual end), and that the playlist listing YuHaul uses for discovery carries no live status. Undocumented, and therefore not relied on: what premieres report, that an ended stream reports none, and the duration while live or upcoming. The researcher also found that YuHaul reads none of this today and that its stored duration of 0 cannot distinguish a live or upcoming video from a real zero length. These are evidence for the obligation, not its source; the requirement names no field.
+- **Necessary consequences:**
+  - "Skipped" as **deferred** with a reason (AC2, AC6): OC-002 gives every processed video exactly one primary outcome; the user excluded every final outcome, and failed would put the video in the Errors queue, which runs never claim. Deferred is the only existing category that means "not processed yet, will be retried". No new outcome category is added.
+  - One active deferred item (AC5): discovery skips videos it already knows ([BR-035](br-035-stop-active-run.md), Derived from), so without an active item no later run would reach the video. That is the stranded state BR-035 AC16 forbids.
+  - Before exclusions and duplicates (AC9): an exclusion match would commit excluded, which is final under BR-039 and which the user ruled out. Running duplicate detection would record evidence for a video the user has said is not yet to be decided.
+  - No current report means no routing (AC3): the user requires a fresh status at routing time; without one, routing would rely on stale data.
+  - No final outcome from unknown status (AC3, AC6): BR-032 AC3 and BR-030 forbid treating absence of processing as a negative outcome.
+  - Partly done and capacity retries (AC11, AC13): the user's reason concerns adding a live session to a playlist, and a missing addition or capacity retry is such an add.
+  - AC12: BR-039 AC8 forbids reversing a recorded success, and no requirement authorizes removing videos from playlists.
+- **Specification choices:**
+  - A report from earlier in the same run counts as current (definition of *current report*). Within one run, a read that confirms not live cannot become wrong, because an ordinary upload or an ended broadcast does not become live or upcoming again; a read showing live or upcoming only causes a skip. This avoids a second read per video. If the Architect finds provider evidence that contradicts this, the read must move closer to the send.
+  - "Nothing else in the same report indicates a broadcast that is scheduled or started without having ended" makes "treat any ambiguity as skip" falsifiable without naming fields.
+  - Inspection shows live now, upcoming or not confirmed (AC2), so the user can tell a genuine stream from an unclear report.
+  - At most one check per video per run, eligible for the next run with no waiting time (AC5): "checked again on a later run". A claimed Errors-queue entry moves to the deferred item, as BR-035 AC11 does for a stop.
+  - AC7's no time limit: the default for the open user choice below.
+  - Simulations (AC16): a simulation shows what production would do, so it shows the skip. Replay and backtest cannot call YouTube, so they use local status. With no local status, as for videos discovered before this requirement, they evaluate normally and say the status is unknown, rather than skipping every legacy video.
+  - Priority MUST, matching the neighboring outcome and queue requirements; the assignment named no priority.
+
+## Verified by
+
+Use the real server path with migrated SQLite and a controlled YouTube provider that counts requests and can change a video's reported live status between runs.
+
+- **Skip and re-check (AC1–2, AC4–6):** discover a live video L and an upcoming video P. The run sends no add and makes no route decision for either, records both as deferred with the live reason (live now; upcoming), and each has exactly one pending deferred item. Make L report neither live nor upcoming with a completed broadcast, and keep P upcoming. A new run reads both again, evaluates L under the current routes and adds it, and keeps P deferred on the same item, with no second item. Restart between runs; the result is the same.
+- **Stale stored status is not used (AC1):** store a "not live" status for P from an earlier run while the provider still reports P upcoming. The next run reads P again and skips it. Remove the provider's answer for P under a quota refusal: P is not evaluated and is not committed as anything final.
+- **Ambiguity (AC2):** for separate videos, return no live status, an unrecognized value, "neither" together with a started broadcast that has no end, and a zero or missing duration with no live status. Each is skipped with "live status not confirmed"; none is evaluated or added.
+- **Exclusions and duplicates (AC9):** give a live video a title or channel that an exclusion matches and a title that duplicates an earlier video. While live it is deferred, not excluded, and no duplicate evidence is written. After it ends, it is excluded or matched normally.
+- **Partly done and capacity (AC11, AC13):** seed a partly done video whose provider status is upcoming: its missing addition is not sent; after it ends, only the missing addition is sent under the original decision. Seed a full playlist and a live video that matches it: no capacity check, no waiting-list entry, and the waiting count is unchanged.
+- **Final and earlier additions (AC11–12):** seed an accepted video that the provider now reports as live: nothing is read for routing, sent, removed or changed.
+- **Long wait (AC7):** keep a video upcoming across many runs: it is checked once per run, keeps one item, and is never finalized. Dismiss it: no later run checks it, and re-queue does not restore it.
+- **Not returned (AC8):** have the provider answer successfully without a live-skipped video: it is no longer live-skipped and follows the existing rule for deferred videos YouTube no longer returns.
+- **Handoff (AC14):** stop a run that has claimed a live-skipped item: it is pending again with the live reason; the re-queue preview does not count the video as stranded.
+- **Simulations (AC16):** run a dry run, a replay and a backtest over a live, an upcoming, a confirmed-ended and a legacy video with no local status. The first two are shown as skipped for live status; the confirmed one is evaluated; the legacy one is evaluated and marked status unknown. Replay and backtest make no YouTube request. No production outcome, queue item, guard or recorded success changes.
+
+## Depends on
+
+- [BR-032](br-032-processing-outcome-distinction.md) and [OC-002](oc-002-route-evaluation-outcome-semantics.md) (deferred as the outcome; Guarantee 5 amended 2026-11-19)
+- [BR-039](br-039-final-outcomes-are-never-reprocessed.md) (finality, partly done videos, recorded successes)
+- [BR-013](br-013-quota-limited-work-deferral.md), [BR-030](br-030-temporary-failure-work-preservation.md), [OC-001](oc-001-youtube-api-quota-and-failure-semantics.md) (retention when no current report can be obtained)
+- [BR-035](br-035-stop-active-run.md) and [BR-037](br-037-requeue-stranded-videos.md) (claiming, handoff, stranded)
+- [BR-040](br-040-respect-youtube-playlist-capacity.md), [BR-041](br-041-bound-playlist-full-waiting-work.md) and [OC-007](oc-007-playlist-capacity-deferral-handoff.md) (capacity)
+- [BR-002](br-002-subscription-discovery-without-live-monitoring.md) (discovery; known videos are not rediscovered)
+- [BR-007](br-007-exclusion-behaviors.md), [BR-008](br-008-exact-and-fuzzy-duplicate-detection.md) (exclusions and duplicates come after the live check)
+- [BR-026](br-026-dry-run-evaluation.md), [BR-027](br-027-historical-backtesting.md), [Historical Re-evaluation](historical-reevaluation.md), [BR-015](br-015-explainable-route-decisions.md) AC7 (simulations, local information)
+
+## Outside scope
+
+Architecture (where and how the status is read, stored and shown) and presentation are left to the Architect and the Designer. This requirement adds no polling outside runs, no notification when a stream ends, no reserved quota and no removal from playlists.

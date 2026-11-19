@@ -3,7 +3,7 @@ type: obligation-contract
 title: OC-002 — Route Evaluation Outcome Semantics
 description: Shared vocabulary and classification rules for routing outcomes, consumed by evaluation, persistence, statistics, and inspection
 tags: [obligation-contract, routes, outcomes, classification, semantics]
-timestamp: 2026-10-25T00:00:00Z
+timestamp: 2026-11-19T00:00:00Z
 ---
 
 **Status:** accepted
@@ -26,6 +26,7 @@ timestamp: 2026-10-25T00:00:00Z
 3. **Rejected**: the video was evaluated against all applicable routes and matched no route conditions.
 4. **Excluded**: the video was prevented from evaluation by an exclusion rule (channel, video, title, word/phrase, or duration exclusion) before route evaluation.
 5. **Deferred**: the video was not evaluated due to an operational constraint (quota exhaustion, authorization pending, or other temporary inability to process).
+   For the live case: a video whose fresh YouTube report does not confirm that it is neither live nor upcoming is deferred with the reason *live or upcoming on YouTube*, before exclusions, duplicate detection and routes, as [BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md) requires. Every consumer treats it as deferred, never as rejected, excluded, failed or final, and keeps its reason distinct from other deferral reasons.
 6. **Failed**: the video's evaluation or action execution attempted and encountered a failure that prevents completion (permanent API error, action execution failure after retry).
 7. **Not-yet-evaluated**: a video that has been discovered but has not yet reached evaluation in the current or any prior run. This is never classified as rejected or any other negative outcome.
 8. The classification of a video can change across runs only while it is not final (e.g., deferred in run N, accepted in run N+1 after re-authorization). Accepted, rejected, excluded and unavailable on YouTube are final: once committed, they never change, in either direction ([BR-039](br-039-final-outcomes-are-never-reprocessed.md), amended 2026-11-12).
@@ -49,6 +50,7 @@ timestamp: 2026-10-25T00:00:00Z
 - Outcome records include sufficient evidence to reconstruct the evaluation path.
 
 ## Derived from
+- The 2026-11-19 live case in Guarantee 5 follows the user decision recorded in [BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md); no outcome category was added.
 - Anchor: youtube-discovery-routing.md (AC32, AC15, AC20, AC28)
 - [BR-008](br-008-exact-and-fuzzy-duplicate-detection.md) AC9, recording the user's 2026-10-25 “Continue, yes” decision; Guarantee 11 derives the shared reporting meaning without adding an outcome category.
 - Guarantee 8 limit: the user's decision of 2026-11-12 that a final outcome never changes, in either direction ([BR-039](br-039-final-outcomes-are-never-reprocessed.md)).
