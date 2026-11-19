@@ -21,7 +21,8 @@ The Videos page lets the user find a video YuHaul knows ([BR-038](../../requirem
 - **Revised again 2026-11-12** after critique (CHANGES REQUIRED, session `ses_e2e61920affeUTLBU835PmTm85`), findings F1–F8. The first implementation task is now a write-cost spike for secure-delete.
 - **Decided 2026-11-16:** O5 = S1 (user decision, relayed by the coordinating session; spike evidence commit `acf141b`). Secure-delete is removed from the contract.
 - **Revised 2026-11-18:** destination purge, cancellation-safe write cleanup, and measured expiry/no-index control clarified after targeted critique. See the [Search topic log](log.md). Targeted recheck and runtime proof are pending.
-- **Gate:** P1–P4 rerun on the indexed path, with P3's write-side criteria including the optimize cost (f), plus R1–R8, D1–D2, F-R and G-O. The optimize cost is unmeasured until P3 (f) and G-O run, and must pass before release.
+- **Corrected 2026-11-19:** ARS-001 §10.5 now requires write-lock-first transactions for every writer that can fire the `transient_metadata` triggers before holding the write lock (today `Expire` and `Refresh`), because 029's FTS5 load turns their first write into a read-then-write upgrade that skips `_busy_timeout`. Test R9 added. See the [Search topic log](log.md).
+- **Gate:** P1–P4 rerun on the indexed path, with P3's write-side criteria including the optimize cost (f), plus R1–R9, D1–D2, F-R and G-O. The optimize cost is unmeasured until P3 (f) and G-O run, and must pass before release.
 - **Migrations:** search adds migration 029. BR-039 owns 027 and 028, and search releases only after BR-039's 028. Run-initiation migration 026 (ARS-005) owns the two `(video_id, status)` queue indexes and the stored `unavailable_on_youtube` outcome.
 - **Reconciled 2026-11-11 (Plan revision 19):** `total` added; Q1, Q2 and S1 closed.
 

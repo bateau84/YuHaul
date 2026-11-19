@@ -3,7 +3,7 @@ type: decision
 title: ADR-001 — Search Held Titles Through an FTS5 Trigram Prefilter With a Go Re-check (Request-Time Scan Failed Its Gate)
 description: Realize BR-038 name search with a regular FTS5 trigram index over Go-folded keys of held titles, keyed by a stable integer document map, with SQL purge triggers on transient_metadata and an incremental FTS5 optimize after each sweep (secure-delete off, decision O5 = S1, 2026-11-16). Go writers add entries in the same transaction as the title write; triggers remove them on every update or delete. A startup and sweep reconcile repairs gaps. Every candidate is re-checked in Go with the exact matcher and the held rule, and total counts only re-checked matches. The request-time scan (option B) was chosen first and failed its measured gate (P2) at 150,000 held titles; it remains the path for keys shorter than 3 code points and for an unbuilt index.
 tags: [architecture, decision, videos, search, retention, sqlite, fts5, performance, unicode]
-timestamp: 2026-11-18T00:00:00Z
+timestamp: 2026-11-19T00:00:00Z
 ---
 
 **Status:** accepted 2026-11-12 — option C replaces option B. The decision realizes [BR-038](../../../requirements/yuhaul/br-038-video-search-by-title-or-id.md) AC6, AC7, AC11 and AC14–AC18, and [QS-001](../../../requirements/yuhaul/qs-001-video-search-response-time.md). Option C is not implemented yet. The exact contract is [ARS-001](../specifications/ars-001-video-search-api-and-queries.md) §10. The file path is unchanged so that existing links still work.
@@ -23,6 +23,7 @@ History:
 - 2026-11-12: the write-cost spike failed with secure-delete on (commit `acf141b`, ARS-001 §10.10). Decision O5 opened.
 - 2026-11-16: **O5 closed with S1.** The user chose S1: secure-delete off, plus an FTS5 optimize after each sweep. The choice was relayed to the architect by the coordinating session. Secure-delete is removed from the contract.
 - 2026-11-18: ARS-001 clarifies destination purges on ID replacement, cancellation-safe transaction cleanup, and proof of the expiry workload and no-index control. S1 and release gates are unchanged. Targeted recheck is pending.
+- 2026-11-19: ARS-001 §10.5 extends write-lock-first to `Expire` and `Refresh`, because 029's FTS5 load makes their first trigger-firing write a read-then-write upgrade that skips `_busy_timeout`. Test R9 joins the gate. This decision, S1 and migration 029 are unchanged.
 
 Get an independent critique of §10 before implementation.
 
@@ -212,7 +213,7 @@ The following constraints are part of the design:
 ## Confirmation and reconsideration
 
 - **Spike (done):** failed with secure-delete on and passed with it off (commit `acf141b`). O5 was decided as S1 on 2026-11-16.
-- **Confirmation (gate):** ARS-001 P1–P4 must pass at the 150,000-held-title load on the i7-10510U host or the deployment host. P3 requires no `SQLITE_BUSY` or `SQLITE_LOCKED`, the run-duration budget against an equivalent no-index run, sweep transactions (including optimize steps) of at most 1 s, and a complete optimize within 60 s. P3 and G-O must show that expiry purged 5,000 entries that actually existed before the sweep (ARS-001 §9.2). R1–R8, D1, D2, F-R and G-O must pass on the bundled modernc SQLite. P3(f) and G-O measure the optimize cost before release.
+- **Confirmation (gate):** ARS-001 P1–P4 must pass at the 150,000-held-title load on the i7-10510U host or the deployment host. P3 requires no `SQLITE_BUSY` or `SQLITE_LOCKED`, the run-duration budget against an equivalent no-index run, sweep transactions (including optimize steps) of at most 1 s, and a complete optimize within 60 s. P3 and G-O must show that expiry purged 5,000 entries that actually existed before the sweep (ARS-001 §9.2). R1–R9, D1, D2, F-R and G-O must pass on the bundled modernc SQLite. P3(f) and G-O measure the optimize cost before release.
 - **If P2 still fails with option C:** look at the per-stage split that P2 reports (`begin`, `candidates`, `recheck`, `sort`, `project`, `encode`). Do not drop the Go re-check or count FTS hits as `total`. A remaining cost of the 20,000-match sort is a QS-001 matter for the requirements owner, not a reason to weaken AC7 or AC4.
 - **Revisit** if the requirements owner reads AC16 as forbidding any second copy, or widens searchable text (for example to fingerprints or channel names).
 
