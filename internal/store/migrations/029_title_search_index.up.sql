@@ -39,3 +39,7 @@ BEGIN
      WHERE rowid IN (SELECT doc_id FROM title_search_doc WHERE video_id = OLD.video_id);
     DELETE FROM title_search_doc WHERE video_id = OLD.video_id;
 END;
+
+-- Not one of the five Search objects: RecreateSearchIndex does not touch it. It
+-- lets the video search read run_video_outcome by video_id (ARS-001 §6.4, §6.5).
+CREATE INDEX run_video_outcome_video_run ON run_video_outcome(video_id, run_id);

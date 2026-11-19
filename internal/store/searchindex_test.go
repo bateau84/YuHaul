@@ -153,6 +153,11 @@ func TestSearchMigrationRecreateAndRollback(t *testing.T) {
 			t.Fatalf("DDL differs for %s: %q vs %q", name, ddl, after[name])
 		}
 	}
+	var idxDDL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='run_video_outcome_video_run'`).Scan(&idxDDL); err != nil ||
+		!strings.Contains(idxDDL, "run_video_outcome(video_id, run_id)") {
+		t.Fatalf("RecreateSearchIndex must leave run_video_outcome_video_run in place: %q %v", idxDDL, err)
+	}
 	if err := old.Up(); err == nil || errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("028 source accepted 029 database: %v", err)
 	}
@@ -160,6 +165,7 @@ func TestSearchMigrationRecreateAndRollback(t *testing.T) {
 		DROP TRIGGER transient_metadata_search_purge_insert;
 		DROP TRIGGER transient_metadata_search_purge_update;
 		DROP TRIGGER transient_metadata_search_purge_delete;
+		DROP INDEX run_video_outcome_video_run;
 		DROP TABLE title_search; DROP TABLE title_search_doc; DROP TABLE title_search_state;
 		UPDATE schema_migrations SET version=28, dirty=0; COMMIT;`)
 	if err := old.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
