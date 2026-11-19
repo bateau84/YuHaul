@@ -89,6 +89,32 @@ func TestFetchForEvaluationRealBoundRead(t *testing.T) {
 	_ = ledger
 }
 
+// The real bound read carries the live classification through to the outcome
+// and reads again even when Store A already holds the row.
+func TestFetchForEvaluationRealBoundReadLiveStatus(t *testing.T) {
+	body := `{"items":[
+	 {"id":"now","snippet":{"title":"T","channelTitle":"C","description":"","publishedAt":"2026-01-01T00:00:00Z","liveBroadcastContent":"live"},"contentDetails":{"duration":"P0D"}},
+	 {"id":"soon","snippet":{"title":"T","channelTitle":"C","description":"","publishedAt":"2026-01-01T00:00:00Z","liveBroadcastContent":"upcoming"},"contentDetails":{"duration":"P0D"}},
+	 {"id":"vod","snippet":{"title":"T","channelTitle":"C","description":"","publishedAt":"2026-01-01T00:00:00Z","liveBroadcastContent":"none"},"contentDetails":{"duration":"PT1M"}}]}`
+	m, _, binding, calls, _ := boundMetadataManager(t, 200, body, 10)
+	reqs := []metadata.InputRequirement{{VideoID: "now", Live: true}, {VideoID: "soon", Live: true}, {VideoID: "vod", Live: true}}
+	for round := 1; round <= 2; round++ {
+		out, err := m.FetchForEvaluation(context.Background(), binding, reqs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]metadata.LiveStatus{"now": "live", "soon": "upcoming", "vod": "none"}
+		for id, live := range want {
+			if out.Live[id] != live {
+				t.Errorf("round %d: Live[%s] = %q, want %q", round, id, out.Live[id], live)
+			}
+		}
+		if int(calls.Load()) != round {
+			t.Fatalf("round %d: calls=%d; a stored row must not satisfy Live", round, calls.Load())
+		}
+	}
+}
+
 func TestFetchForEvaluationRealBoundReadEmptyItemsProvesAbsence(t *testing.T) {
 	m, _, binding, _, _ := boundMetadataManager(t, 200, `{"items":[]}`, 10)
 	out, err := m.FetchForEvaluation(context.Background(), binding, evalInputs("gone"))

@@ -619,6 +619,79 @@ type VideoDetailPresence struct {
 type VideoIDs struct {
 	IDs      []string
 	Complete bool
+	// Live has one entry for every ID in IDs (BR-042, live-status ARS-001 §2).
+	Live map[string]LiveStatus
+}
+
+// LiveStatus is the parser's classification of one returned video.
+type LiveStatus string
+
+const (
+	LiveNone        LiveStatus = "none"
+	LiveNow         LiveStatus = "live"
+	LiveUpcoming    LiveStatus = "upcoming"
+	LiveUnconfirmed LiveStatus = "unconfirmed"
+)
+
+// classifyLive applies the first matching rule of live-status ARS-001 §2. It
+// never reads the duration, and keeps no raw value.
+func classifyLive(item map[string]json.RawMessage, duplicateItem map[string]bool) LiveStatus {
+	if duplicateItem["snippet"] {
+		return LiveUnconfirmed
+	}
+	snippet, snippetDups, ok := readJSONObject(item["snippet"])
+	if !ok || len(snippetDups) > 0 {
+		return LiveUnconfirmed
+	}
+	lbc, ok := jsonString(snippet["liveBroadcastContent"])
+	if !ok {
+		return LiveUnconfirmed
+	}
+	switch lbc {
+	case "live":
+		return LiveNow
+	case "upcoming":
+		return LiveUpcoming
+	case "none":
+	default:
+		return LiveUnconfirmed
+	}
+	rawDetails, has := item["liveStreamingDetails"]
+	if !has && !duplicateItem["liveStreamingDetails"] {
+		return LiveNone
+	}
+	if duplicateItem["liveStreamingDetails"] {
+		return LiveUnconfirmed
+	}
+	details, detailDups, ok := readJSONObject(rawDetails)
+	if !ok || len(detailDups) > 0 {
+		return LiveUnconfirmed
+	}
+	endRaw, hasEnd := jsonString(details["actualEndTime"])
+	if !hasEnd {
+		return LiveUnconfirmed
+	}
+	end, err := parseTime(endRaw)
+	if err != nil {
+		return LiveUnconfirmed
+	}
+	if _, present := details["activeLiveChatId"]; present {
+		return LiveUnconfirmed
+	}
+	if _, present := details["concurrentViewers"]; present {
+		return LiveUnconfirmed
+	}
+	if rawStart, present := details["actualStartTime"]; present {
+		startRaw, ok := jsonString(rawStart)
+		if !ok {
+			return LiveUnconfirmed
+		}
+		start, err := parseTime(startRaw)
+		if err != nil || start.After(end) {
+			return LiveUnconfirmed
+		}
+	}
+	return LiveNone
 }
 
 // GetVideosWithReturnedIDs fetches at most 50 distinct IDs and validates the
@@ -639,7 +712,7 @@ func (c *Client) GetVideosWithReturnedIDs(ctx context.Context, videoIDs []string
 		return nil, VideoIDs{}, errors.New("get videos: expected 1 to 50 distinct IDs")
 	}
 	q := url.Values{}
-	q.Set("part", "snippet,contentDetails")
+	q.Set("part", "snippet,contentDetails,liveStreamingDetails")
 	q.Set("id", strings.Join(videoIDs, ","))
 	q.Set("maxResults", strconv.Itoa(len(videoIDs)))
 	body, err := c.getByID(ctx, "/videos", q, OpVideosList, 1, true)
@@ -667,7 +740,7 @@ func (c *Client) GetVideosWithReturnedIDs(ctx context.Context, videoIDs []string
 	if json.Unmarshal(items, &rawItems) != nil {
 		return invalid()
 	}
-	result := VideoIDs{IDs: make([]string, 0, len(rawItems))}
+	result := VideoIDs{IDs: make([]string, 0, len(rawItems)), Live: make(map[string]LiveStatus, len(rawItems))}
 	details := make([]VideoDetail, 0, len(rawItems))
 	seen := make(map[string]bool, len(rawItems))
 	for _, raw := range rawItems {
@@ -681,6 +754,7 @@ func (c *Client) GetVideosWithReturnedIDs(ctx context.Context, videoIDs []string
 		}
 		seen[id] = true
 		result.IDs = append(result.IDs, id)
+		result.Live[id] = classifyLive(item, duplicateItem)
 		// Ambiguous detail fields are unavailable, but a reliable ID remains returned.
 		var snippet, content map[string]json.RawMessage
 		if !duplicateItem["snippet"] {

@@ -373,6 +373,7 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 		if prev, ok := need[r.VideoID]; ok {
 			r.Title, r.ChannelName = r.Title || prev.Title, r.ChannelName || prev.ChannelName
 			r.Description, r.Duration = r.Description || prev.Description, r.Duration || prev.Duration
+			r.Live = r.Live || prev.Live
 		} else {
 			order = append(order, r.VideoID)
 		}
@@ -401,7 +402,7 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 			held[row.VideoID] = row
 		}
 		for _, id := range chunk {
-			if row, ok := held[id]; ok && rowSupplies(row, cutoff, need[id]) {
+			if row, ok := held[id]; ok && !need[id].Live && rowSupplies(row, cutoff, need[id]) {
 				out.Statuses[id] = FetchCurrent
 				continue
 			}
@@ -477,6 +478,14 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 				complete = false // Identity is not reliable; omission proves nothing.
 			}
 			returned[id] = true
+		}
+		for id, live := range res.Live {
+			if requested[id] && returned[id] {
+				if out.Live == nil {
+					out.Live = make(map[string]LiveStatus)
+				}
+				out.Live[id] = live
+			}
 		}
 		var save []TransientMetadata
 		details := make(map[string]TransientMetadata, len(res.Details))

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
+	"github.com/bateau84/YuHaul/internal/youtube"
 )
 
 // TransientMetadata is a single Store A record.
@@ -78,7 +79,12 @@ type FetchResult struct {
 	// Complete is true only for a validated response, so an omitted ID is
 	// proof of absence.
 	Complete bool
+	// Live has one classification per Returned id (BR-042).
+	Live map[string]LiveStatus
 }
+
+// LiveStatus is the live-status classification of one returned video.
+type LiveStatus = youtube.LiveStatus
 
 // BoundFetcher reads metadata by ID through the shared bound, quota-accounted
 // read seam, using the caller's authorization binding.
@@ -106,6 +112,8 @@ const (
 type InputRequirement struct {
 	VideoID                                   string
 	Title, ChannelName, Description, Duration bool
+	// Live forces a read: a stored row never satisfies it.
+	Live bool
 }
 
 // ReadFacts preserves the typed facts of a failed metadata read for the run
@@ -135,6 +143,9 @@ type ReadFacts struct {
 type FetchOutcome struct {
 	// Statuses has one entry per requested video.
 	Statuses map[string]FetchStatus
+	// Live holds the classification of each ID returned by a read in this
+	// call. It is reported alongside Statuses, not merged into them.
+	Live map[string]LiveStatus
 	// Read is the first read failure that suspended fetching, or nil.
 	Read *ReadFacts
 	// Attempts is the number of admitted by-ID sends; a refusal or failure

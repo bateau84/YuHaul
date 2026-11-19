@@ -715,7 +715,7 @@ func (f *metadataFetcher) FetchMetadataBound(ctx context.Context, binding auth.A
 	if err != nil {
 		return metadata.FetchResult{}, fmt.Errorf("metadata fetcher: get videos by id: %w", err)
 	}
-	out := metadata.FetchResult{Returned: returned.IDs, Complete: returned.Complete, Details: make([]metadata.TransientMetadata, 0, len(details))}
+	out := metadata.FetchResult{Returned: returned.IDs, Complete: returned.Complete, Live: returned.Live, Details: make([]metadata.TransientMetadata, 0, len(details))}
 	for _, d := range details {
 		m := metadata.TransientMetadata{VideoID: d.ID}
 		if d.Present.Title {
