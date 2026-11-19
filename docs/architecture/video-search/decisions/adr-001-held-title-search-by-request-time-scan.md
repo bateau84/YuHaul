@@ -23,6 +23,7 @@ History:
 - 2026-11-12: the write-cost spike failed with secure-delete on (commit `acf141b`, ARS-001 §10.10). Decision O5 opened.
 - 2026-11-16: **O5 closed with S1.** The user chose S1: secure-delete off, plus an FTS5 optimize after each sweep. The choice was relayed to the architect by the coordinating session. Secure-delete is removed from the contract.
 - 2026-11-18: ARS-001 clarifies destination purges on ID replacement, cancellation-safe transaction cleanup, and proof of the expiry workload and no-index control. S1 and release gates are unchanged. Targeted recheck is pending.
+- 2026-11-19: ARS-001 §10.4 moves the startup recreate, reconcile and optimize out of `store.Open` into `metadata.PrepareSearchIndex`, called by `cmd/server` right after `store.Open` and before any service, worker or listener starts (coder result `943f7124`). The earlier premise that `metadata` imports only `quota` no longer holds: it imports `auth`, `youtube` and `quota`, so `store` → `metadata` closes test import cycles. Constraint 12 records the boundary. Option C, S1 and migration 029 are unchanged.
 - 2026-11-19: ARS-001 §10.5 extends write-lock-first to `Expire` and `Refresh`, because 029's FTS5 load makes their first trigger-firing write a read-then-write upgrade that skips `_busy_timeout`. Test R9 joins the gate. This decision, S1 and migration 029 are unchanged.
 
 Get an independent critique of §10 before implementation.
@@ -73,7 +74,7 @@ The result is `total: 3` and those 3 rows, newest discovery first, the same answ
     - `discovery.Engine.upsertTransientMetadata`, a raw `INSERT … ON CONFLICT DO UPDATE` inside the discovery transaction (`internal/discovery/engine.go` lines 484–508).
   - The sweep is `metadata.Manager.ExpireStale`. `RunLifecycle` calls it once at the start of every production run (`internal/pipeline/pipeline.go` line 408). If it fails, the run logs a warning and continues.
   - `store.Open` runs migrations and then a Go backfill (`BackfillRouteIdentities`) before any caller serves requests. This is the precedent for a Go-side index build.
-  - Package imports: `metadata` imports only `quota` among internal packages; `store` imports none. So `store` → `metadata` and `discovery` → `metadata` create no cycle.
+  - Package imports (as read on 2026-11-12): `metadata` imported only `quota` among internal packages; `store` imports none. **Superseded 2026-11-19:** `metadata` now imports `auth`, `quota`, `titlekey` and `youtube`. `store` → `metadata` causes no production cycle, but it breaks the in-package tests of `quota` and `auth` that import `store` (coder result `943f7124`). Constraint 12 and ARS-001 §10.4 therefore keep `store` free of `metadata`. `discovery` → `metadata` is still acyclic.
   - `go.mod`: `modernc.org/sqlite v1.58.0` bundles SQLite 3.53.4, which has FTS5, the trigram tokenizer (3.34+), `secure-delete` (3.42+) and contentless-delete (3.43+).
 - **Experiment, this session.** SQLite 3.46.1 CLI, scratch files only.
   - A regular FTS5 table with `secure-delete = 1` loses a deleted row's trigram bytes from `_data` immediately. A contentless-delete table with `secure-delete = 1` keeps them in a segment behind a tombstone. (Secure-delete was later dropped for cost; see O5.)
@@ -90,7 +91,7 @@ The result is `total: 3` and those 3 rows, newest discovery first, the same answ
 | BR-038 AC7 | The index is only a prefilter. Every candidate is re-checked with the ARS-001 §5 matcher (`Key`, full case folding, literal, no match that ends before a combining mark). The index text and the query are both `Key` output, so the prefilter never misses a true match (§10.5 proof). |
 | AC6 | A typed ID that is not found is name-searched through the same path. An 11-character key always uses the index. |
 | AC11, AC18 | The match list is built from re-checked rows only. Sorting, cursors, `page=n` and `total` are unchanged (ARS-001 §7). `total` never uses an FTS count. |
-| AC14, AC15 | Search still runs in one read-only transaction with no YouTube dependency. Only the existing metadata writers, the store opener and the sweep write the index. Search never writes it. |
+| AC14, AC15 | Search still runs in one read-only transaction with no YouTube dependency. Only the existing metadata writers, the startup step `metadata.PrepareSearchIndex` and the sweep write the index. Search never writes it. |
 | AC16 | Each index entry lives no longer than its source title. A purge trigger removes it logically in the same statement that clears, changes, replaces or deletes the title. Its trigrams leave the live index segments at the next complete optimize, after the next sweep at the latest (ARS-001 I2b). The Go re-check at the request cutoff stops a title that is no longer held from being found before the sweep runs. Retention tests R1–R8 and G-O (ARS-001 §10.11) check this, within the limits stated there. |
 | AC17, QS-001 | Cost grows with the number of hits, at most about 20,000 per QS-001, not with the number of held titles. P1–P4 rerun at the 150,000 seed is the gate (ARS-001 §9.2). |
 
@@ -128,7 +129,7 @@ Rejected, as before. It folds only ASCII letters (fails AC7), and a leading `%` 
   - a document map `title_search_doc(doc_id INTEGER PRIMARY KEY, video_id TEXT UNIQUE)` that supplies stable integer rowids;
   - **adds** are explicit Go writes in the same transaction as the title write, because only Go can compute `Key`;
   - **Removals** are SQL triggers on `transient_metadata`: before insert, after update and after delete. On an ID move, the update trigger purges both the old and destination entries, including when `UPDATE OR REPLACE` silently deletes the destination with recursive triggers off;
-  - a Go **reconcile** at `store.Open` and at the sweep removes entries that are not indexable and adds missing ones;
+  - a Go **reconcile** at startup (since 2026-11-19 `metadata.PrepareSearchIndex`, called by `cmd/server`; first designed in `store.Open`) and at the sweep removes entries that are not indexable and adds missing ones;
   - an incremental FTS5 **optimize** (`merge` steps, one short write-lock-first transaction each) after every sweep and after every reconcile that removes entries, so removed trigrams leave the segments;
   - search sends `Key(text)` as a quoted FTS5 phrase and re-checks every hit in Go.
 - *Benefits:* cost grows with the number of hits. AC7 semantics stay in one Go function. Retention is enforced in SQL for every writer.
@@ -193,6 +194,7 @@ The following constraints are part of the design:
 9. **Rebuild only by drop-and-recreate.** Never by `DELETE` of every entry, which leaves every trigram behind delete markers until an optimize, and never by FTS5 `'rebuild'`.
 10. **Reconcile, recreate and optimize steps take the write lock first** (`BEGIN IMMEDIATE` on a dedicated connection). Cleanup does not depend on the caller's canceled context, and a connection with unconfirmed transaction closure is discarded, not pooled. These writes are bounded by `IndexWriteBatch` rows per reconcile batch or `OptimizeMergePages` pages per optimize step; recreate remains a single DDL transaction.
 11. **Key version.** Search uses the index only when `title_search_state.key_version` equals `titlekey.Version()`.
+12. **Startup step and package boundary.** `cmd/server` calls `metadata.PrepareSearchIndex` right after `store.Open` and before it builds any service or starts the scheduler, workers or listener. A startup error aborts the process. `store` never imports `metadata`, nor any package that depends on it. The index code stays in `metadata` with the held rule it uses. Moving it to a lower package is allowed only together with `LocalRow`, `ProjectLocal`, `Held` and `ParseLocalTime`, never as a copy of the rule (ARS-001 §10.4).
 
 ## Consequences
 
@@ -205,7 +207,8 @@ The following constraints are part of the design:
   - discovery, refresh and expiry each do extra index work (about 0.2 ms per purge with secure-delete off), and each sweep ends with an optimize whose cost is not yet measured;
   - a removed title's trigrams stay in the index segments, invisible to queries, until the next complete optimize;
   - metadata writes now fail when the index is damaged, until it is recreated;
-  - `store.Open` runs a reconcile, which at first start after 029 folds and inserts every held title;
+  - server startup runs a reconcile, which at first start after 029 folds and inserts every held title;
+  - `store.Open` alone does not build the index: other openers and tests see the scan path until they call `metadata.PrepareSearchIndex` or a sweep runs;
   - the sweep gains a reconcile pass of about one scan of the index map;
   - there are now two candidate queries (indexed and scan), and they must agree (test D1).
 - **Neutral:** paging, cursors, `total`, the HTTP contract and the SPA are unchanged.
