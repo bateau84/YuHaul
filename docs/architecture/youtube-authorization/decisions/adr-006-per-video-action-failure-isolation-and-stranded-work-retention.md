@@ -3,7 +3,7 @@ type: decision
 title: ADR-006 — Per-Video Action Failure Isolation and Stranded-Work Retention
 description: A handled per-video failure, including a guard-blocked target, is recorded and retained while independent videos continue; a run-stopping failure hands every unfinished video to a retained sink before the run becomes failed.
 tags: [architecture, pipeline, failure-semantics, work-preservation, idempotency, recovery]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** decided technical contract. Implemented 2026-11-09 with the ten required tests (`internal/pipeline/failure_isolation_test.go`, `integration` build tag). Independent final review (round 4, 2026-11-09; reviewer session `ses_e3e8dc3feffeedsw0eB59kxvM3`, Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`) verified this decision, with ADR-005 and ADR-007 and their follow-up fixes, on the assembled binary using child-process kill and SIGTERM tests. It found no material defect. Required tests 2, 3, 5, 6, 8, 9 and 10 are integration-only: they run under the `integration` build tag and have no default-suite proof. Cancellation handling (§2 case 1 and its `interrupted` outcome) belongs to [ADR-007](adr-007-asynchronous-startup-resume-and-shutdown-interruption.md) and was implemented with it on 2026-11-09: `failRun` now interrupts a run whose context ended, with no sweep. This decision does not authorize live operations.
@@ -96,11 +96,13 @@ In the retry path, cases 3 and 5 keep their existing `processRetryVideo` behavio
 For every production run-stopping failure in any phase, except cases 2.1 and 2.2, `failRun` must first run a retention sweep:
 
 1. **Select unfinished members:** take the run's candidate set (`listRunVideos`). Exclude videos whose processing state is `completed`, and exclude videos that already have a committed final outcome for this run (accepted, rejected, excluded, deferred or failed).
-2. **Video owned by a live retry receipt of this run** (`deferred_item`/`error_entry` `status='retrying'` with `retry_run_id` = this run): return the still-owned group to `pending` through the existing exact-receipt requeue. Preserve the original IDs, `run_id`, reasons and history. Do not create a new runtime sink for it. A removed group stays removed.
-3. **Any other unfinished video:** keep one active runtime `error_entry` for (video, this run), with the bounded `diag.Reason` of the stopping cause.
+2. **Retry-origin member:** Use the [persisted claim set](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md#511-durable-retry-claim-provenance) and verify current ownership under the writer before requeueing any still-owned exact member. Preserve IDs, origin, reasons and history. Proven release or removal is not an opportunity to requeue again or create a runtime sink. Do not acknowledge the refused pair or substitute another row. Follow [authorization ARS-001](../specifications/ars-001-authorization-state-dispatch-and-send-guard.md#exact-retry-ownership-receipt) for typed refusal and missing or invalid provenance.
+3. **Independently verified native unfinished member:** keep one active runtime `error_entry` for (video, this run), with the bounded `diag.Reason` of the stopping cause. Absence of a current owner does not prove native origin. Durable Stop takes precedence and uses its own handoff.
 4. Commit all of steps 2–3 in **one** writer transaction (`WithRetryTx`). If the first attempt fails, retry once under `runFinalizationContext`. Call `FailRun` only after this transaction commits. If retention still fails, call `InterruptRun`, which leaves the run resumable, and never `FailRun`. This is the same order as `retainAuthorityFailure`. Implement both with one shared helper.
 
 The sweep makes **no provider calls and does not touch `playlist_send_guard`**. It writes no action evidence, increments no counters other than through the existing recompute in `FailRun`, and creates no attempt timestamps.
+
+The 2026-11-18 provenance amendment to steps 2–3 is specified, not verified by the original failure-isolation tests.
 
 ### 4. Run status
 

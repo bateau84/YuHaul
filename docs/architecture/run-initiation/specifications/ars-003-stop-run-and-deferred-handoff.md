@@ -3,10 +3,12 @@ type: specification
 title: ARS-003 — Stop Run and Deferred Handoff — Migration 025, Interfaces, HTTP and Tests
 description: Exact migration 025 and schema step, run-control and stop interfaces, the shared deferred-queue handoff, claim-ownership changes, startup classification changes, run-read fields, HTTP contracts and the full conformance test list for Stop and the amended Discard.
 tags: [architecture, specification, runs, stop, discard, deferred-queue, migration, api, concurrency]
-timestamp: 2026-11-10T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted — exact implementation contract. Implemented, review pending (2026-11-10; see §9). It realizes [ADR-004](../decisions/adr-004-stop-active-run-and-deferred-handoff.md) and amends [ARS-002](ars-002-discard-unusable-time-limit-run.md) §2.4 (Discard uses the handoff).
+
+**2026-11-18 amendment:** The [receipt-aware handoff](#21-claim-ownership) replaces owner-wide updates for in-process Stop, startup Stop and eligible run Discard. This amendment is not implemented or verified.
 
 ## What the two sides agree on
 
@@ -86,23 +88,13 @@ No table references `deferred_item`, so the rebuild is safe inside the transacti
 
 ## 2. Shared handoff (package `queue`, called by `pipeline`)
 
-```go
-// HandOffUnfinishedTx hands every unfinished video of ended run runID to the
-// deferred queue and releases all of its claims. Caller's transaction; no
-// network; no guard or action writes.
-func (s *Store) HandOffUnfinishedTx(ctx context.Context, tx *sql.Tx, runID int64, reason DeferredReason, unfinished []int64) (HandoffResult, error)
+`HandOffUnfinishedTx` takes the caller's reserved writer, the receiving run ID, a handoff reason and the authority-aware unfinished set selected under that writer. On success it returns `HandoffResult` counts (`Requeued`, `Created`, `Resolved`, `Removed`) for logs and tests. It does no network work and writes no guards or actions.
 
-type HandoffResult struct{ Requeued, Created, Resolved, Removed int } // for logs and tests
-```
+`reason` must be `DeferredReasonStoppedByUser` or `DeferredReasonDiscardedByUser`; anything else is an error. Apply the following outcomes in order, subject to §2.1's provenance checks **before** any queue write:
 
-`reason` must be `DeferredReasonStoppedByUser` or `DeferredReasonDiscardedByUser`; anything else is an error. Steps, in order:
-
-1. `UPDATE deferred_item SET status='pending', retry_after=NULL WHERE status='retrying' AND retry_run_id=?` → `Requeued`.
-2. `UPDATE error_entry SET status='resolved', resolved_at=? WHERE status='retrying' AND retry_run_id=?` → `Resolved`.
-3. For each V in `unfinished`:
-   - `UPDATE deferred_item SET retry_after=NULL WHERE video_id=V AND status='pending'`.
-   - If `EXISTS(deferred_item WHERE video_id=V AND retry_run_id=R AND status='discarded') OR EXISTS(error_entry WHERE video_id=V AND retry_run_id=R AND status='dismissed')`: `Removed++` and continue.
-   - If no `deferred_item` of V has `status='pending'`: `INSERT INTO deferred_item(video_id, run_id, deferral_reason, retry_after, retry_count, status) VALUES(V, R, reason, NULL, 0, 'pending')` → `Created++`.
+1. Set each validated Deferred claim to `pending`, `retry_after=NULL` → `Requeued`. Match exact ID, video, origin, expected status and receiving owner when writing.
+2. Resolve each validated Errors claim, setting `resolved_at` → `Resolved`. Use the same exact predicates. For unfinished work, steps 2–3 must jointly establish authorized retention or its removal exception before commit.
+3. For each authorized unfinished V, make legitimately reused pending Deferred work due now, including the independent pending row in H1(b). If exact user removal bars new work, count `Removed` and do not insert. Otherwise, if no authorized pending row exists and the run has authority to retain V, insert the existing handoff item (`video_id=V`, `run_id=R`, `deferral_reason=reason`, `retry_after=NULL`, `retry_count=0`, `status='pending'`) → `Created++`. An unexplained pending row is not proof of a committed handoff. Keep the capacity-specific limits in BR-035 AC10–16.
 4. Postcondition, checked in the transaction: no row with `status='retrying' AND retry_run_id=R` remains in either table. Otherwise return `ErrRetryOwnership`, and the caller rolls back.
 
 `retry_run_id` is not cleared (most-recent-owner marker).
@@ -115,15 +107,21 @@ type HandoffResult struct{ Requeued, Created, Resolved, Removed int } // for log
   - a claim of a final video closes its queue items with `closed_reason='final_outcome'` and returns `ClaimClosedFinal`;
   - a partly done video is not reset for re-routing;
   - a resumed run's main loop processes only members that are routable by it (`state.RoutableByRun`, ARS-006 §5).
-- Candidate claiming gains a `LIMIT` and a same-run exclusion, in the unchanged created-at order (ARS-005 §5). Step 3 and test H1(b) are unchanged; an earlier draft's change to them was withdrawn after the critic review.
+- Candidate claiming gains a `LIMIT` and a same-run exclusion, in the unchanged created-at order (ARS-005 §5). Preserve the result of H1(b): an independently authorized pending row is reused and made due, not duplicated.
 
-The unfinished set comes from `listUnfinishedRunVideosTx(ctx, tx, runID) ([]int64, error)` in package `pipeline`. It is the exact `SELECT` now inline in `sweepStrandedWork` (`authority.go:314–326`), extracted. `sweepStrandedWork` calls it and is otherwise unchanged. For a non-production run type it returns an empty set.
+The unfinished set comes from the shared pipeline selector. Its result includes enough identity to distinguish proved native work, retry-origin members and ambiguous members under §2.1; the prior ID-only list and owner-based sweep are insufficient. For a non-production run the set is empty.
 
-### 2.1 Claim ownership (package `queue`)
+### 2.1 Claim ownership
 
 - `retryOwner`: `if status == "failed" || status == "stopped" { continue }`.
 - `claimRetryGroupTx` eligibility and `ListDeferredRetryCandidates`: `r.status IN ('failed','stopped')` replaces `r.status = 'failed'`.
-- `ValidateRetryReceiptTx`: unchanged (`stopped` is not `running`/`interrupted`, so not owned).
+- `ValidateRetryReceiptTx` treats `stopped` as not owned. A marked run can still settle local handoff while `running` or `interrupted`; this never grants dispatch.
+
+**Receipt-aware settlement.** In the caller's reserved SQLite writer, classify native and retry members before mutating queues. Use [ARS-005 §5.1.1](ars-005-requeue-stranded-videos.md#511-durable-retry-claim-provenance) for retry identity, including membership with no current owner. Check exact row IDs, video, immutable origin, current status/owner and sibling conflicts. Enumerate live owner rows as a completeness check, including claims for videos already settled or final; that check may not authorize any row. An exact claim remaining on a finished video follows existing cleanup without a new sink, routing or an outcome change. For unfinished work, apply the existing pending-item reuse and due-time rules to independently authorized work; reuse an exact surviving Deferred claim where applicable. Resolve only exact still-owned Errors claims. A removed exact member stays removed; under AC12 do not create a new item for a video whose claimed work the user removed. Preserve independent legitimate pending work. A committed handoff or released claim is not a new claim; recognize its proven disposition without repeating it. Do not turn loss, missing rows or ambiguous provenance into permission to release another owner's work, adopt a sibling, or create a substitute sink. A genuinely native unfinished input retains its existing handoff.
+
+Check the no-leftover-claims and authorized-retention postconditions before writing the terminal state and counters. Unexplained live owner rows, missing required provenance, conflicting ownership or inability to establish required retention fail the transaction; do not skip them, release them blindly or mark a run settled with leftover claims. Stop keeps its marker and never resumes; startup fails with `stop_settlement` under §3.7. Eligible Discard rolls back with its existing refusal and leaves the run unchanged under [ARS-002 §2.4](ars-002-discard-unusable-time-limit-run.md#24-discardrun-algorithm). Proven removed work is not unexplained ownership; do not require a replacement for it.
+
+The handoff writes no guards or action evidence. A live invocation that proves pre-admission Stop may use the existing owned guard cleanup in [authorization ARS-001](../../youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md#authority-at-guard-preparation-and-post-admission). Startup cannot reconstruct that proof from claim provenance, the marker or missing attempt evidence. Preserve old unresolved guards and actual admitted evidence. Discard never clears a guard.
 
 ## 3. Pipeline (package `pipeline`)
 
@@ -327,7 +325,7 @@ Real migrated SQLite unless marked *unit*. "Controlled provider" = the counting 
    - no `retrying` row with `retry_run_id=R`;
    - guards and actions unchanged.
 7. **H2 idempotency:** a second handoff for R changes nothing.
-8. **H3 leftover claim:** a retrying row of R for a video with a committed outcome is released too; the postcondition holds.
+8. **H3 leftover claim:** an exact retrying member of R for a video with a committed outcome follows existing cleanup; the postcondition holds and the outcome is unchanged. An unexpected same-owner sibling instead aborts settlement with no queue, outcome or counter changes. Exercise both in-process and startup Stop and the eligible Discard transaction, with no provider calls. Include a released member with cleared owner, a removed member and an unrelated legitimate native handoff.
 9. **H4 atomicity:** a failure injected after step 2 rolls back steps 1–2.
 
 ### 7.3 Claims and next run (`internal/queue`, `internal/pipeline`)
@@ -405,4 +403,3 @@ Implemented 2026-11-10 on PR #4 (backend only; the frontend, including `web/src/
 - The scheduler-unchanged test (ARS-002 H2) was not written: `DiscardRun` and `StopRun` have no reference to the scheduler.
 - The SPA tests (E2) belong to the frontend task.
 - Live-provider, real-browser and long-run behavior are unproven.
-

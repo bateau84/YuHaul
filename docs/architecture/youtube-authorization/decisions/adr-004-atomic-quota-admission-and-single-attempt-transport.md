@@ -3,7 +3,7 @@ type: decision
 title: ADR-004 — Atomic Quota Admission and Single-Attempt Transport
 description: Shared local quota holds at fenced dispatch and HTTP/1-only transport prevent stale budget admission and hidden retries.
 tags: [architecture, decision, youtube, quota, concurrency, transport]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** decided technical contract; bounded critique approved/SOUND; implementation and runtime proof outstanding.
@@ -66,6 +66,8 @@ Extend the existing ledger instance with one process-local admission mutex and o
 7. **All spenders participate.** Every production Data API admission uses this owner, including each allowed explicit read recovery and mutation. Legacy append APIs remain for historical/test recording, not another production sending path. Existing views report committed consumption, not reservations as completed calls. Capacity preflights should include held cost. Simulation/local inspection stays provider-free and quota-free.
 
 **Lock order:** auth authority fence → quota admission mutex → bounded local database work. Quota never calls auth or enters action/queue ownership. Finalization takes quota/database locks only, releasing them before rejection observation or any auth call. No reverse quota → auth nesting or action/queue transaction while entering Dispatch. No auth/quota mutex or SQLite transaction spans OAuth/Data API waits or body reads. Local database operations remain request-context bounded. The injected admission callback is local only, never generic network-capable work. Auth does not import quota policy; composition maps concrete operation and receipt/hold facts.
+
+**Guarded POST clarification (2026-11-18):** [Authorization ARS-001, “Authority at guard preparation and POST admission”](../specifications/ars-001-authorization-state-dispatch-and-send-guard.md) requires composition to hold the bounded local SQLite writer through the provisional-to-admitted transition, in the same lock order. Quota does not own or interpret action/queue policy. Keep explicit writer lifetime through acceptance even if the request is cancelled; bound acquisition and statements and release the writer before transport. This is not an I/O extension to `Hold.AdmitIf`'s validator. The rules for read admission and actual-call finalization do not change.
 
 ### Supported single-attempt transport
 

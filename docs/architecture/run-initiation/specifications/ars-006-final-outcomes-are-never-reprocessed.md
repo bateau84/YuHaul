@@ -3,7 +3,7 @@ type: specification
 title: ARS-006 — Final Outcomes Are Never Reprocessed — Migrations 027–028, Classification, Claim Closing, Main-Loop Filter, Continuation Send, Inspection, Statistics and Tests
 description: Exact contract for BR-039. Covers migration 027 (closed_reason) and 028 (immutability triggers, with a down file); the shared final, partly-done and routable predicates; claim results and closing; the single-transaction already-final retry refusal; the production main-loop input filter; the original decision and the status-free decision authority loader; continuation with decisionRunID in the executor, loadActions and ClaimPlaylistSend; continued_actions inspection and run-attributed route statistics; handoff exclusions; the interim hold; delivery order; and the conformance tests.
 tags: [architecture, specification, outcomes, lifecycle, retry, deferred-queue, error-queue, send-guard, migration, api, statistics]
-timestamp: 2026-11-12T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted — exact implementation contract; steps 1, 2a, 2b, 3 and 4 (§1, §2–§7) implemented; the K-series tests K6, K18, K20 and K21 not yet (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
@@ -287,6 +287,8 @@ Any failure → `ErrOriginalDecisionUnavailable`. `productionAuthority` itself i
 
 ### 7.3 Executor and `ClaimPlaylistSend` (amends authorization ARS-001)
 
+**Receipt-at-send clarification (2026-11-18; implementation proof outstanding):** The §7.4 review records the earlier decision-query contract. The sender-ownership clause is now the exact-receipt check in [authorization ARS-001, “Authority at guard preparation and POST admission”](../../youtube-authorization/specifications/ars-001-authorization-state-dispatch-and-send-guard.md), not the existence of any same-owner row. Check it in the same guard writer, at the authority step before exact-target success, and again at final POST admission. This applies equally when `DecisionRunID` normalizes to 0 and the work is retry-origin. `DecisionRunID` still selects only decision authority; genuine native work needs no queue receipt. This clarification supersedes only the earlier broad sender clause and the claim that same-run **retry** authority is unchanged. C1–C5 otherwise keep their decision, evidence, order and compatibility rules; the typed Stop/removal/ownership outcomes are separate from a missing captured decision. No persisted shape changes.
+
 - **`executeDecision(ctx, runID, v, decisionRunID, matched)`:** `executeVideoActions(ctx, runID, v)` becomes the case `decisionRunID == runID` with matched = this run's decisions, unchanged. When `decisionRunID != runID`, routes for `matchedActionsComplete` come from `decisionAuthority(decisionRunID)`. The `failed` and `completed` reconciliation and the state transitions use the receiving run, as today.
 - **`Executor.execute(ctx, runID, decisionRunID, videoID, matches, binding)`:**
   - `run` and the run-level gates (`productionAuthority(runID)`, mutation safety version, binding, `admitLegacy`) use `runID`;
@@ -295,7 +297,7 @@ Any failure → `ErrOriginalDecisionUnavailable`. `productionAuthority` itself i
   - every `PlaylistSendClaim` gets `DecisionRunID: decisionRunID`.
 
   `ExecuteBound` and `Execute` pass `runID` for both run arguments. `ExecuteBoundDecision` exposes the parameter.
-- **`ClaimPlaylistSend`:** with `DecisionRunID` 0 or equal to `RunID`, it is unchanged. Otherwise the authority query is:
+- **`ClaimPlaylistSend`:** with `DecisionRunID` 0 or equal to `RunID`, use the existing same-run decision query plus the receipt rule above. Otherwise use this decision query plus the same receipt rule:
 
 ```sql
 SELECT 1 FROM route_decision rd
@@ -311,11 +313,9 @@ WHERE rd.id = ? AND rd.run_id = :decisionRun AND rd.video_id = :video AND rd.dec
       WHERE s.video_id = :video AND <prodSuccess> AND srd.run_id = :decisionRun)
   AND NOT EXISTS (SELECT 1 FROM executed_action s JOIN route_decision srd ON srd.id = s.route_decision_id
       WHERE s.video_id = :video AND <prodSuccess> AND srd.run_id <> :decisionRun)
-  AND (EXISTS (SELECT 1 FROM deferred_item d WHERE d.video_id = :video AND d.status = 'retrying' AND d.retry_run_id = :run)
-    OR EXISTS (SELECT 1 FROM error_entry e WHERE e.video_id = :video AND e.status = 'retrying' AND e.retry_run_id = :run))
 ```
 
-The receiving-run gate, the success check, `LegacySendVeto` (`receiving_run_id = RunID`, `assume_acted = 0`) and the guard insert are unchanged. The guard and the `executed_action` row get `run_id = RunID` and `route_decision_id` = the R0 decision.
+The receiving-run gate includes the Stop check from authorization ARS-001. The success check, `LegacySendVeto` (`receiving_run_id = RunID`, `assume_acted = 0`) and the guard insert are unchanged. The guard and the `executed_action` row get `run_id = RunID` and `route_decision_id` = the R0 decision.
 
 ### 7.4 Send-guard owner review (2026-11-12, task b39-sendguard-review, Plan revision 20)
 
