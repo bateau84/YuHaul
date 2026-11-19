@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
@@ -141,8 +140,6 @@ type Result struct {
 // locally and nothing stopped the scan (BR-002 AC8). It carries the registered
 // diagnostic code no_source_scanned.
 var ErrNoSourceScanned = diag.WithCode(errors.New("discovery: no channel was scanned successfully"), "no_source_scanned")
-
-var youtubeChannelID = regexp.MustCompile(`^UC[A-Za-z0-9_-]{22}$`)
 
 // Run discovers new videos and persists them as not_yet_evaluated. It returns
 // a summary of what was found and how much quota was consumed.
@@ -354,8 +351,25 @@ func isSourceLocal(ctx context.Context, err error) bool {
 	return true
 }
 
-// logSourceSkipped records the one WARN per skipped source (ADR-001 D7). It
-// never logs err, the uploads playlist ID, a page token, the channel title or
+// recordSourceFailure commits the durable incident row for channelID in its own
+// short transaction (ARS-002 section 2), with no network I/O inside it.
+func (e *Engine) recordSourceFailure(ctx context.Context, runID int64, channelID string) error {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin source failure transaction: %w", err)
+	}
+	if err := state.RecordUploadsSourceFailureTx(ctx, tx, runID, channelID, time.Now()); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit source failure: %w", err)
+	}
+	return nil
+}
+
+// logSourceSkipped records the one WARN per skipped source (ADR-001 D7), after
+// its incident row has committed. It never logs err, the uploads playlist ID, a page token, the channel title or
 // a URL.
 func (e *Engine) logSourceSkipped(ctx context.Context, runID int64, ch youtube.Channel, err error, pagesDiscarded int) {
 	attrs := []any{
@@ -364,12 +378,8 @@ func (e *Engine) logSourceSkipped(ctx context.Context, runID int64, ch youtube.C
 		"pages_discarded", pagesDiscarded,
 	}
 	// The validated channel ID may appear in this one server-log record (G3,
-	// accepted). Anything that fails validation is withheld.
-	if youtubeChannelID.MatchString(ch.ID) {
-		attrs = append(attrs, "source_channel_id", ch.ID)
-	} else {
-		attrs = append(attrs, "source_channel_id_valid", false)
-	}
+	// accepted). Only a valid ID is ever isolated, so only a valid ID is logged.
+	attrs = append(attrs, "source_channel_id", ch.ID)
 	var ref int64
 	if qerr := e.db.QueryRowContext(ctx, `SELECT id FROM channel WHERE channel_id = ?;`, ch.ID).Scan(&ref); qerr == nil {
 		attrs = append(attrs, "source_channel_ref", ref)
@@ -389,9 +399,23 @@ func (e *Engine) fetchNewVideos(ctx context.Context, runID int64, client *youtub
 	// The budget check exits only the page loop; later channels are refused
 	// before any request, so they are never "attempted".
 	listed := make(map[string]bool)
+	// A resumed run repeats discovery. A source already recorded as failed in
+	// this run is not asked again and counts as attempted and failed locally.
+	var recorded map[string]bool
+	if isolate {
+		var err error
+		if recorded, err = state.PermanentSourceFailureChannels(ctx, e.db, runID); err != nil {
+			return nil, fmt.Errorf("discovery: %w", err)
+		}
+	}
 	for _, ch := range channels {
 		if ch.UploadsPlaylistID == "" {
 			e.logger.DebugContext(ctx, "discovery: channel has no uploads playlist")
+			continue
+		}
+		if recorded[ch.ID] {
+			result.SourcesAttempted++
+			result.SourcesFailedLocal++
 			continue
 		}
 		watermark, err := e.channelWatermark(ctx, ch.ID)
@@ -422,7 +446,14 @@ func (e *Engine) fetchNewVideos(ctx context.Context, runID int64, client *youtub
 					result.ScanStopped = true
 					break
 				}
-				if isolate && isSourceLocal(ctx, err) {
+				// A skip that cannot be recorded must not happen: an invalid
+				// channel ID is not isolated, and a failed insert fails the
+				// run (ARS-002 section 2). The reason is fixed by
+				// isSourceLocal and is in diag's provider-reason set.
+				if isolate && isSourceLocal(ctx, err) && state.ValidSourceChannelID(ch.ID) {
+					if rerr := e.recordSourceFailure(ctx, runID, ch.ID); rerr != nil {
+						return nil, fmt.Errorf("discovery: record source failure for %s: %w", ch.ID, rerr)
+					}
 					result.SourcesFailedLocal++
 					e.logSourceSkipped(ctx, runID, ch, err, pages)
 					skipped = true

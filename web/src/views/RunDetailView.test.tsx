@@ -3,6 +3,7 @@ import { act, render, screen, waitFor, fireEvent, within } from '@testing-librar
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { RunDetailView, RUN_POLL_INTERVAL_MS } from './RunDetailView'
 import { ToastProvider } from '../components/ToastProvider'
+import * as sourceApi from '../api/source-failures'
 import type { Run, RunStatus, VideoFinalOutcome, VideoOutcome } from '../types'
 
 const mockGetRun = vi.fn()
@@ -339,42 +340,56 @@ describe('RunDetailView outcome filter (BR-032 AC5)', () => {
     expect(screen.queryByText('No videos match the current filters.')).not.toBeInTheDocument()
   })
 
-  describe('incomplete discovery note (discovery ADR-001 D6)', () => {
-    const NOTE = /Discovery was incomplete/
+  describe('channel scan coverage (discovery ARS-002)', () => {
+    afterEach(() => vi.restoreAllMocks())
+    const CH_B = `UC${'B'.repeat(22)}`
+    const row = {
+      id: 5, run_id: 7, channel_id: CH_B, channel_name: 'Channel B', occurred_at: '2026-11-20T12:00:00Z',
+      category: 'permanent' as const, operation: 'playlist_items_list' as const, http_status: 404, reason: 'playlistNotFound',
+    }
 
-    it('shows a non-error note on a completed run and does not call the run failed', async () => {
-      mockGetRun.mockResolvedValue({ ...runFixture, discovery_incomplete: true })
+    it('lists the failed channel on a completed run, beside the unchanged "Run completed" status', async () => {
+      vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue({ items: [row], next_before_id: null })
+      mockGetRun.mockResolvedValue(runFixture)
       serveVideos([])
       renderView()
 
-      const note = await screen.findByTestId('discovery-incomplete')
-      expect(note).toHaveTextContent(NOTE)
-      expect(note).toHaveTextContent('playlist not found')
-      expect(note).toHaveTextContent('polled again on the next run')
+      expect(await screen.findByRole('heading', { name: 'Some channels could not be scanned. Results are incomplete.' })).toBeInTheDocument()
+      expect(screen.getByText('Channel B')).toBeInTheDocument()
       expect(screen.getByText('Run completed')).toBeInTheDocument()
       expect(screen.queryByText('Run failed')).not.toBeInTheDocument()
     })
 
-    it.each([
-      ['a clean run', { discovery_incomplete: false }],
-      ['an older server that omits the field', {}],
-      ['a failed run (legacy Run 52 style keeps its stored reason)', { status: 'failed' as const, discovery_incomplete: true, interrupt_reason: 'diag:v1 phase=discovery operation=discover code=provider_error status=404 reason=playlistNotFound' }],
-    ])('shows no note for %s', async (_name, patch) => {
-      mockGetRun.mockResolvedValue({ ...runFixture, ...patch })
+    it('says nothing about channels for a run with no recorded failure', async () => {
+      const spy = vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue({ items: [], next_before_id: null })
+      mockGetRun.mockResolvedValue(runFixture)
       serveVideos([])
       renderView()
 
-      await screen.findByText(/Run (completed|failed)/)
-      expect(screen.queryByTestId('discovery-incomplete')).not.toBeInTheDocument()
+      await screen.findByText('Run completed')
+      await waitFor(() => expect(spy).toHaveBeenCalledWith(7, { beforeId: undefined }))
+      expect(screen.queryByText(/channels/i)).not.toBeInTheDocument()
     })
 
-    it('renders no_source_scanned on a failed run as the accepted sentence', async () => {
+    it('does not read channel scans for a dry run', async () => {
+      const spy = vi.spyOn(sourceApi, 'getRunSourceFailures')
+      mockGetRun.mockResolvedValue({ ...runFixture, run_type: 'dry_run', videos_selected: 1, videos_evaluated: 1 })
+      serveVideos([])
+      renderView()
+
+      await screen.findByText('Run completed')
+      expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('renders no_source_scanned as the accepted sentence and lists the channel', async () => {
+      vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue({ items: [row], next_before_id: null })
       mockGetRun.mockResolvedValue({ ...runFixture, status: 'failed', interrupt_reason: 'diag:v1 phase=discovery operation=discover code=no_source_scanned' })
       serveVideos([])
       renderView()
 
-      expect(await screen.findByText('No channels were scanned successfully.')).toBeInTheDocument()
-      expect(screen.queryByTestId('discovery-incomplete')).not.toBeInTheDocument()
+      expect(await screen.findByRole('heading', { name: 'Run failed. No channels were scanned successfully.' })).toBeInTheDocument()
+      expect(screen.getByText('No channels were scanned successfully.')).toBeInTheDocument()
+      expect(screen.getByText('Channel B')).toBeInTheDocument()
     })
   })
 

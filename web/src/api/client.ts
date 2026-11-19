@@ -45,6 +45,9 @@ export { getDeferredPage } from './deferred-page'
 export { getStrandedPreview, requeueStranded } from './stranded'
 export { searchVideos, getVideo } from './video-search'
 
+// Read-only channel scan records (discovery ARS-002).
+export { getSourceFailures, getRunSourceFailures } from './source-failures'
+
 // Analytics operations are wired to the real backend.
 export {
   listChannels,

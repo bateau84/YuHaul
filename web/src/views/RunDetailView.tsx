@@ -11,6 +11,7 @@ import { DiscardRunControl } from '../components/DiscardRunControl'
 import { discardReasonSentence } from '../lib/discard-reason'
 import { useToast } from '../hooks/useToast'
 import { FailureReason } from '../components/FailureReason'
+import { ChannelCoverage } from '../components/ChannelCoverage'
 import { parseDiag } from '../lib/failure-reason'
 import { simulationExplanation, simulationMode, unavailableNoRoutesRow, unavailableRowText, videoOutcomeLabels } from '../lib/outcome'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
@@ -543,11 +544,6 @@ function RunDetailContent({ id }: { id?: string }) {
               </span>
             )}
           </div>
-          {run.status === 'completed' && run.discovery_incomplete === true && (
-            <p data-testid="discovery-incomplete" style={{ margin: '8px 0 0' }}>
-              Discovery was incomplete: at least one subscribed channel&apos;s uploads could not be read (YouTube: playlist not found). Those channels were skipped and will be polled again on the next run. The server log for this run identifies them.
-            </p>
-          )}
           {stopped && (
             <>
               <p style={{ margin: '8px 0 0' }}>
@@ -594,6 +590,10 @@ function RunDetailContent({ id }: { id?: string }) {
           )}
         </div>
       )}
+
+      {/* Channel scan coverage reads its own request; it renders nothing for a
+          run with no recorded failure. Simulation runs scan no channels. */}
+      {!mode && <ChannelCoverage run={run} />}
 
       {/* Driven only by the run read's discardable fact. Kept mounted after a
           confirmed discard so the acknowledgement survives the re-read. */}

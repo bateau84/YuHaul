@@ -68,6 +68,11 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return jsonResponse(await mock.getOverview())
   }
 
+  // Read-only channel scan records (discovery ARS-002): none by default.
+  if (method === 'GET' && (path === '/api/errors/sources' || /^\/api\/runs\/\d+\/discovery-source-errors$/.test(path))) {
+    return jsonResponse({ items: [], next_before_id: null })
+  }
+
   // Runs
   if (path === '/api/runs' && method === 'GET') {
     const runs = await mock.listRuns()

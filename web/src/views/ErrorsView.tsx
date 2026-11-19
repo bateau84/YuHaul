@@ -6,6 +6,7 @@ import { ClosedNotice, RefusalAlert } from '../components/ClosedNotice'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { FailureReason } from '../components/FailureReason'
 import { DeferredQueue } from '../components/DeferredQueue'
+import { ChannelScanErrors } from '../components/ChannelScanErrors'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
 import { categoryLabel, offersAccountStatus } from '../lib/failure-reason'
@@ -280,6 +281,8 @@ export function ErrorsView() {
               )}
             </div>
           )}
+
+          {tab === 'errors' && <ChannelScanErrors />}
 
           <ConfirmDialog
             open={confirmDismiss !== null}

@@ -57,6 +57,8 @@ type isoHarness struct {
 	logs    *bytes.Buffer
 	mu      sync.Mutex
 	reqs    map[string]int // playlist ID -> playlistItems requests
+	specs   map[string]srcSpec
+	state   *state.Store
 }
 
 func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
@@ -73,9 +75,9 @@ func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
 	require.NoError(t, err)
 
 	now := time.Now().UTC()
-	byPlaylist := map[string]srcSpec{}
+	h.specs = map[string]srcSpec{}
 	for _, s := range specs {
-		byPlaylist[s.playlist()] = s
+		h.specs[s.playlist()] = s
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/subscriptions", func(w http.ResponseWriter, r *http.Request) {
@@ -97,8 +99,8 @@ func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 	})
 	mux.HandleFunc("/playlistItems", func(w http.ResponseWriter, r *http.Request) {
-		s := byPlaylist[r.URL.Query().Get("playlistId")]
 		h.mu.Lock()
+		s := h.specs[r.URL.Query().Get("playlistId")]
 		h.reqs[s.playlist()]++
 		h.mu.Unlock()
 		page := 1
@@ -132,13 +134,58 @@ func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
 
 	st, err := state.NewStore(h.db)
 	require.NoError(t, err)
-	h.runID, err = st.CreateRun(ctx, &state.Run{StartedAt: now, RunType: state.RunTypeManual, Status: state.RunStatusRunning})
-	require.NoError(t, err)
+	h.state = st
+	h.runID = h.newRun(t)
 	h.ledger = quota.New(h.db)
 	require.NoError(t, h.ledger.SetDailyLimit(ctx, limit))
 	logger := slog.New(slog.NewTextHandler(h.logs, nil))
 	h.engine = NewEngine(service, state.NewMachine(st), h.ledger, h.db, WithBaseURL(server.URL), WithLogger(logger))
 	return h
+}
+
+func (h *isoHarness) newRun(t *testing.T) int64 {
+	t.Helper()
+	id, err := h.state.CreateRun(context.Background(), &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	return id
+}
+
+// setFailAt changes when (1-based page; 0 never) the channel's playlist fails.
+func (h *isoHarness) setFailAt(c byte, failAt int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.specs["UU"+strings.Repeat(string(c), 22)]
+	s.failAt = failAt
+	h.specs[s.playlist()] = s
+}
+
+func (h *isoHarness) requests(c byte) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reqs["UU"+strings.Repeat(string(c), 22)]
+}
+
+type failureRow struct {
+	ID                        int64
+	RunID                     int64
+	Channel, At, Category, Op string
+	Status                    int
+	Reason                    string
+}
+
+func (h *isoHarness) failureRows(t *testing.T) []failureRow {
+	t.Helper()
+	rows, err := h.db.Query(`SELECT id, run_id, channel_id, occurred_at, category, operation, http_status, reason FROM discovery_source_failure ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var out []failureRow
+	for rows.Next() {
+		var r failureRow
+		require.NoError(t, rows.Scan(&r.ID, &r.RunID, &r.Channel, &r.At, &r.Category, &r.Op, &r.Status, &r.Reason))
+		out = append(out, r)
+	}
+	require.NoError(t, rows.Err())
+	return out
 }
 
 func (h *isoHarness) run() (*Result, error) {
@@ -406,6 +453,7 @@ func TestSkipLogRecordIsSafe(t *testing.T) {
 	require.Contains(t, out, "diagnostic=\"diag:v1 phase=discovery operation=playlist_items_list code=provider_error status=404 reason=playlistNotFound\"")
 	require.Contains(t, out, "pages_discarded=1")
 	require.Contains(t, out, "source_channel_id="+chID('B'))
+	require.NotContains(t, out, "source_channel_id_valid")
 	require.NotContains(t, out, "UU"+strings.Repeat("B", 22), "uploads playlist ID")
 	require.NotContains(t, out, "p2", "page token")
 	require.NotContains(t, out, "Title "+chID('B'), "channel title")
@@ -413,15 +461,16 @@ func TestSkipLogRecordIsSafe(t *testing.T) {
 	require.NotContains(t, out, "list playlist items", "error text")
 }
 
-func TestSkipLogInvalidChannelIDIsFlagged(t *testing.T) {
+func TestInvalidChannelIDIsNotIsolated(t *testing.T) {
 	bad := notFoundSpec('B', 1, []string{"vB1"})
 	bad.id = "UCshort"
 	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), bad}, 1000)
 	_, err := h.run()
-	require.NoError(t, err)
-	out := h.logs.String()
-	require.Contains(t, out, "source_channel_id_valid=false")
-	require.NotContains(t, out, "source_channel_id=UCshort")
+	require.Error(t, err, "a skip that cannot be recorded must not happen")
+	require.NotErrorIs(t, err, ErrNoSourceScanned)
+	require.Empty(t, h.failureRows(t))
+	require.NotContains(t, h.logs.String(), "uploads source skipped")
+	require.Equal(t, 0, h.videoCount(t, "vA1"))
 }
 
 func TestSkipLogCarriesLocalRefWhenChannelRowExists(t *testing.T) {
@@ -452,4 +501,109 @@ func TestFloorIsWrittenOnlyForTheScannedChannelsOwnVideos(t *testing.T) {
 	c := h.channel(t, chID('C'))
 	require.True(t, c.exists)
 	require.False(t, c.floor.Valid, "a foreign snippet channel's floor is not advanced by another channel's scan")
+}
+
+func TestIncidentRowIsCommittedBeforeTheNextRequestAndSkipLogsAfter(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), notFoundSpec('B', 1, []string{"vB1"}), okSpec('C', []string{"vC1"})}, 1000)
+	_, err := h.run()
+	require.NoError(t, err)
+	rows := h.failureRows(t)
+	require.Len(t, rows, 1)
+	r := rows[0]
+	require.Equal(t, h.runID, r.RunID)
+	require.Equal(t, chID('B'), r.Channel)
+	require.Equal(t, "permanent", r.Category)
+	require.Equal(t, "playlist_items_list", r.Op)
+	require.Equal(t, 404, r.Status)
+	require.Equal(t, "playlistNotFound", r.Reason)
+	require.NotEmpty(t, r.At)
+	require.Equal(t, 1, h.notFoundLedgerRows(t), "the ledger row stays and is separate")
+	require.True(t, diag.ProviderReasonAdmitted(r.Reason))
+}
+
+func TestFailedIncidentWriteFailsTheRunWithoutALogOrACount(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), notFoundSpec('B', 1, []string{"vB1"}), okSpec('C', []string{"vC1"})}, 1000)
+	_, err := h.db.Exec(`CREATE TRIGGER fail_incident BEFORE INSERT ON discovery_source_failure BEGIN SELECT RAISE(ABORT, 'injected'); END`)
+	require.NoError(t, err)
+	res, err := h.run()
+	require.Error(t, err)
+	require.Nil(t, res)
+	require.Equal(t, "diag:v1 phase=discovery operation=discover code=sqlite_error sqlite=SQLITE_CONSTRAINT", diag.Reason(err, "discovery phase failed"))
+	require.NotContains(t, h.logs.String(), "uploads source skipped")
+	require.Empty(t, h.failureRows(t))
+	require.Equal(t, 0, h.requests('C'), "no further provider request after the failed write")
+}
+
+func TestSameRunResumeDoesNotAskARecordedSourceAgain(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), notFoundSpec('B', 1, []string{"vB1"})}, 1000)
+	_, err := h.run()
+	require.NoError(t, err)
+	require.Equal(t, 1, h.requests('B'))
+	first := h.failureRows(t)
+	h.logs.Reset()
+
+	res, err := h.run() // the same run id: a resumed discovery
+	require.NoError(t, err)
+	require.Equal(t, 1, h.requests('B'), "no uploads request for a recorded source")
+	require.Equal(t, 2, res.SourcesAttempted)
+	require.Equal(t, 1, res.SourcesFailedLocal)
+	require.Equal(t, first, h.failureRows(t), "no second row, and the earlier row stands")
+	require.NotContains(t, h.logs.String(), "uploads source skipped", "not logged again")
+}
+
+func TestSameRunResumeWithOnlyRecordedSourcesStillEndsNoSourceScanned(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{notFoundSpec('B', 1, []string{"vB1"})}, 1000)
+	_, err := h.run()
+	require.ErrorIs(t, err, ErrNoSourceScanned)
+	_, err = h.run()
+	require.ErrorIs(t, err, ErrNoSourceScanned)
+	require.Equal(t, 1, h.requests('B'))
+	require.Len(t, h.failureRows(t), 1)
+}
+
+func TestCrashBeforeTheInsertLeavesTheSourceToBePolledOnResume(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), notFoundSpec('B', 1, []string{"vB1"})}, 1000)
+	_, err := h.db.Exec(`CREATE TRIGGER fail_incident BEFORE INSERT ON discovery_source_failure BEGIN SELECT RAISE(ABORT, 'injected'); END`)
+	require.NoError(t, err)
+	_, err = h.run()
+	require.Error(t, err)
+	_, err = h.db.Exec(`DROP TRIGGER fail_incident`)
+	require.NoError(t, err)
+
+	_, err = h.run()
+	require.NoError(t, err)
+	require.Equal(t, 2, h.requests('B'), "a source with no row is polled again")
+	require.Len(t, h.failureRows(t), 1)
+}
+
+func TestFreshRunPollsAgainAndNeverRewritesHistory(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), notFoundSpec('B', 1, []string{"vB1"})}, 1000)
+	_, err := h.run()
+	require.NoError(t, err)
+	run1 := h.failureRows(t)
+	require.Len(t, run1, 1)
+
+	// Run 2: B still fails. It is polled again and adds its own row.
+	h.runID = h.newRun(t)
+	_, err = h.run()
+	require.NoError(t, err)
+	require.Equal(t, 2, h.requests('B'))
+	rows := h.failureRows(t)
+	require.Len(t, rows, 2)
+	require.Equal(t, run1[0], rows[0], "the earlier row is unchanged")
+	require.Equal(t, h.runID, rows[1].RunID)
+
+	// Run 3: B recovers. It is scanned, no row is added, and history stays.
+	h.setFailAt('B', 0)
+	h.runID = h.newRun(t)
+	_, err = h.run()
+	require.NoError(t, err)
+	require.Equal(t, 3, h.requests('B'))
+	require.Equal(t, rows, h.failureRows(t))
+	require.Equal(t, 1, h.videoCount(t, "vB1"))
+}
+
+func TestPlaylistNotFoundIsInDiagsProviderReasonVocabulary(t *testing.T) {
+	require.True(t, diag.ProviderReasonAdmitted("playlistNotFound"))
+	require.False(t, diag.ProviderReasonAdmitted("not-a-reason"))
 }

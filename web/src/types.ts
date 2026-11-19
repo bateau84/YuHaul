@@ -121,10 +121,6 @@ export interface Run {
   // Set by the server when a stored interrupt/failure reason existed but was
   // withheld by safe-diagnostic vetting; the raw text is never sent (ARD-001).
   failure_reason_unavailable?: boolean
-  // True when a completed production run skipped at least one subscribed
-  // channel whose uploads list YouTube reported as not found. It names no
-  // channel. Absent from older servers; treat absence as false.
-  discovery_incomplete?: boolean
   // Closed-set provenance, always present in server JSON and null when unknown
   // or legacy. Run Detail uses both only to tell a manual Run Now run that
   // stopped at its time limit apart from every other interrupted run.
@@ -783,3 +779,27 @@ export type VideoSearchResponse =
   | { kind: 'results'; results: VideoSearchPage }
 
 export type VideoSearchKind = VideoSearchResponse['kind']
+
+// One recorded failed uploads-source scan (discovery ARS-002 section 4.2).
+// A row is history: it never says whether the channel scans successfully now.
+export interface SourceFailure {
+  id: number
+  run_id: number
+  // Null when the server withheld an invalid ID.
+  channel_id: string | null
+  // The channel's current local name, not a snapshot; null when none is known.
+  channel_name: string | null
+  // UTC RFC 3339; null when unreadable.
+  occurred_at: string | null
+  category: 'permanent' | 'transient'
+  operation: 'playlist_items_list'
+  http_status: number | null
+  // A provider reason the server admitted, else null.
+  reason: string | null
+}
+
+export interface SourceFailurePage {
+  items: SourceFailure[]
+  // The last returned id, only while an older row exists.
+  next_before_id: number | null
+}

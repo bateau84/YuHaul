@@ -98,6 +98,8 @@ type RunVideoStore interface {
 	GetExecutedActionsForVideoInRun(ctx context.Context, videoID, runID int64) ([]state.ExecutedAction, error)
 	ListUnresolvedMutations(ctx context.Context, runID int64, videoIDs []int64) (map[int64][]state.UnresolvedMutation, error)
 	ListContinuedActions(ctx context.Context, runID, videoID int64) ([]state.ContinuedAction, error)
+	// ListSourceFailures serves the read-only channel scan error projections.
+	ListSourceFailures(ctx context.Context, q state.SourceFailureQuery) (*state.SourceFailurePage, error)
 }
 
 // ConfigVersionStore is the subset of config.Store used by the run handlers.
@@ -491,6 +493,9 @@ func (noopRunVideoStore) GetExecutedActionsForVideoInRun(context.Context, int64,
 func (noopRunVideoStore) ListContinuedActions(context.Context, int64, int64) ([]state.ContinuedAction, error) {
 	return nil, errors.New("run video store not configured")
 }
+func (noopRunVideoStore) ListSourceFailures(context.Context, state.SourceFailureQuery) (*state.SourceFailurePage, error) {
+	return nil, errors.New("run video store not configured")
+}
 func (noopRunVideoStore) ListUnresolvedMutations(context.Context, int64, []int64) (map[int64][]state.UnresolvedMutation, error) {
 	return nil, errors.New("run video store not configured")
 }
@@ -556,6 +561,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
 	mux.HandleFunc("GET /api/runs", s.handleListRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
+	mux.HandleFunc("GET /api/runs/{id}/discovery-source-errors", s.handleListRunSourceFailures)
 	mux.HandleFunc("GET /api/runs/{id}/videos", s.handleListRunVideos)
 	mux.HandleFunc("GET /api/runs/{id}/videos/{videoId}", s.handleGetRunVideo)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
@@ -590,6 +596,9 @@ func (s *Server) Handler() http.Handler {
 
 	// Queue handlers are served from legacy /api/errors and /api/deferred
 	// paths, plus the newer /api/queue/* namespace.
+	// The exact GET pattern is more specific than the /api/errors/ prefix, so it
+	// wins; POSTs under it still reach the queue handler and are refused there.
+	mux.HandleFunc("GET /api/errors/sources", s.handleListSourceFailures)
 	mux.Handle("/api/errors", stripPrefix("/api/errors", s.queueHandler.ErrorHandler()))
 	mux.Handle("/api/errors/", stripPrefix("/api/errors", s.queueHandler.ErrorHandler()))
 	mux.Handle("/api/deferred", stripPrefix("/api/deferred", s.queueHandler.DeferredHandler()))

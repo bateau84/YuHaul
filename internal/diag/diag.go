@@ -313,6 +313,11 @@ func isNilError(err error) bool {
 func Encode(err error, phase, operation string) string {
 	return Classify(err, phase, operation).String()
 }
+
+// ProviderReasonAdmitted reports whether reason is in the closed provider
+// reason vocabulary.
+func ProviderReasonAdmitted(reason string) bool { return providerReasons[reason] }
+
 func Safe(s string) bool { _, ok := AdmitStored(s); return ok }
 
 // GuardErrorText is the final write-boundary guard for error-derived text.
