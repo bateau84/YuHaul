@@ -266,6 +266,81 @@ describe('VideosView (design: Videos — Find a Video by Title or ID)', () => {
     expect(storageSpy[0]).not.toHaveBeenCalled()
   })
 
+  // The focus request belongs to the load that paging started. A late passive
+  // effect from the page 1 outcome must not consume it, or page 2 announces the
+  // plain count and its heading never takes focus.
+  it('announces page 2 and focuses its heading when the page 1 effects are still pending at the click', async () => {
+    const p1 = pageOf({ total: 130, total_pages: 3, last_position: 50, next_cursor: 'n1', items: [video('aaaaaaaaaaa')] })
+    const p2 = pageOf({ total: 130, total_pages: 3, number: 2, first_position: 51, last_position: 100, next_cursor: 'n2', prev_cursor: 'p2', items: [video('bbbbbbbbbbb')] })
+    let release!: (r: Response) => void
+    fetchMock
+      .mockResolvedValueOnce(json({ kind: 'results', results: p1 }))
+      .mockReturnValueOnce(new Promise<Response>((resolve) => (release = resolve)))
+    renderAt('/videos?q=title')
+    const status = () => screen.getByRole('status')
+    expect(await screen.findByText('1 video on this page.')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    // Page 1 stays out of the focus request while page 2 loads.
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
+    release(json({ kind: 'results', results: p2 }))
+
+    expect(await screen.findByText('Showing 51–100 of 130. Newest discovery first.')).toBeInTheDocument()
+    expect(status()).toHaveTextContent('Page 2, showing 51–100.')
+    expect(status()).not.toHaveTextContent('1 video on this page.')
+    await waitFor(() => expect(screen.getByRole('heading', { level: 2 })).toHaveFocus())
+  })
+
+  // Deterministic version of the race: click in the microtask that follows the
+  // page 1 commit, before React's scheduler has run that commit's passive effects.
+  it('keeps the focus request when the click lands before the page 1 passive effects have run', async () => {
+    const p1 = pageOf({ total: 130, total_pages: 3, last_position: 50, next_cursor: 'n1', items: [video('aaaaaaaaaaa')] })
+    const p2 = pageOf({ total: 130, total_pages: 3, number: 2, first_position: 51, last_position: 100, next_cursor: 'n2', prev_cursor: 'p2', items: [video('bbbbbbbbbbb')] })
+    fetchMock
+      .mockResolvedValueOnce(json({ kind: 'results', results: p1 }))
+      .mockResolvedValueOnce(json({ kind: 'results', results: p2 }))
+    const g = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    const before = g.IS_REACT_ACT_ENVIRONMENT
+    g.IS_REACT_ACT_ENVIRONMENT = false
+    const observer = new MutationObserver(() => {
+      const next = screen.queryByRole('button', { name: 'Next page' })
+      if (next) {
+        observer.disconnect()
+        next.click()
+      }
+    })
+    try {
+      observer.observe(document.body, { childList: true, subtree: true })
+      renderAt('/videos?q=title')
+      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Page 2, showing 51–100.'))
+      await waitFor(() => expect(screen.getByRole('heading', { level: 2 })).toHaveFocus())
+      expect(calls()[1]).toBe('/api/videos/search?q=title&cursor=n1')
+    } finally {
+      observer.disconnect()
+      g.IS_REACT_ACT_ENVIRONMENT = before
+    }
+  })
+
+  it('does not move focus to the heading for a plain search after paging', async () => {
+    const p1 = pageOf({ total: 130, total_pages: 3, last_position: 50, next_cursor: 'n1' })
+    const p2 = pageOf({ total: 130, total_pages: 3, number: 2, first_position: 51, last_position: 100, prev_cursor: 'p2' })
+    fetchMock
+      .mockResolvedValueOnce(json({ kind: 'results', results: p1 }))
+      .mockResolvedValueOnce(json({ kind: 'results', results: p2 }))
+      .mockResolvedValueOnce(json({ kind: 'results', results: p1 }))
+    renderAt('/videos?q=title')
+    fireEvent.click(await screen.findByRole('button', { name: 'Next page' }))
+    await screen.findByText('Showing 51–100 of 130. Newest discovery first.')
+    await waitFor(() => expect(screen.getByRole('heading', { level: 2 })).toHaveFocus())
+
+    const input = screen.getByRole('searchbox')
+    input.focus()
+    submitSearch('other')
+    await screen.findByText('Showing 1–50 of 130. Newest discovery first.')
+    expect(screen.getByRole('status')).toHaveTextContent('1 video on this page.')
+    expect(input).toHaveFocus()
+  })
+
   it('restores a page from the URL by position on reload and never puts a cursor in the URL', async () => {
     fetchMock.mockResolvedValue(
       json({ kind: 'results', results: pageOf({ number: 3, total: 130, first_position: 101, last_position: 130, prev_cursor: 'p3' }) })

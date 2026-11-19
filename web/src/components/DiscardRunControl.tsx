@@ -1,5 +1,6 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useId, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+import { focusOnAttachWithoutScroll } from '../lib/focus'
 import { ApiError } from '../api/core'
 import { discardRefusalCode, discardRun, type DiscardRefusalCode, type DiscardRunResult } from '../api/runs'
 import { discardReasonSentence } from '../lib/discard-reason'
@@ -120,15 +121,10 @@ export function DiscardRunControl({ runId, cause, onRunPage = false, available =
   const [done, setDone] = useState(false)
   const keepRef = useRef<HTMLButtonElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const ackRef = useRef<HTMLDivElement>(null)
   const inFlight = useRef(false)
   const titleId = useId()
   const descId = useId()
   const reason = discardReasonSentence(cause)
-
-  useEffect(() => {
-    if (done) ackRef.current?.focus({ preventScroll: true })
-  }, [done])
 
   function close() {
     if (inFlight.current) return
@@ -168,7 +164,7 @@ export function DiscardRunControl({ runId, cause, onRunPage = false, available =
 
   if (done) {
     return (
-      <div ref={ackRef} role="status" tabIndex={-1} className="discard-run-ack">
+      <div ref={focusOnAttachWithoutScroll} role="status" tabIndex={-1} className="discard-run-ack">
         <p>
           <strong>Discarded:</strong> run {runId} is now marked failed and will not be resumed. Its unfinished videos
           are in the deferred queue, and the next new run will process them automatically. Nothing was sent to YouTube.

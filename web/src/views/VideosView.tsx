@@ -28,7 +28,9 @@ const msgInvalidText = "Some of this text can't be read, so nothing was searched
 type Outcome =
   | { phase: 'idle' }
   | { phase: 'pending' }
-  | { phase: 'done'; response: VideoSearchResponse }
+  // focus: this load was asked for by paging or Search again, so its own result
+  // takes the heading focus. The request travels with the outcome it belongs to.
+  | { phase: 'done'; response: VideoSearchResponse; focus: boolean }
   | { phase: 'failed'; stale: boolean }
 
 function parsePage(raw: string | null): number | undefined {
@@ -115,6 +117,10 @@ export function VideosView() {
     const page = parsePage(pageParam)
     const pending = pendingCursor.current
     pendingCursor.current = null
+    // Take the focus request for this load now. A late effect from the previous
+    // outcome can no longer consume it, because only this load reads the flag.
+    const wantsFocus = focusHeading.current
+    focusHeading.current = false
     const query =
       pending && pending.page === page ? { cursor: pending.cursor } : page !== undefined ? { page } : {}
     searchVideos(trimmedQ, query)
@@ -124,12 +130,12 @@ export function VideosView() {
           navigate(`/videos/${response.video_id}`, { replace: true })
           return
         }
-        setOutcome({ phase: 'done', response })
+        setOutcome({ phase: 'done', response, focus: wantsFocus })
         if (response.kind === 'results' || (response.kind === 'id_not_found' && response.results)) {
           const r = response.results!
           const n = r.items.length
           setAnnounce(
-            focusHeading.current && r.first_position !== null && r.last_position !== null
+            wantsFocus && r.first_position !== null && r.last_position !== null
               ? `Page ${r.number}, showing ${r.first_position}–${r.last_position}.`
               : n === 1
                 ? '1 video on this page.'
@@ -149,10 +155,7 @@ export function VideosView() {
 
   // After paging, focus moves to the results heading (SC 2.4.3).
   useEffect(() => {
-    if (outcome.phase === 'done' && focusHeading.current) {
-      focusHeading.current = false
-      headingRef.current?.focus()
-    }
+    if (outcome.phase === 'done' && outcome.focus) headingRef.current?.focus()
   }, [outcome])
 
   const submit = useCallback(

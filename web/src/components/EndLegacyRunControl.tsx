@@ -1,5 +1,6 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useId, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+import { focusOnAttachWithoutScroll } from '../lib/focus'
 import { ApiError } from '../api/core'
 import { endRefusalCode, endRun, type EndRefusalCode, type EndRunResult } from '../api/runs'
 import { ModalDialog } from './ModalDialog'
@@ -79,14 +80,9 @@ export function EndLegacyRunControl({ runId, savedStatus, available = true, onSe
   const [done, setDone] = useState(false)
   const keepRef = useRef<HTMLButtonElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const ackRef = useRef<HTMLDivElement>(null)
   const inFlight = useRef(false)
   const titleId = useId()
   const descId = useId()
-
-  useEffect(() => {
-    if (done) ackRef.current?.focus({ preventScroll: true })
-  }, [done])
 
   function close() {
     if (inFlight.current) return
@@ -125,7 +121,7 @@ export function EndLegacyRunControl({ runId, savedStatus, available = true, onSe
 
   if (done) {
     return (
-      <div ref={ackRef} role="status" tabIndex={-1} className="discard-run-ack">
+      <div ref={focusOnAttachWithoutScroll} role="status" tabIndex={-1} className="discard-run-ack">
         <p>
           <strong>Marked as ended:</strong> run {runId} is now marked failed. You ended it as a legacy run, and it will
           not be resumed. Its unfinished videos were not processed and were not added to any queue. Nothing was sent to

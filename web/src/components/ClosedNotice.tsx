@@ -1,6 +1,6 @@
-import { useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { CircleCheck } from 'lucide-react'
+import { focusOnAttach } from '../lib/focus'
 import { closedText } from '../lib/final-outcome'
 
 // A queue entry closed because its video already has a final outcome (BR-039).
@@ -25,12 +25,8 @@ export function ClosedNotice({ outcome, videoId, target }: { outcome: string | n
 // Persistent refusal shown where the row was. The Retry button that was
 // focused is gone, so focus moves to the alert instead of falling to <body>.
 export function RefusalAlert({ text }: { text: string }) {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    ref.current?.focus()
-  }, [])
   return (
-    <div ref={ref} tabIndex={-1} role="alert" className="form-error">
+    <div ref={focusOnAttach} tabIndex={-1} role="alert" className="form-error">
       {text}
     </div>
   )

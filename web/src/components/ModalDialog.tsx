@@ -34,7 +34,13 @@ export function ModalDialog({
       document.activeElement instanceof HTMLElement ? document.activeElement : null
     const target = initialFocusRef?.current ?? dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
     target?.focus()
-    return () => previouslyFocused?.focus()
+    // Give focus back only if it was lost with the dialog (it is on <body>). Focus that
+    // something else took when the dialog closed, such as an acknowledgement attached in
+    // the same commit, is kept.
+    return () => {
+      const active = document.activeElement
+      if (!active || active === document.body) previouslyFocused?.focus()
+    }
   }, [initialFocusRef])
 
   useEffect(() => {
