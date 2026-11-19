@@ -8,6 +8,8 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-19
 
+- Decided two points from the Errors implementation review in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the `View account status` link is limited to `oauth_error`, `authorization_unavailable`, `authorization_changed` and `credential_persistence_failed`; and rows with the same title show `Video ID: {id}` and add `, video {id}` to their control names. Design only.
+
 - Corrected the Errors “Other states” paragraph in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): raw non-`diag:v1` text is never shown (`Reason unavailable.`), as ARS-001 returns normalized text or nothing. Confirmed from the code that the `api_error` category means a YouTube API error response only, so its label stays. Design only.
 
 - Added the focus rule after a confirmed Errors `Dismiss` to [admin interface design](/docs/design/yuhaul-admin-ui-design.md): focus moves to the next row, or to the page heading when no next row exists, matching Deferred. Extended it to the ordinary Errors `Remove` button, to match the shipped code, and to a successful `Retry` (not yet implemented; planned with the Errors reason-presentation work). Design only.

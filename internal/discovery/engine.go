@@ -138,10 +138,13 @@ func (e *Engine) Run(ctx context.Context, runID int64) (*Result, error) {
 		return e.ledger.RecordCalls(ctx, sql.NullInt64{Int64: runID, Valid: true}, quota.Operation(op), calls)
 	}
 	client := e.factory(ctx, token, recorder)
-	return e.runWithClient(ctx, runID, client)
+	// The unguarded client cannot use the by-ID read, so this legacy path (no
+	// production caller; the pipeline uses RunBound whenever it has a binding)
+	// cannot learn true field presence.
+	return e.runWithClient(ctx, runID, client, false)
 }
 
-func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube.Client) (*Result, error) {
+func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube.Client, byID bool) (*Result, error) {
 
 	result := &Result{}
 	runStart := time.Now().UTC()
@@ -161,7 +164,7 @@ func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube
 		return nil, err
 	}
 
-	if err := e.prefetchMetadata(ctx, client, newVideos, result); err != nil {
+	if err := e.prefetchMetadata(ctx, client, newVideos, result, byID); err != nil {
 		return nil, err
 	}
 
@@ -223,7 +226,7 @@ func (e *Engine) RunBound(ctx context.Context, runID int64, binding auth.Authori
 			opts = append(opts, youtube.WithBaseURL(e.baseURL))
 		}
 		client := youtube.NewAuthorizedClient(ctx, resolve, opts...)
-		return e.runWithClient(ctx, runID, client)
+		return e.runWithClient(ctx, runID, client, true)
 	}
 }
 
@@ -294,6 +297,9 @@ type discoveredVideo struct {
 
 func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, channels []youtube.Channel, result *Result) ([]*discoveredVideo, error) {
 	var out []*discoveredVideo
+	// A video listed twice (in one playlist page or by two channels) is
+	// discovered once; persisting it twice would violate video.video_id.
+	listed := make(map[string]bool)
 	for _, ch := range channels {
 		if ch.UploadsPlaylistID == "" {
 			e.logger.DebugContext(ctx, "discovery: channel has no uploads playlist")
@@ -328,9 +334,10 @@ func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, cha
 				if err != nil {
 					return nil, err
 				}
-				if exists {
+				if exists || listed[it.VideoID] {
 					continue
 				}
+				listed[it.VideoID] = true
 				out = append(out, &discoveredVideo{
 					VideoID:      it.VideoID,
 					ChannelID:    it.ChannelID,
@@ -359,14 +366,29 @@ func (e *Engine) fetchNewVideos(ctx context.Context, client *youtube.Client, cha
 	return out, nil
 }
 
-func (e *Engine) prefetchMetadata(ctx context.Context, client *youtube.Client, videos []*discoveredVideo, result *Result) error {
+// prefetchMetadata attaches videos.list details to the discovered videos. A
+// video whose batch was refused, skipped or unusable keeps no details, so its
+// description and duration are stored as not supplied. With byID the read keeps
+// true field presence (a real empty description or P0D duration stays a real
+// value). Without it (the legacy unguarded client) GetVideos cannot tell an
+// omitted field from an empty one, so only a non-empty string or non-zero
+// duration counts as supplied.
+func (e *Engine) prefetchMetadata(ctx context.Context, client *youtube.Client, videos []*discoveredVideo, result *Result, byID bool) error {
 	ids := make([]string, 0, len(videos))
+	seen := make(map[string]bool, len(videos))
 	for _, v := range videos {
-		ids = append(ids, v.VideoID)
+		if !seen[v.VideoID] {
+			seen[v.VideoID] = true
+			ids = append(ids, v.VideoID)
+		}
+	}
+	batchSize := e.batchSize
+	if byID && batchSize > 50 {
+		batchSize = 50
 	}
 
-	for i := 0; i < len(ids); i += e.batchSize {
-		end := i + e.batchSize
+	for i := 0; i < len(ids); i += batchSize {
+		end := i + batchSize
 		if end > len(ids) {
 			end = len(ids)
 		}
@@ -374,19 +396,41 @@ func (e *Engine) prefetchMetadata(ctx context.Context, client *youtube.Client, v
 			e.logger.WarnContext(ctx, "discovery: insufficient quota for metadata fetch", "diagnostic", diag.Encode(err, "discovery", "videos_list"))
 			break
 		}
-		batch, err := client.GetVideos(ctx, ids[i:end])
+		var batch []youtube.VideoDetail
+		var err error
+		if byID {
+			batch, _, err = client.GetVideosWithReturnedIDs(ctx, ids[i:end])
+		} else {
+			batch, err = client.GetVideos(ctx, ids[i:end])
+			for j := range batch {
+				d := &batch[j]
+				d.Present = youtube.VideoDetailPresence{
+					Title: d.Title != "", ChannelTitle: d.ChannelTitle != "",
+					Description: d.Description != "", Duration: d.DurationSeconds != 0,
+				}
+			}
+		}
 		if err != nil {
-			if errors.Is(err, auth.ErrQuotaRefused) {
-				break
+			var readErr *youtube.ReadError
+			var invalid *youtube.InvalidResponseError
+			switch {
+			case errors.Is(err, auth.ErrQuotaRefused):
+				return nil
+			case byID && !errors.As(err, &readErr) && errors.As(err, &invalid):
+				// An unusable response means "not supplied" for this batch only.
+				e.logger.WarnContext(ctx, "discovery: metadata response unusable", "count", end-i)
+				continue
 			}
 			return fmt.Errorf("discovery: get videos metadata: %w", err)
 		}
+		byVideo := make(map[string]youtube.VideoDetail, len(batch))
 		for _, d := range batch {
-			for _, v := range videos {
-				if v.VideoID == d.ID {
-					v.Metadata = &d
-					break
-				}
+			byVideo[d.ID] = d
+		}
+		for _, v := range videos {
+			if d, ok := byVideo[v.VideoID]; ok {
+				d := d
+				v.Metadata = &d
 			}
 		}
 	}
@@ -405,20 +449,34 @@ func (e *Engine) persist(ctx context.Context, runID int64, runStart time.Time, v
 			return fmt.Errorf("discovery: persist video %s: %w", v.VideoID, err)
 		}
 
+		// The playlist snippet is real provider data, so it supplies title,
+		// channel name, thumbnail and published time when there are no details
+		// or the details lack that field. Description and duration come only
+		// from details whose Present flag is set; otherwise they are NULL.
 		title := v.Title
 		channelName := v.ChannelName
-		description := ""
-		duration := 0
 		publishedAt := v.PublishedAt
 		thumbnail := v.ThumbnailURL
+		var description *string
+		var duration *int
 
-		if v.Metadata != nil {
-			title = v.Metadata.Title
-			channelName = v.Metadata.ChannelTitle
-			description = v.Metadata.Description
-			duration = v.Metadata.DurationSeconds
-			publishedAt = v.Metadata.PublishedAt
-			thumbnail = v.Metadata.ThumbnailURL
+		if d := v.Metadata; d != nil {
+			if d.Present.Title {
+				title = d.Title
+			}
+			if d.Present.ChannelTitle {
+				channelName = d.ChannelTitle
+			}
+			if d.Present.Description {
+				description = &d.Description
+			}
+			if d.Present.Duration {
+				duration = &d.DurationSeconds
+			}
+			publishedAt = d.PublishedAt
+			if d.ThumbnailURL != "" {
+				thumbnail = d.ThumbnailURL
+			}
 		}
 
 		if _, err := duplicate.SaveFingerprint(ctx, tx, v.VideoID, v.ChannelID, "api_discovery", title, false, nil); err != nil {
@@ -481,9 +539,25 @@ func (e *Engine) videoExists(ctx context.Context, videoID string) (bool, error) 
 	return true, nil
 }
 
-func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoID, title, channelName, description string,
-	duration int, thumbnailURL string, publishedAt, fetchedAt time.Time) error {
+// upsertTransientMetadata stores the Store A row. A nil description or duration
+// is written as NULL ("not validly supplied"); a non-nil one is a real value,
+// including "" and 0. Blank title, channel name and thumbnail are NULL too.
+func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoID, title, channelName string, description *string,
+	duration *int, thumbnailURL string, publishedAt, fetchedAt time.Time) error {
 
+	nullString := func(v string) any {
+		if v == "" {
+			return nil
+		}
+		return v
+	}
+	var descriptionArg, durationArg any
+	if description != nil {
+		descriptionArg = *description
+	}
+	if duration != nil {
+		durationArg = *duration
+	}
 	expiresAt := fetchedAt.Add(30 * 24 * time.Hour)
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO transient_metadata
@@ -501,8 +575,8 @@ func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoI
 		  refreshed_at = excluded.refreshed_at,
 		  expires_at = excluded.expires_at,
 		  is_active = excluded.is_active;`,
-		videoID, title, channelName, description, publishedAt.UTC(), duration,
-		thumbnailURL, fetchedAt.UTC(), fetchedAt.UTC(), expiresAt.UTC(), true,
+		videoID, nullString(title), nullString(channelName), descriptionArg, publishedAt.UTC(), durationArg,
+		nullString(thumbnailURL), fetchedAt.UTC(), fetchedAt.UTC(), expiresAt.UTC(), true,
 	)
 	return err
 }

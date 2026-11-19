@@ -330,6 +330,125 @@ func (s *Store) Refresh(ctx context.Context, items []TransientMetadata, ttl time
 	return nil
 }
 
+// UpsertFetched writes freshly fetched records in one write-lock-first
+// transaction, inserting a row that was evicted or never held and updating one
+// that exists. A nil field is written as NULL, never as a default, so a missing
+// or invalid input stays distinguishable from a real empty or zero one. TTL
+// fields are reset from now and ttl. The title-search triggers fire inside the
+// same transaction. It returns the number of rows written, and fails if any
+// statement does not write exactly one row.
+func (s *Store) UpsertFetched(ctx context.Context, items []TransientMetadata, ttl time.Duration, now time.Time) (int, error) {
+	if len(items) == 0 {
+		return 0, nil
+	}
+	fetchedAt := now.UTC()
+	expiresAt := fetchedAt.Add(ttl)
+	saved := 0
+	err := inWriteTx(ctx, s.db, func(c *sql.Conn) error {
+		stmt, err := c.PrepareContext(ctx, `
+		INSERT INTO transient_metadata (
+			video_id, title, channel_name, description, published_at,
+			duration_seconds, thumbnail_url, fetched_at, refreshed_at,
+			expires_at, expired_at, is_active
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)
+		ON CONFLICT(video_id) DO UPDATE SET
+			title = excluded.title,
+			channel_name = excluded.channel_name,
+			description = excluded.description,
+			published_at = excluded.published_at,
+			duration_seconds = excluded.duration_seconds,
+			thumbnail_url = excluded.thumbnail_url,
+			fetched_at = excluded.fetched_at,
+			refreshed_at = excluded.refreshed_at,
+			expires_at = excluded.expires_at,
+			expired_at = NULL,
+			is_active = 1;`)
+		if err != nil {
+			return fmt.Errorf("metadata: prepare fetched upsert: %w", err)
+		}
+		defer stmt.Close()
+		for _, m := range items {
+			res, err := stmt.ExecContext(ctx,
+				m.VideoID, m.Title, m.ChannelName, m.Description, m.PublishedAt,
+				m.DurationSeconds, m.ThumbnailURL, fetchedAt, fetchedAt, expiresAt)
+			if err != nil {
+				return fmt.Errorf("metadata: upsert fetched %s: %w", m.VideoID, err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("metadata: upsert fetched %s rows affected: %w", m.VideoID, err)
+			}
+			if n != 1 {
+				return fmt.Errorf("metadata: upsert fetched %s wrote %d rows", m.VideoID, n)
+			}
+			saved++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("metadata: fetched upsert transaction: %w", err)
+	}
+	return saved, nil
+}
+
+// inputRow is a stored row with every route input and its TTL state.
+type inputRow struct {
+	LocalRow
+	Description *string
+}
+
+// readInputRows reads the route inputs of ids (at most 50) in one statement.
+func (s *Store) readInputRows(ctx context.Context, ids []string) ([]inputRow, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if len(ids) > 50 {
+		return nil, fmt.Errorf("metadata: input read exceeds 50 IDs")
+	}
+	args := make([]any, len(ids))
+	query := `SELECT video_id, title, channel_name, description, duration_seconds, fetched_at, expires_at, expired_at, is_active FROM transient_metadata WHERE video_id IN (`
+	for i, id := range ids {
+		args[i] = id
+		if i > 0 {
+			query += ","
+		}
+		query += "?"
+	}
+	query += ")"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("metadata: read input rows: %w", err)
+	}
+	defer rows.Close()
+	var out []inputRow
+	for rows.Next() {
+		var row inputRow
+		var title, channel, desc sql.NullString
+		var duration sql.NullInt64
+		if err := rows.Scan(&row.VideoID, &title, &channel, &desc, &duration, &row.FetchedAt, &row.ExpiresAt, &row.ExpiredAt, &row.IsActive); err != nil {
+			return nil, fmt.Errorf("metadata: scan input row: %w", err)
+		}
+		if title.Valid {
+			row.Title = &title.String
+		}
+		if channel.Valid {
+			row.ChannelName = &channel.String
+		}
+		if desc.Valid {
+			row.Description = &desc.String
+		}
+		if duration.Valid {
+			n := int(duration.Int64)
+			row.DurationSeconds = &n
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("metadata: iterate input rows: %w", err)
+	}
+	return out, nil
+}
+
 // GetFingerprint returns the Store B fingerprint for videoID, or an empty
 // string if no fingerprint exists.
 func (s *Store) GetFingerprint(ctx context.Context, videoID string) (string, error) {

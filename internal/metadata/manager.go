@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/quota"
+	"github.com/bateau84/YuHaul/internal/youtube"
 )
 
 // DefaultTTL is the default metadata retention window (30 days).
@@ -20,6 +23,7 @@ const DefaultRefreshBatchSize = 50
 type Manager struct {
 	store     *Store
 	fetcher   Fetcher
+	bound     BoundFetcher
 	ledger    *quota.Ledger
 	logger    *slog.Logger
 	ttl       time.Duration
@@ -63,6 +67,14 @@ func WithNow(now func() time.Time) Option {
 		if now != nil {
 			m.now = now
 		}
+	}
+}
+
+// WithBoundFetcher sets the bound, quota-accounted by-ID read used by
+// FetchForEvaluation.
+func WithBoundFetcher(f BoundFetcher) Option {
+	return func(m *Manager) {
+		m.bound = f
 	}
 }
 
@@ -332,4 +344,261 @@ func (m *Manager) refreshCandidates(ctx context.Context, src candidateSource, wi
 func IsMetadataExpired(err error) bool {
 	var expired *MetadataExpiredError
 	return errors.As(err, &expired)
+}
+
+// fetchChunk is the most unique IDs sent in one videos.list call.
+const fetchChunk = 50
+
+// FetchForEvaluation makes the route inputs of reqs locally current, fetching
+// the rest through the bound read seam, at most 50 unique IDs per call
+// (ARS-005 §6.1, Discovery ARS-001 §3).
+//
+// Every unique requested ID gets one status. The returned error is only a local
+// classification, preflight or persistence failure; a failed read is carried
+// in FetchOutcome.Read with its primary, accounting, renewal and interruption
+// facts kept apart, for the run owner to dispose of. After any read failure
+// other than an unusable response no further call is made and the unsent IDs
+// take the failing status. A known quota refusal makes zero calls and writes
+// zero rows. An unusable response does not suspend fetching.
+func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.AuthorizationBinding, reqs []InputRequirement) (FetchOutcome, error) {
+	out := FetchOutcome{Statuses: make(map[string]FetchStatus, len(reqs))}
+	order := make([]string, 0, len(reqs))
+	need := make(map[string]InputRequirement, len(reqs))
+	for _, r := range reqs {
+		if r.VideoID == "" {
+			return out, errors.New("metadata: fetch for evaluation: empty video ID")
+		}
+		if prev, ok := need[r.VideoID]; ok {
+			r.Title, r.ChannelName = r.Title || prev.Title, r.ChannelName || prev.ChannelName
+			r.Description, r.Duration = r.Description || prev.Description, r.Duration || prev.Duration
+		} else {
+			order = append(order, r.VideoID)
+		}
+		need[r.VideoID] = r
+	}
+	failAll := func(ids []string) {
+		for _, id := range ids {
+			if _, done := out.Statuses[id]; !done {
+				out.Statuses[id] = FetchFailed
+			}
+		}
+	}
+
+	var missing []string
+	for i := 0; i < len(order); i += fetchChunk {
+		chunk := order[i:min(i+fetchChunk, len(order))]
+		rows, err := m.store.readInputRows(ctx, chunk)
+		if err != nil {
+			failAll(order)
+			return out, err
+		}
+		// One cutoff is taken only after the rows are fully read.
+		cutoff := m.now().UTC()
+		held := make(map[string]inputRow, len(rows))
+		for _, row := range rows {
+			held[row.VideoID] = row
+		}
+		for _, id := range chunk {
+			if row, ok := held[id]; ok && rowSupplies(row, cutoff, need[id]) {
+				out.Statuses[id] = FetchCurrent
+				continue
+			}
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 {
+		return out, nil
+	}
+	if m.bound == nil || m.ledger == nil {
+		failAll(missing)
+		return out, errors.New("metadata: fetch for evaluation: bound fetcher or quota ledger unavailable")
+	}
+
+	for i := 0; i < len(missing); i += fetchChunk {
+		chunk := missing[i:min(i+fetchChunk, len(missing))]
+		if out.Read != nil {
+			status := readStatus(out.Read)
+			for _, id := range chunk {
+				out.Statuses[id] = status
+			}
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			out.Read = &ReadFacts{Err: err, Interruption: err}
+			for _, id := range chunk {
+				out.Statuses[id] = FetchFailed
+			}
+			continue
+		}
+		// Known insufficiency refuses with zero attempts. A preflight error is a
+		// local fault, not a refusal. The positive answer never replaces the
+		// admission inside the read.
+		ok, _, err := m.ledger.CanAfford(ctx, quota.OpVideosList.UnitCost())
+		if err != nil {
+			failAll(missing[i:])
+			return out, fmt.Errorf("metadata: quota preflight for evaluation fetch: %w", err)
+		}
+		if !ok {
+			out.Read = &ReadFacts{Err: auth.ErrQuotaRefused, Primary: auth.ErrQuotaRefused, QuotaRefused: true}
+			for _, id := range chunk {
+				out.Statuses[id] = FetchQuotaRefused
+			}
+			continue
+		}
+
+		res, err := m.bound.FetchMetadataBound(ctx, binding, chunk)
+		if err != nil {
+			facts, status, suspend := classifyRead(err)
+			if facts.Admitted {
+				out.Attempts++
+			}
+			for _, id := range chunk {
+				out.Statuses[id] = status
+			}
+			if suspend {
+				out.Read = &facts
+			} else {
+				m.logger.WarnContext(ctx, "metadata fetch response unusable", "ids", len(chunk))
+			}
+			continue
+		}
+
+		out.Attempts++
+		requested := make(map[string]bool, len(chunk))
+		for _, id := range chunk {
+			requested[id] = true
+		}
+		returned := make(map[string]bool, len(res.Returned))
+		complete := res.Complete
+		for _, id := range res.Returned {
+			if !requested[id] || returned[id] {
+				complete = false // Identity is not reliable; omission proves nothing.
+			}
+			returned[id] = true
+		}
+		var save []TransientMetadata
+		details := make(map[string]TransientMetadata, len(res.Details))
+		for _, d := range res.Details {
+			if !requested[d.VideoID] || !returned[d.VideoID] {
+				continue
+			}
+			if _, dup := details[d.VideoID]; dup {
+				continue
+			}
+			details[d.VideoID] = d
+			save = append(save, d)
+		}
+		saved, err := m.store.UpsertFetched(ctx, save, m.ttl, m.now())
+		if err != nil {
+			failAll(missing[i:])
+			return out, err
+		}
+		out.Saved += saved
+		unusable := 0
+		for _, id := range chunk {
+			d, hasDetail := details[id]
+			switch {
+			case hasDetail && detailSupplies(d, need[id]):
+				out.Statuses[id] = FetchFetched
+			case returned[id] || !complete:
+				out.Statuses[id] = FetchUnusable
+				unusable++
+			default:
+				out.Statuses[id] = FetchAbsent
+			}
+		}
+		if unusable > 0 {
+			m.logger.WarnContext(ctx, "metadata fetch inputs unusable", "count", unusable, "complete", complete)
+		}
+	}
+	// An accounting fault controls fail-closed propagation: the caller must see
+	// it as an error, with the per-ID statuses already filled in.
+	if out.Read != nil && out.Read.Accounting != nil {
+		return out, &ReadFaultError{Facts: *out.Read}
+	}
+	return out, nil
+}
+
+// ReadFaultError reports a metadata read whose local quota accounting failed.
+// It carries the typed facts and unwraps to the original read error. Its text
+// is fixed so no provider or store detail reaches a log through it.
+type ReadFaultError struct{ Facts ReadFacts }
+
+func (e *ReadFaultError) Error() string { return "metadata read accounting failed" }
+
+// Unwrap exposes the original read error and the accounting fault.
+func (e *ReadFaultError) Unwrap() []error { return []error{e.Facts.Err, e.Facts.Accounting} }
+
+// rowSupplies reports whether a stored row is current at cutoff and supplies
+// every input r requires. Presence is a non-NULL column, so a real empty
+// description or zero duration counts.
+func rowSupplies(row inputRow, cutoff time.Time, r InputRequirement) bool {
+	if ProjectLocal(row.LocalRow, cutoff).SourceFetchedAt == nil {
+		return false
+	}
+	return (!r.Title || row.Title != nil) &&
+		(!r.ChannelName || row.ChannelName != nil) &&
+		(!r.Description || row.Description != nil) &&
+		(!r.Duration || row.DurationSeconds != nil)
+}
+
+func detailSupplies(d TransientMetadata, r InputRequirement) bool {
+	return (!r.Title || d.Title != nil) &&
+		(!r.ChannelName || d.ChannelName != nil) &&
+		(!r.Description || d.Description != nil) &&
+		(!r.Duration || d.DurationSeconds != nil)
+}
+
+// readStatus is the status unsent inputs take after a suspending read failure.
+func readStatus(f *ReadFacts) FetchStatus {
+	_, status, _ := classifyRead(f.Err)
+	return status
+}
+
+// classifyRead separates the typed facts of a read error and chooses the
+// per-input status. suspend is false only for an unusable successful response.
+// The original error stays in the facts; nothing is flattened.
+func classifyRead(err error) (facts ReadFacts, status FetchStatus, suspend bool) {
+	facts = ReadFacts{Err: err, Primary: err}
+	var re *youtube.ReadError
+	if errors.As(err, &re) {
+		facts.Primary, facts.Accounting, facts.Renewal = re.Primary, re.Accounting, re.Renewal
+		facts.Interruption, facts.HTTPStatus = re.Interruption, re.Status
+	}
+	var api *youtube.APIError
+	if errors.As(facts.Primary, &api) && facts.HTTPStatus == 0 {
+		facts.HTTPStatus = api.Status
+	}
+	quotaReason := api != nil && (api.Reason == "quotaExceeded" || api.Reason == "dailyLimitExceeded")
+	facts.QuotaRefused = errors.Is(err, auth.ErrQuotaRefused) || quotaReason
+	if facts.Accounting == nil && errors.Is(err, auth.ErrQuotaAccounting) {
+		facts.Accounting = auth.ErrQuotaAccounting
+	}
+
+	var invalid *youtube.InvalidResponseError
+	var transport *youtube.ReadTransportError
+	// A send was admitted only if the provider answered, the transport failed
+	// after admission, the response was unusable, or the read was interrupted.
+	// Local refusals and failures before admission are not attempts.
+	facts.Admitted = facts.HTTPStatus != 0 || facts.Interruption != nil ||
+		errors.As(err, &transport) || errors.As(err, &invalid)
+	switch {
+	case facts.Accounting != nil || errors.Is(err, auth.ErrQuotaAccounting):
+		return facts, FetchFailed, true
+	case facts.QuotaRefused:
+		return facts, FetchQuotaRefused, true
+	case facts.Interruption != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return facts, FetchFailed, true
+	case facts.Renewal != nil || facts.HTTPStatus == http.StatusUnauthorized ||
+		(api != nil && api.Reason == "authError") ||
+		errors.Is(err, auth.ErrAuthorizationChanged) || errors.Is(err, auth.ErrNotConfigured) ||
+		errors.Is(err, auth.ErrAccessExpiredBeforeAdmission):
+		return facts, FetchAuthorizationPending, true
+	case facts.HTTPStatus == http.StatusTooManyRequests ||
+		(api != nil && (api.Reason == "rateLimitExceeded" || api.Reason == "userRateLimitExceeded")):
+		return facts, FetchRateLimited, true
+	case errors.As(err, &invalid):
+		return facts, FetchUnusable, false
+	}
+	return facts, FetchFailed, true
 }

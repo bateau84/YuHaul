@@ -9,6 +9,8 @@ package metadata
 import (
 	"context"
 	"time"
+
+	"github.com/bateau84/YuHaul/internal/auth"
 )
 
 // TransientMetadata is a single Store A record.
@@ -63,6 +65,83 @@ type Fetcher interface {
 	// FetchMetadata returns fresh metadata for the requested video IDs.
 	// Callers may batch IDs; the implementation decides the actual batch size.
 	FetchMetadata(ctx context.Context, videoIDs []string) ([]TransientMetadata, error)
+}
+
+// FetchResult is one by-ID videos.list response (ARS-005 §6.1).
+type FetchResult struct {
+	// Details holds the items that carry usable details. A nil pointer field
+	// means the response did not supply a valid value (not an empty value).
+	Details []TransientMetadata
+	// Returned lists the id of every raw item of the successful response,
+	// including items without a usable detail.
+	Returned []string
+	// Complete is true only for a validated response, so an omitted ID is
+	// proof of absence.
+	Complete bool
+}
+
+// BoundFetcher reads metadata by ID through the shared bound, quota-accounted
+// read seam, using the caller's authorization binding.
+type BoundFetcher interface {
+	FetchMetadataBound(ctx context.Context, binding auth.AuthorizationBinding, videoIDs []string) (FetchResult, error)
+}
+
+// FetchStatus is the per-input result of FetchForEvaluation. It describes the
+// input, never permission to dispatch.
+type FetchStatus string
+
+const (
+	FetchCurrent              FetchStatus = "current"
+	FetchFetched              FetchStatus = "fetched"
+	FetchUnusable             FetchStatus = "unusable"
+	FetchAbsent               FetchStatus = "absent"
+	FetchQuotaRefused         FetchStatus = "quota_refused"
+	FetchAuthorizationPending FetchStatus = "authorization_pending"
+	FetchRateLimited          FetchStatus = "rate_limited"
+	FetchFailed               FetchStatus = "failed"
+)
+
+// InputRequirement names the route inputs one video needs. Presence and value
+// are separate: a valid empty description or zero duration satisfies it.
+type InputRequirement struct {
+	VideoID                                   string
+	Title, ChannelName, Description, Duration bool
+}
+
+// ReadFacts preserves the typed facts of a failed metadata read for the run
+// owner. None of them is rewritten into a per-video status.
+type ReadFacts struct {
+	// Err is the original error, unflattened, for errors.Is/As by the owner.
+	Err error
+	// Primary is the provider/transport/authorization cause, if any.
+	Primary error
+	// Accounting is a local quota/admission/accounting fault, if any.
+	Accounting error
+	// Renewal is a failed authorization-renewal observation, if any.
+	Renewal error
+	// Interruption is a cancellation or deadline seen during the read.
+	Interruption error
+	// HTTPStatus is the response status, 0 when none.
+	HTTPStatus int
+	// Admitted is true when the failed read was an admitted send, so it counts
+	// as an attempt. A refusal or failure before admission is not.
+	Admitted bool
+	// QuotaRefused is true for a known local pre-admission refusal or a
+	// provider quotaExceeded/dailyLimitExceeded rejection.
+	QuotaRefused bool
+}
+
+// FetchOutcome is the result of FetchForEvaluation.
+type FetchOutcome struct {
+	// Statuses has one entry per requested video.
+	Statuses map[string]FetchStatus
+	// Read is the first read failure that suspended fetching, or nil.
+	Read *ReadFacts
+	// Attempts is the number of admitted by-ID sends; a refusal or failure
+	// before admission is not an attempt.
+	Attempts int
+	// Saved is the number of rows written to Store A.
+	Saved int
 }
 
 // MetadataExpiredError indicates that Store A metadata has expired and the

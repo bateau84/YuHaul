@@ -125,11 +125,13 @@ func main() {
 	routerStore.WithOnChange(configSvc.Snapshot)
 
 	metadataStore := metadata.NewStore(db)
+	metaFetcher := &metadataFetcher{auth: authSvc, baseURL: cfg.YouTubeBaseURL, ledger: ledger}
 	meta := metadata.NewManager(
 		metadataStore,
-		&metadataFetcher{auth: authSvc, baseURL: cfg.YouTubeBaseURL, ledger: ledger},
+		metaFetcher,
 		ledger,
 		metadata.WithLogger(logger),
+		metadata.WithBoundFetcher(metaFetcher),
 	)
 
 	detector := duplicate.NewDetector(db, duplicate.WithLogger(logger))
@@ -659,8 +661,21 @@ type metadataFetcher struct {
 	ledger  *quota.Ledger
 }
 
+// FetchMetadata refreshes metadata through the presence-aware by-ID read, so a
+// real empty description or zero duration is kept and a field the provider did
+// not validly supply is nil (NULL). IDs are deduplicated and sent 50 at a time.
+// An item without a usable detail yields no entry. The first failing chunk
+// fails the call.
 func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) ([]metadata.TransientMetadata, error) {
-	if len(videoIDs) == 0 {
+	unique := make([]string, 0, len(videoIDs))
+	seen := make(map[string]bool, len(videoIDs))
+	for _, id := range videoIDs {
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	if len(unique) == 0 {
 		return []metadata.TransientMetadata{}, nil
 	}
 	if f.ledger == nil {
@@ -670,6 +685,25 @@ func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) 
 	if err != nil {
 		return nil, fmt.Errorf("metadata fetcher: no active token: %w", err)
 	}
+	out := make([]metadata.TransientMetadata, 0, len(unique))
+	for i := 0; i < len(unique); i += 50 {
+		res, err := f.FetchMetadataBound(ctx, binding, unique[i:min(i+50, len(unique))])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res.Details...)
+	}
+	return out, nil
+}
+
+// FetchMetadataBound reads up to 50 distinct video IDs with the caller's
+// binding through the shared bound, quota-accounted read. It keeps true field
+// presence: a field the response did not supply validly is nil, never a default.
+// Errors keep their typed read facts for errors.As.
+func (f *metadataFetcher) FetchMetadataBound(ctx context.Context, binding auth.AuthorizationBinding, videoIDs []string) (metadata.FetchResult, error) {
+	if f.ledger == nil {
+		return metadata.FetchResult{}, errors.New("metadata fetcher: quota ledger unavailable")
+	}
 	opts := boundReadOptions(f.auth, binding, f.ledger)
 	if f.baseURL != "" {
 		opts = append(opts, youtube.WithBaseURL(f.baseURL))
@@ -677,27 +711,38 @@ func (f *metadataFetcher) FetchMetadata(ctx context.Context, videoIDs []string) 
 	client := youtube.NewAuthorizedClient(ctx, func(ctx context.Context) (*oauth2.Token, error) {
 		return f.auth.Resolve(ctx, binding)
 	}, opts...)
-	details, err := client.GetVideos(ctx, videoIDs)
+	details, returned, err := client.GetVideosWithReturnedIDs(ctx, videoIDs)
 	if err != nil {
-		return nil, fmt.Errorf("metadata fetcher: get videos: %w", err)
+		return metadata.FetchResult{}, fmt.Errorf("metadata fetcher: get videos by id: %w", err)
 	}
-	out := make([]metadata.TransientMetadata, 0, len(details))
+	out := metadata.FetchResult{Returned: returned.IDs, Complete: returned.Complete, Details: make([]metadata.TransientMetadata, 0, len(details))}
 	for _, d := range details {
-		title := d.Title
-		channel := d.ChannelTitle
-		desc := d.Description
-		dur := d.DurationSeconds
-		thumb := d.ThumbnailURL
-		pub := d.PublishedAt
-		out = append(out, metadata.TransientMetadata{
-			VideoID:         d.ID,
-			Title:           &title,
-			ChannelName:     &channel,
-			Description:     &desc,
-			DurationSeconds: &dur,
-			ThumbnailURL:    &thumb,
-			PublishedAt:     &pub,
-		})
+		m := metadata.TransientMetadata{VideoID: d.ID}
+		if d.Present.Title {
+			v := d.Title
+			m.Title = &v
+		}
+		if d.Present.ChannelTitle {
+			v := d.ChannelTitle
+			m.ChannelName = &v
+		}
+		if d.Present.Description {
+			v := d.Description
+			m.Description = &v
+		}
+		if d.Present.Duration {
+			v := d.DurationSeconds
+			m.DurationSeconds = &v
+		}
+		if d.ThumbnailURL != "" {
+			v := d.ThumbnailURL
+			m.ThumbnailURL = &v
+		}
+		if !d.PublishedAt.IsZero() {
+			v := d.PublishedAt
+			m.PublishedAt = &v
+		}
+		out.Details = append(out.Details, m)
 	}
 	return out, nil
 }
