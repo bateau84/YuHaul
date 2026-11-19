@@ -3,12 +3,16 @@ type: Log
 title: Architecture Change Log
 description: Chronological record of changes to the docs/architecture/ bundle.
 tags: [changelog, log, okf, architecture]
-timestamp: 2026-11-11T00:00:00Z
+timestamp: 2026-11-19T00:00:00Z
 ---
 
 # Architecture Update Log
 
 ## 2026-11-19
+
+**Live status revised after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH`.** The clearance now lives on `run_video_outcome.live_status`, so it does not expire. The gate runs on every pass and resume. Fence and backstop refusals end in a live deferral. ARS-005 §6.1–6.2 is a hard prerequisite for claimed paths. New discoveries get native retention. Version-0 continuation is recorded as unreachable. Store A is no longer changed. After the focused recheck, the critic accepted the design. ARS-001 precision fixes were then applied in §4 (prefetch keeps the returned IDs), §5.1 (gate input set) and §6.2 (separate queue and run reasons; returns `(Deferred, nil)`, never `deferActions`). The ARS-001 §10 amendments to other contracts are not yet applied.
+
+**Live status proposed (BR-042).** The new [live-status](/docs/architecture/live-status/index.md) topic adds ARD-001 and ARS-001. The by-ID read adds `liveStreamingDetails` and classifies `liveBroadcastContent`. `FetchForEvaluation` gains a run-scoped `Live` requirement that only a stamp from the same run satisfies. A live skip writes `deferred / live_now|live_upcoming|live_unconfirmed` and reuses the video-scoped item, using a `live_hold` overlay and the new origin reason `live_or_upcoming`. Backstops sit at the evaluation entries and in `ClaimPlaylistSend`. The amendments to ARS-005, ARS-006, authorization ARS-001, capacity ARD-001, Discovery ARS-001 and safe-diagnostic ARS-001 are listed in ARS-001 §10 and are applied on acceptance. Not implemented.
 
 **§6.1.1 clarified after critic `ses_e0cc26e27ffeKGNU9EOMRb4itV`.** [Run-initiation ARS-005 §6.1.1](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) now states five things. Writers keep the true field presence from the by-ID read and write `NULL` only for a field that was not supplied. An invalid discovery by-ID response means "not supplied", and discovery continues. In ordinary routing a `NULL` duration means no match, while a version-0 run with a duration exclusion takes authority-failure retention. A dedicated data-only migration is the fallback if no receipt migration exists. Empty titles are not cleared. Three new evidence items cover real `''` and `P0D` values, invalid responses and the routing differences. The decision is unchanged.
 
