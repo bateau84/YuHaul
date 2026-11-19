@@ -3,7 +3,7 @@ type: obligation-contract
 title: OC-001 — YouTube API Quota and Failure Semantics
 description: Agreement between the system and the YouTube Data API v3 on how quota exhaustion and API failures are treated operationally
 tags: [obligation-contract, youtube, api, quota, failure]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted
@@ -35,6 +35,7 @@ timestamp: 2026-11-07T00:00:00Z
 - **Transient error (5xx, timeout)**: individual work item retained for retry; other work in the run continues if independent.
 - **Authorization error**: BR-034/OC-006 renewal and call safety take precedence. If recovery cannot safely continue, remaining work is preserved/deferred with the applicable unavailable or reconnect-required reason. Work remains eligible after recovery, but uncertain mutations are not blindly replayed.
 - **Permanent error (404, invalid parameter)**: individual work item moved to error queue with permanent-failure classification; other work continues.
+- **Permanent uploads-source error**: for a permanent response that prevents scanning an individual channel's uploads, the required error-queue disposition is a durable, read-only source entry in Errors. The user can identify the affected channel and inspect its permanent failure reason after a reload or application restart. This is not a failed video processing item; it has no manual Retry, Dismiss, or source-suppression action. It does not block the next eligible fresh discovery run from polling that channel under [BR-002 AC6–7](br-002-subscription-discovery-without-live-monitoring.md). A consumption-log entry or Run Detail diagnosis does not replace the Errors entry.
 
 ## Invariants
 - No API call is made when the system knows remaining quota is insufficient.
@@ -45,6 +46,7 @@ timestamp: 2026-11-07T00:00:00Z
 ## Derived from
 - Anchor: youtube-discovery-routing.md (AC13, AC18, AC19, AC30, Context: quota exhaustion as operational state)
 - User's 2026-11-07 refresh amendment recorded in [BR-034](br-034-automatic-youtube-token-refresh.md), superseding only unconditional auth-error-to-interactive-reauthorization handling.
+- Permanent uploads-source disposition: the user's “1. yes / 2. agreed.” decision on 2026-11-18, relayed in dispatcher answer `0fab403b-69b5-4702-9d29-1124d3e03426` to Loom question `f8bb5793-7026-4e1d-b3f7-4b7545b73234` (Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`). It specifies the source-item disposition only; existing video retry and removal are unchanged.
 
 ## Verified by
 - Integration test: quota exhaustion response triggers deferral, not error classification.
@@ -52,6 +54,7 @@ timestamp: 2026-11-07T00:00:00Z
 - Integration test: access rejection attempts available renewal; safe read recovery continues; missing/rejected renewal authorization prompts reconnect and defers work; ambiguous mutations remain protected under OC-006.
 - Consumption audit: every API call logged with response category.
 - Proactive deferral test: system does not attempt calls when quota is exhausted.
+- Controlled-provider run: a permanent uploads-source response is classified as permanent in consumption accounting and yields an identifiable, read-only Errors entry available after restart. Verify no source Retry, Dismiss, or suppression action; verify the next eligible fresh discovery run polls the source. Contrast with the existing transient, quota and authorization dispositions and verify that video Retry and removal still work as specified.
 
 ## Open questions
 - None

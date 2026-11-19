@@ -24,6 +24,16 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-18
 
+- Amended [admin interface design](/docs/design/yuhaul-admin-ui-design.md) to label and filter the saved-discovery Deferred reason `discovery_processing_pending`; added a focused inspection check without changing controls or BR-037 scope. Design only.
+
+- Clarified the narrowly approved recovered discovery run whose sole source is proved ineligible after a saved page: Completed with incomplete coverage and saved-work handoff, no origin routing or source error. Added contrasting recovery checks. Design only.
+
+- Clarified in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) that permanent channel-scan entries show a durable vetted, plain-language specific reason, with an honest unavailable fallback and restart checks. Existing read-only controls and fresh-poll behavior remain unchanged. Design only.
+
+- Clarified partial-page video work in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) following dispatcher-relayed approval: eligible saved videos from an incomplete source can route in a mixed run; when no channel succeeds, observations are saved for later and not routed by the failed run. Coverage remains incomplete. Design only.
+
+- Amended [admin interface design](/docs/design/yuhaul-admin-ui-design.md) with partial channel-scan reporting and durable read-only permanent source errors, distinguishing all-attempted-source failure, empty success, global failure and interruption. Preserved the capacity design. Design only; no implementation, browser or accessibility verification.
+
 - Amended [admin interface design](/docs/design/yuhaul-admin-ui-design.md) with playlist-capacity run evidence, target-scoped waiting and visible nonautomatic eviction history. Preserved simulation isolation, uncertain-send safeguards and historical evidence; recorded architecture dependencies. Design only; no browser or accessibility verification.
 
 - Reconciled the `video_already_final` refusal focus decision in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): in Errors and Deferred, focus moves to the persistent alert because the activated Retry control is removed. Kept search-message focus behavior unchanged and added keyboard and screen-reader checks. Design only; browser and assistive-technology verification remains outstanding.

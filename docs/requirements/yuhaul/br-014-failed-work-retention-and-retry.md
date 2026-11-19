@@ -3,6 +3,7 @@ type: requirement
 title: BR-014 — Failed Work Retention and Retry
 description: Failed work retained in inspectable error queue with retry and removal options
 tags: [requirement, failure, retry, error-queue, resilience, priority:MUST]
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted
@@ -20,6 +21,8 @@ The system SHALL retain failed work in an inspectable error queue, providing the
 4. The user can remove a failed work item from the queue, accepting that it will not be retried.
 5. The error queue is durable and survives application restarts.
 6. The system distinguishes transient failures (eligible for automatic retry) from permanent failures (requiring user intervention).
+
+These criteria govern failed video processing work. A permanent uploads-source error is a distinct read-only Errors entry under [OC-001](oc-001-youtube-api-quota-and-failure-semantics.md); it does not use these controls or require intervention before the next eligible discovery poll.
 
 ## Derived from
 

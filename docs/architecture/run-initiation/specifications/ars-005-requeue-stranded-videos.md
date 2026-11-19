@@ -3,10 +3,12 @@ type: specification
 title: ARS-005 — Re-queue Stranded Videos — Migration 026, Outcome Schema Step, Shared Predicates, Scan and Insert SQL, Ordered Batch Claiming, Metadata Precondition, Unavailable Outcome, Paged Deferred Queue, HTTP and Tests
 description: Exact contract for BR-037. Covers migration 026 and the final-outcome schema step; the shared send-veto, guard, active-item and removed-by-user predicates; the stranded scan and chunked insert; PreviewStranded and RequeueStranded with their locks and refusal codes; claiming in the existing created-at order while quota remains (with a ready alternative for provider failures); the metadata precondition and the unavailable_on_youtube outcome; the paged GET /api/deferred prerequisite; HTTP bodies; and the conformance tests.
 tags: [architecture, specification, runs, deferred-queue, recovery, run-14, send-guard, stranded, metadata, quota, outcomes, paging, migration, api, concurrency]
-timestamp: 2026-11-12T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted — exact implementation contract, not implemented. Revised 2026-11-11 for the amended BR-037, BR-035 AC14 and BR-032 AC1, then corrected after critic review `ses_e33a11010ffe4XP0Rmw0ZVtQBs` (see §13). It realizes [ADR-006](../decisions/adr-006-requeue-stranded-videos.md). Reconciled 2026-11-11 (Plan revision 19): F3 is decided as **variant K** (user decision; BR-035 AC14 unchanged), so the body is the contract and Appendix A is kept only as a rejected alternative. F4 does not apply to production data. §7 gains page jumps, positions and a reason filter. **Amended 2026-11-12 for BR-039:** see §15.
+
+**2026-11-18 receiving clarification:** §§5–6 also constrain the shared receiver used by [Discovery ARS-001](../../discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md). This does not specify new BR-037 admin controls or change the guarded send/result contract.
 
 It amends [ARS-003](ars-003-stop-run-and-deferred-handoff.md) in three places:
 
@@ -432,16 +434,16 @@ LIMIT ?limit
 ### 5.2 Run loop (variant K — decided 2026-11-11)
 
 - `const retryClaimBatch = 500` (package `pipeline`).
-- `createClaimedRunLocked`: `ListDeferredRetryCandidates(ctx, now, 0, retryClaimBatch)`, then claims as today.
+- `createClaimedRunLocked`: if minimum-unit quota is known exhausted, create the run without claiming; otherwise `ListDeferredRetryCandidates(ctx, now, 0, retryClaimBatch)` then recheck claim eligibility under the writer. A preflight storage fault is not a quota result. A supported resume is not a second initial claim.
 - `processDeferredItems(ctx, runID)`:
   1. `ids := ListRetryVideoIDs(runID)`. Run the metadata precondition for `ids` (§6.2), then each video's disposition.
   2. Leave the loop if any of these holds:
      - the run's `initiated_by` is not `run_now` or `schedule`;
      - `ctx.Err() != nil`;
-     - `ledger.CanAfford(ctx, quota.OpVideosList.UnitCost())` is false or fails;
-     - §6.2 reported a quota refusal in this pass.
+     - the minimum-unit preflight returns a known refusal, or the run's dispatch stop records quota (refused locally or proved by an admitted provider response);
+     - an integrity/accounting fault blocks reliable admission or settlement (propagate it, do not treat it as quota).
 
-     Nothing else leaves the loop. In particular, fetch suspension does not.
+     A non-quota provider failure does not otherwise leave the loop. In particular, fetch suspension and unrecovered authorization do not prohibit **local-only claim and settlement** while AC14's conditions hold. Section 6 governs what may run for those claims; claiming does not authorize a provider call.
   3. `items := ListDeferredRetryCandidates(ctx, now, runID, retryClaimBatch)`. If it is empty, leave.
   4. In `qs.WithRetryTx`, recheck the run row (`running`, `stop_requested_at` NULL); if it fails, claim nothing and leave. Otherwise call `ClaimDeferredGroupTx` per item in list order. A lost claim (`claimed=false`) is skipped: the item was taken by a live owner at that moment.
   5. Go to 1.
@@ -457,7 +459,7 @@ The run's claimed set is always a prefix of the created-at order, which equals t
 - videos this run already claimed;
 - claims lost to a concurrent claimer.
 
-The run leaves the loop only on quota exhaustion, stop, interruption or shutdown, or when no candidates remain. Unclaimed rows are not written. Tests B6 and B7 check this.
+The run leaves the loop on quota exhaustion, stop, interruption or shutdown, no remaining candidates, or a local integrity/accounting fault that prevents safe admission or settlement. Unclaimed rows are not written. Provider authorization refusal without an accounting/integrity fault is not that last case. Tests B6 and B7 check the claim order and the non-quota cases.
 
 ## 6. Metadata precondition, dispositions and the unavailable outcome
 
@@ -466,44 +468,55 @@ The run leaves the loop only on quota exhaustion, stop, interruption or shutdown
 **Raw item ids (critic F2).** `youtube.Client` gains `GetVideosWithReturnedIDs(ctx, ids) (details []VideoDetail, returned VideoIDs, err error)`, with `VideoIDs struct{ IDs []string; Complete bool }`.
 
 - `returned.IDs` lists the `id` of every element of the raw `items` array of the successful response, including items that `GetVideos` skips because `publishedAt` does not parse (`client.go:638–643`).
-- `Complete` is false if any raw item has an empty or unreadable `id`.
+- `Complete` is true only for an admitted, successfully accounted, successful response with a decoded top-level object and an explicitly present non-null `items` array, after every element has been structurally read and its nonempty, valid, unique ID matched to the requested set. An empty array is valid. A missing or null array, `{}`, `null`, non-array `items`, invalid item identity, duplicate/unrequested ID, truncated body, or nonempty/unusable `nextPageToken` is not complete for this by-ID request. Do not follow a token or infer omissions. An invalid envelope yields a typed invalid-response error; an incomplete identity set must not yield `absent` for any request. Already returned individually valid details may only be used when the envelope is valid and identities unambiguous; they cannot prove absence.
 - `GetVideos` keeps its signature and behavior.
 
 ```go
 type FetchResult struct {
     Details  []TransientMetadata
     Returned []string // raw item ids of the successful response
-    Complete bool     // every raw item had a readable id
+    Complete bool     // validated complete response; safe to infer omission
 }
 type BoundFetcher interface {
     FetchMetadataBound(ctx context.Context, binding auth.AuthorizationBinding, videoIDs []string) (FetchResult, error)
 }
 type FetchStatus string // current | fetched | unusable | absent | quota_refused | authorization_pending | rate_limited | failed
-func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.AuthorizationBinding, videoIDs []string) (map[string]FetchStatus, error)
 ```
 
 `cmd/server`'s `metadataFetcher` implements `FetchMetadataBound` with `boundReadOptions(f.auth, binding, f.ledger)`, the given binding, and `GetVideosWithReturnedIDs`.
 
-`FetchForEvaluation`:
+`FetchForEvaluation` takes the invocation binding and one input requirement per unique requested ID (fields required by the captured configuration and evaluation path). It returns a status keyed by ID and the run-scoped disposition described below, plus a separate typed error if local classification/persistence failed. A dispatch stop is not an input status.
 
-1. Mark `current` every id whose `GetDisplayMetadata` succeeds.
+`FetchForEvaluation` applies this order:
+
+1. Mark `current` only for an unexpired local row supplying the actual required fields of this evaluation, not merely because `GetDisplayMetadata` returns a row. The caller supplies relevant input requirements from its snapshot; presence/validity is separate from value, including valid zero duration or empty description. Classify `final` and `partly_done` first (§6.2).
 2. For the rest, take chunks of 50:
-   - If `CanAfford(OpVideosList cost)` is false, mark this chunk and every later chunk `quota_refused`.
+   - If the minimum-unit preflight reports known insufficiency, return `quota_refused` with zero attempts. A preflight/store error is a local integrity/accounting failure, not refusal. A positive estimate never overrides final admission or a previously known provider stop.
    - Otherwise call `FetchMetadataBound`.
-     - **On success:** store `Details` with `store.Refresh(ctx, details, m.ttl, now)`. Then, for each requested id:
+     - **On success:** persist usable `Details` with Store A's TTL- and index-aware upsert, preserving true field presence and accepting an evicted/missing prior row. Do not count an update of zero rows as saved. Then, for each requested id:
        - in `Details` → `fetched`;
        - in `Returned` but not in `Details` → `unusable`;
        - not in `Returned` and `Complete` true → `absent`;
        - not in `Returned` and `Complete` false → `unusable`.
-     - **On error,** mark the chunk with the matching status:
-       - `quota_refused` for `errors.Is(err, auth.ErrQuotaRefused)`;
-       - `authorization_pending` for authorization unavailable, using the executor's existing test;
-       - `rate_limited` for `*youtube.APIError` with `Reason` `rateLimitExceeded` or `userRateLimitExceeded`;
-       - `failed` for anything else, including a body that does not decode.
+     - **On error,** carry the primary read fact, accounting error and renewal error separately. Apply the guarded read disposition below before per-ID status; never flatten a wrapped provider error into `failed` or `absent` when it carried a run-wide stop or auxiliary fault.
 
-       Mark every later chunk with the same status, without calling.
+       Preserve earlier chunks' durably established inputs and settled outcomes. If the run enters an authorization stop, mark the rejected chunk's unresolved inputs and every unsent input that still requires a fetch `authorization_pending`, not `failed`, `rate_limited`, or `absent`. No debit for the unsent suffix. A previously available local input is not invalidated by the stop, but it does not permit a subsequent network operation. An invalid 2xx envelope or unusable item is not evidence of absence.
 
-`absent` is produced only when a successful response, with every item id readable, does not include the id. This is BR-037's definition of *not returned by YouTube*. An `unusable` id is logged at warning with only the video id and the count of the chunk's unusable items.
+`absent` is produced only when the validated, complete successful response defined above does not include the ID. This is BR-037's definition of *not returned by YouTube*. Log a fixed `unusable` diagnostic and counts, not provider payload or identifiers.
+
+Per-ID fetch statuses describe inputs, not permission to dispatch. The boundary also returns a typed run dispatch-stop result and separate primary/accounting/renewal facts whenever present. Propagate a typed auxiliary fault through the error result, not a `failed` input status that loses the enclosing disposition. Stop evidence and the fault survive all wrappers through the run owner. In a compound error, a known quota reason still forbids further claims and remains a deferral reason; an accounting fault controls fail-closed propagation. A renewal observation can preserve account status even when another retry is forbidden.
+
+**One guarded Data API disposition for production phases.** Apply this on `videos.list`, uploads and discovery reads, and propagate the corresponding dispatch stop from guarded action results without changing mutation classification. The selected run dispatch scope controls all subsequent production Data API paths, including discovery continuation, enrichment and executor calls. A narrower fetch suspension is not a dispatch stop.
+
+| Evidence | Processing effect and accounting |
+|---|---|
+| Durable Stop/selection cancellation | Stop/interrupt under the existing lifecycle. Preserve separate facts for any already admitted attempt. It is not a source-local failure or an admission to try another call. |
+| Outer `ReadError.Accounting`, or local quota/admission/store integrity error | No further dispatch; keep conservative held cost, and propagate the fault through existing retain-before-fail/recovery. Preserve the primary category/disposition and a separate renewal fact if present. Never turn a known quota/auth reason into a fabricated video failure; never pretend a durable debit or usable response after failed accounting. |
+| Authorization refusal, identity changed, unresolved rejection or unavailable renewal | Follow OC-006. Classify the current binding/revision; preserve typed reconnect-required versus temporary/unavailable cause. After acknowledged accounting, allow at most one identical read retry if the authorization boundary proves accepted current access for the **same** identity; account it independently. If no safe authorized continuation, close the run's dispatch scope, preserve authorization deferral, and let variant K continue local-only as applicable. Do not retry a mutation. A first rejection is not an authorization stop if the permitted read recovers. |
+| Definitive quota refusal | Typed pre-admission refusal costs zero. A proved admitted quota rejection (`quotaExceeded` or `dailyLimitExceeded`, or equivalent registered classifier evidence) has one `quota` ledger attempt even with positive local headroom. Close the dispatch scope and stop further claims under AC14. Defer remaining API-dependent work under existing quota semantics; no immediate retry. |
+| Other bounded provider transport/5xx/rate/invalid-response failures with usable authority and known accounting | Preserve existing fetch-chunk suspension and local variant K. A rate limit does not imply quota exhaustion; no call contrary to applicable pacing. An independently ready video may continue only if the actual operation can pass the same authorization, pacing and quota guards; local claiming itself does not grant dispatch. |
+
+Attribute each admitted send to its actual operation under the bound ledger owner. Persist the run-level known stop before proceeding beyond the boundary; on compatible same-run recovery reuse it or reconstruct an already-accounted provider quota stop from the run's typed ledger evidence if the process died before persisting the stop. Check the stop before any run-owned provider work, including metadata lifecycle refresh and renewal for a new protected request, not just at the next batch. Retain any already-known accounting fault and separately known quota/auth facts; if the local store cannot record or reconcile them, fail closed in the current process using existing retention/recovery. Do not treat unknown accounting as a positive bank of quota or successful result. These rules do not claim crash-complete accounting for a request whose send and result were never durably captured (authorization ADR-004). A fresh eligible run performs ordinary authorized admission again.
 
 ### 6.1.1 Legacy Store A defaults (decided 2026-11-19, review `516b34d2` F1; clarified after critic `ses_e0cc26e27ffeKGNU9EOMRb4itV`)
 
@@ -559,15 +572,16 @@ UPDATE transient_metadata SET duration_seconds = NULL WHERE duration_seconds = 0
 ### 6.2 Pipeline precondition (per claimed pass)
 
 - **BR-039 first (§15):** classify each video of `ids` with `state.ClassifyVideoTx`. Only `open` videos enter this precondition and its dispositions. `final` videos are closed and `partly_done` videos are continued, as ARS-006 §5 and §7 say.
-- Collect the YouTube ids of the `open` videos in `ids` and call `FetchForEvaluation(ctx, *p.executionBinding, …)`. If `p.executionBinding` is nil, or fetching is *suspended* for this run, give every non-`current` id the status `failed` without a call.
-- Once any chunk returns `authorization_pending`, `rate_limited` or `failed`, fetching is suspended for the rest of the run (an in-memory flag on the run control). `unusable` does not suspend fetching, because the call succeeded. Suspension does not end claiming (variant K, decided).
+- Before handling open or partly-done receipts, resolve any current or restored run dispatch stop as in §6.1. Classify incomplete work with that fact **before** consulting generic fetch suspension, a nil binding or a readiness-backstop result. In particular an authorization stop wins over `failed` or unchanged release for missing inputs, even if a prior batch had already suspended fetching. If there is no recorded stop and the binding is absent, obtain the typed authorization disposition at the existing admission boundary; a malformed per-call setup is a local fault, not proof that the user must reconnect.
+- Without an effective run-wide stop, check current inputs and fetch the rest for `open` videos. A non-quota `rate_limited` or `failed` metadata result suspends further metadata fetches in the pass according to §6.1; `unusable` alone does not. This generic fallback assigns `failed` only to otherwise unclassified inputs. Quota and accounting faults follow §5.2; a pure authorization stop permits further local claims under variant K but no further provider work.
+- Under an authorization stop, apply the same `authorization_pending` settlement below to receipts for the unsent suffix, to later locally claimed receipts, and to unfinished exact live receipts restored after restart. Already committed final results reconcile or acknowledge under BR-039; do not rewrite settled receipt history as authorization deferral. An otherwise-ready video may settle only under existing local rules that require no provider work. If an open video still needs metadata or an otherwise authorized network operation cannot start, defer the real unfinished work. For a partly-done video retain only its outstanding work with the original decision and existing exact target/guard authority; do not hydrate it, reroute it or issue a new send. A previously issued or uncertain mutation keeps its established disposition and guard; this table is not a means of reopening, releasing or reinterpreting it. A concurrent accounting/integrity fault still closes dispatch and further claims; preserve established authorization deferral facts without forcing unsafe settlement or swallowing the auxiliary fault.
 - `requeued(v)` := `EXISTS (SELECT 1 FROM deferred_item WHERE id IN <receipt.Deferred ids> AND deferral_reason = 'requeued_by_user')`.
 
 | Status | `requeued(v)` | Otherwise |
 |---|---|---|
 | `current`, `fetched` | `processRetryVideo` | same |
 | `quota_refused` | `deferRetryForInputsTx(…, quota_exhausted)`; report a quota refusal | same |
-| `authorization_pending` | `deferRetryForInputsTx(…, authorization_pending)` | same |
+| `authorization_pending` | Exact `authorization_pending` deferral under the protocol below; no generic release or unavailable result | same |
 | `rate_limited` | `deferRetryForInputsTx(…, api_rate_limited)` | same |
 | `failed` | `RequeueRetryReceiptTx` (released unchanged); log `diag.Encode(err, "routing", "load_metadata")` | same |
 | `unusable` | `RequeueRetryReceiptTx` (released unchanged); no outcome; fetching not suspended | same |
@@ -578,14 +592,18 @@ UPDATE transient_metadata SET duration_seconds = NULL WHERE duration_seconds = 0
 1. `ValidateRetryReceiptTx`;
 2. `TransitionRunVideoStateTx(not_yet_evaluated → evaluating)`;
 3. `TransitionRunVideoStateTx(evaluating → deferred, FinalOutcomeDeferred, &reason)`;
-4. resolve owned error rows, first creating a pending deferred sink when the receipt has no deferred row (as `processRetryVideo`'s deferred branch does);
-5. `AcknowledgeRetryDeferralReceiptTx(receipt)`.
+4. when the receipt has no owned Deferred row, establish the appropriate pending Deferred sink without changing the owned Error rows or adding the new row to the receipt;
+5. call `AcknowledgeRetryDeferralReceiptTx(receipt)` to return owned Deferred rows to pending and resolve the exact owned Error rows. Do not resolve or release them before acknowledgement revalidates the receipt.
 
 A same-owner resumed claim that is already past `not_yet_evaluated` uses its current state on an allowed edge.
 
 The item keeps its original `deferral_reason` (for example `requeued_by_user`) while the run outcome records the deferral reason. How the Deferred view shows this is for the Designer to decide (ADR-006 Findings). Nothing is changed here.
 
-**Backstop.** `processRetryVideo` sets `requireInputsKey{}`. With it set, `videoContextForExclusion`, `detectVideos` and `routeVideos` return `errInputsUnavailable` instead of substituting an empty `TransientMetadata`. `processRetryVideo` maps that error to the `failed` row (released unchanged, no outcome). Without the key, behavior is unchanged.
+**Authorization-stop receipt settlement.** In `WithRetryTx`, revalidate the exact live receipt, finality, and the run's authority to settle locally. For open work blocked before evaluation, use `deferRetryForInputsTx`. For other independently authorized unfinished work prevented from sending, use the existing disposition/receipt handoff at the current state without re-running evaluation or writing an attempted action. The receiving-run video outcome is `deferred` with `deferred_reason=authorization_pending`; the run retains the separate vetted reconnect-required or temporary/unavailable cause. Restore the exact owned Deferred rows to pending with their original IDs, age, reason and most-recent owner. Resolve owned Errors rows only with a durable appropriate Deferred sink in the same transaction; if there was no owned Deferred row, create the needed sink with `deferral_reason=authorization_pending`. Do not substitute an unrelated ordinary or capacity row for an exact obligation. Preserve the run/video membership fence, existing decisions, successes, final outcomes, and all unresolved guards; an unowned or user-removed item is not recreated. Failed settlement rolls back and leaves the receipt recoverable. Recovery after a committed settlement makes no second claim or deferral.
+
+**Backstop.** `processRetryVideo` sets `requireInputsKey{}`. With it set, `videoContextForExclusion`, `detectVideos` and `routeVideos` return `errInputsUnavailable` instead of substituting an empty `TransientMetadata`. Recheck the effective current or restored stop first: authorization uses the exact `authorization_pending` settlement; only a generic input loss without a more specific disposition uses unchanged release. Without the key, this backstop is unchanged; the dispatch stop still applies.
+
+**Receiving proof:** Fail renewal in an admitted metadata batch, then exercise its unsent suffix, a later eligible local batch, and a receiver reopened with the stop and live receipts. Include a pre-existing generic suspension, local-ready inputs, partly-done work and an unresolved guard. Verify zero subsequent run-owned provider calls, no debit for unsent or local-only work, exact authorization deferrals and cause, unchanged queue age/reason and guard history, and no fabricated absence/failure or same-run re-claim. Contrast accounting failure and quota refusal, and recovery after a committed receipt settlement.
 
 **Live gate (BR-042, amended 2026-11-19).** `liveGateClaimed` ([Live ARS-001](../../live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) §5.3) runs inside this precondition, after BR-039 classification and the dispatch-stop resolution above. Live ARD-001 P1 makes this precondition a hard prerequisite of the BR-042 claimed paths.
 
