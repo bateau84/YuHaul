@@ -8,6 +8,8 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-19
 
+- Added [admin interface design](/docs/design/yuhaul-admin-ui-design.md) section “Live and Upcoming Videos — Skipped Until Ended” for BR-042: the three cases (live now, upcoming, live status not confirmed) in Run Detail, Decision Detail, the Deferred row and its reason filter, the videos page, simulations (including `Live status unknown`) and long waits over repeated runs. Design only; the API is left open and capability needs are listed.
+
 - Decided two points from the Errors implementation review in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the `View account status` link is limited to `oauth_error`, `authorization_unavailable`, `authorization_changed` and `credential_persistence_failed`; and rows with the same title show `Video ID: {id}` and add `, video {id}` to their control names. Design only.
 
 - Corrected the Errors “Other states” paragraph in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): raw non-`diag:v1` text is never shown (`Reason unavailable.`), as ARS-001 returns normalized text or nothing. Confirmed from the code that the `api_error` category means a YouTube API error response only, so its label stays. Design only.
