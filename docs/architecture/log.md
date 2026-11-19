@@ -8,6 +8,10 @@ timestamp: 2026-11-19T00:00:00Z
 
 # Architecture Update Log
 
+## 2026-11-20
+
+**Central migration allocation (`rq-receipt-migration-order`).** [Discovery ARS-002](/docs/architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md) §6 allocates `030` to the additive, immutable `discovery_source_failure` table. It goes ahead of the receipt-provenance migration because neither depends on the other. No number above `030` is reserved. Each later migration takes the next integer when it is integrated into the release candidate, with no gaps and no renumbering once a number reaches any deployed or shared database. Plan dependencies keep the order receipt → Discovery page/scope → live-status, with capacity's `deferred_item` rebuild combined or carried forward. The expected numbers are `031`, `032` and `033`; they are not reserved. [Run-initiation ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §5.1.1 and §6.1.1 are amended. This closes the interim's G1 (Errors entry) after the user declined it on 2026-11-20. Documentation only.
+
 ## 2026-11-19
 
 **Live-status amendments applied (BR-042, `b42-amend`).** The six contracts named in [Live ARS-001 §10](/docs/architecture/live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) now state the live-status additions, each with a back-link. ARS-005 §6.1.2/§6.2 add the `Live` requirement, the claimed gate, the live row and hold clearing. ARS-006 §7.2 adds a live-only gate before continuation. Authorization ARS-001 adds `LiveClearedTx` at the authority step and at POST admission, and maps `ErrLiveNotCleared` to a deferral. Safe-diagnostic ARS-001 adds the registrations. Capacity ARD-001 and Discovery ARS-001 are amended in their uncommitted working copies. Docs only.

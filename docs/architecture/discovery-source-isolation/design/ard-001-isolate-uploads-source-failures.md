@@ -42,7 +42,7 @@ If YouTube lists uploads for A, returns `404 playlistNotFound` for B, and lists 
 
 ## Decision and alternatives
 
-**Keep the full production run.** Let discovery own one uploads-source scan at a time. Reuse native video/run evidence, the guarded reader and the existing authorized Run Detail and Errors surfaces. Add one compact run/source record type for positive completion and isolated failure, not an operational event bus or video queue. The permanent-failure record doubles as its Errors entry; no dual write. Successful completion supplies the coverage floor even when no new video was found; no separate watermark table.
+**Keep the full production run.** Let discovery own one uploads-source scan at a time. Reuse native video/run evidence, the guarded reader and the existing authorized Run Detail and Errors surfaces. Add one compact run/source record type for positive completion and isolated failure, not an operational event bus or video queue. The permanent-failure record doubles as its Errors entry; no dual write. *(Refined 2026-11-20 by [ARS-002](../specifications/ars-002-durable-source-failure-record.md): failure incidents are an immutable table of their own, migration `030`; the mutable run/source coverage row comes later with ARS-001's migration and is keyed by the same `(run_id, channel_id)`.)* Successful completion supplies the coverage floor even when no new video was found; no separate watermark table.
 
 | Alternative | Trade-off and disposition |
 |---|---|

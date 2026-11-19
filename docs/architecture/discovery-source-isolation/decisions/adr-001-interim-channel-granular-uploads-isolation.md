@@ -6,7 +6,7 @@ tags: [architecture, decision, discovery, interim, recovery, diagnostics]
 timestamp: 2026-11-20T00:00:00Z
 ---
 
-**Status:** accepted as an interim (architecture). Two user-owned gaps (G1, G2) need explicit acceptance before release; G3 gates one log attribute. It does not supersede [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) or [ARS-001](../specifications/ars-001-durable-discovery-page-handoff.md). Nothing here is implemented yet.
+**Status:** accepted as an interim (architecture). User answers on 2026-11-20 (relayed by the dispatcher): G2 and G3 accepted; G1 declined ("there is no rush, implement the proper fix"). G1 is therefore closed by [ARS-002](../specifications/ars-002-durable-source-failure-record.md), which ships with this interim and adds migration `030`. That supersedes Option 1's "no migration" premise and withdraws D6. D1–D5 and D7 stand. It does not supersede [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) or [ARS-001](../specifications/ars-001-durable-discovery-page-handoff.md). Nothing here is implemented yet.
 
 Production builds up to `debad57` fail every run when one subscribed channel's uploads list returns `404 playlistNotFound`. Runs 52 and 53 each failed after about 13 minutes of reads. This interim keeps the run alive. If channels A and C list successfully and B returns `404 playlistNotFound`, the run saves and routes A's and C's new videos and advances only their floors. It keeps none of B's pages and does not move B's floor. It ends **Completed** with an explicit incomplete-discovery note, and the next fresh run polls B again. If every attempted channel fails this way and no run-wide stop happened, the run ends **Failed** with "No channels were scanned successfully." It needs no schema migration.
 
@@ -31,11 +31,11 @@ Production builds up to `debad57` fail every run when one subscribed channel's u
 | Authority | Disposition in this interim |
 |---|---|
 | BR-002 AC6 | **Satisfied.** A failed channel is skipped for this run and retried next run. Successful channels' discoveries are kept. |
-| BR-002 AC7 | **Satisfied, except for identity.** Scanning continues and the failed floor stays where it was. Run Detail shows incomplete coverage from durable ledger facts, without naming the channel. The next fresh run re-polls the channel. |
+| BR-002 AC7 | **Satisfied.** Scanning continues and the failed floor stays where it was. Run Detail reports incomplete coverage and names the channels from ARS-002's durable rows (this replaces the original ledger-based note). The next fresh run re-polls the channel. |
 | BR-002 AC8 | **Satisfied.** The run ends terminal `failed` with an explicit no-successful-scan reason. That condition is defined below. |
-| BR-002 AC9 | **Gap G2.** A failed channel's earlier pages are dropped, not routed. They remain discoverable because B's floor does not move. |
+| BR-002 AC9 | **Gap G2, accepted by the user on 2026-11-20.** A failed channel's earlier pages are dropped, not routed. They remain discoverable because B's floor does not move. |
 | BR-002 AC10 | **Not applicable.** No page is saved before its channel completes. |
-| OC-001 permanent uploads-source error | **Gap G1.** There is no durable read-only source entry in Errors. Consumption accounting still classifies the attempt as `permanent`. |
+| OC-001 permanent uploads-source error | **Satisfied by [ARS-002](../specifications/ars-002-durable-source-failure-record.md),** which ships with this interim. G1 was declined on 2026-11-20. Consumption accounting still classifies the attempt as `permanent`. |
 | OC-001 quota, transient and authorization semantics | **Unchanged.** These stay run-wide, exactly as today. |
 | OC-002, BR-032, BR-039 | **Preserved.** No video or action outcome is invented. Final outcomes are untouched. |
 | Live-status ([Live ARS-001](../../live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) §4) | **Compatible.** The prefetch sees only merged videos from completed channels, so a skipped channel's videos get no `live_status`. |
@@ -149,7 +149,10 @@ After discovery, the pipeline decides as follows:
   - The run is terminal `failed`, as today's discovery failure is. Retention and other side effects are unchanged.
 - **Otherwise,** the existing flow continues and the run completes or defers as today. That includes a mixed run, and a run where both local failures and a `ScanStopped` happened.
 
-### D6. Inspection without new storage
+### D6. Inspection without new storage (withdrawn 2026-11-20)
+
+**Withdrawn.** Don't implement this section. [ARS-002 §4](../specifications/ars-002-durable-source-failure-record.md#4-authorized-readers-and-api) replaces the ledger-derived `discovery_incomplete` flag with the durable source-failure rows, which are exact, contain the channel, and don't over-report on resume. The original text is kept below for history.
+
 
 - The Run read projection adds `discovery_incomplete` (boolean). It is true for a production run (`scheduled`/`manual`) when `quota_ledger` has a row with that `run_id`, `operation_type='playlist_items_list'`, `outcome_category='permanent'` and `http_status=404`.
   - The ledger is durable, append-only, never pruned in source, and survives resume.
@@ -263,8 +266,8 @@ Reconsider the interim when any of these happens:
 
 ## Open questions
 
-User-owned. These block release, not implementation.
+Answered by the user on 2026-11-20 (relayed by the dispatcher). Nothing user-owned remains open.
 
-- **G1 (OC-001):** Ship without the durable read-only source entry in Errors until a migration slot exists. The stand-ins are Run Detail's incomplete-coverage note and the log identity. The alternative is to wait for Option 2.
-- **G2 (BR-002 AC9):** Until the full design, a channel that fails after earlier pages contributes none of its videos to that run. They are re-polled next run from the unchanged floor.
-- **G3 (diagnostic log contract):** Allow the validated YouTube channel ID of a skipped source in one server-log record (D7). This shows one of your subscriptions in your own server logs; nothing is stored or published. Without it, a channel that never produced a video cannot be identified until Option 2.
+- **G1 (OC-001): declined.** "there is no rush, implement the proper fix." The durable read-only Errors entry ships with this interim, through [ARS-002](../specifications/ars-002-durable-source-failure-record.md) and migration `030`.
+- **G2 (BR-002 AC9): accepted.** Until the full design, a channel that fails after earlier pages contributes none of its videos to that run. They are re-polled next run from the unchanged floor.
+- **G3 (diagnostic log contract): accepted.** The validated channel ID is included as `source_channel_id` in the single D7 warning line. This is a bounded exception to the diagnostic log rule for that one record only.
