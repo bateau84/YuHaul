@@ -8,6 +8,10 @@ timestamp: 2026-11-11T00:00:00Z
 
 # Architecture Update Log
 
+## 2026-11-19
+
+**Legacy Store A defaults (`rq-metadata-fetch`, review `516b34d2` F1).** [Run-initiation ARS-005 §6.1.1](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) adds a one-time clearing step. Old `transient_metadata` rows can hold `''` for a missing description or channel name and `0` for a missing duration. These become `NULL` in the receipt-provenance migration, so the readiness check cannot accept them as real inputs. A real empty or zero value in an old row is cleared too, and the bound fetch reads it again. TTL alone, a cutoff and a provenance column were rejected. Contract only; it is not implemented.
+
 ## 2026-11-18
 
 **BR-039 rollback procedure corrected (gate b39-gate-iii MAJOR-1).** The rollback note in [ARS-006 §1.2](run-initiation/specifications/ars-006-final-outcomes-are-never-reprocessed.md) and [ADR-007](run-initiation/decisions/adr-007-final-outcomes-are-never-reprocessed.md) Decision 6 dropped the triggers but left `schema_migrations` at 28. As a result, the pre-028 binary failed with `no migration found for version 28`, and deploying the new binary again started with no triggers.
