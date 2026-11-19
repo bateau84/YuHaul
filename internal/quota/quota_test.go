@@ -382,6 +382,9 @@ func TestAttemptMigrationPreservesLegacyRows(t *testing.T) {
 		`CREATE TABLE error_entry (id INTEGER PRIMARY KEY, video_id INTEGER, status TEXT)`,
 		`CREATE TABLE video (id INTEGER PRIMARY KEY, final_outcome TEXT CHECK(final_outcome IN ('accepted', 'rejected', 'excluded', 'deferred', 'failed', 'not_yet_evaluated')))`,
 		`CREATE TABLE run_video_outcome (run_id INTEGER, video_id INTEGER, final_outcome TEXT CHECK (final_outcome IS NULL OR final_outcome IN ('accepted','rejected','excluded','deferred','failed','not_yet_evaluated')))`,
+		// Migration 029 creates triggers on transient_metadata, which every real
+		// database has from migration 001; the fixture needs the columns they name.
+		`CREATE TABLE transient_metadata (video_id TEXT PRIMARY KEY, title TEXT, is_active BOOLEAN, expired_at TIMESTAMP, fetched_at TIMESTAMP, expires_at TIMESTAMP)`,
 		`CREATE TABLE quota_ledger (id INTEGER PRIMARY KEY, date TEXT, operation_type TEXT, units_consumed INTEGER, call_count INTEGER, run_id INTEGER, recorded_at DATETIME)`,
 		`INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, recorded_at) VALUES ('2020-01-01', 'videos_list', 3, 3, '2020-01-01T00:00:00Z')`,
 	} {
