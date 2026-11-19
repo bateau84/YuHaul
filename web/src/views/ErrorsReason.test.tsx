@@ -287,6 +287,35 @@ describe('Focus after a successful Retry', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Errors & Deferred' })).toHaveFocus())
   })
 
+  // Regression: the click lands in the microtask after the load's commit, before React
+  // has run that commit's passive effects. The focus request must not be consumed by
+  // that earlier commit against the old list (focusing the row being removed).
+  it('moves focus to the next row when Retry is clicked before the load effects have run', async () => {
+    const rows = [entry({ id: 1, video_title: 'First' }), entry({ id: 2, video_title: 'Second', external_video_id: 'bbbbbbbbbbb' })]
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue(rows)
+    vi.spyOn(queueApi, 'retryError').mockResolvedValue(rows[0])
+    const g = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    const before = g.IS_REACT_ACT_ENVIRONMENT
+    g.IS_REACT_ACT_ENVIRONMENT = false
+    const observer = new MutationObserver(() => {
+      const retry = screen.queryByRole('button', { name: 'Retry First' })
+      if (retry) {
+        observer.disconnect()
+        retry.click()
+      }
+    })
+    try {
+      observer.observe(document.body, { childList: true, subtree: true })
+      renderErrors()
+      await waitFor(() => expect(screen.queryByText('First')).toBeNull())
+      await waitFor(() => expect(screen.getByText('Second').closest('tr')).toHaveFocus())
+      expect(queueApi.retryError).toHaveBeenCalledTimes(1)
+    } finally {
+      observer.disconnect()
+      g.IS_REACT_ACT_ENVIRONMENT = before
+    }
+  })
+
   it('moves focus to the heading when the last of several rows is retried', async () => {
     const rows = [entry({ id: 1, video_title: 'First' }), entry({ id: 2, video_title: 'Last', external_video_id: 'bbbbbbbbbbb' })]
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue(rows)

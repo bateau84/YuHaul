@@ -48,7 +48,10 @@ export function ErrorsView() {
   const bodyRef = useRef<HTMLTableSectionElement>(null)
   // Row index to focus once a removed row (Dismiss, Remove or a successful
   // Retry) has left the list.
-  const focusAfterDismiss = useRef<number | null>(null)
+  // It is state, set in the same update that removes the row, so only the commit
+  // that removed the row can act on it. A ref read by an effect on `errors` was
+  // consumed by a still-pending effect from an earlier commit, against the old list.
+  const [focusAfterDismiss, setFocusAfterDismiss] = useState<{ index: number } | null>(null)
   const recoveredRef = useRef(false)
   const { addToast } = useToast()
 
@@ -87,13 +90,11 @@ export function ErrorsView() {
   // After a row is removed focus would fall to <body>: move it to the
   // row that took its place, or to the page heading when no row is left.
   useEffect(() => {
-    const index = focusAfterDismiss.current
-    if (index === null) return
-    focusAfterDismiss.current = null
-    const row = bodyRef.current?.querySelectorAll<HTMLTableRowElement>('tr[data-error-row]')[index]
+    if (focusAfterDismiss === null) return
+    const row = bodyRef.current?.querySelectorAll<HTMLTableRowElement>('tr[data-error-row]')[focusAfterDismiss.index]
     if (row) row.focus()
     else headingRef.current?.focus()
-  }, [errors])
+  }, [focusAfterDismiss])
 
   async function handleRetry() {
     setRetrying(true)
@@ -111,7 +112,7 @@ export function ErrorsView() {
   async function retryError(id: number) {
     try {
       await api.retryError(id)
-      focusAfterDismiss.current = errors.findIndex((e) => e.id === id)
+      setFocusAfterDismiss({ index: errors.findIndex((e) => e.id === id) })
       setErrors((prev) => prev.filter((e) => e.id !== id))
       addToast('Error queued for retry', 'success')
     } catch (err) {
@@ -135,7 +136,7 @@ export function ErrorsView() {
   async function dismissError(id: number, toast = 'Error dismissed') {
     try {
       await api.dismissError(id)
-      focusAfterDismiss.current = errors.findIndex((e) => e.id === id)
+      setFocusAfterDismiss({ index: errors.findIndex((e) => e.id === id) })
       setErrors((prev) => prev.filter((e) => e.id !== id))
       addToast(toast, 'success')
     } catch (err) {
