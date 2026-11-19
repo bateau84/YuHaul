@@ -70,8 +70,29 @@ type SearchResult struct {
 	Stats Stats `json:"-"`
 }
 
-// Stats are the counts a request logs (never text).
-type Stats struct{ Candidates, Matches int }
+// Stats are what a name search logs: the path, counts and stage durations,
+// never text.
+type Stats struct {
+	Path                Path
+	Candidates, Matches int
+	Stages              Stages
+}
+
+// Stages are the durations of the name-search stages (ARS-001 §9.2). The
+// handler adds the sixth, encode.
+type Stages struct {
+	// Begin is classification and BeginTx.
+	Begin time.Duration
+	// Candidates is the path choice and the candidate query, until its last
+	// row is read.
+	Candidates time.Duration
+	// Recheck is Held and Key/Contains over the candidates.
+	Recheck time.Duration
+	// Sort is the sort and the page cut.
+	Sort time.Duration
+	// Project is the summary projection of the page.
+	Project time.Duration
+}
 
 // TitleInfo is a title and whether it may be shown.
 type TitleInfo struct {
@@ -182,6 +203,7 @@ func pagingErr(p Paging) error {
 // Search classifies raw and answers it (ARS-001 §3, §4.1, §6, §7). Inputs that
 // need no lookup are answered without opening a transaction.
 func (s *Service) Search(ctx context.Context, raw string, p Paging) (SearchResult, error) {
+	started := time.Now()
 	in := Classify(raw)
 	fromLink := in.Kind == KindLinkID
 	switch in.Kind {
@@ -202,6 +224,7 @@ func (s *Service) Search(ctx context.Context, raw string, p Paging) (SearchResul
 		return SearchResult{}, fmt.Errorf("videosearch: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // read-only; rollback is the end of the snapshot
+	begin := time.Since(started)
 
 	if in.Kind == KindLinkID || in.Kind == KindTypedID {
 		found, err := exactIDExists(ctx, tx, in.VideoID)
@@ -223,6 +246,7 @@ func (s *Service) Search(ctx context.Context, raw string, p Paging) (SearchResul
 	if err != nil {
 		return SearchResult{}, err
 	}
+	stats.Stages.Begin = begin
 	res := SearchResult{Kind: "results", Results: page, Stats: stats}
 	if in.Kind == KindTypedID {
 		res.Kind, res.VideoID, res.FromLink = "id_not_found", in.VideoID, &fromLink
@@ -247,8 +271,8 @@ LIMIT 1`, id, id).Scan(&src)
 	return true, nil
 }
 
-// namePage runs the §6.1 scan and cuts the requested page from the sorted
-// matches (§7).
+// namePage reads the §6.1 candidates by the §10.7 path, re-checks them, and
+// cuts the requested page from the sorted matches (§7).
 func (s *Service) namePage(ctx context.Context, tx *sql.Tx, text string, p Paging) (*Page, Stats, error) {
 	folder := titlekey.NewFolder()
 	needle := folder.Key(text)
@@ -277,12 +301,14 @@ func (s *Service) namePage(ctx context.Context, tx *sql.Tx, text string, p Pagin
 		boundary, hasCursor = b, true
 	}
 
-	matches, cutoff, candidates, err := scanMatches(ctx, tx, folder, needle, s.now)
+	set, err := findMatches(ctx, tx, folder, needle, s.now)
 	if err != nil {
 		return nil, Stats{}, err
 	}
-	keys := make([]SortKey, len(matches))
-	for i, m := range matches {
+	cutoff := set.Cutoff
+	sortStart := time.Now()
+	keys := make([]SortKey, len(set.Matches))
+	for i, m := range set.Matches {
 		keys[i] = m.Key
 	}
 	SortKeys(keys)
@@ -306,6 +332,8 @@ func (s *Service) namePage(ctx context.Context, tx *sql.Tx, text string, p Pagin
 	for _, k := range keys[w.Start:w.End] {
 		ids = append(ids, k.VideoID)
 	}
+	projectStart := time.Now()
+	sortTime := projectStart.Sub(sortStart)
 	items, err := summaries(ctx, tx, ids, cutoff)
 	if err != nil {
 		return nil, Stats{}, err
@@ -327,7 +355,13 @@ func (s *Service) namePage(ctx context.Context, tx *sql.Tx, text string, p Pagin
 			page.PrevCursor = &c
 		}
 	}
-	return page, Stats{Candidates: candidates, Matches: total}, nil
+	return page, Stats{
+		Path: set.Path, Candidates: set.Candidates, Matches: total,
+		Stages: Stages{
+			Candidates: set.CandidateTime, Recheck: set.RecheckTime,
+			Sort: sortTime, Project: time.Since(projectStart),
+		},
+	}, nil
 }
 
 // ---- View ------------------------------------------------------------------

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/titlekey"
@@ -48,8 +49,19 @@ type Match struct {
 	Key SortKey
 }
 
-// candidateSQL is ARS-001 §6.1. It is read-only and returns every row that may
-// hold a title: the cheap filter only narrows; metadata.Held decides.
+// Path names the §6.1 candidate query a name search used.
+type Path string
+
+const (
+	// PathIndexed asks the title search index for candidates.
+	PathIndexed Path = "indexed"
+	// PathScan reads every row that may hold a title.
+	PathScan Path = "scan"
+)
+
+// candidateSQL is the ARS-001 §6.1 scan path. It is read-only and returns every
+// row that may hold a title: the cheap filter only narrows; metadata.Held
+// decides.
 const candidateSQL = `
 SELECT m.video_id, m.title, m.is_active, m.expired_at, m.fetched_at, m.expires_at,
        v.discovered_at, v.id IS NOT NULL
@@ -63,22 +75,89 @@ WHERE m.is_active = 1
                   WHERE f.video_id = m.video_id
                     AND (f.source = 'user_import' OR f.is_duplicate_reference = 1)))`
 
-// ScanMatches reads every candidate row inside tx, then takes one cutoff and
-// returns (using now for the cutoff) the sort keys of rows that are held at that cutoff and whose title
-// contains needleKey (a Key result). It also returns the cutoff, which the
-// caller reuses for ProjectMetadata. It writes nothing and changes no expiry.
-// Titles are dropped as soon as they have been compared.
-func ScanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needleKey string, now func() time.Time) ([]Match, time.Time, error) {
-	m, cutoff, _, err := scanMatches(ctx, tx, folder, needleKey, now)
-	return m, cutoff, err
+// indexedCandidateSQL is the ARS-001 §6.1 indexed path: the same columns and
+// the same filter as candidateSQL, narrowed first by the index. The index text
+// is never selected; the title comes from transient_metadata.
+const indexedCandidateSQL = `
+SELECT m.video_id, m.title, m.is_active, m.expired_at, m.fetched_at, m.expires_at,
+       v.discovered_at, v.id IS NOT NULL
+FROM title_search
+JOIN title_search_doc d ON d.doc_id = title_search.rowid
+JOIN transient_metadata m ON m.video_id = d.video_id
+LEFT JOIN video v ON v.video_id = m.video_id
+WHERE title_search MATCH ?
+  AND m.is_active = 1
+  AND m.expired_at IS NULL
+  AND m.title IS NOT NULL AND m.title <> ''
+  AND (v.id IS NOT NULL
+       OR EXISTS (SELECT 1 FROM title_fingerprint f
+                  WHERE f.video_id = m.video_id
+                    AND (f.source = 'user_import' OR f.is_duplicate_reference = 1)))`
+
+// useIndex is the ARS-001 §10.7 path rule. ready is metadata.SearchIndexReady.
+// FTS5 matches nothing for fewer than 3 code points, and its handling of U+0000
+// inside a query string is unverified, so both go to the scan, which is always
+// correct.
+func useIndex(ready bool, needleKey string) bool {
+	return ready && utf8.RuneCountInString(needleKey) >= 3 && !strings.ContainsRune(needleKey, 0)
 }
 
-// scanMatches is ScanMatches that also reports how many candidate rows it read
-// (for the operational log, which carries counts only).
-func scanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needleKey string, now func() time.Time) ([]Match, time.Time, int, error) {
-	rows, err := tx.QueryContext(ctx, candidateSQL)
+// ftsPhrase binds needleKey as one FTS5 string: inside it every character is
+// literal (ARS-001 §10.6).
+func ftsPhrase(needleKey string) string {
+	return `"` + strings.ReplaceAll(needleKey, `"`, `""`) + `"`
+}
+
+// matchSet is what one candidate read produced. It carries no title.
+type matchSet struct {
+	Matches []Match
+	Cutoff  time.Time
+	Path    Path
+	// Candidates counts rows the candidate query returned.
+	Candidates int
+	// CandidateTime is the path choice and candidate query, up to the last
+	// row read. RecheckTime is Held and Contains over those rows.
+	CandidateTime, RecheckTime time.Duration
+}
+
+// ScanMatches reads every candidate row inside tx on the scan path, then takes
+// one cutoff and returns (using now for the cutoff) the sort keys of rows that
+// are held at that cutoff and whose title contains needleKey (a Key result). It
+// also returns the cutoff, which the caller reuses for ProjectMetadata. It
+// writes nothing and changes no expiry. Titles are dropped as soon as they have
+// been compared.
+func ScanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needleKey string, now func() time.Time) ([]Match, time.Time, error) {
+	set, err := readMatches(ctx, tx, folder, needleKey, now, PathScan, time.Now())
+	return set.Matches, set.Cutoff, err
+}
+
+// findMatches chooses the path (ARS-001 §10.7) and reads the matches. An error
+// from the indexed query is returned as is: there is no fallback to the scan,
+// which would hide damage that also blocks writes (§10.9).
+func findMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needleKey string, now func() time.Time) (matchSet, error) {
+	start := time.Now()
+	ready, err := metadata.SearchIndexReady(ctx, tx)
 	if err != nil {
-		return nil, time.Time{}, 0, fmt.Errorf("videosearch: scan candidates: %w", err)
+		return matchSet{}, err
+	}
+	path := PathScan
+	if useIndex(ready, needleKey) {
+		path = PathIndexed
+	}
+	return readMatches(ctx, tx, folder, needleKey, now, path, start)
+}
+
+// readMatches runs the path's candidate query, takes the cutoff after its last
+// row, and keeps the rows that Held and Contains accept. The index only
+// proposes candidates; this re-check decides, and its list is the total.
+func readMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needleKey string, now func() time.Time, path Path, start time.Time) (matchSet, error) {
+	query, args := candidateSQL, []any(nil)
+	if path == PathIndexed {
+		query, args = indexedCandidateSQL, []any{ftsPhrase(needleKey)}
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return matchSet{}, fmt.Errorf("videosearch: %s candidates: %w", path, err)
 	}
 	defer rows.Close()
 
@@ -94,7 +173,7 @@ func scanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needl
 	for rows.Next() {
 		if n++; n%ctxCheckEvery == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, time.Time{}, 0, err
+				return matchSet{}, err
 			}
 		}
 		var (
@@ -103,7 +182,7 @@ func scanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needl
 		)
 		if err := rows.Scan(&c.row.VideoID, &title, &c.row.IsActive, &c.row.ExpiredAt,
 			&c.row.FetchedAt, &c.row.ExpiresAt, &c.disc, &c.has); err != nil {
-			return nil, time.Time{}, 0, fmt.Errorf("videosearch: scan candidate: %w", err)
+			return matchSet{}, fmt.Errorf("videosearch: scan %s candidate: %w", path, err)
 		}
 		if title.Valid {
 			c.row.Title = &title.String
@@ -111,11 +190,12 @@ func scanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needl
 		cands = append(cands, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, time.Time{}, 0, fmt.Errorf("videosearch: iterate candidates: %w", err)
+		return matchSet{}, fmt.Errorf("videosearch: iterate %s candidates: %w", path, err)
 	}
 	// One cutoff, taken only after the result set is fully consumed (the same
 	// order ReadLocalDisplay uses).
 	cutoff := now().UTC()
+	recheck := time.Now()
 
 	var out []Match
 	for _, c := range cands {
@@ -128,7 +208,10 @@ func scanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needl
 		}
 		out = append(out, Match{Key: SortKey{HasDisc: ok, Disc: disc, VideoID: c.row.VideoID}})
 	}
-	return out, cutoff, len(cands), nil
+	return matchSet{
+		Matches: out, Cutoff: cutoff, Path: path, Candidates: len(cands),
+		CandidateTime: recheck.Sub(start), RecheckTime: time.Since(recheck),
+	}, nil
 }
 
 // Metadata is the availability of one video's title and channel name at the

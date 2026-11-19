@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -37,7 +38,8 @@ func WithVideoSearch(v VideoSearcher) Option {
 }
 
 // handleVideoSearch is GET /api/videos/search (ARS-001 §2). Logs carry the kind,
-// counts and duration only: never q, a title, a channel name or a cursor.
+// path (indexed or scan), counts, stage durations and total duration only:
+// never q, a title, a channel name or a cursor.
 func (s *Server) handleVideoSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	start := time.Now()
@@ -60,10 +62,21 @@ func (s *Server) handleVideoSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "search_failed")
 		return
 	}
-	s.logger.InfoContext(r.Context(), "video search",
-		"kind", res.Kind, "candidates", res.Stats.Candidates, "matches", res.Stats.Matches,
-		"duration_ms", time.Since(start).Milliseconds())
+	encodeStart := time.Now()
 	writeJSON(w, http.StatusOK, res)
+	encode := time.Since(encodeStart)
+
+	attrs := []any{"kind", res.Kind}
+	if st := res.Stats; st.Path != "" { // a name search read the candidates
+		attrs = append(attrs, "path", string(st.Path),
+			"candidates", st.Candidates, "matches", st.Matches,
+			slog.Group("stages", // time.Duration: nanoseconds in JSON logs (ARS-001 §9.2)
+				"begin", st.Stages.Begin, "candidates", st.Stages.Candidates,
+				"recheck", st.Stages.Recheck, "sort", st.Stages.Sort,
+				"project", st.Stages.Project, "encode", encode))
+	}
+	attrs = append(attrs, "duration_ms", time.Since(start).Milliseconds())
+	s.logger.InfoContext(r.Context(), "video search", attrs...)
 }
 
 // handleGetVideo is GET /api/videos/{videoId} (ARS-001 §2).

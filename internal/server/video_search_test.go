@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +43,9 @@ type vsFix struct {
 	clock *vsClock
 	logs  *bytes.Buffer
 	route int64
+	// wantPath is the candidate path every name search must log. Tests that
+	// exercise the scan path set it to "scan".
+	wantPath string
 }
 
 var vsNow = time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
@@ -52,7 +56,7 @@ func newVSFix(t *testing.T) *vsFix {
 	t.Helper()
 	db, stateStore, routerStore, versioner, cleanup := setupRunVideoTest(t)
 	t.Cleanup(cleanup)
-	f := &vsFix{t: t, db: db, clock: &vsClock{t: vsNow}, logs: &bytes.Buffer{}}
+	f := &vsFix{t: t, db: db, clock: &vsClock{t: vsNow}, logs: &bytes.Buffer{}, wantPath: "indexed"}
 	f.srv = NewServer(&fakePipeline{}, pipeline.NewBroadcaster(),
 		WithServerLogger(slog.New(slog.NewJSONHandler(f.logs, nil))),
 		WithRunStore(stateStore), WithRunVideoStore(stateStore),
@@ -68,6 +72,15 @@ func (f *vsFix) exec(q string, args ...any) int64 {
 	require.NoError(f.t, err, q)
 	id, _ := res.LastInsertId()
 	return id
+}
+
+// reindex makes the index see rows seeded with raw SQL (ARS-001 §9: such
+// writers bypass IndexTitleTx, so the reconcile adds them). Without it the
+// indexed path cannot find them.
+func (f *vsFix) reindex() {
+	f.t.Helper()
+	_, err := metadata.ReconcileSearchIndex(context.Background(), f.db, f.clock.Now())
+	require.NoError(f.t, err)
 }
 
 func (f *vsFix) run(runType, status string, initiatedBy any, started time.Time) int64 {
@@ -110,13 +123,33 @@ type vsResp struct {
 	code   int
 	header http.Header
 	raw    []byte
+	// path is the candidate path the request logged; empty when the request
+	// read no candidates.
+	path string
+	// logged is the request's "video search" log record, if it wrote one.
+	logged map[string]any
 }
 
+// get serves path and parses the log line the request wrote. A name search
+// must have used f.wantPath.
 func (f *vsFix) get(path string) vsResp {
 	f.t.Helper()
+	before := f.logs.Len()
 	rec := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-	return vsResp{rec.Code, rec.Header(), rec.Body.Bytes()}
+	r := vsResp{code: rec.Code, header: rec.Header(), raw: rec.Body.Bytes()}
+	for _, line := range bytes.Split(f.logs.Bytes()[before:], []byte("\n")) {
+		var m map[string]any
+		if len(line) == 0 || json.Unmarshal(line, &m) != nil || m["msg"] != "video search" {
+			continue
+		}
+		r.logged = m
+		r.path, _ = m["path"].(string)
+	}
+	if r.path != "" {
+		require.Equal(f.t, f.wantPath, r.path, path)
+	}
+	return r
 }
 
 func (f *vsFix) search(q string, extra ...string) vsResp {
@@ -164,6 +197,7 @@ func TestVideoSearchPagingTotalsAndJumps_T10(t *testing.T) {
 	f.video("other000001", vsNow, nil, nil)
 	f.held("other000001", "Jazz", "Chan")
 
+	f.reindex()
 	var walked []string
 	cursors := []string{}
 	var p1 *videosearch.Page
@@ -260,6 +294,7 @@ func TestVideoSearchIDKinds_T12_T13_T14(t *testing.T) {
 	f.held("someother111", "mentions XyZ12345678 here", "Chan")
 	f.reference("ref00000001", "UCref")
 
+	f.reindex()
 	res := f.search(known).search(t)
 	assert.Equal(t, "video", res.Kind)
 	assert.Equal(t, known, res.VideoID)
@@ -303,6 +338,7 @@ func TestVideoSearchIDKinds_T12_T13_T14(t *testing.T) {
 		f.video(id, vsNow.Add(-time.Duration(i)*time.Minute), nil, nil)
 		f.held(id, "alpha "+id, "C")
 	}
+	f.reindex()
 	page := f.search("alpha").search(t).Results
 	require.NotNil(t, page.NextCursor)
 	r = f.search("beta", "cursor", *page.NextCursor)
@@ -321,6 +357,7 @@ func TestVideoSearchCoverageFlow_T19(t *testing.T) {
 	id := "cover000001"
 	f.video(id, vsNow.Add(-time.Hour), nil, nil)
 	f.held(id, "Coverage title", "Chan")
+	f.reindex()
 	require.Equal(t, []string{id}, ids(f.search("coverage").search(t).Results))
 
 	// expires_at moved past without a sweep: not found, expired in the view.
@@ -330,6 +367,7 @@ func TestVideoSearchCoverageFlow_T19(t *testing.T) {
 	assert.Equal(t, "expired", v["title"].(map[string]any)["availability"])
 	assert.Nil(t, v["title"].(map[string]any)["text"])
 	f.exec(`UPDATE transient_metadata SET expires_at = ? WHERE video_id = ?`, ts(vsNow.Add(time.Hour)), id)
+	f.reindex() // the raw UPDATE purged the entry (trigger); only a reconcile adds it back
 	require.Len(t, f.search("coverage").search(t).Results.Items, 1)
 
 	// Real sweeps. A cursor from before the sweep names no item afterwards.
@@ -338,6 +376,7 @@ func TestVideoSearchCoverageFlow_T19(t *testing.T) {
 		f.video(x, vsNow.Add(-time.Duration(i)*time.Minute), nil, nil)
 		f.held(x, "sweepable "+x, "C")
 	}
+	f.reindex()
 	first := f.search("sweepable").search(t).Results
 	require.NotNil(t, first.NextCursor)
 	f.clock.Set(vsNow.Add(31 * 24 * time.Hour))
@@ -361,6 +400,7 @@ func TestVideoSearchHidesFingerprints_T20_T21(t *testing.T) {
 	f.video("vidlogs0001", vsNow, nil, nil)
 	f.held("vidlogs0001", "Needle Title", "SecretChannelName")
 
+	f.reindex()
 	for _, q := range []string{"SECRETFINGERPRINT", "Former Imported"} {
 		r := f.search(q)
 		assert.Empty(t, r.search(t).Results.Items, q)
@@ -372,8 +412,20 @@ func TestVideoSearchHidesFingerprints_T20_T21(t *testing.T) {
 	for _, p := range paths {
 		assert.Equal(t, "no-store", f.get(p).header.Get("Cache-Control"), p)
 	}
-	first := f.search("needle").search(t)
-	require.NotNil(t, first)
+	first := f.search("needle")
+	require.NotNil(t, first.search(t))
+	// The log record names the path, counts and every stage; the stages are
+	// durations, not text.
+	require.NotNil(t, first.logged)
+	assert.Equal(t, "indexed", first.logged["path"])
+	assert.Equal(t, "results", first.logged["kind"])
+	assert.EqualValues(t, 1, first.logged["matches"])
+	stages, ok := first.logged["stages"].(map[string]any)
+	require.True(t, ok, "stages group: %v", first.logged)
+	assert.ElementsMatch(t, []string{"begin", "candidates", "recheck", "sort", "project", "encode"}, jsonKeys(stages))
+	for name, d := range stages {
+		assert.Positive(t, d, name)
+	}
 	f.get("/api/videos/vidlogs0001")
 	// A failing read logs a diagnostic, still without text.
 	require.NoError(t, f.db.Close())
@@ -390,6 +442,40 @@ func TestVideoSearchHidesFingerprints_T20_T21(t *testing.T) {
 		assert.NotContains(t, logs, secret)
 	}
 	assert.Contains(t, logs, `"kind":"results"`)
+}
+
+// A name search takes the scan path while the index is not ready, and answers
+// the same as the indexed path once it is (ARS-001 §10.7).
+func TestVideoSearchScanPathWhenIndexNotReady_D2(t *testing.T) {
+	f := newVSFix(t)
+	f.wantPath = "scan"
+	for i := 0; i < 60; i++ {
+		id := vid(i)
+		f.video(id, vsNow.Add(-time.Duration(i)*time.Hour), nil, nil)
+		f.held(id, fmt.Sprintf("Lofi Beats %d", i), "Chan")
+	}
+	// No reconcile: title_search_state.built_at is NULL.
+	r := f.search("lofi")
+	scan := r.search(t)
+	assert.Equal(t, "scan", r.path)
+	assert.Equal(t, 60, scan.Results.Total)
+	require.NotNil(t, scan.Results.NextCursor)
+	scanPage2 := f.search("lofi", "cursor", *scan.Results.NextCursor).search(t).Results
+
+	f.reindex()
+	f.wantPath = "indexed"
+	r = f.search("lofi")
+	idx := r.search(t)
+	assert.Equal(t, "indexed", r.path)
+	assert.Equal(t, scan.Results, idx.Results)
+	assert.Equal(t, scanPage2, f.search("lofi", "cursor", *idx.Results.NextCursor).search(t).Results)
+
+	// A key under 3 code points after normalisation uses the scan even when the
+	// index is ready: e + U+0301 + x composes to two code points.
+	f.wantPath = "scan"
+	r = f.search("e\u0301x")
+	r.search(t)
+	assert.Equal(t, "scan", r.path)
 }
 
 func TestVideoViewFieldsPerState_T22_T23_T24_T25_T26(t *testing.T) {
@@ -499,6 +585,7 @@ func TestVideoViewFieldsPerState_T22_T23_T24_T25_T26(t *testing.T) {
 	assert.Equal(t, "simulation_only", vs["record"])
 	assert.Equal(t, map[string]any{"state": "simulation_only"}, vs["latest_outcome"])
 	assert.Equal(t, map[string]any{"state": "none"}, vs["queue_state"])
+	f.reindex()
 	assert.Equal(t, "video", f.search("sssssssssss").search(t).Kind)
 	assert.Equal(t, []string{"sssssssssss"}, ids(f.search("simulated only").search(t).Results))
 }
@@ -545,6 +632,7 @@ func TestVideoViewQueueStatePrecedence_T22(t *testing.T) {
 	assert.Equal(t, map[string]any{"state": "none"}, q("queuednn001"))
 	// Search rows carry the same state.
 	f.held("queuedcl001", "queue probe", "C")
+	f.reindex()
 	items := f.search("queue probe").search(t).Results.Items
 	require.Len(t, items, 1)
 	b, _ := json.Marshal(items[0].QueueState)
@@ -575,7 +663,15 @@ func TestVideoSearchWritesNothing_T31(t *testing.T) {
 	f.outcome(run, v, "accepted", nil, nil)
 	f.decision(v, run, "matched", nil)
 	f.reference("snapshot002", "UC")
+	f.reindex()
+	// The snapshot must include a populated index, or "unchanged" proves little.
+	var entries int
+	require.NoError(t, f.db.QueryRow(`SELECT count(*) FROM title_search_doc`).Scan(&entries))
+	require.Positive(t, entries)
 	before := dumpTables(t, f.db)
+	for _, tbl := range []string{"title_search", "title_search_doc", "title_search_state", "title_search_content", "title_search_data", "title_search_docsize", "title_search_idx", "title_search_config"} {
+		require.True(t, slices.ContainsFunc(before, func(r string) bool { return strings.HasPrefix(r, tbl+" ") }), "snapshot lacks %s", tbl)
+	}
 	for _, p := range []string{"/api/videos/search?q=snapshot", "/api/videos/search?q=snapshot001", "/api/videos/snapshot001", "/api/videos/snapshot002", "/api/videos/search?q=zzz"} {
 		require.Equal(t, 200, f.get(p).code, p)
 	}
@@ -794,6 +890,7 @@ func TestVideoSearchHandlerOutputMatchesSPAShape(t *testing.T) {
 		}
 	}
 
+	f.reindex()
 	for _, q := range []string{"", "lo", strings.Repeat("a", 201), "https://www.youtube.com/watch?list=1", "shape probe", "shapevid001",
 		"https://youtu.be/shapevid001", "https://youtu.be/AAAAAAAAAAA", "ShAPEVID001", "\xff\xfe\xfd"} {
 		checkResponse(decode(f.search(q)))
