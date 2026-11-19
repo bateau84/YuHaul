@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -54,7 +55,18 @@ func (s *Service) handleListErrors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"errors": publicErrorEntries(entries)})
+	views := publicErrorEntries(entries)
+	ids := make([]string, len(views))
+	for i := range views {
+		ids[i] = views[i].ExternalVideoID
+	}
+	titles := s.localTitles(r.Context(), ids)
+	for i := range views {
+		views[i].VideoTitle = titles[views[i].ExternalVideoID]
+	}
+	// A title may expire; the browser must not keep it past that.
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"errors": views})
 }
 
 func (s *Service) handleRetryError(w http.ResponseWriter, r *http.Request) {
@@ -151,12 +163,23 @@ func (s *Service) handleListDeferred(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	views := publicDeferredItems(page.Items)
+	ids := make([]string, len(views))
+	for i := range views {
+		ids[i] = views[i].ExternalVideoID
+	}
+	titles := s.localTitles(r.Context(), ids)
+	for i := range views {
+		views[i].VideoTitle = titles[views[i].ExternalVideoID]
+	}
+	w.Header().Set("Cache-Control", "no-store")
+
 	byReason := make(map[string]int, len(page.ByReason))
 	for reason, n := range page.ByReason {
 		byReason[string(reason)] = n
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"deferred":    publicDeferredItems(page.Items),
+		"deferred":    views,
 		"total":       page.Total,
 		"queue_total": page.QueueTotal,
 		"by_reason":   byReason,
@@ -328,6 +351,9 @@ type errorEntryView struct {
 	ReasonUnavailable bool          `json:"error_message_unavailable,omitempty"`
 	ClosedReason      *string       `json:"closed_reason"`
 	VideoFinalOutcome *string       `json:"video_final_outcome,omitempty"`
+	// VideoTitle is set only by the list handlers, only from a title held
+	// locally now (never stored in the queue row), and is otherwise omitted.
+	VideoTitle string `json:"video_title,omitempty"`
 }
 
 // unsafeText returns text unchanged when it is safe to expose, and "" plus an
@@ -356,8 +382,8 @@ func publicErrorEntry(e *ErrorEntry) errorEntryView {
 }
 
 // deferredItemView is the wire shape of a deferred item. It matches
-// DeferredItem in web/src/types.ts; video_title and channel_name are optional
-// there and are not supplied by the queue store.
+// DeferredItem in web/src/types.ts; channel_name is optional there and is not
+// supplied. video_title is filled by the list handler only.
 type deferredItemView struct {
 	RetryRunID                *int64          `json:"retry_run_id,omitempty"`
 	ID                        int64           `json:"id"`
@@ -372,6 +398,7 @@ type deferredItemView struct {
 	CreatedAt                 time.Time       `json:"created_at"`
 	ClosedReason              *string         `json:"closed_reason"`
 	VideoFinalOutcome         *string         `json:"video_final_outcome,omitempty"`
+	VideoTitle                string          `json:"video_title,omitempty"`
 }
 
 func publicDeferredItem(item *DeferredItem) deferredItemView {
@@ -401,6 +428,43 @@ func publicDeferredItem(item *DeferredItem) deferredItemView {
 		view.DeferredReasonUnavailable = true
 	}
 	return view
+}
+
+// localTitles returns the titles that are held locally right now, by external
+// video ID. It reads in chunks of 100 (the reader's limit) and uses a title only
+// when its availability is current_local. A failed read yields no titles for the
+// whole list: the list is still served and the UI falls back to the video ID.
+func (s *Service) localTitles(ctx context.Context, ids []string) map[string]string {
+	if s.titles == nil {
+		return nil
+	}
+	const chunk = 100
+	out := make(map[string]string)
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; !dup {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	for start := 0; start < len(unique); start += chunk {
+		end := min(start+chunk, len(unique))
+		display, err := s.titles.ReadLocalDisplay(ctx, unique[start:end])
+		if err != nil {
+			slog.WarnContext(ctx, "queue list titles unavailable", "diagnostic", diag.Encode(err, "unknown", "inspect_queue"))
+			return nil
+		}
+		for id, d := range display {
+			if d.TitleAvailability == "current_local" && d.Title != nil && *d.Title != "" {
+				out[id] = *d.Title
+			}
+		}
+	}
+	return out
 }
 
 func publicDeferredItems(items []DeferredItem) []deferredItemView {

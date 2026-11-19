@@ -4,9 +4,12 @@ import * as api from '../api/client'
 import { ApiError } from '../api/core'
 import { ClosedNotice, RefusalAlert } from '../components/ClosedNotice'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { FailureReason } from '../components/FailureReason'
 import { DeferredQueue } from '../components/DeferredQueue'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
+import { categoryLabel, offersAccountStatus } from '../lib/failure-reason'
+import { duplicateTitles, videoIdSuffix } from '../lib/same-title'
 import {
   diagCode,
   isClosedEntry,
@@ -28,6 +31,8 @@ export function ErrorsView() {
   const setTab = (next: 'errors' | 'deferred') => setSearchParams(next === 'deferred' ? { tab: 'deferred' } : {})
   const [errors, setErrors] = useState<ErrorEntry[]>([])
   // A closed entry is no longer active: it is never counted (BR-039).
+  // Rows that share a title name their video ID, visibly and in control names.
+  const sharedTitles = duplicateTitles(errors)
   const activeCount = errors.filter((e) => !isClosedEntry(e)).length
   const [queueTotal, setQueueTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
@@ -41,7 +46,8 @@ export function ErrorsView() {
   const firstRowRef = useRef<HTMLTableRowElement>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const bodyRef = useRef<HTMLTableSectionElement>(null)
-  // Row index to focus once a dismissed row has left the list.
+  // Row index to focus once a removed row (Dismiss, Remove or a successful
+  // Retry) has left the list.
   const focusAfterDismiss = useRef<number | null>(null)
   const recoveredRef = useRef(false)
   const { addToast } = useToast()
@@ -78,7 +84,7 @@ export function ErrorsView() {
     firstRowRef.current?.focus()
   })
 
-  // After Dismiss the row is gone and focus would fall to <body>: move it to the
+  // After a row is removed focus would fall to <body>: move it to the
   // row that took its place, or to the page heading when no row is left.
   useEffect(() => {
     const index = focusAfterDismiss.current
@@ -105,6 +111,7 @@ export function ErrorsView() {
   async function retryError(id: number) {
     try {
       await api.retryError(id)
+      focusAfterDismiss.current = errors.findIndex((e) => e.id === id)
       setErrors((prev) => prev.filter((e) => e.id !== id))
       addToast('Error queued for retry', 'success')
     } catch (err) {
@@ -193,6 +200,8 @@ export function ErrorsView() {
                       const closed = isClosedEntry(e)
                       const unreadable = !closed && isUnreadableDecision(e)
                       const videoKey = e.external_video_id
+                      const idText = String(e.external_video_id ?? e.video_id)
+                      const suffix = videoIdSuffix(e.video_title, sharedTitles, idText)
                       return (
                         <Fragment key={e.id}>
                           {e.id in refusals && (
@@ -203,12 +212,28 @@ export function ErrorsView() {
                             </tr>
                           )}
                           <tr ref={i === 0 ? firstRowRef : undefined} tabIndex={-1} data-error-row>
-                            <td data-label="Video">{e.video_title ?? e.external_video_id ?? e.video_id}</td>
-                            <td data-label="Category">{unreadable ? originalDecisionUnavailable.type : e.error_category}</td>
+                            <td data-label="Video" className="cell-video">
+                              {e.video_title ?? e.external_video_id ?? e.video_id}
+                              {suffix && <div style={{ color: 'var(--color-text-muted)' }}>Video ID: {idText}</div>}
+                            </td>
+                            <td data-label="Category">{unreadable ? originalDecisionUnavailable.type : categoryLabel(e.error_category)}</td>
                             <td data-label="Reason">
-                              {unreadable
-                                ? originalDecisionUnavailable.detail
-                                : e.error_message || (e.error_message_unavailable ? 'Reason unavailable' : 'No reason provided')}
+                              {unreadable ? (
+                                originalDecisionUnavailable.detail
+                              ) : e.error_message ? (
+                                <>
+                                  <FailureReason message={e.error_message} subject={`${e.video_title ?? e.external_video_id ?? String(e.video_id)}${suffix}`} />
+                                  {offersAccountStatus(e.error_message) && (
+                                    <div>
+                                      <Link to="/settings" aria-label={suffix ? `View account status${suffix}` : undefined}>
+                                        View account status
+                                      </Link>
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                e.error_message_unavailable ? 'Reason unavailable' : 'No reason provided'
+                              )}
                             </td>
                             <td data-label="Actions">
                               {closed ? (
@@ -217,24 +242,28 @@ export function ErrorsView() {
                                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                                   <button
                                     className="button"
-                                    aria-label={`Dismiss error: ${e.video_title ?? e.external_video_id ?? e.video_id}`}
+                                    aria-label={`Dismiss error: ${e.video_title ?? e.external_video_id ?? e.video_id}${suffix}`}
                                     onClick={() => setConfirmDismiss(e)}
                                   >
                                     Dismiss
                                   </button>
-                                  {videoKey && <Link to={`/videos/${encodeURIComponent(videoKey)}`}>View video</Link>}
+                                  {videoKey && (
+                                    <Link to={`/videos/${encodeURIComponent(videoKey)}`} aria-label={suffix ? `View video${suffix}` : undefined}>
+                                      View video
+                                    </Link>
+                                  )}
                                   <span>{originalDecisionUnavailable.noRetry}</span>
                                 </div>
                               ) : (
                                 <div style={{ display: 'flex', gap: 8 }}>
                                   <button
                                     className="button"
-                                    aria-label={`Retry ${e.video_title ?? `video ${e.external_video_id ?? e.video_id}`}`}
+                                    aria-label={`Retry ${e.video_title ?? `video ${e.external_video_id ?? e.video_id}`}${suffix}`}
                                     onClick={() => retryError(e.id)}
                                   >
                                     Retry
                                   </button>
-                                  <button className="button" onClick={() => dismissError(e.id)}>
+                                  <button className="button" aria-label={suffix ? `Remove${suffix}` : undefined} onClick={() => dismissError(e.id)}>
                                     Remove
                                   </button>
                                 </div>

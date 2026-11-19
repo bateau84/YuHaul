@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/bateau84/YuHaul/internal/diag"
+	"github.com/bateau84/YuHaul/internal/metadata"
 )
 
 // RetryHandler is invoked when a queue entry is manually retried. It performs
@@ -28,6 +29,20 @@ type Service struct {
 	handler     RetryHandler
 	logger      *slog.Logger
 	coordinator RetryCoordinator
+	titles      LocalDisplayReader
+}
+
+// LocalDisplayReader is the local-only, bounded (100 IDs) metadata read that
+// supplies the optional video_title of the two list responses.
+type LocalDisplayReader interface {
+	ReadLocalDisplay(context.Context, []string) (map[string]metadata.LocalDisplay, error)
+}
+
+// WithLocalDisplayReader lets the Errors and Deferred lists show a video title
+// that is held locally right now. Titles are never copied into queue rows.
+func (s *Service) WithLocalDisplayReader(r LocalDisplayReader) *Service {
+	s.titles = r
+	return s
 }
 
 // RetryCoordinator atomically creates a receiving run and claims the video

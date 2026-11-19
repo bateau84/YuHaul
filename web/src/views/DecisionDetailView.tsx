@@ -9,6 +9,7 @@ import { deriveRouteDecision, actionOutcomeLabel, actionOutcomeReasonLabel, form
 import { shortRouteId } from '../lib/route'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
 import { diagCode, ORIGINAL_DECISION_UNAVAILABLE, originalDecisionUnavailable } from '../lib/final-outcome'
+import { FailureReason } from '../components/FailureReason'
 import type { Run, DecisionDetail, RouteDecision, ConditionAudit, ActionOutcome, ContinuedAction } from '../types'
 
 const actionIcons = {
@@ -112,7 +113,9 @@ function ActionOutcomeEvidence({ action, simulation }: { action: ActionOutcome; 
         <span style={detail}>Action explanation unavailable.</span>
       )}
       {action.error_message ? (
-        <span style={{ color: 'var(--color-status-rejected)', fontSize: '0.875rem' }}>{action.error_message}</span>
+        <span style={{ color: 'var(--color-status-rejected)', fontSize: '0.875rem' }}>
+          <FailureReason message={action.error_message} subject={action.target_playlist_id ? `the action on playlist ${action.target_playlist_id}` : 'this action'} />
+        </span>
       ) : action.error_message_unavailable ? (
         <span style={detail}>An error reason was recorded for this action, but it cannot be displayed safely.</span>
       ) : null}
@@ -449,9 +452,13 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
           <p style={{ marginTop: 8, color: 'var(--color-text-muted)' }}>Deferred reason: {video.deferred_reason}</p>
         )}
         {!mode && video.error_message && (
-          <p style={{ marginTop: 8, color: 'var(--color-status-rejected)' }}>
-            {diagCode(video.error_message) === ORIGINAL_DECISION_UNAVAILABLE ? originalDecisionUnavailable.videoReason : video.error_message}
-          </p>
+          <div style={{ marginTop: 8, color: 'var(--color-status-rejected)' }}>
+            {diagCode(video.error_message) === ORIGINAL_DECISION_UNAVAILABLE ? (
+              originalDecisionUnavailable.videoReason
+            ) : (
+              <FailureReason message={video.error_message} subject={local?.title_availability === 'current_local' && local.title ? local.title : video.video_id} />
+            )}
+          </div>
         )}
         {!mode && !video.error_message && video.error_message_unavailable && (
           <p style={{ marginTop: 8, color: 'var(--color-text-muted)' }}>

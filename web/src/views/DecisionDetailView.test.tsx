@@ -200,7 +200,7 @@ describe('DecisionDetailView', () => {
               action_type: 'add_to_playlist',
               target_playlist_id: 'PLmusic',
               outcome: 'failed',
-              error_message: 'HTTP 500 quotaExceeded',
+              error_message: 'diag:v1 phase=action_execution operation=execute_action code=provider_error status=403 reason=quotaExceeded',
               executed_at: executedAt,
             },
           ],
@@ -212,7 +212,7 @@ describe('DecisionDetailView', () => {
     await waitFor(() => expect(screen.getByText('Late Night Jazz Mix')).toBeInTheDocument())
 
     expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText('HTTP 500 quotaExceeded').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText("YouTube's API quota was used up.").length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText(`Attempted ${new Date(executedAt).toLocaleString()}`).length).toBeGreaterThanOrEqual(1)
     expect(screen.queryByText(/Succeeded/)).not.toBeInTheDocument()
   })
@@ -697,6 +697,23 @@ describe('DecisionDetailView', () => {
       expect(await screen.findByText('Run 7 did not evaluate this video again. These playlist additions finish decisions made by runs 1 and 5.')).toBeInTheDocument()
       expect(screen.getByText('No routes were evaluated for this video in this run. Its routes were decided in runs 1 and 5.')).toBeInTheDocument()
     })
+  })
+
+  it('shows a stored video failure as a sentence with the support code only under Technical details', async () => {
+    const stored = 'diag:v1 phase=discovery operation=discover code=timeout'
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      processing_state: 'failed',
+      final_outcome: 'failed',
+      video: { ...baseDetail.video, final_outcome: 'failed', error_message: stored },
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText('YuHaul stopped waiting because a step took too long.')).toBeInTheDocument()
+    const summary = screen.getByText('Technical details')
+    expect(summary.closest('details')!.open).toBe(false)
+    expect(summary.getAttribute('aria-label')).toMatch(/^Technical details for .+/)
+    expect(screen.getByText(stored)).toBeInTheDocument()
+    expect(summary.closest('p')).toBeNull()
   })
 
   it('replaces the diagnostic of an unreadable original decision with the plain reason', async () => {

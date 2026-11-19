@@ -144,7 +144,9 @@ describe('Run Detail — mark a legacy run as ended', () => {
     mockGetRun.mockResolvedValueOnce({ ...failed, interrupt_reason: DISCARD })
     const discarded = renderPage()
     expect(await screen.findByText('Run failed — discarded by user.')).toBeInTheDocument()
-    expect(screen.getByText(/Reason: diag:v1 phase=unknown operation=discard_run/)).toBeInTheDocument()
+    expect(screen.queryByText(/diag:v1|Reason unavailable/)).toBeNull()
+    // The discard cause is shown as its accepted sentence, never as raw text.
+    expect(screen.getByText('Reason: Its saved settings are missing.')).toBeInTheDocument()
     expect(screen.getByText(/Its unfinished videos are in the deferred queue/)).toBeInTheDocument()
     expect(screen.queryByText(/marked as ended/)).toBeNull()
     discarded.unmount()
@@ -158,7 +160,16 @@ describe('Run Detail — mark a legacy run as ended', () => {
     renderPage()
     expect(await screen.findByText('Run failed')).toBeInTheDocument()
     expect(screen.queryByText(/by user/)).toBeNull()
-    expect(screen.getByText(/Reason: diag:v1 phase=discovery/)).toBeInTheDocument()
+    expect(screen.getByText('YuHaul stopped waiting because a step took too long.')).toBeInTheDocument()
+    expect(screen.getByText('Technical details').closest('p')).toBeNull()
+  })
+
+  it('shows the neutral cause sentence, never raw text, for a discarded run whose code is outside the closed set', async () => {
+    mockGetRun.mockResolvedValueOnce({ ...run14, status: 'failed' as const, endable: false, completed_at: '2026-10-21T06:00:00Z', interrupt_reason: 'diag:v1 phase=unknown operation=discard_run code=snapshot_unavailable_x' })
+    renderPage()
+    expect(await screen.findByText('Run failed — discarded by user.')).toBeInTheDocument()
+    expect(screen.queryByText(/snapshot_unavailable_x/)).toBeNull()
+    expect(screen.getByText('Reason: Its saved data cannot be used to continue it safely.')).toBeInTheDocument()
   })
 
   it('makes no claim about who ended a failed run whose machine reason is absent', async () => {

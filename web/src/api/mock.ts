@@ -348,7 +348,7 @@ const mockErrors: ErrorEntry[] = [
     channel_name: 'Focus Sounds',
     run_id: 1,
     error_category: 'authorization',
-    error_message: 'OAuth token expired during playlist insertion.',
+    error_message: 'diag:v1 phase=action_execution operation=execute_action code=oauth_error reason=invalid_grant',
     status: 'active',
     created_at: '2026-09-08T06:04:00Z',
     retry_count: 0,

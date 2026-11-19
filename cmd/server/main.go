@@ -145,7 +145,7 @@ func main() {
 		os.Exit(1)
 	}
 	queueStore.WithLogger(logger)
-	queueSvc := queue.NewService(queueStore, nil).WithLogger(logger)
+	queueSvc := queue.NewService(queueStore, nil).WithLogger(logger).WithLocalDisplayReader(meta)
 
 	statsStore := stats.NewStore(db)
 	advisoryStore := advisory.NewStore(db)

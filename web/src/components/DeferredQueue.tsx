@@ -12,6 +12,7 @@ import { ClosedNotice, RefusalAlert } from './ClosedNotice'
 import { ConfirmDialog } from './ConfirmDialog'
 import { FetchErrorRegion } from './FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
+import { duplicateTitles, videoIdSuffix } from '../lib/same-title'
 
 const PAGE_SIZE = 50
 const nf = new Intl.NumberFormat()
@@ -333,6 +334,8 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
 
   const { page } = data
   const items = data.deferred
+  // The current page, closed rows included, decides which titles are shared.
+  const sharedTitles = duplicateTitles(items.map((row) => closedHere[row.id] ?? row))
   const filtered = reason !== undefined
   const pastEnd = items.length === 0 && data.total > 0
   const queueEmpty = data.queue_total === 0
@@ -425,6 +428,8 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
               {items.map((row, i) => {
                 const d = closedHere[row.id] ?? row
                 const closed = isClosedEntry(d)
+                const idText = String(d.external_video_id ?? d.video_id)
+                const suffix = videoIdSuffix(d.video_title, sharedTitles, idText)
                 return (
                   <Fragment key={d.id}>
                     {row.id in closedHere && (
@@ -435,8 +440,13 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                       </tr>
                     )}
                     <tr tabIndex={-1}>
-                      <td data-label="Video">
-                        {d.video_title ?? (
+                      <td data-label="Video" className="cell-video">
+                        {d.video_title ? (
+                          <>
+                            {d.video_title}
+                            {suffix && <div style={{ color: 'var(--color-text-muted)' }}>Video ID: {idText}</div>}
+                          </>
+                        ) : (
                           <>
                             Video title unavailable <span style={{ color: 'var(--color-text-muted)' }}>Video ID: {d.external_video_id ?? d.video_id}</span>
                           </>
@@ -451,14 +461,14 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                           <div style={{ display: 'flex', gap: 8 }}>
                             <button
                               className="button"
-                              aria-label={`Retry now: ${d.video_title ?? `video ${d.external_video_id ?? d.video_id}`}`}
+                              aria-label={`Retry now: ${d.video_title ?? `video ${d.external_video_id ?? d.video_id}`}${suffix}`}
                               onClick={() => void retryItem(d, i)}
                             >
                               Retry now
                             </button>
                             <button
                               className="button"
-                              aria-label={`Dismiss deferred item: ${d.video_title ?? d.external_video_id ?? d.video_id}`}
+                              aria-label={`Dismiss deferred item: ${d.video_title ?? d.external_video_id ?? d.video_id}${suffix}`}
                               onClick={() => (isHandedOver(d) ? setConfirmDismiss({ item: d, index: i }) : void discard(d, i))}
                             >
                               Dismiss

@@ -503,7 +503,7 @@ describe('RunDetailView lifecycle (Task 2.1)', () => {
     vi.useFakeTimers()
     mockGetRun
       .mockResolvedValueOnce({ ...runFixture, status: 'running', current_phase: 'discovery', videos_selected: null, videos_discovered: 0 })
-      .mockResolvedValueOnce({ ...runFixture, status: 'failed', interrupt_reason: 'quota exhausted' })
+      .mockResolvedValueOnce({ ...runFixture, status: 'failed', interrupt_reason: 'diag:v1 phase=discovery operation=discover code=timeout' })
 
     renderView()
     await flush()
@@ -517,7 +517,7 @@ describe('RunDetailView lifecycle (Task 2.1)', () => {
     // Terminal display follows the stored state, with the safe run-level
     // failure reason — no success toast from the earlier "running" phase.
     expect(screen.getByText('Run failed')).toBeInTheDocument()
-    expect(screen.getByText('Reason: quota exhausted')).toBeInTheDocument()
+    expect(screen.getByText('YuHaul stopped waiting because a step took too long.')).toBeInTheDocument()
     expect(screen.queryByText(/Run in progress/)).not.toBeInTheDocument()
 
     const readsAfterTerminal = mockGetRun.mock.calls.length
@@ -611,12 +611,12 @@ describe('RunDetailView lifecycle (Task 2.1)', () => {
     mockGetRun.mockResolvedValue({
       ...runFixture,
       status: 'interrupted',
-      interrupt_reason: 'process restarted',
+      interrupt_reason: 'diag:v1 phase=unknown operation=unknown code=canceled',
     })
 
     renderView()
     expect(await screen.findByText('Run interrupted')).toBeInTheDocument()
-    expect(screen.getByText('Reason: process restarted')).toBeInTheDocument()
+    expect(screen.getByText('The work was cancelled before YuHaul got a result.')).toBeInTheDocument()
   })
 
   it('keeps a readable safe phase after failure', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useParams, Link, useNavigate, useLocation } from 'react-router-dom'
 import * as api from '../api/client'
 import { Badge } from '../components/Badge'
@@ -10,6 +10,8 @@ import { runEnding } from '../lib/run-ending'
 import { DiscardRunControl } from '../components/DiscardRunControl'
 import { discardReasonSentence } from '../lib/discard-reason'
 import { useToast } from '../hooks/useToast'
+import { FailureReason } from '../components/FailureReason'
+import { parseDiag } from '../lib/failure-reason'
 import { simulationExplanation, simulationMode, unavailableNoRoutesRow, unavailableRowText, videoOutcomeLabels } from '../lib/outcome'
 import { currentLocalObservedAt, currentLocalUnavailableLabel } from '../lib/current-local-metadata'
 import { canOfferStop, isStopping, type PublishedRange, type Run, type RunStatus, type VideoFinalOutcome, type VideoOutcome } from '../types'
@@ -66,11 +68,11 @@ function progressAnnouncement(run: Run, readError: boolean): string {
 // server only sends `interrupt_reason` when the stored text passed safe
 // vetting; when it was withheld, `failure_reason_unavailable` marks a reason
 // as existing but not displayable. Missing evidence never invents a reason.
-function failureExplanation(run: Run): string {
+function failureExplanation(run: Run): ReactNode {
   if (run.failure_reason_unavailable) {
     return 'A reason was recorded for this run, but it cannot be displayed safely.'
   }
-  if (run.interrupt_reason) return `Reason: ${run.interrupt_reason}`
+  if (run.interrupt_reason) return <FailureReason message={run.interrupt_reason} subject={`run ${run.id}`} />
   return run.status === 'failed'
     ? 'No failure reason was recorded for this run.'
     : 'No interruption reason was recorded for this run.'
@@ -563,8 +565,14 @@ function RunDetailContent({ id }: { id?: string }) {
               <p style={{ margin: '8px 0 0' }}>Last recorded phase: {phaseLabel(run.current_phase) ?? 'unavailable'}.</p>
             </>
           )}
-          {isTerminal && !endedByUser && (
-            <p style={{ margin: '8px 0 0', color: 'var(--color-status-failed)' }}>{failureExplanation(run)}</p>
+          {/* A discarded run has its own accepted copy; its stored cause is a run-level code. */}
+          {isTerminal && !endedByUser && ending === 'discarded_by_user' && (
+            <p style={{ margin: '8px 0 0', color: 'var(--color-status-failed)' }}>
+              Reason: {discardReasonSentence(parseDiag(run.interrupt_reason)?.code)}
+            </p>
+          )}
+          {isTerminal && !endedByUser && ending !== 'discarded_by_user' && (
+            <div style={{ margin: '8px 0 0', color: 'var(--color-status-failed)' }}>{failureExplanation(run)}</div>
           )}
           {ending === 'discarded_by_user' && (
             <p style={{ margin: '8px 0 0' }}>

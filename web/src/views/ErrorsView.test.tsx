@@ -25,7 +25,7 @@ describe('ErrorsView', () => {
       external_video_id: 'yt-safe-id',
       run_id: 9,
       error_category: 'api_error' as const,
-      error_message: 'quotaExceeded',
+      error_message: 'diag:v1 phase=action_execution operation=execute_action code=provider_error status=403 reason=quotaExceeded',
       status: 'active' as const,
       created_at: '2026-10-01T00:00:00Z',
       retry_count: 0,
@@ -36,8 +36,8 @@ describe('ErrorsView', () => {
 
     renderWithProviders(<ErrorsView />)
     const row = await waitFor(() => screen.getByText('yt-safe-id').closest('tr'))
-    expect(within(row!).getByText('api_error')).toBeInTheDocument()
-    expect(within(row!).getByText('quotaExceeded')).toBeInTheDocument()
+    expect(within(row!).getByText('YouTube API error')).toBeInTheDocument()
+    expect(within(row!).getByText("YouTube's API quota was used up.")).toBeInTheDocument()
     fireEvent.click(within(row!).getByRole('button', { name: /^Retry / }))
     await waitFor(() => expect(retry).toHaveBeenCalledWith(427))
 
@@ -56,7 +56,8 @@ describe('ErrorsView', () => {
 
     // Default errors tab should show the mock error.
     await waitFor(() => expect(screen.getByText('Ambient Study Session')).toBeInTheDocument())
-    expect(screen.getByText('OAuth token expired during playlist insertion.')).toBeInTheDocument()
+    expect(screen.getByText("YouTube no longer accepts YuHaul's saved access.")).toBeInTheDocument()
+    expect(screen.queryByText(/diag:v1/, { selector: ':not(code)' })).toBeNull()
 
     const errorRow = screen.getByText('Ambient Study Session').closest('tr')
     expect(errorRow).not.toBeNull()
