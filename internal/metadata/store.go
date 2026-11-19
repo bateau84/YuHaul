@@ -254,13 +254,13 @@ func (s *Store) Expire(ctx context.Context, videoIDs []string, now time.Time) er
 	if len(videoIDs) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("metadata: begin expire transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, `
+	// The UPDATE fires the title-search triggers, which read the FTS table. A
+	// deferred transaction would take a read snapshot first and then fail its
+	// write upgrade with SQLITE_BUSY without waiting, so take the write lock
+	// up front (the connection's busy_timeout then applies).
+	expiredAt := now.UTC()
+	err := inWriteTx(ctx, s.db, func(c *sql.Conn) error {
+		stmt, err := c.PrepareContext(ctx, `
 		UPDATE transient_metadata
 		SET title = NULL,
 		    channel_name = NULL,
@@ -269,19 +269,19 @@ func (s *Store) Expire(ctx context.Context, videoIDs []string, now time.Time) er
 		    expired_at = ?,
 		    is_active = 0
 		WHERE video_id = ?;`)
-	if err != nil {
-		return fmt.Errorf("metadata: prepare expire statement: %w", err)
-	}
-	defer stmt.Close()
-
-	expiredAt := now.UTC()
-	for _, id := range videoIDs {
-		if _, err := stmt.ExecContext(ctx, expiredAt, id); err != nil {
-			return fmt.Errorf("metadata: expire %s: %w", id, err)
+		if err != nil {
+			return fmt.Errorf("metadata: prepare expire statement: %w", err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("metadata: commit expire transaction: %w", err)
+		defer stmt.Close()
+		for _, id := range videoIDs {
+			if _, err := stmt.ExecContext(ctx, expiredAt, id); err != nil {
+				return fmt.Errorf("metadata: expire %s: %w", id, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("metadata: expire transaction: %w", err)
 	}
 	return nil
 }
@@ -291,13 +291,11 @@ func (s *Store) Refresh(ctx context.Context, items []TransientMetadata, ttl time
 	if len(items) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("metadata: begin refresh transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, `
+	fetchedAt := now.UTC()
+	expiresAt := fetchedAt.Add(ttl)
+	// Write lock first; see Expire.
+	err := inWriteTx(ctx, s.db, func(c *sql.Conn) error {
+		stmt, err := c.PrepareContext(ctx, `
 		UPDATE transient_metadata
 		SET title = ?,
 		    channel_name = ?,
@@ -311,24 +309,23 @@ func (s *Store) Refresh(ctx context.Context, items []TransientMetadata, ttl time
 		    expired_at = NULL,
 		    is_active = 1
 		WHERE video_id = ?;`)
-	if err != nil {
-		return fmt.Errorf("metadata: prepare refresh statement: %w", err)
-	}
-	defer stmt.Close()
-
-	fetchedAt := now.UTC()
-	expiresAt := fetchedAt.Add(ttl)
-	for _, m := range items {
-		if _, err := stmt.ExecContext(ctx,
-			m.Title, m.ChannelName, m.Description, m.PublishedAt,
-			m.DurationSeconds, m.ThumbnailURL, fetchedAt, fetchedAt,
-			expiresAt, m.VideoID,
-		); err != nil {
-			return fmt.Errorf("metadata: refresh %s: %w", m.VideoID, err)
+		if err != nil {
+			return fmt.Errorf("metadata: prepare refresh statement: %w", err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("metadata: commit refresh transaction: %w", err)
+		defer stmt.Close()
+		for _, m := range items {
+			if _, err := stmt.ExecContext(ctx,
+				m.Title, m.ChannelName, m.Description, m.PublishedAt,
+				m.DurationSeconds, m.ThumbnailURL, fetchedAt, fetchedAt,
+				expiresAt, m.VideoID,
+			); err != nil {
+				return fmt.Errorf("metadata: refresh %s: %w", m.VideoID, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("metadata: refresh transaction: %w", err)
 	}
 	return nil
 }
