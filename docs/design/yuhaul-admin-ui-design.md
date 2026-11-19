@@ -1305,6 +1305,66 @@ Both are small and low risk; route them to a coder together.
 6. *Accepted.* The route statistics note is not shown while no view renders per-run action counts. Whoever adds such a view must show the note with it; this stays an open obligation.
 Browser, screen-reader and 320 px checks remain outstanding.
 
+#### Errors — Category and Reason Presentation
+
+**Status and scope (2026-11-19):** Design decision on two findings from the real-browser review of build 8e947db (gate b39-gate-iii). Design only; no browser, screen-reader or implementation check of this text has been run. It covers the Errors tab list for video and action entries. It adds no control and changes no retry or dismiss behavior.
+
+**Finding.** The Errors list showed the stored text `diag:v1 phase=routing operation=load_metadata code=provider_error status=503` as the Reason, and the raw value `api_error` as the Category.
+
+**What the design already said.** Before this section, the design did not give wording for ordinary Errors entries, so this is a design gap and not an implementation defect:
+- The scenario “Error queue shows failed items with error type, reason, and timestamp” (the error-queue story) and the Errors region (“error row (video title, channel, error type, timestamp, …)”) name a type and a reason but give no wording.
+- Section 5 of “Final Outcomes Are Never Reprocessed” gives copy for one code only, `original_decision_unavailable`.
+- “Exact production action presentation” (Run Detail and Decision Detail) sets the rule that explanations come from registered codes, never from parsing printable text, and that safe bounded diagnostic facts may be secondary detail. It gives action wording, not Errors wording.
+- [Run-outcome diagnostics ARS-001](/docs/architecture/run-outcome-diagnostics/specifications/ars-001-safe-diagnostic-contract.md) states that presentation may format admitted facts and does not require showing the `diag:v1` text. Its browser row says: preserve the unavailable flags, distinguish a safe code, and reuse accepted copy.
+The shipped list does not break any written copy. It does miss the intent of that rule, and a person reading it must decode a code string. The wording below closes the gap.
+
+**Decision: a plain sentence first, the code kept as a support detail.**
+- *Reason cell.* One plain sentence chosen by the stored `code` (and, for `provider_error` and `oauth_error`, its `reason`), from the table below. The browser reads `code`, `status` and `reason` from the closed `diag:v1` grammar; it never matches on prose. The sentence states what happened and nothing else: no cause that the code does not establish, no promise about a later try, and no instruction. Existing links stay as designed; the authorization codes add the link `View account status` (to Settings > Account, as in the playlist-confirmation amendment).
+- *Technical details.* Under the sentence, a collapsed native disclosure with the visible label `Technical details`. Its accessible name is `Technical details for {video title, or video ID}`, so it contains its visible label (SC 2.5.3) and tells rows apart. Opened, it shows the exact admitted string once, in a monospace face, as selectable text (a person can copy it for support), and the label `Support code`. It wraps inside the cell at every width. It is not repeated in a tooltip, `title` or accessible name of any other control. Opening it moves no focus and announces nothing. It is shown only for a string that passes the `diag:v1` grammar, never for other text. Phase and operation appear only here.
+- *Category cell.* `api_error` → `YouTube API error`; `authorization` → `Authorization`; `runtime` → `Processing error`; any other value → `Error`. `Original decision unavailable` keeps its own type label from section 5.
+
+| Stored `code` (and `reason`) | Reason sentence |
+|---|---|
+| `provider_error`, `quotaExceeded` or `dailyLimitExceeded` | `YouTube's API quota was used up.` |
+| `provider_error`, `rateLimitExceeded` or `userRateLimitExceeded` | `YouTube asked YuHaul to slow down.` |
+| `provider_error`, `authError`, `forbidden` or `insufficientPermissions` | `YouTube did not accept YuHaul's access for this request.` |
+| `provider_error`, `backendError` or `internalError` | `YouTube reported a problem on its side.` |
+| `provider_error`, `badRequest` or `invalidParameter` | `YouTube rejected the request as invalid.` |
+| `provider_error`, `videoNotFound` | `YouTube could not find this video.` |
+| `provider_error`, `playlistNotFound` | `YouTube could not find the playlist.` |
+| `provider_error`, `playlistItemsNotAccessible` | `YouTube would not let YuHaul read the playlist's items.` |
+| `provider_error`, `notFound` | `YouTube could not find what was requested.` |
+| `provider_error`, `playlistContainsMaximumNumberOfVideos` | `The playlist is full.` Where the playlist-capacity amendment gives wording for the same evidence, that wording governs. |
+| `provider_error`, `videoAlreadyInPlaylist` | `The video is already in the playlist.` |
+| `provider_error`, no reason | `YouTube returned an error.` With a stored status: `YouTube returned an error (status {status}).` |
+| `oauth_error`, `invalid_grant` | `YouTube no longer accepts YuHaul's saved access.` |
+| `oauth_error`, any other or no reason | `YouTube sign-in could not be completed.` |
+| `authorization_unavailable` | `No usable YouTube access was available.` |
+| `authorization_changed` | `YouTube access changed while this was in progress.` |
+| `credential_persistence_failed` | `YuHaul could not save renewed YouTube access.` |
+| `action_authority_invalid` | `YuHaul could not confirm it was still allowed to make this playlist change.` |
+| `mutation_application_uncertain` | `YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.` (the existing copy) |
+| `original_decision_unavailable` | The existing section 5 detail. |
+| `video_unavailable` | `This video is no longer available on YouTube.` |
+| `timeout` | `A request took too long.` |
+| `transport_error` | `YuHaul could not reach YouTube.` |
+| `invalid_provider_response` | `YouTube's answer could not be understood.` |
+| `sqlite_error` | `YuHaul could not read or save its own data.` |
+| `canceled` | `The work was cancelled before it finished.` |
+| `stopped_by_user` | `Stopped by you before it finished.` |
+| `ended_by_user` | `Marked as ended by you.` |
+| `panic` | `YuHaul hit an unexpected internal fault.` |
+| `unknown_error` | `The cause of this failure was not recorded.` |
+| Any other code, including run-level codes such as `snapshot_unavailable`, `snapshot_unreadable` and `checkpoint_unrecognized`, and any value this version does not list | `Reason unavailable.` Never the raw value. |
+
+**Other states.** A stored reason that is not a `diag:v1` string but was admitted by the API (older text) is shown as the API returned it, with no `Technical details`. An empty reason keeps `Reason unavailable` when the API sets `error_message_unavailable`, otherwise `No reason provided`. A closed entry (section 4 of the final-outcomes copy) keeps its original reason, shown this way. Other places that show a stored video failure with no accepted copy (for example Decision Detail's video reason) reuse this table; do not add error text to the Run Detail video list.
+
+**Accessibility and fit.** Target WCAG 2.2 AA. The sentence is ordinary text at the same size and 4.5:1 contrast as other cell text (SC 1.4.3). The disclosure is keyboard operable with Enter and Space, exposes its open or closed state, and has a visible, unobscured focus (SC 2.1.1, 2.4.7, 2.4.11). The support code has no horizontal scroll at 320 CSS px and 200% zoom (SC 1.4.10). Meaning is carried by text, not color.
+
+**Acceptance observations.** With a real server and one entry per row family of the table: each Reason cell reads its sentence and no `diag:v1` text is visible until `Technical details` is opened; opened, it shows the stored string exactly; two rows with the same title have different disclosure names only through the title or ID, and both contain `Technical details`; an unknown code reads `Reason unavailable.`; the closed row and the section 5 row are unchanged; keyboard, screen-reader and 320 px passes.
+
+**Limits.** The sentences claim only what each code's name and ARS-001 establish. The architect owns what each code means; if a code's meaning differs, the sentence changes, not the structure. Which entries offer Retry is unchanged and is not decided here.
+
 #### Run Video Recognition — Current Local Context
 
 **Amendment scope (2026-11-06):** Improve recognition in the Run Detail video list and Decision Detail using permitted local title, source-channel display name and duration. This is the bounded independent read slice in [OC-005](../requirements/yuhaul/oc-005-decision-evidence-attribution-and-availability.md) and the provisional [decision-evidence architecture](../architecture/decision-evidence/design/ard-001-run-attributed-evidence-and-metadata-lifecycles.md), not full historical evidence delivery. Reuse US-013, US-014 and SC-002; the user's Run15 feedback shows that IDs and generic exclusion badges alone do not meet their recognition/explanation goal. No new story capability, subscription-name capability, metadata storage, date meaning, or retention permission is introduced. The full historical comparison/reproduction promise remains blocked, not waived by truthful unavailable copy.
@@ -1901,6 +1961,8 @@ Advisories are system-generated suggestions based on channel and route performan
 **Modal/dialog open:** Focus moves to first focusable element inside modal (typically close button or primary action).
 
 **Modal/dialog close:** Focus returns to the element that triggered the modal.
+
+**Modal/dialog surface (2026-11-19, from the gate b39-gate-iii browser review).** Every confirmation dialog uses one look. The page behind is dimmed by a black backdrop at 50% opacity, in every theme; it must read clearly as “behind”. A 10% backdrop, as in build 8e947db, is too faint to mark the page as unavailable and is not acceptable. The dialog itself is a solid surface with no transparency, so its text keeps its own contrast (4.5:1 or better) whatever is behind it, with a visible 1 CSS px edge. It is at most 36 rem (576 CSS px) wide and centered in the viewport. At 320 CSS px it takes the viewport width less a 16 CSS px margin on each side and scrolls inside itself, with its buttons still reachable. Cancel, Escape and a click on the backdrop behave as the dialog's own design says; this paragraph changes none of them. Check by measuring the computed backdrop color and the dialog width at 1280 and 320 CSS px.
 
 #### Layout Constraint
 
