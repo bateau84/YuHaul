@@ -6,6 +6,10 @@ tags: [design, documentation, change-log]
 timestamp: 2026-11-10T00:00:00Z
 ---
 
+## 2026-11-20
+
+- Confirmed and adjusted the channel-scan presentation in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) against ARS-002: Errors → Channel scan errors read as a history (absolute time, per-entry record sentence, optional later-failure and scanned-successfully-since facts), the Run Detail coverage block names the skipped channels, and a run with no rows shows no coverage claim. Design only.
+
 ## 2026-11-19
 
 - Decided in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (Plan r29): one accessible-name pattern for every Errors and Deferred row control (`Remove error: {T}`, `View video: {T}`, and so on, with `T` the title or `video {id}`), and how a Deferred row reads after a live hold clears (`Waiting for the next run.` with a not-live line; the live filter selects held rows only). Design only.
