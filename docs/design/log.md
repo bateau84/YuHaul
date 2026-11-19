@@ -12,6 +12,8 @@ timestamp: 2026-11-10T00:00:00Z
 
 - Decided two findings from the b39-gate-iii real-browser review in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the confirmation-dialog backdrop (black at 50%, solid dialog surface, at most 36 rem wide, centered) and a new section “Errors — Category and Reason Presentation” (plain sentence by diagnostic code, category labels, and a collapsed `Technical details` disclosure that keeps the exact support code). Found that the design had no Errors reason wording before, so the raw text is a design gap, not an implementation defect. Design only; no browser, accessibility or implementation check of the new text.
 
+- Architecture review (run-outcome diagnostics owner) of the Errors reason table in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): reworded nine sentences so each claims only what its code establishes. `transport_error`, `timeout` and `canceled` no longer imply whether a request reached YouTube or finished there; `video_unavailable`, `action_authority_invalid`, `unknown_error` and non-`invalid_grant` `oauth_error` no longer state causes their codes do not establish; the two playlist-state provider reasons are attributed to YouTube. Table structure, `reason` use and other sections unchanged. Design only.
+
 ## 2026-11-18
 
 - Reconciled the `video_already_final` refusal focus decision in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): in Errors and Deferred, focus moves to the persistent alert because the activated Retry control is removed. Kept search-message focus behavior unchanged and added keyboard and screen-reader checks. Design only; browser and assistive-technology verification remains outstanding.

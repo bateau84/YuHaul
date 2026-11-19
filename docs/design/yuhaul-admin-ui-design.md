@@ -1334,27 +1334,27 @@ The shipped list does not break any written copy. It does miss the intent of tha
 | `provider_error`, `playlistNotFound` | `YouTube could not find the playlist.` |
 | `provider_error`, `playlistItemsNotAccessible` | `YouTube would not let YuHaul read the playlist's items.` |
 | `provider_error`, `notFound` | `YouTube could not find what was requested.` |
-| `provider_error`, `playlistContainsMaximumNumberOfVideos` | `The playlist is full.` Where the playlist-capacity amendment gives wording for the same evidence, that wording governs. |
-| `provider_error`, `videoAlreadyInPlaylist` | `The video is already in the playlist.` |
+| `provider_error`, `playlistContainsMaximumNumberOfVideos` | `YouTube reported that the playlist is full.` Where the playlist-capacity amendment gives wording for the same evidence, that wording governs. |
+| `provider_error`, `videoAlreadyInPlaylist` | `YouTube reported that the video is already in the playlist.` |
 | `provider_error`, no reason | `YouTube returned an error.` With a stored status: `YouTube returned an error (status {status}).` |
 | `oauth_error`, `invalid_grant` | `YouTube no longer accepts YuHaul's saved access.` |
-| `oauth_error`, any other or no reason | `YouTube sign-in could not be completed.` |
+| `oauth_error`, any other or no reason | `YouTube access could not be renewed.` |
 | `authorization_unavailable` | `No usable YouTube access was available.` |
 | `authorization_changed` | `YouTube access changed while this was in progress.` |
 | `credential_persistence_failed` | `YuHaul could not save renewed YouTube access.` |
-| `action_authority_invalid` | `YuHaul could not confirm it was still allowed to make this playlist change.` |
+| `action_authority_invalid` | `YuHaul could not confirm that this run's saved routes allow this playlist change.` |
 | `mutation_application_uncertain` | `YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.` (the existing copy) |
 | `original_decision_unavailable` | The existing section 5 detail. |
-| `video_unavailable` | `This video is no longer available on YouTube.` |
-| `timeout` | `A request took too long.` |
-| `transport_error` | `YuHaul could not reach YouTube.` |
+| `video_unavailable` | `YouTube did not return this video when YuHaul asked for its details.` |
+| `timeout` | `YuHaul stopped waiting because a step took too long.` |
+| `transport_error` | `A network connection failed.` |
 | `invalid_provider_response` | `YouTube's answer could not be understood.` |
 | `sqlite_error` | `YuHaul could not read or save its own data.` |
-| `canceled` | `The work was cancelled before it finished.` |
+| `canceled` | `The work was cancelled before YuHaul got a result.` |
 | `stopped_by_user` | `Stopped by you before it finished.` |
 | `ended_by_user` | `Marked as ended by you.` |
 | `panic` | `YuHaul hit an unexpected internal fault.` |
-| `unknown_error` | `The cause of this failure was not recorded.` |
+| `unknown_error` | `The cause of this failure is not available.` |
 | Any other code, including run-level codes such as `snapshot_unavailable`, `snapshot_unreadable` and `checkpoint_unrecognized`, and any value this version does not list | `Reason unavailable.` Never the raw value. |
 
 **Other states.** A stored reason that is not a `diag:v1` string but was admitted by the API (older text) is shown as the API returned it, with no `Technical details`. An empty reason keeps `Reason unavailable` when the API sets `error_message_unavailable`, otherwise `No reason provided`. A closed entry (section 4 of the final-outcomes copy) keeps its original reason, shown this way. Other places that show a stored video failure with no accepted copy (for example Decision Detail's video reason) reuse this table; do not add error text to the Run Detail video list.
