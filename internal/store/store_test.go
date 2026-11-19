@@ -28,6 +28,24 @@ func openTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// migrationHead is the last migration in the same directory embedded by store.
+func migrationHead(t *testing.T) uint {
+	t.Helper()
+	src, err := iofs.New(os.DirFS("migrations"), ".")
+	require.NoError(t, err)
+	defer src.Close()
+	version, err := src.First()
+	require.NoError(t, err)
+	for {
+		next, err := src.Next(version)
+		if os.IsNotExist(err) {
+			return version
+		}
+		require.NoError(t, err)
+		version = next
+	}
+}
+
 func TestOpenAppliesMigrations(t *testing.T) {
 	db := openTestDB(t)
 
@@ -35,7 +53,8 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	err := db.QueryRowContext(context.Background(),
 		"SELECT version FROM schema_migrations LIMIT 1;").Scan(&version)
 	require.NoError(t, err)
-	require.Equal(t, 28, version)
+	require.Equal(t, int(migrationHead(t)), version)
+	require.GreaterOrEqual(t, version, 29)
 }
 
 func TestMigration011NormalizesLegacyRunTimestamps(t *testing.T) {
@@ -138,7 +157,7 @@ func TestMigration013UpgradeSeedsNullTimestampAndPreservesCorpus(t *testing.T) {
 
 	var version int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM schema_migrations LIMIT 1;`).Scan(&version))
-	require.Equal(t, 28, version)
+	require.Equal(t, int(migrationHead(t)), version)
 
 	// Exactly one singleton row, seeded NULL: no backfill, no sentinel date.
 	var rowCount, nullCount int
@@ -257,7 +276,7 @@ func TestMigration016AddsNullableDiagnosticColumnsWithoutBackfill(t *testing.T) 
 
 	var version int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT version FROM schema_migrations LIMIT 1;`).Scan(&version))
-	require.Equal(t, 28, version)
+	require.Equal(t, int(migrationHead(t)), version)
 
 	// Historical rows stay NULL — unknown, never guessed as zero.
 	var selected sql.NullInt64
