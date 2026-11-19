@@ -1,6 +1,10 @@
-package videosearch
+// Package titlekey computes the title match keys shared by video search and
+// the metadata search index (video-search ARS-001 §1.2, §10.6). It is a leaf
+// package: it imports only the standard library and golang.org/x/text.
+package titlekey
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -8,6 +12,14 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
+
+// keyRevision is raised whenever the code of Key changes (ARS-001 §10.6).
+const keyRevision = 1
+
+// Version identifies the key algorithm as "<rev>/<unicode>", where <unicode>
+// is the Unicode version of the bundled golang.org/x/text. Index entries built
+// with another version may miss true matches.
+func Version() string { return strconv.Itoa(keyRevision) + "/" + norm.Version }
 
 // Folder computes match keys (ARS-001 §5). A cases.Caser is not safe for
 // concurrent use, so create one Folder per request and do not share it.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/metadata"
+	"github.com/bateau84/YuHaul/internal/titlekey"
 )
 
 // ctxCheckEvery is how many candidate rows are read between context checks
@@ -67,14 +68,14 @@ WHERE m.is_active = 1
 // contains needleKey (a Key result). It also returns the cutoff, which the
 // caller reuses for ProjectMetadata. It writes nothing and changes no expiry.
 // Titles are dropped as soon as they have been compared.
-func ScanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey string, now func() time.Time) ([]Match, time.Time, error) {
+func ScanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needleKey string, now func() time.Time) ([]Match, time.Time, error) {
 	m, cutoff, _, err := scanMatches(ctx, tx, folder, needleKey, now)
 	return m, cutoff, err
 }
 
 // scanMatches is ScanMatches that also reports how many candidate rows it read
 // (for the operational log, which carries counts only).
-func scanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey string, now func() time.Time) ([]Match, time.Time, int, error) {
+func scanMatches(ctx context.Context, tx *sql.Tx, folder *titlekey.Folder, needleKey string, now func() time.Time) ([]Match, time.Time, int, error) {
 	rows, err := tx.QueryContext(ctx, candidateSQL)
 	if err != nil {
 		return nil, time.Time{}, 0, fmt.Errorf("videosearch: scan candidates: %w", err)
@@ -118,7 +119,7 @@ func scanMatches(ctx context.Context, tx *sql.Tx, folder *Folder, needleKey stri
 
 	var out []Match
 	for _, c := range cands {
-		if !metadata.Held(c.row, cutoff) || !Contains(folder.Key(*c.row.Title), needleKey) {
+		if !metadata.Held(c.row, cutoff) || !titlekey.Contains(folder.Key(*c.row.Title), needleKey) {
 			continue
 		}
 		disc, ok := time.Time{}, false

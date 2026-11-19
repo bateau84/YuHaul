@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/titlekey"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -152,22 +153,22 @@ func TestMatcher(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, Contains(Key(tc.title), Key(tc.needle)))
+			assert.Equal(t, tc.want, titlekey.Contains(titlekey.Key(tc.title), titlekey.Key(tc.needle)))
 		})
 	}
 }
 
 func TestKeyAndEmptyNeedle(t *testing.T) {
-	assert.Equal(t, "strasse", Key("Straße"))
-	assert.Equal(t, Key("Café"), Key("CAFÉ"))
-	assert.False(t, Contains("abc", ""))
-	f := NewFolder()
-	assert.Equal(t, Key("Lofi"), f.Key("Lofi"))
+	assert.Equal(t, "strasse", titlekey.Key("Straße"))
+	assert.Equal(t, titlekey.Key("Café"), titlekey.Key("CAFÉ"))
+	assert.False(t, titlekey.Contains("abc", ""))
+	f := titlekey.NewFolder()
+	assert.Equal(t, titlekey.Key("Lofi"), f.Key("Lofi"))
 }
 
 // T4
 func TestCursor(t *testing.T) {
-	n := Key("lofi")
+	n := titlekey.Key("lofi")
 	disc := time.Date(2025, 3, 4, 5, 6, 7, 123456789, time.UTC)
 
 	t.Run("round trip with discovery time", func(t *testing.T) {
@@ -207,7 +208,7 @@ func TestCursor(t *testing.T) {
 		"not json":        enc("nope"),
 		"empty":           "",
 		"tampered":        enc(strings.Replace(good, `"after"`, `"afte"`, 1)),
-		"wrong hash":      enc(fmt.Sprintf(`{"v":1,"h":%q,"dir":"after","d":null,"id":%q}`, needleHash(Key("jazz")), id)),
+		"wrong hash":      enc(fmt.Sprintf(`{"v":1,"h":%q,"dir":"after","d":null,"id":%q}`, needleHash(titlekey.Key("jazz")), id)),
 		"wrong version":   enc(fmt.Sprintf(`{"v":2,"h":%q,"dir":"after","d":null,"id":%q}`, h, id)),
 		"missing version": enc(fmt.Sprintf(`{"h":%q,"dir":"after","d":null,"id":%q}`, h, id)),
 		"wrong dir":       enc(fmt.Sprintf(`{"v":1,"h":%q,"dir":"around","d":null,"id":%q}`, h, id)),
@@ -225,7 +226,7 @@ func TestCursor(t *testing.T) {
 	}
 	t.Run("different search text", func(t *testing.T) {
 		c := encodeCursor(n, Boundary{Dir: After, Key: SortKey{VideoID: id}})
-		_, err := decodeCursor(c, Key("jazz"))
+		_, err := decodeCursor(c, titlekey.Key("jazz"))
 		assert.ErrorIs(t, err, ErrInvalidCursor)
 	})
 }
@@ -284,7 +285,7 @@ func sortedKeys(n int) []SortKey {
 
 func TestPaging130(t *testing.T) {
 	keys := sortedKeys(130)
-	n := Key("q")
+	n := titlekey.Key("q")
 
 	type page struct {
 		w    Window

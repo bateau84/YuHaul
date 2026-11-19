@@ -11,6 +11,7 @@ import (
 
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/titlekey"
 	"github.com/stretchr/testify/require"
 )
 
@@ -112,7 +113,7 @@ func TestScanMatchesUsesRunDetailHeldRuleAndWritesNothing(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback()
 
-	f := NewFolder()
+	f := titlekey.NewFolder()
 	got, cutoff, err := ScanMatches(context.Background(), tx, f, f.Key("LOFI"), func() time.Time { return storeNow })
 	require.NoError(t, err)
 	require.Equal(t, storeNow, cutoff)
@@ -164,7 +165,7 @@ func TestScanMatchesStopsOnCancelledContext(t *testing.T) {
 	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	require.NoError(t, err)
 	defer tx.Rollback()
-	f := NewFolder()
+	f := titlekey.NewFolder()
 	_, _, err = ScanMatches(ctx, tx, f, f.Key("lofi"), func() time.Time { return storeNow })
 	require.Error(t, err)
 }

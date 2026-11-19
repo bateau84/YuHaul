@@ -11,6 +11,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/state"
+	"github.com/bateau84/YuHaul/internal/titlekey"
 )
 
 // Service errors the server maps to HTTP codes (ARS-001 §2).
@@ -249,7 +250,7 @@ LIMIT 1`, id, id).Scan(&src)
 // namePage runs the §6.1 scan and cuts the requested page from the sorted
 // matches (§7).
 func (s *Service) namePage(ctx context.Context, tx *sql.Tx, text string, p Paging) (*Page, Stats, error) {
-	folder := NewFolder()
+	folder := titlekey.NewFolder()
 	needle := folder.Key(text)
 
 	// Validate paging against this needle before any database read cost is
