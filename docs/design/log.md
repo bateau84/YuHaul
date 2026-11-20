@@ -8,6 +8,7 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-20
 
+- Recorded the implementation status of the channel scan block in the [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the Errors section and the Run Detail list are in `04aee26`, and the run-wide-cause variants are pending. The block's API need is now supplied by [ARS-002 §4.5](/docs/architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md#45-per-run-channel-scan-outcome-added-2026-11-20-review-833a06fb-major-1) `discovery_scan`. The designer still owes copy for `in_progress` and for the unreachable `null`-with-rows case. Architect, review `833a06fb`.
 - Specified Errors page empty states in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (review 833a06fb): the video list reads `No video errors in the queue.`, no empty state claims overall health, and both-empty and one-empty pages read section by section. Design only.
 
 - Added to [admin interface design](/docs/design/yuhaul-admin-ui-design.md) the Run Detail coverage copy for runs whose channel scan was cut short or that failed for a run-wide reason (critic follow-up): no `Some channels…` understatement, no coverage claim, status unchanged. Design only.

@@ -6,7 +6,7 @@ tags: [architecture, specification, discovery, errors, migration, diagnostics, a
 timestamp: 2026-11-20T00:00:00Z
 ---
 
-**Status:** accepted technical contract. Not implemented. It builds on the channel-granular interim ([ADR-001](../decisions/adr-001-interim-channel-granular-uploads-isolation.md)), and the two ship together. It realizes the source-failure part of [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) and [ARS-001 §5](ars-001-durable-discovery-page-handoff.md#5-authorized-inspection-contract). The page handoff, sealed scope, assessment and floor rows remain with ARS-001 and its later migration.
+**Status:** accepted technical contract, amended 2026-11-20 for review `833a06fb` MAJOR-1 (§4.5, the per-run scan outcome). §1–§4.4 are implemented in `b8934d6` and `04aee26` (local candidate on `interim-uploads-isolation`); evidence: review record `833a06fb` ("with fixes", reviewer session `ses_e09c5a500ffepaBHsFYpJCNTXG`), not rerun by the architect. §4.5 and the explicit D1 flag are implemented in `<SHA pending: coder>`; evidence `<pending>`. It builds on the channel-granular interim ([ADR-001](../decisions/adr-001-interim-channel-granular-uploads-isolation.md)), and the two ship together. It realizes the source-failure part of [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) and [ARS-001 §5](ars-001-durable-discovery-page-handoff.md#5-authorized-inspection-contract). The page handoff, sealed scope, assessment and floor rows remain with ARS-001 and its later migration.
 
 Example: channels A and C list successfully, and B's uploads read returns `404 playlistNotFound`. Before discovery asks YouTube for anything else, it commits one row: run 54, channel `UC…B`, permanent, `playlist_items_list`, `404`, `playlistNotFound`, time. Run 54 continues and ends **Completed**. After a restart, Errors shows a read-only **Channel scan error** for B in run 54, with "YouTube reported that the uploads playlist was not found." Run Detail for run 54 says "Some channels could not be scanned. Results are incomplete." and lists B. Run 55 polls B again. If B still fails, run 55 adds its own row. If B succeeds, run 54's row stays as history; nothing removes or rewrites it.
 
@@ -51,7 +51,13 @@ CREATE INDEX discovery_source_failure_run_id      ON discovery_source_failure(ru
 CREATE TRIGGER discovery_source_failure_immutable
     BEFORE UPDATE ON discovery_source_failure
     BEGIN SELECT RAISE(ABORT, 'discovery_source_failure is immutable'); END;
+
+-- Added 2026-11-20 (§4.5): the run's channel-scan outcome.
+ALTER TABLE run ADD COLUMN discovery_scan_outcome TEXT
+    CHECK (discovery_scan_outcome IS NULL OR discovery_scan_outcome IN ('completed', 'cut_short', 'no_source_scanned'));
 ```
+
+`030` is unreleased, so this column is added to the same file; no new number is taken. Any development or test database already at version 30 without the column must be recreated, the same as the `024` precedent. A database that has reached a deployed environment at version 30 without this column would need a new migration instead. The dispatcher confirmed none has.
 
 Each choice, and why:
 
@@ -159,10 +165,64 @@ These obligations come from the existing design; copy and layout stay with the d
   - the fixed sentence "This channel will be checked again on the next eligible fresh poll if it is still eligible. This entry records what happened in this run."
 
   There are no Retry, Dismiss, Remove or suppress controls.
-- **Run Detail** reads `GET /api/runs/{id}/discovery-source-errors`. If it returns rows on a run not ended by `no_source_scanned`, it shows "Some channels could not be scanned. Results are incomplete." and lists the channels. A `failed` run with `no_source_scanned` keeps "Run failed. No channels were scanned successfully." and may list them. A read failure uses the existing read-failure behavior, not "no failures".
+- **Run Detail** reads `GET /api/runs/{id}/discovery-source-errors` for the list. It chooses the sentence from the run read's `discovery_scan` (§4.5). A read failure uses the existing read-failure behavior, not "no failures".
 - **D6 is withdrawn.** Don't ship ADR-001 D6's `discovery_incomplete` field or its ledger query. If the interim branch already added them, remove them. The incident rows are exact, contain the channel, and don't over-report on resume (§3).
 
 **Remaining design gap, routed to the designer, not blocking.** This record cannot distinguish "a run on this build with no failed channel" from "an older run without scan evidence". Only ARS-001's later assessment can. Until then, Run Detail shows no coverage sentence for a run with zero rows. It does not show "Channel scan details are unavailable for this run.", and it never says that all channels were scanned or that no new videos were found. The designer confirms this or supplies alternative copy that is true in both cases.
+
+### 4.5 Per-run channel-scan outcome (added 2026-11-20, review `833a06fb` MAJOR-1)
+
+The design's "Scan cut short" variant needs a saved fact that channel scanning stopped early because of a run-wide cause. The in-memory `ScanStopped` and error paths are lost on restart. One nullable column on `run` holds the fact (§1).
+
+| Stored value | Meaning |
+|---|---|
+| `NULL` | Unknown. The run never reached the uploads scan, it is a simulation, or it predates `030`. |
+| `cut_short` | The uploads scan started and has not been recorded as finished. For a run that is no longer running, scanning stopped early because of a run-wide cause: a budget or quota stop (`ScanStopped`), a run-wide error during the scan (provider quota, authorization, accounting, non-isolated provider error, SQLite), cancellation (Stop, time limit, shutdown) or a crash. The run status carries the cause. |
+| `completed` | The uploads loop visited every in-scope channel, and each one completed or failed locally under D1. No budget or refusal break happened. |
+| `no_source_scanned` | The run ended terminal `failed` under BR-002 AC8 (ADR-001 D5). |
+
+**Writes.** Each is a single `UPDATE run SET discovery_scan_outcome = ? WHERE id = ?`, with no provider I/O inside its transaction.
+
+1. **`cut_short` at scan start.** The engine writes it when `fetchNewVideos` begins, after subscription and channel resolution and before the §3 same-run lookup and any `playlist_items_list` request. It is written even when no channel will need a request, such as when every channel lacks an uploads playlist or is skipped by §3. It is in its own statement. Writing it first covers every non-normal ending, including a crash, with no per-error write path. A failure returns the classified SQLite error and the run fails as today; no channel is scanned without the fact. Every incident row (§2) is written after this, so a run with rows always has a non-null value.
+2. **`completed` at a normal scan end.** The engine writes it in its own statement when the uploads loop ends with `!ScanStopped` and no returned error. That is before metadata prefetch and before AC8 evaluation. A failure returns the classified SQLite error. If `ScanStopped` is set, it writes nothing, and `cut_short` stands. An all-local-failure scan also writes `completed`, because the scan did finish normally.
+3. **`no_source_scanned` in the terminal failure write.** When the pipeline fails the run for an error with `errors.Is(err, discovery.ErrNoSourceScanned)`, it uses the store method that sets status `failed` and `interrupt_reason`. That method also sets `discovery_scan_outcome = 'no_source_scanned'` in **the same UPDATE**, chosen by an explicit parameter, never by inspecting reason text. If that write loses to Stop (`stop_requested_at` set), nothing changes, `completed` stands, and the run reads as stopped with a finished scan. That is true.
+
+Prefetch, persist and later phases never write the column, so a later failure cannot turn a finished scan into `cut_short`.
+
+**Resume.** A resume that repeats discovery overwrites the value through writes 1–2: `cut_short` at its scan start, then `completed` if it finishes. A resumed scan that completes therefore replaces an earlier `cut_short`. A resume that starts after discovery keeps the stored value from the execution that scanned. A `failed` run is never resumed, so `no_source_scanned` is final. Run Now's `interrupt_reason = NULL` reset and startup recovery do not touch the column. These updates are not guarded by `stop_requested_at`: they record what the scan did, not a lifecycle transition.
+
+**Read API.** `GET /api/runs/{id}` adds `discovery_scan`, read in the same row as `status`:
+
+- `null` when the stored value is `NULL`;
+- `"in_progress"` when the stored value is `cut_short` and `status` is `running`;
+- otherwise the stored value (`completed`, `cut_short` or `no_source_scanned`).
+
+An unrecognized stored value is reported as `null` with a server warning. It is not a diagnostic and carries no text.
+
+**UI rule.** A run with zero rows shows no coverage block, whatever the value. With one or more rows, apply the first matching rule:
+
+| `status` and `discovery_scan` | Design variant |
+|---|---|
+| `failed` and `no_source_scanned` | "Run failed. No channels were scanned successfully." plus the list |
+| `cut_short` | **Scan cut short:** "Channel scanning stopped before it finished. Results are incomplete." / "See the run status for the cause." / "Channels recorded as not scanned:" plus the list / "YuHaul has no record of which other channels were scanned." Add "Completed is the run's saved status; it does not mean every channel was scanned." when `status` is `completed`. |
+| `completed`, or `no_source_scanned` with any status other than `failed` | **Neither:** "Some channels could not be scanned. Results are incomplete." plus the list |
+| `in_progress` | The list under "Some channels could not be scanned. Results are incomplete." The run is still running; the designer confirms or replaces this copy (non-blocking). |
+| `null` (rows exist) | Not reachable: write 1 precedes every row. Treat as an integrity anomaly and use **Run-wide cause, scan stage not established** ("This run did not complete normally, so results are incomplete. See the run status." plus the list) only when `status` is `failed`, `interrupted` or `stopped`. For `completed`, show only the list under "Channels recorded as not scanned:" with no coverage sentence. |
+
+The **Run-wide cause, scan stage not established** variant otherwise has no reachable case on this build. It remains the design's rule for evidence that does not state the scan stage.
+
+**Reuse.** ARS-001's later assessment refines, but does not replace, this column. When it lands, its writers keep setting `discovery_scan_outcome` as a coarse projection:
+
+| ARS-001 assessment | `discovery_scan_outcome` |
+|---|---|
+| `blocked`, or an unsettled sealed scope at a terminal or interrupted end | `cut_short` |
+| `complete`, `mixed` or `no_attempts` | `completed` |
+| `all_local_failed` | `no_source_scanned` |
+| `eligibility_changed_no_coverage` | `completed` |
+
+Readers that understand `discovery_acquisition` prefer it. Runs from this build keep their coarse value.
+
+**D1 isolation flag.** `runWithClient` takes an explicit `isolateSources bool`, separate from `byID`. `RunBound` passes `true`; the legacy `Run` passes `false`. `fetchNewVideos` applies D1 and §2/§3 only when `isolateSources` is true. Neither flag is derived from the other (ADR-001 D1).
 
 ## 5. Write boundary for the coder
 
@@ -174,6 +234,14 @@ Work on top of the interim branch (`interim-uploads-isolation`). Allowed changes
 - New `internal/server/discovery_source_handlers.go`, plus registration in `server.go` and the run handlers (§4.1, §4.3), with tests.
 - Remove D6: the `discovery_incomplete` projection in `internal/stats/store.go`, `internal/state/models.go` and the SPA, if present.
 - Web: a new client function and types, the Errors source section, and the Run Detail coverage block, with tests. Reuse `failure-reason.ts`'s reason admission set.
+
+**Amendment 2026-11-20 (§4.5 and the D1 flag), on top of `04aee26`:**
+
+- `internal/store/migrations/030_discovery_source_failure.up.sql`: append the `ALTER TABLE run ADD COLUMN discovery_scan_outcome …` statement from §1. Extend the store migration tests to cover the column, its CHECK, `NULL` on existing rows, and a clean install plus the `029 → 030` upgrade.
+- `internal/state`: a writer `SetDiscoveryScanOutcome(ctx, runID, value)` for `cut_short` and `completed`. Add a scan-outcome parameter to the terminal failure write: extend `Store.FailRun` and `Machine.FailRun`, or add a `…WithScanOutcome` variant, so `no_source_scanned` is set in the same UPDATE. Add a `DiscoveryScanOutcome` field to the run read and the public projection `discovery_scan` (`in_progress` mapping, unknown → `null`) in `models.go` and the run select in `internal/stats/store.go`. Plus tests.
+- `internal/discovery/engine.go`: add the explicit `isolateSources` parameter (`RunBound` true, `Run` false), replacing the `byID` reuse at the D1 branch (`engine.go:165,180` in `04aee26`). Add write 1 before the first uploads request and write 2 at a normal scan end.
+- `internal/pipeline/pipeline.go`: choose the terminal failure write with the `no_source_scanned` parameter when `errors.Is(err, discovery.ErrNoSourceScanned)`.
+- Web: types and the Run Detail coverage-block selection rule from §4.5, using the design copy, with tests.
 
 Unchanged:
 
@@ -244,9 +312,21 @@ Unchanged:
    - The AC8 run shows "No channels were scanned successfully."
    - Keyboard, 320 px and screen reader checks are as in the design.
 
+7. **Scan outcome (§4.5).** Run each case through the guarded harness and the real pipeline with migrated SQLite, then reopen.
+   - A normal mixed scan reads `completed` and Run Detail shows "Some channels…".
+   - A and B fail locally and a budget refusal then stops the scan; the run is `completed`. It reads `cut_short`, shows the scan-cut-short variant with the "Completed is…" sentence, and shows neither "Some channels…" nor "No channels were scanned successfully.".
+   - A provider `quotaExceeded`, an authorization error and a cancellation during the scan each leave `cut_short` with the run's own status.
+   - Kill the process mid-scan: `cut_short`, and the run is interrupted after startup recovery. Resume, and the scan completes: `completed`.
+   - A resume that starts after discovery keeps its value.
+   - All attempted channels fail locally: `failed`, `no_source_scanned`, set in the same UPDATE as the status. Inject a Stop that wins first: `stopped`, `completed`.
+   - A later prefetch, persist or routing failure after a finished scan keeps `completed`.
+   - A running run reports `in_progress`, simulations report `null`, and an injected unknown stored value reports `null`.
+   - A zero-row run shows no block for every value.
+   - The legacy `Run` path isolates nothing, even with `byID` forced true.
+
 ## Release notes
 
-- **Rollback after `030`:** once migration `030` has been applied, any image built before `030` fails at startup, because its embedded migration chain ends at `029` and it refuses the version-30 database. Rolling back the image alone does not work. To roll back, stop the writers, restore a database backup taken before `030` was applied, then start the older image. Take that backup immediately before deploying the first `030` image. This applies to every later migration too.
+- **Rollback after `030`:** once migration `030` has been applied, any image built before `030` fails at startup, because its embedded migration chain ends at `029` and it refuses the version-30 database. Rolling back the image alone does not work. To roll back, stop the writers, restore a database backup taken before `030` was applied, then start the older image. Take that backup immediately before deploying the first `030` image. This applies to every later migration too. The operator-facing copy is [Upgrade notes](../../../user-docs/upgrade-notes.md); the PR body for the `030` release must repeat it.
 
 ## Open questions
 
