@@ -117,8 +117,11 @@ func (s *Store) ValidateRetryReceiptTx(ctx context.Context, tx *sql.Tx, receipt 
 	if owner != 0 && owner != receipt.ReceivingRunID {
 		return result, fmt.Errorf("retry receipt video %d owned by run %d: %w", receipt.VideoID, owner, ErrWorkNotOwned)
 	}
+	// A live row the receiving run holds but the stored claim does not name is
+	// an integrity failure. Rows live under no owner or a failed one are not
+	// the run's; another live owner was refused above.
 	for _, table := range []string{"deferred_item", "error_entry"} {
-		rows, err := tx.QueryContext(ctx, `SELECT id FROM `+table+` WHERE video_id=? AND status='retrying'`, receipt.VideoID)
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM `+table+` WHERE video_id=? AND status='retrying' AND retry_run_id=?`, receipt.VideoID, receipt.ReceivingRunID)
 		if err != nil {
 			return result, fmt.Errorf("validate retry siblings in %s: %w", table, err)
 		}
@@ -648,11 +651,47 @@ func (s *Store) finishRetryGroupTx(ctx context.Context, tx *sql.Tx, videoID, run
 		deferredStatus, errorStatus = "completed", "resolved"
 		resolvedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE deferred_item SET status = ? WHERE video_id = ? AND retry_run_id = ? AND status = 'retrying'`, deferredStatus, videoID, runID); err != nil {
+	// Only the stored claim identity says which rows this run claimed. Owner
+	// pointers alone never do: a sibling that gained the same owner later is
+	// not a member, and a live row with no stored identity is an integrity
+	// failure, not something to release or complete.
+	stored, present, err := storedRetryReceipt(ctx, tx, runID, videoID)
+	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE error_entry SET status = ?, resolved_at = ? WHERE video_id = ? AND retry_run_id = ? AND status = 'retrying'`, errorStatus, resolvedAt, videoID, runID)
-	return err
+	if present {
+		for _, group := range []struct {
+			table, set string
+			args       []any
+			refs       []RetryRowRef
+		}{
+			{"deferred_item", `status=?`, []any{deferredStatus}, stored.Deferred},
+			{"error_entry", `status=?, resolved_at=?`, []any{errorStatus, resolvedAt}, stored.Errors},
+		} {
+			for _, ref := range group.refs {
+				args := append(append([]any(nil), group.args...), ref.ID, videoID, ref.OriginRunID, runID)
+				if _, err := tx.ExecContext(ctx, `UPDATE `+group.table+` SET `+group.set+` WHERE id=? AND video_id=? AND run_id=? AND retry_run_id=? AND status='retrying'`, args...); err != nil {
+					return fmt.Errorf("finish retry row %s %d: %w", group.table, ref.ID, err)
+				}
+			}
+		}
+	}
+	// What remains live under this run was not in the stored set (or there is
+	// no stored set).
+	for _, table := range []string{"deferred_item", "error_entry"} {
+		var live int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM `+table+` WHERE video_id=? AND retry_run_id=? AND status='retrying'`, videoID, runID).Scan(&live); err != nil {
+			return fmt.Errorf("verify retry rows of video %d in %s: %w", videoID, table, err)
+		}
+		if live == 0 {
+			continue
+		}
+		if !present {
+			return fmt.Errorf("run %d holds %d live %s rows of video %d with no stored claim provenance: %w", runID, live, table, videoID, ErrRetryProvenance)
+		}
+		return fmt.Errorf("run %d holds %d unexpected live %s rows of video %d outside its stored claim: %w", runID, live, table, videoID, ErrRetryOwnership)
+	}
+	return nil
 }
 
 // ListRetryVideoIDs returns the distinct pre-decision recovery membership of

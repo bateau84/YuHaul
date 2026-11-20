@@ -482,3 +482,27 @@ func TestStoredSetIgnoresReplacedAndForeignRows(t *testing.T) {
 		t.Fatalf("forged receipt = %v, want ErrRetryProvenance", err)
 	}
 }
+
+// A live row under no owner (or a failed one) is not the receiving run's, so it
+// is not an unexpected sibling of its stored claim.
+func TestValidateIgnoresLiveRowsTheReceivingRunDoesNotHold(t *testing.T) {
+	ctx := context.Background()
+	f := newProvenanceFixture(t)
+	origin, owner := retryRun(t, f.db), retryRun(t, f.db)
+	video := seedVideo(t, f.db, origin, "unowned-sibling")
+	item := deferredSibling(t, f.s, video, origin, DeferredStatusPending)
+	receipt, taken := f.claimAuto(item, owner)
+	if !taken {
+		t.Fatal("claim lost")
+	}
+	if _, err := f.db.Exec(`INSERT INTO error_entry(video_id,run_id,error_category,error_message,status,created_at,retry_run_id) VALUES(?,?, 'runtime','x','retrying',?,NULL)`, video, origin, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	err := f.s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		_, err := f.s.ValidateRetryReceiptTx(ctx, tx, receipt)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("validate = %v, want nil", err)
+	}
+}
