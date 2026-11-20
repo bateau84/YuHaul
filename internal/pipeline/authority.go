@@ -319,14 +319,19 @@ func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason, scan
 		return qs.WithRetryTx(retainCtx, func(tx *sql.Tx) error { return retain(retainCtx, qs, tx) })
 	}
 	if err = attempt(ctx); err != nil {
-		p.logger.ErrorContext(ctx, "retain run failure", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "retain_failure"))
+		p.logger.ErrorContext(ctx, "retain run failure", "run_id", runID, "diagnostic", diag.Encode(withIntegrityCode(err), "unknown", "retain_failure"))
 		// Retention is the handoff. Retry it independently of the possibly
 		// expired execution context before choosing a terminal status.
 		finalizeCtx, cancel := runFinalizationContext(ctx)
 		err = attempt(finalizeCtx)
 		cancel()
 		if err != nil {
-			p.logger.ErrorContext(ctx, "run retention finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+			if errors.Is(err, queue.ErrRetryProvenance) {
+				// Retention stopped on an unusable stored claim identity; say so,
+				// not the failure that led here.
+				reason = diag.Encode(withIntegrityCode(err), "unknown", "retain_failure")
+			}
+			p.logger.ErrorContext(ctx, "run retention finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(withIntegrityCode(err), "unknown", "finalize_run"))
 			// The candidates remain owned by the run, so interruption is
 			// resumable. Persist it separately; never fail before queue handoff.
 			p.interruptAuthorityRun(ctx, runID, reason)

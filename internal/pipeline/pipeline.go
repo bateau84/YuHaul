@@ -579,6 +579,19 @@ func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
 }
 
 func (p *Pipeline) failRun(ctx context.Context, runID int64, message string, err error) {
+	if errors.Is(err, state.ErrPlaylistSendStopped) {
+		// A Stop the guard or the admission fence saw before cancellation is the
+		// user's action, not a failure of the phase: no ERROR, and the Stop path
+		// owns the ending.
+		p.logger.InfoContext(ctx, "pipeline phase ended by user stop", "run_id", runID,
+			"diagnostic", diag.Facts{Phase: "unknown", Operation: "stop_run", Code: "stopped_by_user"}.String())
+		var refusal *retryAdmissionRefusal
+		if errors.As(err, &refusal) {
+			p.endRefusedRetry(ctx, runID, refusal, diag.Facts{Phase: "unknown", Operation: "stop_run", Code: "stopped_by_user"}.String())
+		}
+		return
+	}
+	err = withIntegrityCode(err)
 	reason := diag.Reason(err, message)
 	var mutation *mutationFailure
 	if errors.As(err, &mutation) {

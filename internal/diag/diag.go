@@ -62,10 +62,12 @@ func (e *codeCause) Unwrap() error { return e.cause }
 // Only mutation_application_uncertain (a guard-blocked or admitted-but-
 // unconfirmed mutation), original_decision_unavailable (BR-039: a partly
 // done video whose original decision cannot be read) and no_source_scanned
-// (discovery ADR-001 D5: every attempted uploads source failed locally) are
-// accepted. Other codes are ignored.
+// (discovery ADR-001 D5: every attempted uploads source failed locally),
+// retry_claim_unverifiable (ARS-005 5.1.1: unfinished retry work has no usable
+// stored claim identity) and stop_settlement_blocked (ARS-003 3.7: a marked
+// Stop could not be settled) are accepted. Other codes are ignored.
 func WithCode(err error, code string) error {
-	if err == nil || (code != "mutation_application_uncertain" && code != "original_decision_unavailable" && code != "no_source_scanned") {
+	if err == nil || (code != "mutation_application_uncertain" && code != "original_decision_unavailable" && code != "no_source_scanned" && code != "retry_claim_unverifiable" && code != "stop_settlement_blocked") {
 		return err
 	}
 	return &codeCause{cause: err, code: code}
@@ -78,7 +80,7 @@ var operations = set("unknown start_run load_run load_token select_inputs captur
 var providerReasons = set("quotaExceeded dailyLimitExceeded rateLimitExceeded userRateLimitExceeded authError forbidden insufficientPermissions backendError internalError badRequest invalidParameter notFound playlistNotFound videoNotFound playlistItemsNotAccessible playlistContainsMaximumNumberOfVideos videoAlreadyInPlaylist")
 var oauthReasons = set("invalid_request invalid_client invalid_grant unauthorized_client unsupported_grant_type invalid_scope access_denied temporarily_unavailable server_error")
 var sqliteCodes = map[int]string{1: "SQLITE_ERROR", 5: "SQLITE_BUSY", 6: "SQLITE_LOCKED", 8: "SQLITE_READONLY", 10: "SQLITE_IOERR", 11: "SQLITE_CORRUPT", 13: "SQLITE_FULL", 14: "SQLITE_CANTOPEN", 19: "SQLITE_CONSTRAINT"}
-var codes = set("unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user video_unavailable original_decision_unavailable no_source_scanned")
+var codes = set("unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user video_unavailable original_decision_unavailable no_source_scanned retry_claim_unverifiable stop_settlement_blocked")
 
 // discardCodes are the codes bound to the discard_run operation; stop_run and
 // end_legacy_run each bind one code of their own; each operation accepts only its own codes and no other facts.
@@ -124,7 +126,7 @@ func (f Facts) Valid() bool {
 			return false
 		}
 	}
-	if (f.Code == "credential_persistence_failed" || f.Code == "authorization_changed" || f.Code == "mutation_application_uncertain") && (f.Status != "" || f.Reason != "" || f.SQLite != "") {
+	if (f.Code == "credential_persistence_failed" || f.Code == "authorization_changed" || f.Code == "mutation_application_uncertain" || f.Code == "retry_claim_unverifiable" || f.Code == "stop_settlement_blocked") && (f.Status != "" || f.Reason != "" || f.SQLite != "") {
 		return false
 	}
 	if f.Reason != "" && !((f.Code == "provider_error" && providerReasons[f.Reason]) || (f.Code == "oauth_error" && oauthReasons[f.Reason])) {

@@ -1,11 +1,11 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -29,6 +29,7 @@ type settlementScene struct {
 	source  int64 // the claimed Errors entry of the originating run
 	native  int64 // a native video of the receiving run, unfinished
 	receipt queue.RetryGroupReceipt
+	logs    *bytes.Buffer
 }
 
 func newSettlementScene(t *testing.T) *settlementScene {
@@ -60,7 +61,8 @@ func newSettlementScene(t *testing.T) *settlementScene {
 	native, err := state.NewMachine(f.state).DiscoverVideo(ctx, sc.recv, "native-two", "fixture-channel")
 	require.NoError(t, err)
 	sc.native = native.ID
-	sc.p = &Pipeline{db: f.db, stateStore: f.state, machine: state.NewMachine(f.state), queueStore: qs, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	sc.logs = &bytes.Buffer{}
+	sc.p = &Pipeline{db: f.db, stateStore: f.state, machine: state.NewMachine(f.state), queueStore: qs, logger: slog.New(slog.NewTextHandler(sc.logs, nil))}
 	return sc
 }
 
@@ -229,6 +231,54 @@ func TestLegacyNullProvenanceBlocksEveryEnding(t *testing.T) {
 			require.Equal(t, tt.wantStatus, sc.status(t))
 			require.Equal(t, queue.ErrorStatusRetrying, sc.sourceStatus(t), "no release, no completion")
 			require.Zero(t, sc.count(t, `SELECT count(*) FROM deferred_item`), "no synthetic handoff")
+			switch {
+			case tt.markedStop:
+				require.Contains(t, sc.logs.String(), "code=stop_settlement_blocked")
+				require.Contains(t, sc.logs.String(), "cause_diagnostic")
+				require.Contains(t, sc.logs.String(), "code=retry_claim_unverifiable")
+			case tt.cause != nil:
+				// The stored interrupt reason and the log name the integrity code.
+				var reason sql.NullString
+				require.NoError(t, sc.f.db.QueryRow(`SELECT interrupt_reason FROM run WHERE id=?`, sc.recv).Scan(&reason))
+				require.Equal(t, "diag:v1 phase=unknown operation=retry code=retry_claim_unverifiable", reason.String)
+				require.Contains(t, sc.logs.String(), "code=retry_claim_unverifiable")
+				require.NotContains(t, sc.logs.String(), "code=unknown_error", "an integrity refusal never reads unknown_error")
+			default:
+				// Retention stopped on the unusable claim: the stored reason says
+				// so instead of repeating the unrelated failure.
+				var reason sql.NullString
+				require.NoError(t, sc.f.db.QueryRow(`SELECT interrupt_reason FROM run WHERE id=?`, sc.recv).Scan(&reason))
+				require.Equal(t, "diag:v1 phase=unknown operation=retain_failure code=retry_claim_unverifiable", reason.String)
+			}
+			if tt.markedStop {
+				require.NotContains(t, sc.logs.String(), "code=unknown_error")
+			}
+		})
+	}
+}
+
+// A Stop the fence sees before the context is cancelled is the user's action:
+// it is not logged as a failed phase.
+func TestStopAtTheFenceIsNotLoggedAsAFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  func(sc *settlementScene) error
+	}{
+		{"retry refusal", func(sc *settlementScene) error {
+			return &retryAdmissionRefusal{receipt: sc.receipt, cause: state.ErrPlaylistSendStopped}
+		}},
+		{"native", func(*settlementScene) error { return fmt.Errorf("execute: %w", state.ErrPlaylistSendStopped) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := newSettlementScene(t)
+			_, err := sc.f.db.Exec(`UPDATE run SET stop_requested_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), sc.recv)
+			require.NoError(t, err)
+			sc.p.registerRun(sc.recv)
+			sc.p.failRun(context.Background(), sc.recv, "action execution phase failed", tc.err(sc))
+			sc.p.finishRun(context.Background(), sc.recv)
+			require.NotContains(t, sc.logs.String(), "level=ERROR")
+			require.NotContains(t, sc.logs.String(), "pipeline phase failed")
+			require.Contains(t, sc.logs.String(), "code=stopped_by_user")
 		})
 	}
 }

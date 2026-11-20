@@ -241,7 +241,7 @@ func (p *Pipeline) finishRun(ctx context.Context, runID int64) {
 		}
 		if err != nil {
 			// The run stays running with its marker for recovery.
-			p.logger.ErrorContext(ctx, "run stop settle failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+			p.logger.ErrorContext(ctx, "run stop settle failed", append([]any{"run_id", runID}, stopSettlementAttrs(err)...)...)
 		}
 	}
 	if cancel != nil {
@@ -287,7 +287,7 @@ func (p *Pipeline) settleStopProtecting(ctx context.Context, runID, protectVideo
 		}
 		lastErr = qerr
 		if attempt == 0 {
-			p.logger.WarnContext(ctx, "run stop settle failed, retrying", "run_id", runID, "diagnostic", diag.Encode(qerr, "unknown", "finalize_run"))
+			p.logger.WarnContext(ctx, "run stop settle failed, retrying", append([]any{"run_id", runID}, stopSettlementAttrs(qerr)...)...)
 		}
 	}
 	return lastErr

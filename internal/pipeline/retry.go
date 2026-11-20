@@ -165,7 +165,7 @@ func (p *Pipeline) endRefusedRetry(ctx context.Context, runID int64, refusal *re
 		}
 	}
 	if err := p.settleRefusedRetry(ctx, runID, refusal, false, reason); err != nil {
-		p.logger.ErrorContext(ctx, "retry refusal settlement unavailable", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+		p.logger.ErrorContext(ctx, "retry refusal settlement unavailable", "run_id", runID, "diagnostic", diag.Encode(withIntegrityCode(err), "unknown", "finalize_run"))
 		p.interruptAuthorityRun(ctx, runID, reason)
 	}
 }
@@ -207,6 +207,28 @@ func (e *retryAdmissionRefusal) protectedVideoID() int64 {
 		return 0
 	}
 	return e.receipt.VideoID
+}
+
+// withIntegrityCode names a retry claim whose stored identity is missing or
+// unusable with its closed diagnostic code (retry_claim_unverifiable), so the
+// stored interrupt reason and the logs do not read unknown_error. Other errors
+// pass through unchanged.
+func withIntegrityCode(err error) error {
+	if errors.Is(err, queue.ErrRetryProvenance) {
+		return diag.WithCode(err, "retry_claim_unverifiable")
+	}
+	return err
+}
+
+// stopSettlementAttrs are the log attributes of a marked Stop that could not
+// be settled: the closed stop_settlement_blocked code and, when the cause is an
+// unusable claim identity, its own code.
+func stopSettlementAttrs(err error) []any {
+	attrs := []any{"diagnostic", diag.Facts{Phase: "unknown", Operation: "finalize_run", Code: "stop_settlement_blocked"}.String()}
+	if cause := withIntegrityCode(err); cause != err {
+		attrs = append(attrs, "cause_diagnostic", diag.Encode(cause, "unknown", "finalize_run"))
+	}
+	return attrs
 }
 
 func isRetryAdmissionRefusal(err error) bool {

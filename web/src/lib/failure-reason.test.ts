@@ -84,8 +84,24 @@ describe('failureSentence', () => {
   })
 
   it('reads "Reason unavailable." for run-level, unlisted and prototype-named codes', () => {
-    for (const code of ['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized', 'brand_new_code', 'constructor', 'toString', 'original_decision_unavailable']) {
+    for (const code of ['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized', 'brand_new_code', 'constructor', 'toString', 'original_decision_unavailable', 'retry_claim_unverifiable', 'stop_settlement_blocked']) {
       expect(failureSentence(diag(code))).toBe(REASON_UNAVAILABLE)
+    }
+  })
+
+  // The two codes are registered so a stored reason parses and reads honestly. No
+  // sentence is designed for them yet (admin UI design, "Errors — Category and
+  // Reason Presentation"), so they read "Reason unavailable." and are never
+  // shown raw, and they admit no other facts.
+  it('registers retry_claim_unverifiable and stop_settlement_blocked without a sentence', () => {
+    for (const code of ['retry_claim_unverifiable', 'stop_settlement_blocked']) {
+      expect(DIAG_CODES.has(code)).toBe(true)
+      const text = diag(code)
+      expect(parseDiag(text)).toEqual({ code, status: undefined, reason: undefined })
+      expect(failureSentence(text)).toBe(REASON_UNAVAILABLE)
+      expect(parseDiag(`${text} status=500`)).toBeNull()
+      expect(parseDiag(`${text} reason=backendError`)).toBeNull()
+      expect(offersAccountStatus(text)).toBe(false)
     }
   })
 
