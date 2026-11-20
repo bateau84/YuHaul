@@ -8,6 +8,8 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-20
 
+- Specified Errors page empty states in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (review 833a06fb): the video list reads `No video errors in the queue.`, no empty state claims overall health, and both-empty and one-empty pages read section by section. Design only.
+
 - Added to [admin interface design](/docs/design/yuhaul-admin-ui-design.md) the Run Detail coverage copy for runs whose channel scan was cut short or that failed for a run-wide reason (critic follow-up): no `Some channels…` understatement, no coverage claim, status unchanged. Design only.
 
 - Confirmed and adjusted the channel-scan presentation in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) against ARS-002: Errors → Channel scan errors read as a history (absolute time, per-entry record sentence, optional later-failure and scanned-successfully-since facts), the Run Detail coverage block names the skipped channels, and a run with no rows shows no coverage claim. Design only.
