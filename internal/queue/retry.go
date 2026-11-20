@@ -58,6 +58,14 @@ func (s *Store) ValidateRetryReceiptTx(ctx context.Context, tx *sql.Tx, receipt 
 	if (runType != "manual" && runType != "scheduled") || (runStatus != "running" && runStatus != "interrupted") {
 		return result, fmt.Errorf("retry receipt receiving run %d is not unfinished production: %w", receipt.ReceivingRunID, ErrWorkNotOwned)
 	}
+	// The caller's copy must be exactly the claim identity stored at claim time.
+	stored, err := requireStoredRetryReceipt(ctx, tx, receipt.ReceivingRunID, receipt.VideoID)
+	if err != nil {
+		return result, err
+	}
+	if !sameRetryReceipt(stored, receipt) {
+		return result, fmt.Errorf("retry receipt of run %d video %d differs from its stored claim provenance: %w", receipt.ReceivingRunID, receipt.VideoID, ErrRetryProvenance)
+	}
 	seen := make(map[string]struct{}, len(receipt.Deferred)+len(receipt.Errors))
 	for _, group := range []struct {
 		table string
@@ -353,8 +361,8 @@ func (s *Store) claimRetryGroupTx(ctx context.Context, tx *sql.Tx, entryID, runI
 		}
 		if owner == runID && own.Valid && own.String == string(outcome) {
 			// M2: this run itself made the video final and was interrupted before
-			// acknowledging. Hand back the exact receipt; reset and write nothing.
-			receipt, err := s.ownedReceiptTx(ctx, tx, videoID, runID, manual)
+			// acknowledging. Hand back the stored receipt; reset and write nothing.
+			receipt, err := requireStoredRetryReceipt(ctx, tx, runID, videoID)
 			if err != nil {
 				return RetryGroupReceipt{}, videoID, ClaimLost, err
 			}
@@ -368,7 +376,9 @@ func (s *Store) claimRetryGroupTx(ctx context.Context, tx *sql.Tx, entryID, runI
 		return receipt, videoID, ClaimClosedFinal, nil
 	}
 	if owner == runID {
-		receipt, err := s.ownedReceiptTx(ctx, tx, videoID, runID, manual)
+		// Same-owner recovery reads the stored claim identity. Live owner rows
+		// can reveal an integrity problem but never supply receipt members.
+		receipt, err := requireStoredRetryReceipt(ctx, tx, runID, videoID)
 		if err != nil {
 			return RetryGroupReceipt{}, videoID, ClaimLost, err
 		}
@@ -401,71 +411,55 @@ func (s *Store) claimRetryGroupTx(ctx context.Context, tx *sql.Tx, entryID, runI
 		}
 	}
 	// Durable membership belongs to the receiving run, not the queue's
-	// originating run. Insert only after admission succeeds; the surrounding
-	// transaction also owns run creation and the claim, so rollback removes both.
-	if _, err := tx.ExecContext(ctx, `INSERT INTO run_video_outcome(run_id,video_id,final_outcome,updated_at)
-		VALUES(?,?, NULL, ?) ON CONFLICT(run_id,video_id) DO NOTHING`,
-		runID, videoID, now.UTC().Format(time.RFC3339Nano)); err != nil {
-		return receipt, videoID, ClaimLost, fmt.Errorf("record retry run %d membership for video %d: %w", runID, videoID, err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE deferred_item SET status = 'retrying', retry_run_id = ?, retry_count = retry_count + CASE WHEN status = 'retrying' AND retry_run_id = ? THEN 0 ELSE 1 END WHERE video_id = ? AND status IN ('pending','retrying')`, runID, runID, videoID); err != nil {
-		return receipt, videoID, ClaimLost, err
+	// originating run. Fix the exact claimed row set first, write it once with
+	// the membership row, then move exactly those rows. The surrounding
+	// transaction also owns run creation, so rollback removes all of it.
+	receipt = RetryGroupReceipt{ReceivingRunID: runID, VideoID: videoID}
+	if receipt.Deferred, err = claimRowRefs(ctx, tx, "deferred_item", videoID, `'pending','retrying'`); err != nil {
+		return RetryGroupReceipt{}, videoID, ClaimLost, err
 	}
 	if manual {
-		if _, err := tx.ExecContext(ctx, `UPDATE error_entry SET status = 'retrying', retry_run_id = ?, retry_count = retry_count + CASE WHEN status = 'retrying' AND retry_run_id = ? THEN 0 ELSE 1 END WHERE video_id = ? AND status IN ('active','retrying')`, runID, runID, videoID); err != nil {
-			return receipt, videoID, ClaimLost, err
+		if receipt.Errors, err = claimRowRefs(ctx, tx, "error_entry", videoID, `'active','retrying'`); err != nil {
+			return RetryGroupReceipt{}, videoID, ClaimLost, err
 		}
 	}
-	if owner == 0 {
-		// A partly done video keeps its successes: reset only the evaluation
-		// state so its missing additions can finish (BR-039). Its continuation
-		// under the original decision arrives with ARS-006 §7.
-		resetSQL := `UPDATE video SET processing_state = 'not_yet_evaluated', final_outcome = 'not_yet_evaluated', deferred_reason = NULL, error_message = NULL, completed_at = NULL WHERE id = ?`
-		if class == state.VideoClassPartlyDone {
-			resetSQL = `UPDATE video SET processing_state = 'evaluated', final_outcome = 'not_yet_evaluated', deferred_reason = NULL, error_message = NULL WHERE id = ?`
-		}
-		if _, err := tx.ExecContext(ctx, resetSQL, videoID); err != nil {
-			return receipt, videoID, ClaimLost, err
-		}
-	}
-	receipt, err = s.ownedReceiptTx(ctx, tx, videoID, runID, manual)
+	provenance, err := encodeRetryProvenance(receipt)
 	if err != nil {
+		return RetryGroupReceipt{}, videoID, ClaimLost, fmt.Errorf("retry claim of run %d video %d: %v: %w", runID, videoID, err, ErrRetryProvenance)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO run_video_outcome(run_id,video_id,final_outcome,updated_at,retry_claim_provenance)
+		VALUES(?,?, NULL, ?, ?)`, runID, videoID, now.UTC().Format(time.RFC3339Nano), provenance); err != nil {
+		return RetryGroupReceipt{}, videoID, ClaimLost, fmt.Errorf("record retry run %d membership for video %d: %w", runID, videoID, err)
+	}
+	for _, group := range []struct {
+		table string
+		wasIn string
+		refs  []RetryRowRef
+	}{{"deferred_item", `'pending','retrying'`, receipt.Deferred}, {"error_entry", `'active','retrying'`, receipt.Errors}} {
+		for _, ref := range group.refs {
+			res, err := tx.ExecContext(ctx, `UPDATE `+group.table+` SET status = 'retrying', retry_run_id = ?, retry_count = retry_count + CASE WHEN status = 'retrying' AND retry_run_id = ? THEN 0 ELSE 1 END
+				WHERE id = ? AND video_id = ? AND run_id = ? AND status IN (`+group.wasIn+`)`, runID, runID, ref.ID, videoID, ref.OriginRunID)
+			if err != nil {
+				return RetryGroupReceipt{}, videoID, ClaimLost, fmt.Errorf("claim %s %d: %w", group.table, ref.ID, err)
+			}
+			if n, err := rowsAffected(res); err != nil {
+				return RetryGroupReceipt{}, videoID, ClaimLost, err
+			} else if n != 1 {
+				return RetryGroupReceipt{}, videoID, ClaimLost, fmt.Errorf("claim %s %d moved %d rows: %w", group.table, ref.ID, n, ErrRetryOwnership)
+			}
+		}
+	}
+	// owner == 0 here: a partly done video keeps its successes, so reset only
+	// the evaluation state so its missing additions can finish (BR-039). Its
+	// continuation under the original decision arrives with ARS-006 §7.
+	resetSQL := `UPDATE video SET processing_state = 'not_yet_evaluated', final_outcome = 'not_yet_evaluated', deferred_reason = NULL, error_message = NULL, completed_at = NULL WHERE id = ?`
+	if class == state.VideoClassPartlyDone {
+		resetSQL = `UPDATE video SET processing_state = 'evaluated', final_outcome = 'not_yet_evaluated', deferred_reason = NULL, error_message = NULL WHERE id = ?`
+	}
+	if _, err := tx.ExecContext(ctx, resetSQL, videoID); err != nil {
 		return RetryGroupReceipt{}, videoID, ClaimLost, err
 	}
 	return receipt, videoID, ClaimTaken, nil
-}
-
-// ownedReceiptTx lists the exact rows the receiving run holds for videoID.
-func (s *Store) ownedReceiptTx(ctx context.Context, tx *sql.Tx, videoID, runID int64, manual bool) (RetryGroupReceipt, error) {
-	receipt := RetryGroupReceipt{ReceivingRunID: runID, VideoID: videoID}
-	for _, table := range []struct {
-		name   string
-		target *[]RetryRowRef
-	}{{"deferred_item", &receipt.Deferred}, {"error_entry", &receipt.Errors}} {
-		if table.name == "error_entry" && !manual {
-			continue
-		}
-		rows, err := tx.QueryContext(ctx, `SELECT id, run_id FROM `+table.name+` WHERE video_id=? AND status='retrying' AND retry_run_id=? ORDER BY id`, videoID, runID)
-		if err != nil {
-			return RetryGroupReceipt{}, err
-		}
-		for rows.Next() {
-			var ref RetryRowRef
-			if err := rows.Scan(&ref.ID, &ref.OriginRunID); err != nil {
-				rows.Close()
-				return RetryGroupReceipt{}, err
-			}
-			*table.target = append(*table.target, ref)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return RetryGroupReceipt{}, err
-		}
-		if err := rows.Close(); err != nil {
-			return RetryGroupReceipt{}, err
-		}
-	}
-	return receipt, nil
 }
 
 // retryOwner arbitrates both queues. Failed and legacy NULL owners are
@@ -685,42 +679,23 @@ func (s *Store) ListRetryVideoIDs(ctx context.Context, runID int64) ([]int64, er
 	return ids, rows.Err()
 }
 
-// RetryGroupReceiptForRunVideo snapshots the receiving run's row history before
-// evaluation begins. Claim paths should prefer the receipt returned by claim;
-// this loader supports automatic-run dispatch/recovery after the claim commit.
+// RetryGroupReceiptForRunVideo returns the claim identity stored when the
+// receiving run claimed the video. It never reconstructs a receipt from owner
+// pointers: a sibling that later gained the same owner is not a member, and
+// members that are now terminal or missing stay in it. ErrWorkRemoved means the
+// run owns no live retry row for the video (disposed-only history is not a work
+// candidate). ErrRetryProvenance means unfinished work has no trustworthy
+// stored identity (legacy NULL, malformed or unsupported value).
 func (s *Store) RetryGroupReceiptForRunVideo(ctx context.Context, runID, videoID int64) (RetryGroupReceipt, error) {
-	r := RetryGroupReceipt{ReceivingRunID: runID, VideoID: videoID}
-	rows, err := s.db.QueryContext(ctx, `SELECT kind, id, run_id, status FROM (
-		SELECT 0 AS kind, id, run_id, status FROM deferred_item WHERE video_id=? AND retry_run_id=?
-		UNION ALL
-		SELECT 1 AS kind, id, run_id, status FROM error_entry WHERE video_id=? AND retry_run_id=?
-	) ORDER BY kind, id`, videoID, runID, videoID, runID)
-	if err != nil {
-		return RetryGroupReceipt{}, fmt.Errorf("load retry receipt: %w", err)
-	}
-	defer rows.Close()
-	live := false
-	for rows.Next() {
-		var kind int
-		var status string
-		var ref RetryRowRef
-		if err := rows.Scan(&kind, &ref.ID, &ref.OriginRunID, &status); err != nil {
-			return RetryGroupReceipt{}, fmt.Errorf("scan retry receipt: %w", err)
-		}
-		if kind == 0 {
-			r.Deferred = append(r.Deferred, ref)
-		} else {
-			r.Errors = append(r.Errors, ref)
-		}
-		live = live || status == "retrying"
-	}
-	if err := rows.Err(); err != nil {
-		return RetryGroupReceipt{}, fmt.Errorf("read retry receipt: %w", err)
+	var live bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM deferred_item WHERE video_id=? AND retry_run_id=? AND status='retrying')
+		OR EXISTS (SELECT 1 FROM error_entry WHERE video_id=? AND retry_run_id=? AND status='retrying')`, videoID, runID, videoID, runID).Scan(&live); err != nil {
+		return RetryGroupReceipt{}, fmt.Errorf("load retry receipt owners: %w", err)
 	}
 	if !live {
 		return RetryGroupReceipt{}, fmt.Errorf("no live retry rows owned by run %d for video %d: %w", runID, videoID, ErrWorkRemoved)
 	}
-	return r, nil
+	return requireStoredRetryReceipt(ctx, s.db, runID, videoID)
 }
 
 // ListDeferredRetryCandidates returns one oldest outstanding row per eligible
