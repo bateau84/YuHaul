@@ -1305,6 +1305,12 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 		receipts = make([]queue.RetryGroupReceipt, 0, len(ids))
 		for _, id := range ids {
 			receipt, err := qs.RetryGroupReceiptForRunVideo(ctx, runID, id)
+			if errors.Is(err, queue.ErrRetryProvenance) {
+				// Unfinished work with no trustworthy stored claim identity (legacy,
+				// malformed or unsupported): an integrity refusal, not a failure of
+				// the video. Nothing is dispatched, reset, handed off or retained.
+				return &retryAdmissionRefusal{receipt: queue.RetryGroupReceipt{ReceivingRunID: runID, VideoID: id}, cause: err}
+			}
 			if err != nil {
 				return fmt.Errorf("recover retry video %d receipt: %w", id, err)
 			}

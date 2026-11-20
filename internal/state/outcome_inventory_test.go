@@ -71,6 +71,7 @@ var outcomeInventory = []outcomeSite{
 	{"internal/pipeline/pipeline.go", `recorded\.String == string\(state\.FinalOutcomeFailed\)`, inventoryNotApplicable, "failed-specific check for an already recorded failure"},
 	{"internal/pipeline/retry.go", `FinalOutcomeUnavailableOnYouTube`, inventoryHandled, "retry accepts the value as a final outcome"},
 	{"internal/pipeline/retry.go", `FinalOutcomeNotYetEvaluated|FinalOutcomeDeferred|FinalOutcomeFailed|final_outcome='failed'`, inventoryNotApplicable, "deferred/failed/not_yet_evaluated-specific retry branches"},
+	{"internal/pipeline/routable_filter.go", `o\.final_outcome='deferred'`, inventoryNotApplicable, "a run's own committed deferred outcome keeps that run's native input out of its main loop after the queue row is removed; unavailable_on_youtube is final, so state.RoutableByRun's FinalVideo term in the same predicate already excludes it (proved by TestRoutableFilterAudit)"},
 	{"internal/pipeline/exclusion.go", `FinalOutcomeExcluded`, inventoryNotApplicable, "excluded-specific check"},
 
 	// internal/videosearch

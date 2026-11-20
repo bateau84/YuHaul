@@ -164,23 +164,56 @@ func (p *Pipeline) endRefusedRetry(ctx context.Context, runID int64, refusal *re
 			return
 		}
 	}
-	if err := p.settleRefusedRetry(ctx, runID, refusal, false); err != nil {
+	if err := p.settleRefusedRetry(ctx, runID, refusal, false, reason); err != nil {
 		p.logger.ErrorContext(ctx, "retry refusal settlement unavailable", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
 		p.interruptAuthorityRun(ctx, runID, reason)
 	}
 }
 
-// settleRefusedRetry is the private receipt-aware settlement boundary. Until
-// retention validates provenance under the reserved writer, neither the
-// generic failure sweep nor the generic stop handoff is safe for this receipt.
-func (p *Pipeline) settleRefusedRetry(_ context.Context, _ int64, _ *retryAdmissionRefusal, _ bool) error {
-	return errors.New("receipt-aware retry settlement unavailable")
+// settleRefusedRetry ends a run whose retry claim was refused at admission:
+// removed work (ErrWorkRemoved), lost or changed ownership (ErrWorkNotOwned,
+// ErrRetryOwnership), a Stop seen at the guard (ErrPlaylistSendStopped) or an
+// integrity failure of the stored claim identity (ErrRetryProvenance).
+//
+// Settlement runs under the reserved writer, keyed by durable claim
+// provenance. The refused video is protected when its work was removed or lost,
+// so no sink or synthetic handoff recreates it and no other owner's row is
+// touched; every other unfinished video keeps its ordinary retention or stop
+// handoff. A marked Stop wins: it settles through settleStop, with the same
+// protection. Without a Stop, retention comes before the failed state, and any
+// retention failure leaves the run interrupted. An unusable claim identity is
+// never settled around: with no Stop the run is only interrupted, and a Stop
+// settlement fails inside the handoff and leaves the marker for recovery.
+func (p *Pipeline) settleRefusedRetry(ctx context.Context, runID int64, refusal *retryAdmissionRefusal, markedStop bool, reason string) error {
+	protect := refusal.protectedVideoID()
+	if markedStop {
+		return p.settleStopProtecting(ctx, runID, protect)
+	}
+	if errors.Is(refusal.cause, queue.ErrRetryProvenance) {
+		return refusal.cause
+	}
+	p.retainThenFail(ctx, runID, reason, "", func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
+		return sweepStrandedWorkExcept(retainCtx, qs, tx, runID, reason, protect)
+	})
+	return nil
+}
+
+// protectedVideoID is the video whose rows a refusal's settlement must not
+// write: the one whose claimed work was removed, lost or conflicts. A Stop or
+// an unusable claim identity protects nothing here.
+func (e *retryAdmissionRefusal) protectedVideoID() int64 {
+	switch {
+	case errors.Is(e.cause, state.ErrPlaylistSendStopped), errors.Is(e.cause, queue.ErrRetryProvenance):
+		return 0
+	}
+	return e.receipt.VideoID
 }
 
 func isRetryAdmissionRefusal(err error) bool {
 	return errors.Is(err, queue.ErrWorkRemoved) ||
 		errors.Is(err, queue.ErrWorkNotOwned) ||
 		errors.Is(err, queue.ErrRetryOwnership) ||
+		errors.Is(err, queue.ErrRetryProvenance) ||
 		errors.Is(err, state.ErrPlaylistSendStopped)
 }
 
@@ -537,7 +570,8 @@ func (p *Pipeline) withoutRetryVideos(ctx context.Context, runID int64, videos [
 		 EXISTS(SELECT 1 FROM deferred_item WHERE video_id=?1 AND retry_run_id=?2
 		        UNION ALL SELECT 1 FROM error_entry WHERE video_id=?1 AND retry_run_id=?2)
 		 OR EXISTS(SELECT 1 FROM run_video_outcome o JOIN video v ON v.id=o.video_id
-		           WHERE o.video_id=?1 AND o.run_id=?2 AND v.discovered_in_run_id IS NOT ?2)`, v.ID, runID).Scan(&retry); err != nil {
+		           WHERE o.video_id=?1 AND o.run_id=?2
+		             AND (o.retry_claim_provenance IS NOT NULL OR v.discovered_in_run_id IS NOT ?2))`, v.ID, runID).Scan(&retry); err != nil {
 			return nil, err
 		}
 		if !retry {

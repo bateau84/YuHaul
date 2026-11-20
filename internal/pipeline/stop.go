@@ -235,7 +235,7 @@ func (p *Pipeline) finishRun(ctx context.Context, runID int64) {
 	if stopped {
 		var err error
 		if refusal != nil {
-			err = p.settleRefusedRetry(ctx, runID, refusal, true)
+			err = p.settleRefusedRetry(ctx, runID, refusal, true, "")
 		} else {
 			err = p.settleStop(ctx, runID)
 		}
@@ -254,6 +254,14 @@ var stopReason = diag.Facts{Phase: "unknown", Operation: "stop_run", Code: "stop
 // settleStop commits the stop: the deferred-queue handoff (production runs),
 // the terminal stopped state and the counters, in one transaction. One retry.
 func (p *Pipeline) settleStop(ctx context.Context, runID int64) error {
+	return p.settleStopProtecting(ctx, runID, 0)
+}
+
+// settleStopProtecting is settleStop for a stopped run whose retry of
+// protectVideoID was refused because its work was removed, lost or conflicts.
+// That video's still-owned members are released with the rest, but it is not
+// handed off as new deferred work. protectVideoID 0 protects nothing.
+func (p *Pipeline) settleStopProtecting(ctx context.Context, runID, protectVideoID int64) error {
 	qs, err := p.retryStore()
 	if err != nil {
 		return err
@@ -266,7 +274,7 @@ func (p *Pipeline) settleStop(ctx context.Context, runID int64) error {
 		if qerr == nil {
 			qerr = qs.WithRetryTx(finalizeCtx, func(tx *sql.Tx) error {
 				var err error
-				result, err = settleStopTx(finalizeCtx, qs, p.stateStore, tx, runID, quotaCost, time.Now().UTC())
+				result, err = settleStopExceptTx(finalizeCtx, qs, p.stateStore, tx, runID, quotaCost, time.Now().UTC(), protectVideoID)
 				return err
 			})
 		}
@@ -288,6 +296,10 @@ func (p *Pipeline) settleStop(ctx context.Context, runID int64) error {
 // settleStopTx performs the settle inside tx (ARS-003 §3.3). It is idempotent
 // for a run that is already stopped. It returns the handoff counts for logs.
 func settleStopTx(ctx context.Context, qs *queue.Store, ss *state.Store, tx *sql.Tx, runID int64, quotaCost int, now time.Time) (queue.HandoffResult, error) {
+	return settleStopExceptTx(ctx, qs, ss, tx, runID, quotaCost, now, 0)
+}
+
+func settleStopExceptTx(ctx context.Context, qs *queue.Store, ss *state.Store, tx *sql.Tx, runID int64, quotaCost int, now time.Time, protectVideoID int64) (queue.HandoffResult, error) {
 	var result queue.HandoffResult
 	var runType, status string
 	var marker sql.NullString
@@ -306,7 +318,7 @@ func settleStopTx(ctx context.Context, qs *queue.Store, ss *state.Store, tx *sql
 		if err != nil {
 			return result, err
 		}
-		if result, err = qs.HandOffUnfinishedTx(ctx, tx, runID, queue.DeferredReasonStoppedByUser, ids); err != nil {
+		if result, err = qs.HandOffUnfinishedExceptTx(ctx, tx, runID, queue.DeferredReasonStoppedByUser, ids, protectVideoID); err != nil {
 			return result, err
 		}
 	}

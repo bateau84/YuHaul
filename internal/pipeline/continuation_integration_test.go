@@ -377,8 +377,19 @@ func TestContinuationCrashAfterGuardClaimK14(t *testing.T) {
 	// the real send claim a process would make just before its request.
 	r41, err := e.pipeline.StartRun(e.ctx, state.RunTypeScheduled)
 	require.NoError(t, err)
+	// A continued send is a retry-origin claim: it carries the stored receipt
+	// and the guard validates it under the same writer.
+	qs, err := queue.NewStore(e.pipeline.db)
+	require.NoError(t, err)
+	receipt, err := qs.RetryGroupReceiptForRunVideo(e.ctx, r41.ID, video)
+	require.NoError(t, err)
 	claimed, _, err := e.stateStore.ClaimPlaylistSend(e.ctx, state.PlaylistSendClaim{RunID: r41.ID, VideoID: video, RouteDecisionID: studyDecision,
-		TargetPlaylistID: contStudy, ActionType: "playlist_insert", AuthorizationID: "crashed-process", DecisionRunID: r0}, time.Now().UTC())
+		TargetPlaylistID: contStudy, ActionType: "playlist_insert", AuthorizationID: "crashed-process", DecisionRunID: r0,
+		Origin: state.PlaylistSendRetry,
+		RetryAuthority: func(ctx context.Context, tx *sql.Tx, _, _ int64) error {
+			_, err := qs.ValidateRetryReceiptTx(ctx, tx, receipt)
+			return err
+		}}, time.Now().UTC())
 	require.NoError(t, err)
 	require.Equal(t, state.PlaylistClaimed, claimed)
 	require.NoError(t, e.stateStore.InterruptRun(e.ctx, r41.ID, "test: killed after guard claim"))

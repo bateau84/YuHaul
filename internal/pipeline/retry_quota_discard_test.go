@@ -376,13 +376,17 @@ func TestErrorOnlyRetryAuthorizationPendingHandoff(t *testing.T) {
 		name       string
 		dismiss    bool
 		wrongOwner bool
-		wantErr    error
-		wantSink   int
-		wantSource queue.ErrorStatus
+		// copiedReceiptDiffers corrupts the caller's copy so it no longer equals
+		// the receipt stored at claim time.
+		copiedReceiptDiffers bool
+		wantErr              error
+		wantSink             int
+		wantSource           queue.ErrorStatus
 	}{
 		{name: "dismissed after claim", dismiss: true, wantErr: queue.ErrWorkRemoved, wantSource: queue.ErrorStatusDismissed},
 		{name: "still owned", wantSink: 1, wantSource: queue.ErrorStatusResolved},
 		{name: "wrong-owner receipt", wrongOwner: true, wantErr: queue.ErrWorkNotOwned, wantSource: queue.ErrorStatusRetrying},
+		{name: "copied receipt differs from stored claim", copiedReceiptDiffers: true, wantErr: queue.ErrRetryProvenance, wantSource: queue.ErrorStatusRetrying},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -420,6 +424,12 @@ func TestErrorOnlyRetryAuthorizationPendingHandoff(t *testing.T) {
 			}))
 			require.Len(t, receipt.Errors, 1)
 			if tt.wrongOwner {
+				// Ownership changes in the store; the caller's receipt stays the
+				// unchanged stored claim identity.
+				_, err = f.db.ExecContext(ctx, `UPDATE error_entry SET retry_run_id=? WHERE id=?`, f.runID, sourceID)
+				require.NoError(t, err)
+			}
+			if tt.copiedReceiptDiffers {
 				receipt.Errors[0].OriginRunID++
 			}
 			if tt.dismiss {
@@ -465,7 +475,11 @@ func TestErrorOnlyRetryAuthorizationPendingHandoff(t *testing.T) {
 			require.Equal(t, tt.wantSource, source.Status)
 			if tt.wrongOwner {
 				require.NotNil(t, source.RetryRunID)
-				require.Equal(t, run.ID, *source.RetryRunID)
+				require.Equal(t, f.runID, *source.RetryRunID, "another owner's row is not touched")
+			}
+			if tt.copiedReceiptDiffers {
+				require.NotNil(t, source.RetryRunID)
+				require.Equal(t, run.ID, *source.RetryRunID, "the stored claim is not touched")
 			}
 			var sinks, guards, ledgerRows int
 			require.NoError(t, f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deferred_item WHERE video_id=? AND status='pending' AND deferral_reason='authorization_pending'`, f.videoID).Scan(&sinks))
@@ -479,7 +493,7 @@ func TestErrorOnlyRetryAuthorizationPendingHandoff(t *testing.T) {
 				require.NoError(t, err)
 				require.Empty(t, actions)
 			}
-			if !tt.dismiss && !tt.wrongOwner {
+			if !tt.dismiss && !tt.wrongOwner && !tt.copiedReceiptDiffers {
 				actions, err := f.state.GetExecutedActionsForVideoInRun(ctx, f.videoID, run.ID)
 				require.NoError(t, err)
 				require.Len(t, actions, 1)
