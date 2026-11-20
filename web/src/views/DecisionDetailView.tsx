@@ -114,7 +114,7 @@ function ActionOutcomeEvidence({ action, simulation }: { action: ActionOutcome; 
       )}
       {action.error_message ? (
         <span style={{ color: 'var(--color-status-rejected)', fontSize: '0.875rem' }}>
-          <FailureReason message={action.error_message} subject={action.target_playlist_id ? `the action on playlist ${action.target_playlist_id}` : 'this action'} />
+          <FailureReason message={action.error_message} subject={action.target_playlist_id ? `the action on playlist ${action.target_playlist_id}` : 'this action'} run={{ kind: 'own' }} />
         </span>
       ) : action.error_message_unavailable ? (
         <span style={detail}>An error reason was recorded for this action, but it cannot be displayed safely.</span>
@@ -456,7 +456,7 @@ function DecisionDetailContent({ id, videoId }: { id?: string; videoId?: string 
             {diagCode(video.error_message) === ORIGINAL_DECISION_UNAVAILABLE ? (
               originalDecisionUnavailable.videoReason
             ) : (
-              <FailureReason message={video.error_message} subject={local?.title_availability === 'current_local' && local.title ? local.title : video.video_id} />
+              <FailureReason message={video.error_message} subject={local?.title_availability === 'current_local' && local.title ? local.title : video.video_id} run={{ kind: 'own' }} />
             )}
           </div>
         )}

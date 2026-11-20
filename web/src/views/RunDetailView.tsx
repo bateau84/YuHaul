@@ -73,7 +73,7 @@ function failureExplanation(run: Run): ReactNode {
   if (run.failure_reason_unavailable) {
     return 'A reason was recorded for this run, but it cannot be displayed safely.'
   }
-  if (run.interrupt_reason) return <FailureReason message={run.interrupt_reason} subject={`run ${run.id}`} />
+  if (run.interrupt_reason) return <FailureReason message={run.interrupt_reason} subject={`run ${run.id}`} run={{ kind: 'own' }} />
   return run.status === 'failed'
     ? 'No failure reason was recorded for this run.'
     : 'No interruption reason was recorded for this run.'

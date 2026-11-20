@@ -393,6 +393,20 @@ describe('RunDetailView outcome filter (BR-032 AC5)', () => {
     })
   })
 
+  // Design, "Added codes": in the run's own Run Detail the two retry-run codes
+  // say "this run", point at the videos below and offer no link to itself.
+  it.each([
+    ['retry_claim_unverifiable', 'YuHaul could not verify which queue items this run had claimed, so it stopped instead of continuing that work. The videos below show what was recorded.'],
+    ['retry_work_removed', 'This retry stopped because the item it was working on was removed by you. The videos below show what was recorded.'],
+  ])("shows %s in the run's own Run Detail with no link", async (code, sentence) => {
+    mockGetRun.mockResolvedValue({ ...runFixture, status: 'failed', interrupt_reason: `diag:v1 phase=unknown operation=retry code=${code}` })
+    serveVideos([])
+    renderView()
+    expect(await screen.findByText(sentence)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /^View run/ })).toBeNull()
+    expect(screen.queryByText(/Open the run/)).toBeNull()
+  })
+
   it('explains a completed dry-run with a recorded empty selection', async () => {
     mockGetRun.mockResolvedValue({
       ...runFixture,

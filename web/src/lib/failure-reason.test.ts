@@ -12,6 +12,7 @@ import {
   failureSentence,
   offersAccountStatus,
   parseDiag,
+  reasonRunLink,
   REASON_UNAVAILABLE,
 } from './failure-reason'
 
@@ -84,21 +85,54 @@ describe('failureSentence', () => {
   })
 
   it('reads "Reason unavailable." for run-level, unlisted and prototype-named codes', () => {
-    for (const code of ['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized', 'brand_new_code', 'constructor', 'toString', 'original_decision_unavailable', 'retry_work_removed']) {
+    for (const code of ['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized', 'brand_new_code', 'constructor', 'toString', 'original_decision_unavailable']) {
       expect(failureSentence(diag(code))).toBe(REASON_UNAVAILABLE)
     }
   })
 
-  // The designed sentences for the codes added 2026-11-20. retry_work_removed is
-  // registered so a run's stored reason parses, but the design gives no sentence
-  // for a run or video reason yet, so it reads "Reason unavailable.".
-  it('reads the designed sentences for retry_claim_unverifiable and stop_settlement_blocked', () => {
-    expect(failureSentence(diag('retry_claim_unverifiable'))).toBe(
-      'YuHaul could not verify which queue items this run had claimed, so it stopped instead of continuing that work. Open the run to see what was recorded.',
-    )
+  // The designed sentences for the codes added 2026-11-20 (design, "Added
+  // codes"). The two retry-run codes take the run they describe.
+  it('reads stop_settlement_blocked as designed', () => {
     expect(failureSentence(diag('stop_settlement_blocked'))).toBe(
       "YuHaul could not safely finish stopping this run, so the stop is not settled. This run will not be resumed. Nothing on this page settles it; check YuHaul's logs.",
     )
+  })
+
+  describe('retry-run codes by context', () => {
+    const claim = (subject: string) => `YuHaul could not verify which queue items ${subject} had claimed, so it stopped instead of continuing that work.`
+    it.each([
+      ['own run', { kind: 'own' } as const, `${claim('this run')} The videos below show what was recorded.`],
+      ['a run id', { kind: 'id', id: 41 } as const, `${claim('run 41')} Open the run to see what was recorded.`],
+      ['no run id', { kind: 'unknown' } as const, claim('a retry run')],
+    ])('retry_claim_unverifiable, %s', (_name, run, sentence) => {
+      expect(failureSentence(diag('retry_claim_unverifiable'), run)).toBe(sentence)
+    })
+    it.each([
+      ['own run', { kind: 'own' } as const, 'This retry stopped because the item it was working on was removed by you. The videos below show what was recorded.'],
+      ['a run id', { kind: 'id', id: 41 } as const, 'Run 41, a retry, stopped because the item it was working on was removed by you. Open the run to see what was recorded.'],
+      ['no run id', { kind: 'unknown' } as const, 'A retry stopped because the item it was working on was removed by you.'],
+    ])('retry_work_removed, %s', (_name, run, sentence) => {
+      expect(failureSentence(diag('retry_work_removed'), run)).toBe(sentence)
+    })
+    it('uses the no-id wording by default and for an unusable id, and never claims anything was or was not sent', () => {
+      for (const code of ['retry_claim_unverifiable', 'retry_work_removed']) {
+        const none = failureSentence(diag(code))
+        expect(failureSentence(diag(code), { kind: 'id', id: 0 })).toBe(none)
+        expect(failureSentence(diag(code), { kind: 'id', id: 1.5 })).toBe(none)
+        for (const run of [{ kind: 'own' }, { kind: 'id', id: 3 }, { kind: 'unknown' }] as const) {
+          expect(failureSentence(diag(code), run)).not.toMatch(/nothing was sent|was not sent|was sent/i)
+        }
+      }
+    })
+    it('links only a retry-run code with a run id the API supplied', () => {
+      expect(reasonRunLink(diag('retry_claim_unverifiable'), { kind: 'id', id: 41 })).toBe(41)
+      expect(reasonRunLink(diag('retry_work_removed'), { kind: 'id', id: 41 })).toBe(41)
+      expect(reasonRunLink(diag('retry_work_removed'), { kind: 'own' })).toBeNull()
+      expect(reasonRunLink(diag('retry_work_removed'), { kind: 'unknown' })).toBeNull()
+      expect(reasonRunLink(diag('stop_settlement_blocked'), { kind: 'id', id: 41 })).toBeNull()
+      expect(reasonRunLink(diag('timeout'), { kind: 'id', id: 41 })).toBeNull()
+      expect(reasonRunLink('not a diag string', { kind: 'id', id: 41 })).toBeNull()
+    })
   })
 
   it('registers the three codes and admits no other facts with them', () => {
@@ -110,7 +144,6 @@ describe('failureSentence', () => {
       expect(parseDiag(`${text} reason=backendError`)).toBeNull()
       expect(offersAccountStatus(text)).toBe(false)
     }
-    expect(failureSentence(diag('retry_work_removed'))).toBe(REASON_UNAVAILABLE)
   })
 
   it('never returns raw text: a string outside the diag:v1 grammar reads "Reason unavailable."', () => {

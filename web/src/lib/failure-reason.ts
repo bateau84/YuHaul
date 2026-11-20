@@ -108,9 +108,9 @@ const BY_CODE: Record<string, string> = {
     'YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.',
   no_source_scanned: 'No channels were scanned successfully.',
   // Design, "Errors — Category and Reason Presentation", added codes 2026-11-20.
-  // Neither says that anything was or was not sent: the code does not establish it.
-  retry_claim_unverifiable:
-    'YuHaul could not verify which queue items this run had claimed, so it stopped instead of continuing that work. Open the run to see what was recorded.',
+  // retry_claim_unverifiable and retry_work_removed depend on which run the
+  // reason describes: see runReasonSentence. Neither says that anything was or
+  // was not sent: the code does not establish it.
   stop_settlement_blocked:
     "YuHaul could not safely finish stopping this run, so the stop is not settled. This run will not be resumed. Nothing on this page settles it; check YuHaul's logs.",
   video_unavailable: 'YouTube did not return this video when YuHaul asked for its details.',
@@ -125,8 +125,45 @@ const BY_CODE: Record<string, string> = {
   unknown_error: 'The cause of this failure is not available.',
 }
 
+// The run a reason describes, for the two retry-run codes (design, "Added
+// codes"): the run whose own page shows it, a run the API named by id, or no
+// run known. Without a context the safest wording is used: it never says "this
+// run" and never links.
+export type ReasonRun = { kind: 'own' } | { kind: 'id'; id: number } | { kind: 'unknown' }
+
+const RETRY_RUN_CODES = new Set(['retry_claim_unverifiable', 'retry_work_removed'])
+export const isRetryRunCode = (code: string) => RETRY_RUN_CODES.has(code)
+
+function knownRunId(run: ReasonRun): number | null {
+  return run.kind === 'id' && Number.isInteger(run.id) && run.id > 0 ? run.id : null
+}
+
+// The run id a "View run {id}" link may name, or null: only for a retry-run
+// code with a run the API supplied. Never the entry's own run_id.
+export function reasonRunLink(message: string | null | undefined, run: ReasonRun): number | null {
+  const facts = parseDiag(message)
+  return facts !== null && isRetryRunCode(facts.code) ? knownRunId(run) : null
+}
+
+function runReasonSentence(code: string, run: ReasonRun): string {
+  const id = knownRunId(run)
+  if (code === 'retry_claim_unverifiable') {
+    const subject = run.kind === 'own' ? 'this run' : id !== null ? `run ${id}` : 'a retry run'
+    const base = `YuHaul could not verify which queue items ${subject} had claimed, so it stopped instead of continuing that work.`
+    if (run.kind === 'own') return `${base} The videos below show what was recorded.`
+    return id !== null ? `${base} Open the run to see what was recorded.` : base
+  }
+  if (run.kind === 'own') {
+    return 'This retry stopped because the item it was working on was removed by you. The videos below show what was recorded.'
+  }
+  if (id !== null) {
+    return `Run ${id}, a retry, stopped because the item it was working on was removed by you. Open the run to see what was recorded.`
+  }
+  return 'A retry stopped because the item it was working on was removed by you.'
+}
+
 // The sentence for a stored failure string; never the raw text.
-export function failureSentence(message: string | null | undefined): string {
+export function failureSentence(message: string | null | undefined, run: ReasonRun = { kind: 'unknown' }): string {
   const facts = parseDiag(message)
   if (!facts) return REASON_UNAVAILABLE
   switch (facts.code) {
@@ -140,6 +177,9 @@ export function failureSentence(message: string | null | undefined): string {
       return facts.reason === 'invalid_grant'
         ? "YouTube no longer accepts YuHaul's saved access."
         : 'YouTube access could not be renewed.'
+    case 'retry_claim_unverifiable':
+    case 'retry_work_removed':
+      return runReasonSentence(facts.code, run)
     default:
       return Object.hasOwn(BY_CODE, facts.code) ? BY_CODE[facts.code] : REASON_UNAVAILABLE
   }

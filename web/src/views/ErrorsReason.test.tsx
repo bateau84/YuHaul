@@ -40,6 +40,26 @@ function renderErrors() {
 afterEach(() => vi.restoreAllMocks())
 
 describe('Errors Category and Reason presentation', () => {
+  // Design, "Added codes": an Errors row has no durable last-retry-run id (the
+  // entry's retry_run_id names only the current claim and is empty once the item
+  // is back in its queue), so the retry-run codes use the no-id wording and no
+  // link, even when the entry carries a retry_run_id or an origin run_id.
+  it.each([
+    ['retry_claim_unverifiable', 'YuHaul could not verify which queue items a retry run had claimed, so it stopped instead of continuing that work.'],
+    ['retry_work_removed', 'A retry stopped because the item it was working on was removed by you.'],
+  ])('shows %s with the no-id wording and no run link', async (code, sentence) => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([
+      entry({ error_message: `diag:v1 phase=unknown operation=retry code=${code}`, retry_run_id: 77 }),
+    ])
+    renderErrors()
+    const row = (await screen.findByText('Same Title')).closest('tr')!
+    expect(within(row).getByText(sentence)).toBeInTheDocument()
+    expect(within(row).queryByRole('link', { name: /^View run/ })).toBeNull()
+    expect(within(row).queryByText(/Open the run/)).toBeNull()
+    // The support code stays available under Technical details.
+    expect(row.querySelector('code')?.textContent).toContain(`code=${code}`)
+  })
+
   it('shows the category label and one sentence, with no diag text until Technical details is opened', async () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue([entry()])
     renderErrors()
