@@ -10,6 +10,8 @@ timestamp: 2026-11-18T00:00:00Z
 
 ## 2026-11-20
 
+**Release check recorded (`6d65f7ef`, PR #4 at `2930a2d`):** the ADR-001 and ARS-002 status lines now cite the assembled evidence of `0a9116c4` and `6d65f7ef`, including browser checks at 320 px and 1280 px. Screen-reader and 200% zoom checks remain open. The operator [Upgrade notes](/docs/user-docs/upgrade-notes.md) now say `030` ships in PR #4, and give the release check's operator steps: stop; copy `yuhaul.db` with its `-wal` and `-shm` files; deploy; check for `title search index ready` and version 30; roll back by restoring that copy so `debad57` starts again. They also warn against deploying onto a database already at version 30 from an interim build.
+
 **Implementation recorded (local candidate on `interim-uploads-isolation`):** ADR-001 D1–D5 and D7 in `5f849ea`, ARS-002 §1–§4.4 in `1a0bf19`, and §4.5 with the explicit `isolateSources` flag and the Errors page split in `f88ada9`. The status lines of ADR-001, ARS-002 and the admin UI design now cite these SHAs. Coder-run evidence on `f88ada9`: race tests on store, state, discovery, pipeline, server, stats and diag, `go test ./...` and the web suite pass; browser, screen-reader and 320 px checks were not run. Not yet pushed or reviewed as a whole.
 
 **Review `833a06fb` MAJOR-1 realized in the specification:** [ARS-002 §4.5](/docs/architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md#45-per-run-channel-scan-outcome-added-2026-11-20-review-833a06fb-major-1) extends unreleased `030` with the nullable `run.discovery_scan_outcome` (`completed`, `cut_short`, `no_source_scanned`, or `NULL` for unknown or legacy). Writes:

@@ -6,7 +6,18 @@ tags: [architecture, specification, discovery, errors, migration, diagnostics, a
 timestamp: 2026-11-20T00:00:00Z
 ---
 
-**Status:** accepted technical contract, amended 2026-11-20 for review `833a06fb` MAJOR-1 (§4.5, the per-run scan outcome). §1–§4.4 are implemented in `5f849ea` and `1a0bf19` (local candidate on `interim-uploads-isolation`); evidence: review record `833a06fb` ("with fixes", reviewer session `ses_e09c5a500ffepaBHsFYpJCNTXG`), not rerun by the architect. §4.5 and the explicit D1 flag are implemented in `f88ada9`; evidence coder-run on `f88ada9`: `go test -race` on store, state, discovery, pipeline, server, stats and diag, `go test ./...`, and the web suite (865 tests) all pass; browser, screen-reader and 320 px checks not run. It builds on the channel-granular interim ([ADR-001](../decisions/adr-001-interim-channel-granular-uploads-isolation.md)), and the two ship together. It realizes the source-failure part of [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) and [ARS-001 §5](ars-001-durable-discovery-page-handoff.md#5-authorized-inspection-contract). The page handoff, sealed scope, assessment and floor rows remain with ARS-001 and its later migration.
+**Status:** accepted technical contract, amended 2026-11-20 for review `833a06fb` MAJOR-1 (§4.5, the per-run scan outcome). §1–§4.4 are implemented in `5f849ea` and `1a0bf19` (local candidate on `interim-uploads-isolation`); evidence: review record `833a06fb` ("with fixes", reviewer session `ses_e09c5a500ffepaBHsFYpJCNTXG`), not rerun by the architect. §4.5 and the explicit D1 flag are implemented in `f88ada9`; evidence coder-run on `f88ada9`: `go test -race` on store, state, discovery, pipeline, server, stats and diag, `go test ./...`, and the web suite (865 tests) all pass; see below.
+
+Assembled evidence: reviewer recheck `0a9116c4` (PASS, real binary at `fa26c33`) proved:
+- every scan-outcome variant, including budget stop, quota, AC8, Stop and crash-resume;
+- the 029→030 upgrade and the older binary refusing version 30;
+- the Errors page at 320 px.
+Release check `6d65f7ef` (PASS, PR #4 at `2930a2d` over a `debad57` database) proved:
+- upgrade and rollback on real binaries;
+- the A/B/C production run with B's 404 recorded and shown in Errors and Run Detail;
+- Errors, Deferred, Runs, Run Detail, Videos and Settings in a browser at 1280 and 320 px, with no overflow and no new console errors;
+- the full Go, race, integration and web suites, and CI run `44648517615`.
+Still not run: screen-reader and 200% zoom checks. The designer still owes the `in_progress` copy. It builds on the channel-granular interim ([ADR-001](../decisions/adr-001-interim-channel-granular-uploads-isolation.md)), and the two ship together. It realizes the source-failure part of [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) and [ARS-001 §5](ars-001-durable-discovery-page-handoff.md#5-authorized-inspection-contract). The page handoff, sealed scope, assessment and floor rows remain with ARS-001 and its later migration.
 
 Example: channels A and C list successfully, and B's uploads read returns `404 playlistNotFound`. Before discovery asks YouTube for anything else, it commits one row: run 54, channel `UC…B`, permanent, `playlist_items_list`, `404`, `playlistNotFound`, time. Run 54 continues and ends **Completed**. After a restart, Errors shows a read-only **Channel scan error** for B in run 54, with "YouTube reported that the uploads playlist was not found." Run Detail for run 54 says "Some channels could not be scanned. Results are incomplete." and lists B. Run 55 polls B again. If B still fails, run 55 adds its own row. If B succeeds, run 54's row stays as history; nothing removes or rewrites it.
 
