@@ -8,6 +8,7 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-20
 
+- Section 3a of the [admin interface design](/docs/design/yuhaul-admin-ui-design.md) no longer says the `retry_work_removed` handling is unchecked in a browser: release check `df803f9f` checked it in a browser.
 - Implemented the `retry_work_removed` reason sentence and the run-context variants for `retry_claim_unverifiable` and `retry_work_removed` from the "Added codes" section of the [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the run's own Run Detail and Decision Detail say `this run` with no link; a caller with a run id says `run {id}`, `Open the run to see what was recorded.` and `View run {id}`; everywhere else, including every Errors row, uses the `a retry run` wording with no link. No API field was added: an Errors row has no durable last-retry-run id, so it always takes the no-id variant. No caller supplies a run id yet. Component tests only.
 - Added the run or video reason sentence for `retry_work_removed` to [admin interface design](/docs/design/yuhaul-admin-ui-design.md), and decided that the `View run {id}` link for `retry_claim_unverifiable` and `retry_work_removed` targets the retry run that stopped, never the entry's origin run; recorded the API need for a durable last-retry-run id beside an entry. Design only.
 
