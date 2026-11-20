@@ -10,6 +10,8 @@ timestamp: 2026-11-18T00:00:00Z
 
 ## 2026-11-20
 
+**Implementation recorded (local candidate on `interim-uploads-isolation`):** ADR-001 D1–D5 and D7 in `5f849ea`, ARS-002 §1–§4.4 in `1a0bf19`, and §4.5 with the explicit `isolateSources` flag and the Errors page split in `f88ada9`. The status lines of ADR-001, ARS-002 and the admin UI design now cite these SHAs. Coder-run evidence on `f88ada9`: race tests on store, state, discovery, pipeline, server, stats and diag, `go test ./...` and the web suite pass; browser, screen-reader and 320 px checks were not run. Not yet pushed or reviewed as a whole.
+
 **Review `833a06fb` MAJOR-1 realized in the specification:** [ARS-002 §4.5](/docs/architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md#45-per-run-channel-scan-outcome-added-2026-11-20-review-833a06fb-major-1) extends unreleased `030` with the nullable `run.discovery_scan_outcome` (`completed`, `cut_short`, `no_source_scanned`, or `NULL` for unknown or legacy). Writes:
 - `cut_short` when the uploads scan begins;
 - `completed` when the loop ends normally;
