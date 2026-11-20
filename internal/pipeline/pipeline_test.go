@@ -377,6 +377,50 @@ func TestPipeline_NoSourceScannedFailsRunWithRegisteredCode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(body), `"interrupt_reason":"`+want+`"`)
 	assert.NotContains(t, string(body), "failure_reason_unavailable")
+	// The scan outcome is set in the same terminal write, chosen by the typed error.
+	assert.Contains(t, string(body), `"discovery_scan":"no_source_scanned"`)
+}
+
+func TestPipeline_OtherDiscoveryFailureDoesNotSetTheScanOutcome(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	require.NoError(t, stateStore.SetDiscoveryScanOutcome(ctx, runID, state.ScanOutcomeCutShort))
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	p.failRun(ctx, runID, "discovery phase failed", fmt.Errorf("discovery: provider failure"))
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.NotNil(t, loaded.DiscoveryScanOutcome)
+	assert.Equal(t, state.ScanOutcomeCutShort, *loaded.DiscoveryScanOutcome, "a non-AC8 failure leaves the saved outcome")
+}
+
+func TestPipeline_StopThatWinsKeepsTheCompletedScanOutcome(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	require.NoError(t, stateStore.SetDiscoveryScanOutcome(ctx, runID, state.ScanOutcomeCompleted))
+	_, err = db.ExecContext(ctx, `UPDATE run SET stop_requested_at = ? WHERE id = ?`, time.Now().UTC().Format(state.RunTimestampLayout), runID)
+	require.NoError(t, err)
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	p.failRun(ctx, runID, "discovery phase failed", fmt.Errorf("discovery: %w", discovery.ErrNoSourceScanned))
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.NotEqual(t, state.RunStatusFailed, loaded.Status, "the stop won")
+	require.NotNil(t, loaded.DiscoveryScanOutcome)
+	assert.Equal(t, state.ScanOutcomeCompleted, *loaded.DiscoveryScanOutcome)
 }
 
 func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {

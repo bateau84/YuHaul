@@ -22,3 +22,9 @@ CREATE INDEX discovery_source_failure_run_id      ON discovery_source_failure(ru
 CREATE TRIGGER discovery_source_failure_immutable
     BEFORE UPDATE ON discovery_source_failure
     BEGIN SELECT RAISE(ABORT, 'discovery_source_failure is immutable'); END;
+
+-- The run's saved channel-scan outcome (discovery ARS-002 section 4.5). NULL is
+-- unknown: the run never reached the uploads scan, is a simulation, or predates
+-- this migration. Written only by discovery and the AC8 terminal failure.
+ALTER TABLE run ADD COLUMN discovery_scan_outcome TEXT
+    CHECK (discovery_scan_outcome IS NULL OR discovery_scan_outcome IN ('completed', 'cut_short', 'no_source_scanned'));

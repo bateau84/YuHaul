@@ -350,7 +350,7 @@ describe('RunDetailView outcome filter (BR-032 AC5)', () => {
 
     it('lists the failed channel on a completed run, beside the unchanged "Run completed" status', async () => {
       vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue({ items: [row], next_before_id: null })
-      mockGetRun.mockResolvedValue(runFixture)
+      mockGetRun.mockResolvedValue({ ...runFixture, discovery_scan: 'completed' })
       serveVideos([])
       renderView()
 
@@ -383,7 +383,7 @@ describe('RunDetailView outcome filter (BR-032 AC5)', () => {
 
     it('renders no_source_scanned as the accepted sentence and lists the channel', async () => {
       vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue({ items: [row], next_before_id: null })
-      mockGetRun.mockResolvedValue({ ...runFixture, status: 'failed', interrupt_reason: 'diag:v1 phase=discovery operation=discover code=no_source_scanned' })
+      mockGetRun.mockResolvedValue({ ...runFixture, status: 'failed', discovery_scan: 'no_source_scanned', interrupt_reason: 'diag:v1 phase=discovery operation=discover code=no_source_scanned' })
       serveVideos([])
       renderView()
 

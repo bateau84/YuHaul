@@ -467,6 +467,12 @@ func (m *Machine) CompleteRun(ctx context.Context, runID int64) (*Run, error) {
 // the quota cost from the ledger when one is configured. The reason explains
 // why the run did not reach a normal terminal state.
 func (m *Machine) FailRun(ctx context.Context, runID int64, reason string) (*Run, error) {
+	return m.FailRunWithScanOutcome(ctx, runID, reason, "")
+}
+
+// FailRunWithScanOutcome is FailRun that sets the run's discovery scan outcome
+// in the same terminal UPDATE (ARS-002 section 4.5).
+func (m *Machine) FailRunWithScanOutcome(ctx context.Context, runID int64, reason, scanOutcome string) (*Run, error) {
 	started := m.now().UTC()
 	run, err := m.store.GetRun(ctx, runID)
 	if err != nil {
@@ -479,7 +485,7 @@ func (m *Machine) FailRun(ctx context.Context, runID int64, reason string) (*Run
 	}
 
 	duration := started.Sub(run.StartedAt).Seconds()
-	if err := m.store.FailRun(ctx, runID, reason, duration, quotaCost); err != nil {
+	if err := m.store.FailRunWithScanOutcome(ctx, runID, reason, duration, quotaCost, scanOutcome); err != nil {
 		return nil, err
 	}
 	if err := m.store.RecomputeRunCounters(ctx, runID); err != nil {
@@ -565,3 +571,8 @@ var (
 	_ txer = (*sql.DB)(nil)
 	_ txer = (*sql.Tx)(nil)
 )
+
+// SetDiscoveryScanOutcome records the uploads scan's start or normal end.
+func (m *Machine) SetDiscoveryScanOutcome(ctx context.Context, runID int64, outcome string) error {
+	return m.store.SetDiscoveryScanOutcome(ctx, runID, outcome)
+}

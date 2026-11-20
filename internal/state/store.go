@@ -127,7 +127,8 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
-		         WHERE rd.run_id = run.id) AS videos_evaluated
+		         WHERE rd.run_id = run.id) AS videos_evaluated,
+		        discovery_scan_outcome
 		 FROM run ORDER BY started_at DESC;`)
 	if err != nil {
 		return nil, fmt.Errorf("listing runs: %w", err)
@@ -159,7 +160,8 @@ func (s *Store) ListInterruptedRuns(ctx context.Context) ([]Run, error) {
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
-		         WHERE rd.run_id = run.id) AS videos_evaluated
+		         WHERE rd.run_id = run.id) AS videos_evaluated,
+		        discovery_scan_outcome
 		 FROM run WHERE status = ? AND completed_at IS NULL
 		   AND run_type IN ('manual','scheduled')
 		   AND mutation_safety_version = 1 AND action_authority_version = 1
@@ -192,7 +194,8 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*Run, error) {
 		        duration_seconds, interrupt_reason, current_phase, action_authority_version,
 		        selected_video_count, initiated_by, interrupt_cause, published_from, published_to, stop_requested_at,
 		        (SELECT COUNT(DISTINCT rd.video_id) FROM route_decision rd
-		         WHERE rd.run_id = run.id) AS videos_evaluated
+		         WHERE rd.run_id = run.id) AS videos_evaluated,
+		        discovery_scan_outcome
 		 FROM run WHERE id = ?;`, id)
 	r, err := scanRun(row)
 	if err != nil {
@@ -256,12 +259,21 @@ func (s *Store) CompleteRun(ctx context.Context, id int64, durationSeconds float
 // quota cost. It reuses the interrupt_reason column to explain why the run did
 // not reach a normal terminal state.
 func (s *Store) FailRun(ctx context.Context, id int64, reason string, durationSeconds float64, quotaCost int) error {
+	return s.FailRunWithScanOutcome(ctx, id, reason, durationSeconds, quotaCost, "")
+}
+
+// FailRunWithScanOutcome is FailRun that also sets discovery_scan_outcome in
+// the same UPDATE when scanOutcome is non-empty (ARS-002 section 4.5: only
+// ScanOutcomeNoSourceScanned is used). The outcome is chosen by the caller,
+// never derived from reason text. A Stop that won first leaves everything as is.
+func (s *Store) FailRunWithScanOutcome(ctx context.Context, id int64, reason string, durationSeconds float64, quotaCost int, scanOutcome string) error {
 	reason = diag.GuardErrorText(reason)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE run
-		 SET status = ?, interrupt_reason = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?
+		 SET status = ?, interrupt_reason = ?, completed_at = ?, duration_seconds = ?, quota_cost = ?,
+		     discovery_scan_outcome = COALESCE(NULLIF(?, ''), discovery_scan_outcome)
 		 WHERE id = ? AND stop_requested_at IS NULL;`,
-		RunStatusFailed, reason, formatRunTime(time.Now()), durationSeconds, quotaCost, id)
+		RunStatusFailed, reason, formatRunTime(time.Now()), durationSeconds, quotaCost, scanOutcome, id)
 	if err != nil {
 		return fmt.Errorf("failing run %d: %w", id, err)
 	}
@@ -1091,13 +1103,17 @@ func scanRun(sc interface {
 	var durationSeconds sql.NullFloat64
 	var configVersionID sql.NullInt64
 	var selectedVideoCount sql.NullInt64
+	var scanOutcome sql.NullString
 	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
 		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.VideosUnavailable,
 		&r.QuotaCost, &durationSeconds, &interruptReason, &currentPhase, &r.ActionAuthorityVersion,
-		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &stopRequestedAt, &r.VideosEvaluated)
+		&selectedVideoCount, &initiatedBy, &interruptCause, &publishedFrom, &publishedTo, &stopRequestedAt, &r.VideosEvaluated, &scanOutcome)
 	if err != nil {
 		return nil, err
+	}
+	if scanOutcome.Valid {
+		r.DiscoveryScanOutcome = &scanOutcome.String
 	}
 	if publishedFrom.Valid {
 		r.PublishedFrom = &publishedFrom.String

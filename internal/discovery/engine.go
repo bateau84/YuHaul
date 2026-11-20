@@ -159,10 +159,13 @@ func (e *Engine) Run(ctx context.Context, runID int64) (*Result, error) {
 	// The unguarded client cannot use the by-ID read, so this legacy path (no
 	// production caller; the pipeline uses RunBound whenever it has a binding)
 	// cannot learn true field presence.
-	return e.runWithClient(ctx, runID, client, false)
+	return e.runWithClient(ctx, runID, client, false, false)
 }
 
-func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube.Client, byID bool) (*Result, error) {
+// runWithClient runs one discovery. byID selects the guarded by-ID metadata
+// read; isolateSources enables D1 source isolation. They are independent:
+// neither is derived from the other.
+func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube.Client, byID, isolateSources bool) (*Result, error) {
 
 	result := &Result{}
 	runStart := time.Now().UTC()
@@ -177,7 +180,7 @@ func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube
 		return nil, err
 	}
 
-	newVideos, err := e.fetchNewVideos(ctx, runID, client, channels, result, byID)
+	newVideos, err := e.fetchNewVideos(ctx, runID, client, channels, result, isolateSources)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +255,7 @@ func (e *Engine) RunBound(ctx context.Context, runID int64, binding auth.Authori
 			opts = append(opts, youtube.WithBaseURL(e.baseURL))
 		}
 		client := youtube.NewAuthorizedClient(ctx, resolve, opts...)
-		return e.runWithClient(ctx, runID, client, true)
+		return e.runWithClient(ctx, runID, client, true, true)
 	}
 }
 
@@ -399,6 +402,11 @@ func (e *Engine) fetchNewVideos(ctx context.Context, runID int64, client *youtub
 	// The budget check exits only the page loop; later channels are refused
 	// before any request, so they are never "attempted".
 	listed := make(map[string]bool)
+	// Written first, so every non-normal ending (error, stop, crash) leaves
+	// cut_short with no per-error path (ARS-002 section 4.5).
+	if err := e.machine.SetDiscoveryScanOutcome(ctx, runID, state.ScanOutcomeCutShort); err != nil {
+		return nil, fmt.Errorf("discovery: %w", err)
+	}
 	// A resumed run repeats discovery. A source already recorded as failed in
 	// this run is not asked again and counts as attempted and failed locally.
 	var recorded map[string]bool
@@ -507,6 +515,12 @@ func (e *Engine) fetchNewVideos(ctx context.Context, runID int64, client *youtub
 			listed[v.VideoID] = true
 			v.EnumerationComplete = complete && v.ChannelID == v.SourceChannelID
 			out = append(out, v)
+		}
+	}
+	// The loop visited every in-scope channel with no budget or refusal break.
+	if !result.ScanStopped {
+		if err := e.machine.SetDiscoveryScanOutcome(ctx, runID, state.ScanOutcomeCompleted); err != nil {
+			return nil, fmt.Errorf("discovery: %w", err)
 		}
 	}
 	return out, nil

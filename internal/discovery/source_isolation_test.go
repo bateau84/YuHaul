@@ -22,6 +22,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/youtube"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 // Tests for discovery ADR-001 (interim channel-granular isolation of
@@ -58,7 +59,10 @@ type isoHarness struct {
 	mu      sync.Mutex
 	reqs    map[string]int // playlist ID -> playlistItems requests
 	specs   map[string]srcSpec
-	state   *state.Store
+	baseURL string
+	// videosFail makes videos.list answer 500 (a later prefetch failure).
+	videosFail bool
+	state      *state.Store
 }
 
 func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
@@ -127,10 +131,19 @@ func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("/videos", func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		fail := h.videosFail
+		h.mu.Unlock()
+		if fail {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"errors":[{"reason":"backendError"}]}}`))
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
+	h.baseURL = server.URL
 
 	st, err := state.NewStore(h.db)
 	require.NoError(t, err)
@@ -606,4 +619,104 @@ func TestFreshRunPollsAgainAndNeverRewritesHistory(t *testing.T) {
 func TestPlaylistNotFoundIsInDiagsProviderReasonVocabulary(t *testing.T) {
 	require.True(t, diag.ProviderReasonAdmitted("playlistNotFound"))
 	require.False(t, diag.ProviderReasonAdmitted("not-a-reason"))
+}
+
+func (h *isoHarness) scanOutcome(t *testing.T) *string {
+	t.Helper()
+	var v sql.NullString
+	require.NoError(t, h.db.QueryRow(`SELECT discovery_scan_outcome FROM run WHERE id = ?`, h.runID).Scan(&v))
+	if !v.Valid {
+		return nil
+	}
+	return &v.String
+}
+
+func outcomeIs(t *testing.T, got *string, want string) {
+	t.Helper()
+	require.NotNil(t, got)
+	require.Equal(t, want, *got)
+}
+
+// ARS-002 section 4.5 / section 7 test 7: the saved scan outcome.
+
+func TestScanOutcomeCompletedForANormalMixedScan(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), notFoundSpec('B', 1, []string{"vB1"})}, 1000)
+	require.Nil(t, h.scanOutcome(t), "unknown before the scan")
+	_, err := h.run()
+	require.NoError(t, err)
+	outcomeIs(t, h.scanOutcome(t), "completed")
+}
+
+func TestScanOutcomeCutShortWhenABudgetStopFollowsLocalFailures(t *testing.T) {
+	// subscriptions + channels + A + B = 4 units; C is refused.
+	h := newIsoHarness(t, []srcSpec{notFoundSpec('A', 1, []string{"vA1"}), notFoundSpec('B', 1, []string{"vB1"}), okSpec('C', []string{"vC1"})}, 4)
+	res, err := h.run()
+	require.NoError(t, err)
+	require.True(t, res.ScanStopped)
+	require.Equal(t, 2, res.SourcesFailedLocal)
+	outcomeIs(t, h.scanOutcome(t), "cut_short")
+}
+
+func TestScanOutcomeStaysCutShortOnARunWideProviderError(t *testing.T) {
+	for name, bad := range map[string]srcSpec{
+		"quotaExceeded": {failStatus: 403, failBody: `{"error":{"errors":[{"reason":"quotaExceeded"}]}}`},
+		"authError":     {failStatus: 401, failBody: `{"error":{"errors":[{"reason":"authError"}]}}`},
+		"backendError":  {failStatus: 500, failBody: `{"error":{"errors":[{"reason":"backendError"}]}}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad.id, bad.pages, bad.failAt = chID('B'), [][]string{{"vB1"}}, 1
+			h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), bad}, 1000)
+			_, err := h.run()
+			require.Error(t, err)
+			outcomeIs(t, h.scanOutcome(t), "cut_short")
+		})
+	}
+}
+
+func TestScanOutcomeCanceledBeforeTheScanHasNone(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"})}, 1000)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := h.engine.RunBound(ctx, h.runID, h.binding)
+	require.Error(t, err)
+	require.Nil(t, h.scanOutcome(t), "a run canceled before the scan started has no outcome")
+}
+
+func TestScanOutcomeResumeThatFinishesReplacesCutShort(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), okSpec('B', []string{"vB1"})}, 3)
+	res, err := h.run() // stops after A
+	require.NoError(t, err)
+	require.True(t, res.ScanStopped)
+	outcomeIs(t, h.scanOutcome(t), "cut_short")
+
+	require.NoError(t, h.ledger.SetDailyLimit(context.Background(), 1000))
+	res, err = h.run()
+	require.NoError(t, err)
+	require.False(t, res.ScanStopped)
+	outcomeIs(t, h.scanOutcome(t), "completed")
+}
+
+func TestScanOutcomeSurvivesALaterPrefetchFailure(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"})}, 1000)
+	h.videosFail = true
+	_, err := h.run()
+	require.Error(t, err)
+	outcomeIs(t, h.scanOutcome(t), "completed")
+}
+
+func TestScanOutcomeAllLocalFailuresLeavesCompletedForThePipelineToReplace(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{notFoundSpec('A', 1, []string{"vA1"})}, 1000)
+	_, err := h.run()
+	require.ErrorIs(t, err, ErrNoSourceScanned)
+	outcomeIs(t, h.scanOutcome(t), "completed")
+}
+
+func TestLegacyPathIsolatesNothingEvenWithByIDForced(t *testing.T) {
+	h := newIsoHarness(t, []srcSpec{okSpec('A', []string{"vA1"}), notFoundSpec('B', 1, []string{"vB1"})}, 1000)
+	client := youtube.NewClient(context.Background(), &oauth2.Token{AccessToken: "t"}, youtube.WithBaseURL(h.baseURL))
+	_, err := h.engine.runWithClient(context.Background(), h.runID, client, true, false)
+	require.Error(t, err, "byID must not enable isolation")
+	require.NotErrorIs(t, err, ErrNoSourceScanned)
+	require.Empty(t, h.failureRows(t))
+	require.NotContains(t, h.logs.String(), "uploads source skipped")
 }

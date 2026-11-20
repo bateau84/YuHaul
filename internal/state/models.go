@@ -8,6 +8,7 @@ package state
 
 import (
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/diag"
@@ -128,6 +129,9 @@ type Run struct {
 	// (ARD-001 failure diagnostic boundary).
 	InterruptReason *string `json:"interrupt_reason"`
 	CurrentPhase    *string `json:"current_phase"`
+	// DiscoveryScanOutcome is the saved channel-scan outcome (ScanOutcome*
+	// values); nil is unknown. Serialized by MarshalJSON as discovery_scan.
+	DiscoveryScanOutcome *string `json:"-"`
 	// StopRequestedAt is the durable stop marker. It is set once, on a running
 	// run, when the user presses Stop; the run then ends only as stopped.
 	StopRequestedAt *time.Time `json:"stop_requested_at"`
@@ -180,7 +184,11 @@ func (r Run) MarshalJSON() ([]byte, error) {
 		// Run Now run apart. Always present; null when unproven or legacy.
 		InitiatedBy    *string `json:"initiated_by"`
 		InterruptCause *string `json:"interrupt_cause"`
-	}{alias: (*alias)(&r), InitiatedBy: r.InitiatedBy, InterruptCause: r.InterruptCause}
+		// DiscoveryScan is the channel-scan outcome: completed, cut_short,
+		// no_source_scanned, in_progress (a running run whose scan has not
+		// ended) or null (unknown).
+		DiscoveryScan *string `json:"discovery_scan"`
+	}{alias: (*alias)(&r), InitiatedBy: r.InitiatedBy, InterruptCause: r.InterruptCause, DiscoveryScan: r.publicDiscoveryScan()}
 	if pr := r.publishedRange(); pr != nil {
 		out.PublishedRange = pr
 	}
@@ -198,6 +206,26 @@ func (r Run) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(out)
+}
+
+// publicDiscoveryScan maps the stored scan outcome to its public value. An
+// unrecognized stored value is reported as null with a warning.
+func (r Run) publicDiscoveryScan() *string {
+	if r.DiscoveryScanOutcome == nil {
+		return nil
+	}
+	v := *r.DiscoveryScanOutcome
+	switch v {
+	case ScanOutcomeCutShort:
+		if r.Status == RunStatusRunning {
+			v = "in_progress"
+		}
+	case ScanOutcomeCompleted, ScanOutcomeNoSourceScanned:
+	default:
+		slog.Warn("run has an unrecognized discovery scan outcome", "run_id", r.ID)
+		return nil
+	}
+	return &v
 }
 
 // Video represents a discovered video and its processing state.

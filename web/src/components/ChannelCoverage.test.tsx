@@ -43,7 +43,7 @@ afterEach(() => vi.restoreAllMocks())
 describe('Run Detail: channel coverage block', () => {
   it('lists the failed channel under the partial-scan sentence on a completed run', async () => {
     vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue(page([failure()]))
-    render(<ChannelCoverage run={baseRun} />)
+    render(<ChannelCoverage run={{ ...baseRun, discovery_scan: 'completed' }} />)
 
     expect(await screen.findByRole('heading', { name: 'Some channels could not be scanned. Results are incomplete.' })).toBeInTheDocument()
     expect(screen.getByText('Channels not scanned:')).toBeInTheDocument()
@@ -65,23 +65,65 @@ describe('Run Detail: channel coverage block', () => {
 
   it('keeps "Run failed. No channels were scanned successfully." for the no_source_scanned ending', async () => {
     vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue(page([failure()]))
-    render(<ChannelCoverage run={{ ...baseRun, status: 'failed', interrupt_reason: NONE_SCANNED }} />)
+    render(<ChannelCoverage run={{ ...baseRun, status: 'failed', interrupt_reason: NONE_SCANNED, discovery_scan: 'no_source_scanned' }} />)
     expect(await screen.findByRole('heading', { name: 'Run failed. No channels were scanned successfully.' })).toBeInTheDocument()
     expect(screen.getByText('Channel B')).toBeInTheDocument()
   })
 
+  describe('scan cut short (saved discovery_scan = cut_short)', () => {
+    it.each(['completed', 'failed', 'interrupted', 'stopped'] as const)('uses the cut-short wording for a %s run', async (status) => {
+      vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue(page([failure()]))
+      render(<ChannelCoverage run={{ ...baseRun, status, discovery_scan: 'cut_short' }} />)
+      expect(await screen.findByRole('heading', { name: 'Channel scanning stopped before it finished. Results are incomplete.' })).toBeInTheDocument()
+      expect(screen.getByText('See the run status for the cause.')).toBeInTheDocument()
+      expect(screen.getByText('Channels recorded as not scanned:')).toBeInTheDocument()
+      expect(screen.getByText('Channel B')).toBeInTheDocument()
+      expect(screen.getByText('YuHaul has no record of which other channels were scanned.')).toBeInTheDocument()
+      expect(screen.queryByText(/Some channels could not be scanned/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/No channels were scanned successfully/)).not.toBeInTheDocument()
+      const completedSentence = screen.queryByText("Completed is the run's saved status; it does not mean every channel was scanned.")
+      if (status === 'completed') expect(completedSentence).toBeInTheDocument()
+      else expect(completedSentence).not.toBeInTheDocument()
+    })
+  })
+
   it.each([
-    ['failed for another reason', { status: 'failed' as const, interrupt_reason: 'diag:v1 phase=discovery operation=discover code=provider_error status=403 reason=quotaExceeded' }],
-    ['interrupted', { status: 'interrupted' as const }],
-    ['stopped', { status: 'stopped' as const }],
-  ])('uses the scan-stage-not-established wording for a run that %s', async (_n, patch) => {
+    ['a normally finished scan', { status: 'completed' as const, discovery_scan: 'completed' as const }],
+    ['a run still scanning', { status: 'running' as const, discovery_scan: 'in_progress' as const }],
+    ['no_source_scanned on a run that did not fail (a Stop won)', { status: 'stopped' as const, discovery_scan: 'no_source_scanned' as const }],
+  ])('keeps "Some channels could not be scanned." for %s', async (_n, patch) => {
     vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue(page([failure()]))
     render(<ChannelCoverage run={{ ...baseRun, ...patch }} />)
-    expect(await screen.findByRole('heading', { name: 'This run did not complete normally, so results are incomplete. See the run status.' })).toBeInTheDocument()
-    expect(screen.getByText('Channels recorded as not scanned:')).toBeInTheDocument()
-    expect(screen.getByText('YuHaul has no record of which other channels were scanned.')).toBeInTheDocument()
-    expect(screen.queryByText(/Some channels could not be scanned/)).not.toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Some channels could not be scanned. Results are incomplete.' })).toBeInTheDocument()
+    expect(screen.getByText('Channels not scanned:')).toBeInTheDocument()
+    expect(screen.queryByText(/stopped before it finished/)).not.toBeInTheDocument()
     expect(screen.queryByText(/No channels were scanned successfully/)).not.toBeInTheDocument()
+  })
+
+  describe('unknown scan outcome with recorded rows (an integrity anomaly)', () => {
+    it.each([['failed' as const], ['interrupted' as const], ['stopped' as const]])('says the run did not complete normally for %s', async (status) => {
+      vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue(page([failure()]))
+      render(<ChannelCoverage run={{ ...baseRun, status, discovery_scan: null }} />)
+      expect(await screen.findByRole('heading', { name: 'This run did not complete normally, so results are incomplete. See the run status.' })).toBeInTheDocument()
+      expect(screen.getByText('Channels recorded as not scanned:')).toBeInTheDocument()
+    })
+
+    it.each([[null], [undefined]])('shows only the list for a completed run (%s)', async (scan) => {
+      vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue(page([failure()]))
+      render(<ChannelCoverage run={{ ...baseRun, discovery_scan: scan }} />)
+      expect(await screen.findByText('Channel B')).toBeInTheDocument()
+      expect(screen.getByText('Channels recorded as not scanned:')).toBeInTheDocument()
+      expect(screen.queryByRole('heading')).not.toBeInTheDocument()
+      expect(screen.queryByText(/incomplete|stopped|Some channels/)).not.toBeInTheDocument()
+    })
+  })
+
+  it.each(['completed', 'cut_short', 'no_source_scanned', 'in_progress', null] as const)('shows no block for a zero-row run whose scan is %s', async (scan) => {
+    const spy = vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue(page([]))
+    const { container } = render(<ChannelCoverage run={{ ...baseRun, discovery_scan: scan }} />)
+    await vi.waitFor(() => expect(spy).toHaveBeenCalled())
+    await vi.waitFor(() => expect(screen.queryByText('Loading channel scan details…')).not.toBeInTheDocument())
+    expect(container).toBeEmptyDOMElement()
   })
 
   it('does not show transient rows, which this design does not cover', async () => {

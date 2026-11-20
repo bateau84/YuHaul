@@ -277,7 +277,7 @@ func (p *Pipeline) retainAuthorityFailure(ctx context.Context, runID int64, vide
 	// Persisted reasons, queue detail, and SSE carry only the vetted bounded
 	// summary; the full chain stays in the server log (ARD-001).
 	reason := diag.Reason(cause, "snapshot action authority failure")
-	p.retainThenFail(ctx, runID, reason, func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
+	p.retainThenFail(ctx, runID, reason, "", func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
 		for _, v := range videos {
 			// A final video is never re-queued (BR-039); classify inside the
 			// retention transaction so a concurrent finalization is seen.
@@ -305,7 +305,7 @@ func (p *Pipeline) retainAuthorityFailure(ctx context.Context, runID int64, vide
 // commits is the run marked failed. If retention or the failed transition
 // cannot complete, the run is left resumable as interrupted and is never
 // failed. It reports whether the run became failed.
-func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason string, retain func(context.Context, *queue.Store, *sql.Tx) error) bool {
+func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason, scanOutcome string, retain func(context.Context, *queue.Store, *sql.Tx) error) bool {
 	if !p.mayFinalize(runID) {
 		return false
 	}
@@ -334,7 +334,7 @@ func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason strin
 		}
 	}
 	finalizeCtx, cancel := runFinalizationContext(ctx)
-	_, err = p.machine.FailRun(finalizeCtx, runID, reason)
+	_, err = p.machine.FailRunWithScanOutcome(finalizeCtx, runID, reason, scanOutcome)
 	cancel()
 	if err != nil {
 		p.logger.ErrorContext(ctx, "fail retained run", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))

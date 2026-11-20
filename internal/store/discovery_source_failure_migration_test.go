@@ -14,7 +14,7 @@ import (
 func sourceFailureSchemaDump(t *testing.T, db *sql.DB) []string {
 	t.Helper()
 	rows, err := db.Query(`SELECT type||'|'||name||'|'||coalesce(sql,'') FROM sqlite_master
-		WHERE name NOT LIKE 'discovery_source_failure%' AND name NOT LIKE 'sqlite_%' AND tbl_name NOT LIKE 'discovery_source_failure%'
+		WHERE name NOT LIKE 'discovery_source_failure%' AND name <> 'run' AND name NOT LIKE 'sqlite_%' AND tbl_name NOT LIKE 'discovery_source_failure%'
 		ORDER BY type, name`)
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +68,18 @@ func TestMigration030AddsOnlyTheSourceFailureTable(t *testing.T) {
 			t.Fatalf("existing object changed:\n%s\n%s", before[i], after[i])
 		}
 	}
+	// The run.discovery_scan_outcome column: NULL on existing rows, CHECKed.
+	var nulls int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM run WHERE discovery_scan_outcome IS NULL`).Scan(&nulls); err != nil || nulls != 2 {
+		t.Fatalf("existing runs must read NULL: %d %v", nulls, err)
+	}
+	for _, v := range []string{"completed", "cut_short", "no_source_scanned"} {
+		searchExec(t, db, `UPDATE run SET discovery_scan_outcome = ? WHERE id = 1`, v)
+	}
+	if _, err := db.Exec(`UPDATE run SET discovery_scan_outcome = 'other' WHERE id = 1`); err == nil {
+		t.Fatal("the scan outcome CHECK must refuse an unknown value")
+	}
+	searchExec(t, db, `UPDATE run SET discovery_scan_outcome = NULL WHERE id = 1`)
 	var runs2, videos2 int
 	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM run), (SELECT COUNT(*) FROM video)`).Scan(&runs2, &videos2); err != nil || runs != runs2 || videos != videos2 {
 		t.Fatalf("rows changed: %d/%d vs %d/%d %v", runs, videos, runs2, videos2, err)

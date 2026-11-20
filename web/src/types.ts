@@ -121,6 +121,10 @@ export interface Run {
   // Set by the server when a stored interrupt/failure reason existed but was
   // withheld by safe-diagnostic vetting; the raw text is never sent (ARD-001).
   failure_reason_unavailable?: boolean
+  // The run's saved channel-scan outcome (discovery ARS-002 section 4.5).
+  // in_progress: the scan has started and the run is still running. null or
+  // absent: unknown (never scanned, a simulation, or an older server).
+  discovery_scan?: 'completed' | 'cut_short' | 'no_source_scanned' | 'in_progress' | null
   // Closed-set provenance, always present in server JSON and null when unknown
   // or legacy. Run Detail uses both only to tell a manual Run Now run that
   // stopped at its time limit apart from every other interrupted run.

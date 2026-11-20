@@ -200,3 +200,28 @@ func boolInt(b bool) int {
 	}
 	return 0
 }
+
+// Saved channel-scan outcome values (discovery ARS-002 section 4.5).
+const (
+	ScanOutcomeCutShort        = "cut_short"
+	ScanOutcomeCompleted       = "completed"
+	ScanOutcomeNoSourceScanned = "no_source_scanned"
+)
+
+// SetDiscoveryScanOutcome records that the uploads scan started
+// (ScanOutcomeCutShort) or ended normally (ScanOutcomeCompleted). It is not
+// guarded by stop_requested_at: it records what the scan did, not a lifecycle
+// transition. no_source_scanned is written only with the terminal failure.
+func (s *Store) SetDiscoveryScanOutcome(ctx context.Context, runID int64, outcome string) error {
+	if outcome != ScanOutcomeCutShort && outcome != ScanOutcomeCompleted {
+		return fmt.Errorf("state: invalid scan outcome %q", outcome)
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE run SET discovery_scan_outcome = ? WHERE id = ?;`, outcome, runID)
+	if err != nil {
+		return fmt.Errorf("set discovery scan outcome: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run %d: %w", runID, ErrNotFound)
+	}
+	return nil
+}

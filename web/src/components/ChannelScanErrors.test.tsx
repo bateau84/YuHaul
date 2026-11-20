@@ -144,4 +144,65 @@ describe('Errors view with channel scan errors', () => {
     expect(await within(section).findAllByText('Channel scan error')).toHaveLength(2)
     expect(within(section).queryByRole('button')).not.toBeInTheDocument()
   })
+
+  const renderErrors = () =>
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <ErrorsView />
+        </ToastProvider>
+      </MemoryRouter>,
+    )
+
+  it('names both sections and keeps each empty state to its own list, with no health claim', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    vi.spyOn(sourceApi, 'getSourceFailures').mockResolvedValue(page([]))
+    renderErrors()
+    const video = (await screen.findByRole('heading', { name: 'Video errors' })).closest('section')!
+    const channel = screen.getByRole('heading', { name: 'Channel scan errors' }).closest('section')!
+    expect(await within(video).findByText('No video errors in the queue.')).toBeInTheDocument()
+    expect(await within(channel).findByText('No channel scan errors are recorded. Runs from before YuHaul kept these records show none.')).toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/running smoothly|no problems|all clear|✓/i)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('an empty video list sits above channel entries without saying anything about them', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    vi.spyOn(sourceApi, 'getSourceFailures').mockResolvedValue(page([failure()]))
+    renderErrors()
+    const video = (await screen.findByRole('heading', { name: 'Video errors' })).closest('section')!
+    expect(await within(video).findByText('No video errors in the queue.')).toBeInTheDocument()
+    expect(await screen.findByText('Channel B')).toBeInTheDocument()
+    expect(video.textContent).not.toMatch(/channel/i)
+    expect(screen.queryByText(/No channel scan errors are recorded/)).not.toBeInTheDocument()
+  })
+
+  it('a failed channel read beside an empty video list is not shown as empty, and does not change the video section', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockResolvedValue([])
+    vi.spyOn(sourceApi, 'getSourceFailures').mockRejectedValue(new Error('boom'))
+    renderErrors()
+    expect(await screen.findByText('Could not load channel scan errors. Nothing was changed.')).toBeInTheDocument()
+    const video = screen.getByRole('heading', { name: 'Video errors' }).closest('section')!
+    expect(within(video).getByText('No video errors in the queue.')).toBeInTheDocument()
+    expect(screen.queryByText(/No channel scan errors are recorded/)).not.toBeInTheDocument()
+  })
+
+  it('a failed video read leaves the channel section to say its own state', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockRejectedValue(new Error('down'))
+    vi.spyOn(sourceApi, 'getSourceFailures').mockResolvedValue(page([failure()]))
+    renderErrors()
+    const video = (await screen.findByRole('heading', { name: 'Video errors' })).closest('section')!
+    expect(await within(video).findByText('Failed to load queue. Check your connection and try again.')).toBeInTheDocument()
+    expect(within(video).queryByText('No video errors in the queue.')).not.toBeInTheDocument()
+    expect(await screen.findByText('Channel B')).toBeInTheDocument()
+  })
+
+  it('a loading video read is not shown as empty', async () => {
+    vi.spyOn(queueApi, 'listErrors').mockReturnValue(new Promise(() => {}))
+    vi.spyOn(sourceApi, 'getSourceFailures').mockResolvedValue(page([]))
+    renderErrors()
+    const video = (await screen.findByRole('heading', { name: 'Video errors' })).closest('section')!
+    expect(within(video).getByText('Loading queue...')).toBeInTheDocument()
+    expect(within(video).queryByText('No video errors in the queue.')).not.toBeInTheDocument()
+  })
 })

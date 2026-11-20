@@ -145,7 +145,16 @@ export function ErrorsView() {
     }
   }
 
-  if (loading) return <div className="empty-state">Loading queue...</div>
+  if (loading && tab === 'deferred') return <div className="empty-state">Loading queue...</div>
+
+  const fetchErrorRegion = (
+    <FetchErrorRegion
+      ref={retryButtonRef}
+      message="Failed to load queue. Check your connection and try again."
+      onRetry={handleRetry}
+      retrying={retrying}
+    />
+  )
 
   return (
     <>
@@ -161,7 +170,7 @@ export function ErrorsView() {
           aria-selected={tab === 'errors'}
           disabled={fetchError}
         >
-          {fetchError ? 'Errors' : `Errors (${activeCount})`}
+          {fetchError || loading ? 'Errors' : `Errors (${activeCount})`}
         </button>
         <button
           className={`button ${tab === 'deferred' ? 'button--primary' : ''}`}
@@ -174,20 +183,17 @@ export function ErrorsView() {
         </button>
       </div>
 
-      {fetchError ? (
-        <FetchErrorRegion
-          ref={retryButtonRef}
-          message="Failed to load queue. Check your connection and try again."
-          onRetry={handleRetry}
-          retrying={retrying}
-        />
-      ) : (
+      {tab === 'errors' && (
         <>
-          {tab === 'errors' && (
-            <div className="card">
-              {errors.length === 0 ? (
-                <div className="empty-state">No errors. All processing is running smoothly.</div>
-              ) : (
+          <section className="card" aria-labelledby="video-errors-heading">
+            <h2 id="video-errors-heading" className="section-title">Video errors</h2>
+            {loading ? (
+              <div className="empty-state" role="status">Loading queue...</div>
+            ) : fetchError ? (
+              fetchErrorRegion
+            ) : errors.length === 0 ? (
+              <div className="empty-state">No video errors in the queue.</div>
+            ) : (
                 <table className="table">
                   <thead>
                     <tr>
@@ -278,12 +284,15 @@ export function ErrorsView() {
                     })}
                   </tbody>
                 </table>
-              )}
-            </div>
-          )}
+            )}
+          </section>
+          <ChannelScanErrors />
+        </>
+      )}
+      {tab === 'deferred' && fetchError && fetchErrorRegion}
 
-          {tab === 'errors' && <ChannelScanErrors />}
-
+      {!loading && !fetchError && (
+        <>
           <ConfirmDialog
             open={confirmDismiss !== null}
             title={originalDecisionUnavailable.dismissTitle}

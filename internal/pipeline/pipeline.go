@@ -331,7 +331,7 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 		if r := recover(); r != nil {
 			reason := (diag.Facts{Phase: "unknown", Operation: "unknown", Code: "panic"}).String()
 			logger.ErrorContext(ctx, "pipeline panic", "diagnostic", reason)
-			p.retainThenFail(ctx, runID, reason, func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
+			p.retainThenFail(ctx, runID, reason, "", func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
 				return sweepStrandedWork(retainCtx, qs, tx, runID, reason)
 			})
 		}
@@ -600,7 +600,12 @@ func (p *Pipeline) failRun(ctx context.Context, runID int64, message string, err
 		p.interruptRunWithCause(ctx, runID, diag.InterruptReason(err, ctx.Err(), message), interruptCauseFor(ctx))
 		return
 	}
-	p.retainThenFail(ctx, runID, reason, func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
+	// The AC8 failure sets the run's scan outcome in the same terminal UPDATE.
+	scanOutcome := ""
+	if errors.Is(err, discovery.ErrNoSourceScanned) {
+		scanOutcome = state.ScanOutcomeNoSourceScanned
+	}
+	p.retainThenFail(ctx, runID, reason, scanOutcome, func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
 		return sweepStrandedWork(retainCtx, qs, tx, runID, reason)
 	})
 }

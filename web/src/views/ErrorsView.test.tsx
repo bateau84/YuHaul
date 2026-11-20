@@ -146,7 +146,7 @@ describe('ErrorsView', () => {
     fireEvent.click(screen.getByRole('button', { name: /Remove/i }))
 
     await waitFor(() => expect(screen.queryByText('Ambient Study Session')).not.toBeInTheDocument())
-    expect(screen.getByText(/No errors/i)).toBeInTheDocument()
+    expect(screen.getByText('No video errors in the queue.')).toBeInTheDocument()
   })
 
   it('shows an accessible fetch-error state when the queue fetch fails', async () => {
@@ -166,7 +166,7 @@ describe('ErrorsView', () => {
     expect(screen.getByRole('tab', { name: /^Deferred$/ })).toBeDisabled()
 
     // A failed fetch never renders either empty state.
-    expect(screen.queryByText(/No errors\. All processing/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/No video errors in the queue/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/No deferred work/i)).not.toBeInTheDocument()
   })
 
@@ -177,7 +177,7 @@ describe('ErrorsView', () => {
     renderWithProviders(<ErrorsView />)
 
     await waitFor(() =>
-      expect(screen.getByText('No errors. All processing is running smoothly.')).toBeInTheDocument()
+      expect(screen.getByText('No video errors in the queue.')).toBeInTheDocument()
     )
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByText('Errors (0)')).toBeInTheDocument()
@@ -226,6 +226,6 @@ describe('ErrorsView', () => {
     // The error region persists (disambiguated from the error toast, which is also role=alert).
     expect(screen.getByText('Failed to load queue. Check your connection and try again.')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('button', { name: /^Retry$/ })).toBeEnabled())
-    expect(screen.queryByText(/No errors\. All processing/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/No video errors in the queue/i)).not.toBeInTheDocument()
   })
 })

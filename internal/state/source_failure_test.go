@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -152,4 +153,76 @@ func TestListSourceFailuresPermanentOnlyAndStorageError(t *testing.T) {
 	require.NoError(t, s.db.Close())
 	_, err = s.ListSourceFailures(ctx, SourceFailureQuery{Limit: 10})
 	require.Error(t, err, "a storage failure is never an empty page")
+}
+
+func publicScan(t *testing.T, s *Store, id int64) any {
+	t.Helper()
+	r, err := s.GetRun(context.Background(), id)
+	require.NoError(t, err)
+	b, err := json.Marshal(r)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(b, &m))
+	v, present := m["discovery_scan"]
+	require.True(t, present, "discovery_scan is always present")
+	return v
+}
+
+func TestDiscoveryScanProjection(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	run, err := insertRunSQL(t, s, "manual", "running", nil, nil)
+	require.NoError(t, err)
+	require.Nil(t, publicScan(t, s, run), "unknown stays null")
+
+	require.NoError(t, s.SetDiscoveryScanOutcome(ctx, run, ScanOutcomeCutShort))
+	require.Equal(t, "in_progress", publicScan(t, s, run), "a running run's started scan")
+	_, err = s.db.Exec(`UPDATE run SET status='interrupted' WHERE id=?`, run)
+	require.NoError(t, err)
+	require.Equal(t, "cut_short", publicScan(t, s, run))
+	_, err = s.db.Exec(`UPDATE run SET status='completed' WHERE id=?`, run)
+	require.NoError(t, err)
+	require.Equal(t, "cut_short", publicScan(t, s, run), "completed after a stopped scan still reads cut_short")
+
+	require.NoError(t, s.SetDiscoveryScanOutcome(ctx, run, ScanOutcomeCompleted))
+	require.Equal(t, "completed", publicScan(t, s, run))
+
+	require.Error(t, s.SetDiscoveryScanOutcome(ctx, run, ScanOutcomeNoSourceScanned), "only the terminal failure writes this")
+	require.Error(t, s.SetDiscoveryScanOutcome(ctx, run, "bogus"))
+	require.ErrorIs(t, s.SetDiscoveryScanOutcome(ctx, 99999, ScanOutcomeCompleted), ErrNotFound)
+
+	// An unknown stored value (CHECK bypassed) reads null.
+	s.db.SetMaxOpenConns(1)
+	_, err = s.db.Exec(`PRAGMA ignore_check_constraints = ON`)
+	require.NoError(t, err)
+	_, err = s.db.Exec(`UPDATE run SET discovery_scan_outcome='mystery' WHERE id=?`, run)
+	require.NoError(t, err)
+	_, err = s.db.Exec(`PRAGMA ignore_check_constraints = OFF`)
+	require.NoError(t, err)
+	require.Nil(t, publicScan(t, s, run))
+
+	sim, err := insertRunSQL(t, s, "dry_run", "completed", nil, nil)
+	require.NoError(t, err)
+	require.Nil(t, publicScan(t, s, sim), "simulations report null")
+}
+
+func TestFailRunWithScanOutcomeSetsItInTheSameUpdate(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	run, err := insertRunSQL(t, s, "manual", "running", nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, s.SetDiscoveryScanOutcome(ctx, run, ScanOutcomeCompleted))
+	require.NoError(t, s.FailRunWithScanOutcome(ctx, run, "diag:v1 phase=discovery operation=discover code=no_source_scanned", 1, 2, ScanOutcomeNoSourceScanned))
+	r, err := s.GetRun(ctx, run)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusFailed, r.Status)
+	require.Equal(t, ScanOutcomeNoSourceScanned, *r.DiscoveryScanOutcome)
+
+	// A plain FailRun leaves the outcome alone.
+	other, _ := insertRunSQL(t, s, "manual", "running", nil, nil)
+	require.NoError(t, s.SetDiscoveryScanOutcome(ctx, other, ScanOutcomeCutShort))
+	require.NoError(t, s.FailRun(ctx, other, "x", 1, 1))
+	r, err = s.GetRun(ctx, other)
+	require.NoError(t, err)
+	require.Equal(t, ScanOutcomeCutShort, *r.DiscoveryScanOutcome)
 }
