@@ -124,3 +124,79 @@ func TestDispatchWithQuotaScopedRequiresALedgerAndScope(t *testing.T) {
 		t.Fatalf("nil ledger: %v", err)
 	}
 }
+
+// A credential save that fails right after a successful renewal is a
+// pre-admission refusal: Dispatch resolves before it builds the request,
+// takes a hold or enters transport, so nothing was sent, held or charged. The
+// failure heals once the store recovers, and then the request goes out once.
+func TestDispatchRenewalPersistenceFailureIsPreAdmissionRefusal(t *testing.T) {
+	ctx := context.Background()
+	key := newTestKey(t)
+	store := &failingStore{SQLiteTokenStore: newTestStore(t, key)}
+	seedExpired(t, store.SQLiteTokenStore)
+	store.failRefresh.Store(true)
+	store.failRenewalFailure.Store(true)
+	var exchanges atomic.Int32
+	svc := newExpiredRotatingService(t, store, key, &exchanges, nil)
+	binding, err := svc.Bind(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := quota.New(storetest.Open(t))
+	if err := ledger.SetDailyLimit(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sends atomic.Int32
+	transport := authorityTestTransport(func(r *http.Request) (*http.Response, error) {
+		sends.Add(1)
+		return authorityTestResponse("{}"), nil
+	})
+
+	resp, receipt, hold, err := svc.DispatchWithQuota(ctx, binding, req, transport, ledger, quota.OpVideosList)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if !errors.Is(err, ErrRenewalPersistence) || !IsPreAdmissionAuthorizationRefusal(err) {
+		t.Fatalf("err = %v, want a pre-admission refusal for the persistence failure", err)
+	}
+	if hold != nil || !receipt.AdmittedAt.IsZero() || receipt.AuthorizationID != "" || sends.Load() != 0 {
+		t.Fatalf("something was admitted: hold=%v receipt=%+v sends=%d", hold, receipt, sends.Load())
+	}
+	// No hold was ever taken: the single unit is free.
+	h, err := ledger.Acquire(ctx, quota.OpVideosList)
+	if err != nil || h == nil {
+		t.Fatalf("a hold leaked: %v %v", h, err)
+	}
+	if err := h.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	// The same classification applies to the scoped dispatch the executor uses.
+	_, receipt, hold, err = svc.DispatchWithQuotaScoped(ctx, binding, req, transport, ledger, quota.OpVideosList,
+		func(_ context.Context, transition func() error) error {
+			t.Error("scope entered before admission")
+			return transition()
+		})
+	if !IsPreAdmissionAuthorizationRefusal(err) || hold != nil || receipt.AuthorizationID != "" || sends.Load() != 0 {
+		t.Fatalf("scoped: err=%v hold=%v receipt=%+v sends=%d", err, hold, receipt, sends.Load())
+	}
+	// The classification stays narrow: cancellation and unrelated errors are not refusals.
+	if IsPreAdmissionAuthorizationRefusal(context.Canceled) || IsPreAdmissionAuthorizationRefusal(errors.New("x")) || IsPreAdmissionAuthorizationRefusal(errClientConfiguration) {
+		t.Fatal("classification widened")
+	}
+
+	// Recovery: the retained candidate saves, and the next dispatch sends once.
+	store.failRefresh.Store(false)
+	store.failRenewalFailure.Store(false)
+	resp, _, hold, err = svc.DispatchWithQuota(ctx, binding, req, transport, ledger, quota.OpVideosList)
+	if err != nil || hold == nil || sends.Load() != 1 {
+		t.Fatalf("recovered dispatch: hold=%v err=%v sends=%d", hold, err, sends.Load())
+	}
+	resp.Body.Close()
+	if err := hold.Finalize(ctx, sql.NullInt64{}, quota.OutcomeSuccess, sql.NullInt64{}); err != nil {
+		t.Fatal(err)
+	}
+}

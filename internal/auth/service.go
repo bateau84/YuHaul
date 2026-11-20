@@ -746,8 +746,18 @@ func RenewalFailureCategory(err error) string {
 
 // IsPreAdmissionAuthorizationRefusal reports only authorization conditions
 // that positively prevent Dispatch from admitting the protected request.
-// It intentionally excludes cancellation, persistence, configuration, and
-// malformed-renewal failures.
+// It intentionally excludes cancellation, configuration, and malformed-renewal
+// failures.
+//
+// ErrRenewalPersistence qualifies: it means usable access could not be made
+// durable after a renewal (or a retained rotated candidate could not be
+// saved), so authorization is unavailable. It can only come out of Dispatch's
+// Resolve step, which returns before the request is cloned, an authorization
+// header is installed, a quota hold is acquired or RoundTrip is entered, so no
+// request can have been sent. Callers must still require that no admission
+// receipt exists, as the executor does; ObserveAccessRejection also returns
+// ErrRenewalPersistence, but that follows an admitted request and never passes
+// through this classification.
 func IsPreAdmissionAuthorizationRefusal(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
@@ -756,7 +766,8 @@ func IsPreAdmissionAuthorizationRefusal(err error) bool {
 		errors.Is(err, ErrAccessExpiredBeforeAdmission) ||
 		errors.Is(err, errRefreshRejected) ||
 		errors.Is(err, errTemporaryNetwork) ||
-		errors.Is(err, errTemporaryProvider)
+		errors.Is(err, errTemporaryProvider) ||
+		errors.Is(err, ErrRenewalPersistence)
 }
 
 func classifyRenewalFailure(err error) string {

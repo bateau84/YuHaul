@@ -9,6 +9,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -40,6 +41,11 @@ type admissionOpts struct {
 	postStatus int    // default 200
 	bound      time.Duration
 	nativeOnly bool // no retry claim: a native send of the origin run
+	// lockAcrossSave holds the SQLite writer from a separate connection from
+	// the moment the token endpoint answers until the renewal reports that its
+	// credential save failed, and gives the database a short busy timeout, so
+	// the save right after the renewal hits SQLITE_BUSY.
+	lockAcrossSave bool
 }
 
 type admissionScene struct {
@@ -61,7 +67,7 @@ type admissionScene struct {
 	oauthGo  chan struct{}
 	postHit  chan struct{}
 	postGo   chan struct{}
-	once     [4]sync.Once
+	once     [5]sync.Once
 }
 
 type execResult struct {
@@ -82,9 +88,21 @@ func newAdmissionScene(t *testing.T, o admissionOpts) *admissionScene {
 	}
 	db, err := store.Open(ctx, s.path)
 	require.NoError(t, err)
+	var lockDB *sql.DB
+	if o.lockAcrossSave {
+		require.NoError(t, db.Close())
+		db, err = sql.Open("sqlite", s.path+"?_fk=1&_journal_mode=WAL&_busy_timeout=150&_foreign_keys=1")
+		require.NoError(t, err)
+		lockDB, err = sql.Open("sqlite", s.path+"?_fk=1&_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = lockDB.Close() })
+	}
 	oauth := roundTripTestFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host != "oauth2.googleapis.com" {
 			t.Errorf("unexpected OAuth endpoint %q", req.URL.Host)
+		}
+		if lockDB != nil {
+			s.takeLockUntilSaveFails(lockDB)
 		}
 		if s.opts.blockOAuth {
 			s.once[0].Do(func() { close(s.oauthHit) })
@@ -778,4 +796,125 @@ func TestRemovalDuringRetrySurvivesTheRunLoopWrapping(t *testing.T) {
 	s.p.finishRun(ctx, s.recv)
 	// The wrapping the handler sees after failRun is the same error.
 	require.ErrorIs(t, err, queue.ErrWorkRemoved)
+}
+
+// takeLockUntilSaveFails holds the writer on its own connection until auth logs
+// that the renewal's credential save failed, then gives it back so the handoff
+// that follows can commit. It is the binary case: a lock across the save.
+func (s *admissionScene) takeLockUntilSaveFails(lockDB *sql.DB) {
+	s.once[4].Do(func() {
+		tx, err := lockDB.BeginTx(s.ctx, nil)
+		if err != nil {
+			s.t.Errorf("hold writer across save: %v", err)
+			return
+		}
+		if _, err := tx.Exec(`UPDATE run SET id = id WHERE id = -1`); err != nil {
+			s.t.Errorf("hold writer across save: %v", err)
+			return
+		}
+		var release sync.Once
+		done := func() { release.Do(func() { _ = tx.Rollback() }) }
+		previous := slog.Default()
+		slog.SetDefault(slog.New(&releaseOnSaveFailure{Handler: slog.NewTextHandler(io.Discard, nil), release: done}))
+		s.t.Cleanup(func() { slog.SetDefault(previous); done() })
+	})
+}
+
+type releaseOnSaveFailure struct {
+	slog.Handler
+	release func()
+}
+
+func (h *releaseOnSaveFailure) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == "oauth renewal attempt" {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "outcome" && a.Value.String() == "persistence_failed" {
+				h.release()
+			}
+			return true
+		})
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+// The credential save right after a renewal hits SQLITE_BUSY. Authorization
+// never became usable and no request was sent, so the video defers as
+// authorization_pending with its own guard released, for a fresh run and for a
+// retry-origin run alike, and a later run sends once.
+func TestRenewalPersistenceBusyDefersAsAuthorizationPending(t *testing.T) {
+	for _, nativeOnly := range []bool{true, false} {
+		name := "retry origin"
+		if nativeOnly {
+			name = "native"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := newAdmissionScene(t, admissionOpts{nativeOnly: nativeOnly, lockAcrossSave: true})
+			versioner := config.NewService(router.NewStore(s.f.db), config.NewStore(s.f.db))
+			p := &Pipeline{db: s.f.db, stateStore: s.f.state, machine: state.NewMachine(s.f.state), queueStore: s.qs, auth: s.f.auth, versioner: versioner,
+				configStore: config.NewStore(s.f.db), router: router.NewEngine(router.NewStore(s.f.db)), detector: duplicate.NewDetector(s.f.db),
+				meta: metadata.NewManager(metadata.NewStore(s.f.db), nil, nil), logger: discardLogger(), executor: s.e}
+			p.executionBinding = &s.f.binding
+			p.router.WithRunRoutesValidator(p.ValidateRunRoutes)
+
+			evaluate := func(runID int64) *state.Video {
+				t.Helper()
+				v, err := s.f.state.GetVideo(ctx, s.f.videoID)
+				require.NoError(t, err)
+				if v.ProcessingState != state.VideoStateEvaluated {
+					_, err = p.machine.TransitionVideoState(ctx, v.ID, state.VideoStateNotYetEvaluated, state.VideoStateEvaluating)
+					require.NoError(t, err)
+					_, err = p.machine.TransitionVideoState(ctx, v.ID, state.VideoStateEvaluating, state.VideoStateEvaluated)
+					require.NoError(t, err)
+				}
+				v, err = s.f.state.GetVideo(ctx, s.f.videoID)
+				require.NoError(t, err)
+				return v
+			}
+			runCtx := ctx
+			if !nativeOnly {
+				runCtx = context.WithValue(ctx, guardedRetryGroupKey{}, s.receipt)
+			}
+			outcome, err := p.executeVideoActions(runCtx, s.recv, evaluate(s.recv))
+			require.NoError(t, err, "a refusal that happened before admission is not a failure")
+			require.Equal(t, state.FinalOutcomeDeferred, outcome)
+			require.Zero(t, s.posts.Load(), "no request was sent")
+			require.Zero(t, s.ledgerRows(), "no charge")
+			require.Zero(t, s.guards(), "the owned guard is released with the committed handoff")
+			var reason sql.NullString
+			require.NoError(t, s.f.db.QueryRow(`SELECT outcome_reason FROM executed_action WHERE run_id=? AND video_id=? AND outcome='deferred' AND executed_at IS NULL`, s.recv, s.f.videoID).Scan(&reason))
+			require.Equal(t, "authorization_pending", reason.String)
+			require.Equal(t, 1, s.count(`SELECT count(*) FROM deferred_item WHERE video_id=? AND status='pending' AND deferral_reason='authorization_pending'`, s.f.videoID), "one retained pending item")
+			require.Zero(t, s.count(`SELECT count(*) FROM error_entry WHERE video_id=? AND error_category='runtime' AND status='active' AND run_id=?`, s.f.videoID, s.recv), "no unknown_error entry")
+			require.Equal(t, 1, s.count(`SELECT count(*) FROM run_video_outcome WHERE run_id=? AND video_id=? AND final_outcome='deferred' AND deferred_reason='authorization_pending'`, s.recv, s.f.videoID))
+
+			// The lock is gone and the retained candidate saves: a later run
+			// claims the pending item and sends exactly once.
+			versioner2 := config.NewService(router.NewStore(s.f.db), config.NewStore(s.f.db))
+			later := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning, ActionAuthorityVersion: 1}
+			later.ConfigVersionID, err = versioner2.ActiveVersionID(ctx)
+			require.NoError(t, err)
+			var pendingItem int64
+			require.NoError(t, s.f.db.QueryRow(`SELECT id FROM deferred_item WHERE video_id=? AND status='pending'`, s.f.videoID).Scan(&pendingItem))
+			var receipt queue.RetryGroupReceipt
+			require.NoError(t, s.qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+				var err error
+				if later.ID, err = s.f.state.CreateGuardedMutationRunTx(ctx, tx, later, true); err != nil {
+					return err
+				}
+				var taken bool
+				receipt, _, taken, err = s.qs.ClaimDeferredGroupReceiptTx(ctx, tx, pendingItem, later.ID, time.Now())
+				if err == nil && !taken {
+					err = errRetryClaimLost
+				}
+				return err
+			}))
+			createRouteDecision(t, ctx, s.f.state, s.f.videoID, later.ID, s.f.routeID, 1, state.RouteDecisionMatched)
+			outcome, err = p.executeVideoActions(context.WithValue(ctx, guardedRetryGroupKey{}, receipt), later.ID, evaluate(later.ID))
+			require.NoError(t, err)
+			require.Equal(t, state.FinalOutcomeAccepted, outcome)
+			require.Equal(t, int32(1), s.posts.Load(), "exactly one POST in the later run")
+			require.Equal(t, 1, s.ledgerRows())
+		})
+	}
 }
