@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/bateau84/YuHaul/internal/diag"
+	"github.com/bateau84/YuHaul/internal/duplicate"
+	"github.com/bateau84/YuHaul/internal/metadata"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -438,19 +441,20 @@ func TestAdmissionFenceWriterWait(t *testing.T) {
 		require.Zero(t, s.ledgerRows())
 		s.capacityIsFree()
 	})
-	t.Run("bounded wait runs out", func(t *testing.T) {
+	t.Run("bounded wait runs out and the release transaction is blocked too", func(t *testing.T) {
 		s := newAdmissionScene(t, admissionOpts{bound: 200 * time.Millisecond})
 		require.NoError(t, s.f.ledger.SetDailyLimit(s.ctx, s.e.insertCost))
 		taken := make(chan struct{})
 		takeWriter(s, taken)
 		r := s.wait(s.start())
 		releaseWriter()
-		require.Error(t, r.err)
-		require.Contains(t, r.err.Error(), "guard kept")
+		var fault *admissionWriterFault
+		require.ErrorAs(t, r.err, &fault)
+		require.True(t, fault.guardKept, "the release could not get the writer either")
 		require.False(t, errors.Is(r.err, queue.ErrWorkRemoved) || errors.Is(r.err, state.ErrPlaylistSendStopped), "local failure is not removal or Stop")
 		require.Zero(t, s.posts.Load())
 		require.Zero(t, s.ledgerRows())
-		require.Equal(t, 1, s.guards(), "local failure keeps the guard")
+		require.Equal(t, 1, s.guards(), "residual case: the guard stays")
 		require.Zero(t, s.actions())
 		s.capacityIsFree()
 	})
@@ -546,4 +550,232 @@ func TestAdmissionFenceRefusesAChangedGuard(t *testing.T) {
 	require.Zero(t, s.ledgerRows())
 	require.Equal(t, 1, s.guards(), "the other guard is untouched")
 	s.capacityIsFree()
+}
+
+// holdAdmissionWriter takes the SQLite writer from the executor's goroutine just
+// before the admission scope asks for it, and gives it back just before the
+// release transaction runs (the scope's own bound has run out by then).
+// release is idempotent. between runs after the writer is given back.
+func (s *admissionScene) holdAdmissionWriter(between func()) (release func()) {
+	var tx *sql.Tx
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			if tx != nil {
+				if err := tx.Rollback(); err != nil {
+					s.t.Errorf("release writer: %v", err)
+				}
+			}
+		})
+	}
+	s.e.beforeAdmissionWriter = func() {
+		var err error
+		if tx, err = s.f.db.BeginTx(s.ctx, nil); err != nil {
+			s.t.Errorf("hold writer: %v", err)
+			return
+		}
+		if _, err := tx.Exec(`UPDATE run SET id = id WHERE id = -1`); err != nil {
+			s.t.Errorf("hold writer: %v", err)
+		}
+	}
+	s.e.onAdmissionWriterUnavailable = func() {
+		release()
+		if between != nil {
+			between()
+		}
+	}
+	s.t.Cleanup(release)
+	return release
+}
+
+func busyReason() string {
+	return "diag:v1 phase=action_execution operation=dispatch_request code=sqlite_error sqlite=SQLITE_BUSY"
+}
+
+// Writer not acquired at final admission (ARS-001): nothing was sent, so the
+// invocation removes its own guard after the checks pass again and returns the
+// typed local storage fault.
+func TestAdmissionWriterUnavailableReleasesTheOwnGuard(t *testing.T) {
+	for _, nativeOnly := range []bool{false, true} {
+		name := "retry origin"
+		if nativeOnly {
+			name = "native"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := newAdmissionScene(t, admissionOpts{nativeOnly: nativeOnly, bound: 200 * time.Millisecond})
+			require.NoError(t, s.f.ledger.SetDailyLimit(s.ctx, s.e.insertCost))
+			s.holdAdmissionWriter(nil)
+			r := s.wait(s.start())
+
+			var fault *admissionWriterFault
+			require.ErrorAs(t, r.err, &fault)
+			require.False(t, fault.guardKept)
+			var refusal *retryAdmissionRefusal
+			require.False(t, errors.As(r.err, &refusal), "not an admission refusal")
+			require.Equal(t, busyReason(), diag.Encode(r.err, "unknown", "unknown"), "the existing sqlite_error diagnostic under dispatch_request")
+			require.Zero(t, s.posts.Load())
+			require.Zero(t, s.ledgerRows())
+			require.Zero(t, s.guards(), "own guard released")
+			require.Equal(t, 1, s.count(`SELECT count(*) FROM executed_action WHERE run_id=? AND video_id=? AND outcome='not_attempted' AND executed_at IS NULL`, s.recv, s.f.videoID))
+			s.capacityIsFree()
+			if !nativeOnly {
+				require.Zero(t, s.count(`SELECT count(*) FROM error_entry WHERE run_id=? AND id<>?`, s.recv, s.source), "no sink")
+			}
+
+			// Nothing vetoes the target any more: a later attempt sends once.
+			s.e.beforeAdmissionWriter = nil
+			s.e.onAdmissionWriterUnavailable = nil
+			s.e.admissionBound = 5 * time.Second
+			again := s.wait(s.start())
+			require.NoError(t, again.err)
+			require.Equal(t, int32(1), s.posts.Load())
+			require.Equal(t, 1, s.ledgerRows())
+		})
+	}
+}
+
+// Stop, removal and integrity keep their own rows when the writer was
+// unavailable: the re-check decides, and only an all-pass releases the guard.
+func TestAdmissionWriterUnavailableContrasts(t *testing.T) {
+	t.Run("Stop marked while the writer is held", func(t *testing.T) {
+		s := newAdmissionScene(t, admissionOpts{bound: 200 * time.Millisecond})
+		s.holdAdmissionWriter(s.markStop)
+		r := s.wait(s.start())
+		var refusal *retryAdmissionRefusal
+		require.ErrorAs(t, r.err, &refusal)
+		require.ErrorIs(t, r.err, state.ErrPlaylistSendStopped)
+		require.Zero(t, s.guards(), "the Stop row: own guard removed")
+		require.Zero(t, s.posts.Load())
+	})
+	t.Run("Dismiss committed before the release transaction", func(t *testing.T) {
+		s := newAdmissionScene(t, admissionOpts{bound: 200 * time.Millisecond})
+		s.holdAdmissionWriter(s.removeSource)
+		r := s.wait(s.start())
+		var refusal *retryAdmissionRefusal
+		require.ErrorAs(t, r.err, &refusal)
+		require.ErrorIs(t, r.err, queue.ErrWorkRemoved)
+		var fault *admissionWriterFault
+		require.False(t, errors.As(r.err, &fault))
+		require.Equal(t, 1, s.guards(), "removal never deletes a guard")
+		require.Zero(t, s.actions())
+		require.Zero(t, s.posts.Load())
+	})
+	t.Run("a read failure after the writer is acquired keeps the guard", func(t *testing.T) {
+		s := newAdmissionScene(t, admissionOpts{blockOAuth: true})
+		done := s.start()
+		s.reached(s.oauthHit, "token renewal")
+		_, err := s.f.db.Exec(`ALTER TABLE playlist_send_guard RENAME TO playlist_send_guard_hidden`)
+		require.NoError(t, err)
+		s.releaseOAuth()
+		r := s.wait(done)
+		_, err = s.f.db.Exec(`ALTER TABLE playlist_send_guard_hidden RENAME TO playlist_send_guard`)
+		require.NoError(t, err)
+		require.Error(t, r.err)
+		var fault *admissionWriterFault
+		require.False(t, errors.As(r.err, &fault), "a failure after the writer is held is not 'writer unavailable'")
+		require.Equal(t, 1, s.guards(), "guard kept")
+		require.Zero(t, s.posts.Load())
+		require.Zero(t, s.ledgerRows())
+	})
+}
+
+// Retry-origin work through processRetryVideo: the typed fault passes through
+// unchanged, so the video takes no per-video failure and no Errors entry, its
+// receipt stays live, and the run stops with the claim retained.
+func TestProcessRetryVideoPassesTheWriterFaultThrough(t *testing.T) {
+	ctx := context.Background()
+	s := newAdmissionScene(t, admissionOpts{bound: 200 * time.Millisecond})
+	require.NoError(t, s.f.ledger.SetDailyLimit(s.ctx, s.e.insertCost))
+	versioner := config.NewService(router.NewStore(s.f.db), config.NewStore(s.f.db))
+	p := &Pipeline{db: s.f.db, stateStore: s.f.state, machine: state.NewMachine(s.f.state), queueStore: s.qs, auth: s.f.auth, versioner: versioner,
+		configStore: config.NewStore(s.f.db), router: router.NewEngine(router.NewStore(s.f.db)), detector: duplicate.NewDetector(s.f.db),
+		meta: metadata.NewManager(metadata.NewStore(s.f.db), nil, nil), logger: discardLogger(), executor: s.e}
+	p.executionBinding = &s.f.binding
+	p.router.WithRunRoutesValidator(p.ValidateRunRoutes)
+	s.holdAdmissionWriter(nil)
+
+	err := p.processRetryVideo(context.WithValue(ctx, guardedRetryGroupKey{}, s.receipt), s.recv, s.f.videoID)
+	var fault *admissionWriterFault
+	require.ErrorAs(t, err, &fault)
+	require.Equal(t, busyReason(), diag.Encode(err, "unknown", "unknown"))
+	require.Zero(t, s.posts.Load())
+	require.Zero(t, s.ledgerRows())
+	require.Zero(t, s.guards())
+
+	// No per-video failure: no sink, no failed outcome, no resolved source.
+	require.Zero(t, s.count(`SELECT count(*) FROM error_entry WHERE run_id=? AND id<>?`, s.recv, s.source), "no Errors entry")
+	require.Zero(t, s.count(`SELECT count(*) FROM run_video_outcome WHERE run_id=? AND video_id=? AND final_outcome IS NOT NULL`, s.recv, s.f.videoID))
+	require.Equal(t, 1, s.count(`SELECT count(*) FROM error_entry WHERE id=? AND status='retrying' AND retry_run_id=?`, s.source, s.recv), "the receipt is still live")
+	video, getErr := s.f.state.GetVideo(ctx, s.f.videoID)
+	require.NoError(t, getErr)
+	require.NotEqual(t, state.FinalOutcomeFailed, video.FinalOutcome)
+
+	// Crash between the release and the retention: a restarted process finds the
+	// stored claim live and no guard, and the target sends exactly once.
+	db2, openErr := store.Open(ctx, s.path)
+	require.NoError(t, openErr)
+	defer db2.Close()
+	qs2, qerr := queue.NewStore(db2)
+	require.NoError(t, qerr)
+	recovered, rerr := qs2.RetryGroupReceiptForRunVideo(ctx, s.recv, s.f.videoID)
+	require.NoError(t, rerr)
+	require.Equal(t, s.receipt, recovered)
+	restarted := NewExecutor(db2, s.f.ledger, s.f.auth, WithYouTubeBaseURL(s.server.URL))
+	_, execErr := restarted.ExecuteBound(context.WithValue(ctx, guardedRetryGroupKey{}, recovered), s.recv, s.f.videoID, s.matches, s.f.binding)
+	require.NoError(t, execErr)
+	require.Equal(t, int32(1), s.posts.Load(), "exactly one POST after the restart")
+}
+
+// The run ends through the run-stopping path: failed with the sqlite diagnostic,
+// the claimed work retained exactly (released to its queue), no sink recreated.
+func TestWriterFaultEndsTheRunWithTheClaimRetained(t *testing.T) {
+	s := newAdmissionScene(t, admissionOpts{bound: 200 * time.Millisecond})
+	s.holdAdmissionWriter(nil)
+	r := s.wait(s.start())
+	var fault *admissionWriterFault
+	require.ErrorAs(t, r.err, &fault)
+
+	s.p.registerRun(s.recv)
+	s.p.failRun(s.ctx, s.recv, "retry failed", fmt.Errorf("execute actions for video %d: %w", s.f.videoID, r.err))
+	s.p.finishRun(s.ctx, s.recv)
+	run, err := s.f.state.GetRun(s.ctx, s.recv)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusFailed, run.Status)
+	require.NotNil(t, run.InterruptReason)
+	require.Equal(t, "diag:v1 phase=action_execution operation=dispatch_request code=sqlite_error sqlite=SQLITE_BUSY", *run.InterruptReason)
+	require.Equal(t, 1, s.count(`SELECT count(*) FROM error_entry WHERE id=? AND status='active'`, s.source), "the claim is retained in its queue")
+	require.Zero(t, s.count(`SELECT count(*) FROM error_entry WHERE run_id=? AND id<>?`, s.recv, s.source), "no replacement sink")
+	require.Zero(t, s.guards())
+}
+
+// ErrWorkRemoved survives processDeferredItems, so RetryQueueEntry returns an
+// error the 409 retry_work_removed handler recognizes with errors.Is.
+func TestRemovalDuringRetrySurvivesTheRunLoopWrapping(t *testing.T) {
+	ctx := context.Background()
+	s := newAdmissionScene(t, admissionOpts{blockOAuth: true})
+	versioner := config.NewService(router.NewStore(s.f.db), config.NewStore(s.f.db))
+	p := &Pipeline{db: s.f.db, stateStore: s.f.state, machine: state.NewMachine(s.f.state), queueStore: s.qs, auth: s.f.auth, versioner: versioner,
+		configStore: config.NewStore(s.f.db), router: router.NewEngine(router.NewStore(s.f.db)), detector: duplicate.NewDetector(s.f.db),
+		meta: metadata.NewManager(metadata.NewStore(s.f.db), nil, nil), logger: discardLogger(), executor: s.e}
+	p.executionBinding = &s.f.binding
+	p.router.WithRunRoutesValidator(p.ValidateRunRoutes)
+	done := make(chan error, 1)
+	go func() { done <- p.processDeferredItems(ctx, s.recv, []queue.RetryGroupReceipt{s.receipt}, false) }()
+	s.reached(s.oauthHit, "token renewal")
+	s.removeSource()
+	s.releaseOAuth()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("run loop did not finish")
+	}
+	require.ErrorIs(t, err, queue.ErrWorkRemoved)
+	require.NotErrorIs(t, err, queue.ErrWorkNotOwned)
+	require.Zero(t, s.posts.Load())
+	s.p.registerRun(s.recv)
+	s.p.failRun(ctx, s.recv, "manual retry failed", err)
+	s.p.finishRun(ctx, s.recv)
+	// The wrapping the handler sees after failRun is the same error.
+	require.ErrorIs(t, err, queue.ErrWorkRemoved)
 }

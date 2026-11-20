@@ -177,6 +177,15 @@ func (s *Store) WithRetryTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return nil
 }
 
+// ErrAdmissionWriterUnavailable is returned by WithAdmissionTx only when it
+// could not begin its transaction or take the write lock (SQLITE_BUSY after
+// busy_timeout, or the scope's own bound ran out during that wait) while the
+// request context was still live. fn never ran and nothing was admitted. It is
+// distinct from request cancellation, from any failure after the writer is
+// held and from a commit failure (authorization ARS-001, "Writer not acquired
+// at final admission").
+var ErrAdmissionWriterUnavailable = errors.New("queue: admission writer unavailable")
+
 // WithAdmissionTx runs fn under the SQLite writer for one bounded local scope,
 // the final POST admission fence (authorization ARS-001). The writer is
 // reserved before fn reads anything. bound limits the wait for the writer and
@@ -202,14 +211,14 @@ func (s *Store) WithAdmissionTx(ctx context.Context, bound time.Duration, fn fun
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
-		return fmt.Errorf("begin admission transaction: %w", err)
+		return fmt.Errorf("%w: begin admission transaction: %w", ErrAdmissionWriterUnavailable, diag.SQLiteBusy(err))
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(txCtx, `UPDATE run SET id = id WHERE id = -1`); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
-		return fmt.Errorf("lock admission writer: %w", err)
+		return fmt.Errorf("%w: lock admission writer: %w", ErrAdmissionWriterUnavailable, diag.SQLiteBusy(err))
 	}
 	if !stop() {
 		// The request ended while waiting; the wait, not the writer scope, ends.

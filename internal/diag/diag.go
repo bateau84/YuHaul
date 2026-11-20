@@ -73,6 +73,21 @@ func WithCode(err error, code string) error {
 	return &codeCause{cause: err, code: code}
 }
 
+type sqliteBusyCause struct{ cause error }
+
+func (e *sqliteBusyCause) Error() string { return "operation failed" }
+func (e *sqliteBusyCause) Unwrap() error { return e.cause }
+
+// SQLiteBusy marks err as a local SQLite busy fault for classification, for
+// the case where a bounded wait for the writer ran out before SQLite itself
+// reported anything. A real SQLite error already in err's chain wins.
+func SQLiteBusy(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &sqliteBusyCause{cause: err}
+}
+
 type Facts struct{ Phase, Operation, Code, Status, Reason, SQLite string }
 
 var phases = set("unknown discovery exclusion duplicate_detection routing action_execution")
@@ -195,6 +210,11 @@ func Classify(err error, phase, operation string) Facts {
 		if c, ok := sqliteCodes[se.Code()&0xff]; ok {
 			f.SQLite = c
 		}
+		return f
+	}
+	if _, ok := findCause[*sqliteBusyCause](err); ok {
+		f.Code = "sqlite_error"
+		f.SQLite = "SQLITE_BUSY"
 		return f
 	}
 	if ae, ok := findCause[*youtube.APIError](err); ok {

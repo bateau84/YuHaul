@@ -67,6 +67,9 @@ type Executor struct {
 	// beforeAdmissionWriter is a test seam called, with no lock of its own,
 	// just before the admission scope waits for the SQLite writer.
 	beforeAdmissionWriter func()
+	// onAdmissionWriterUnavailable is a test seam called when the scope could
+	// not get the writer, before the release transaction runs.
+	onAdmissionWriterUnavailable func()
 }
 
 // defaultAdmissionBound bounds the final POST admission scope. The writer is
@@ -376,6 +379,13 @@ func (e *Executor) execute(ctx context.Context, runID, decisionRunID, videoID in
 		outcome, err := e.executeAction(actionCtx, runID, videoID, videoIDText, action, binding)
 		if err != nil {
 			if isRetryAdmissionRefusal(err) {
+				return state.FinalOutcomeFailed, err
+			}
+			var writerFault *admissionWriterFault
+			if errors.As(err, &writerFault) {
+				// A local storage fault at final admission: no failure evidence, no
+				// tail evidence, no sink. The run stops and its retention sweep
+				// holds every unfinished video (ARS-001, "Writer not acquired").
 				return state.FinalOutcomeFailed, err
 			}
 			var accountingErr *postCommitAccountingError
@@ -828,7 +838,7 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 		return resp, mapped, dispatchErr != nil && admission.AuthorizationID == "", dispatchErr
 	}, nil)
 	if fenceErr != nil && hold == nil && result.Admission == nil {
-		return e.refuseAtAdmission(ctx, guardStore, *receipt, runID, videoID, a, fenceErr, retry, isRetry)
+		return e.refuseAtAdmission(ctx, guardStore, *receipt, runID, videoID, a, fenceErr, retry, isRetry, validateReceipt)
 	}
 	if hold != nil {
 		// An admitted attempt is accounted exactly once even when shutdown
@@ -1046,6 +1056,9 @@ func (e *Executor) admissionScope(guardStore *state.Store, guard state.PlaylistS
 			transitionErr = transition()
 			return transitionErr
 		})
+		if errors.Is(err, queue.ErrAdmissionWriterUnavailable) && e.onAdmissionWriterUnavailable != nil {
+			e.onAdmissionWriterUnavailable()
+		}
 		switch {
 		case err == nil, transitionErr != nil && errors.Is(err, transitionErr):
 			return err
@@ -1063,6 +1076,64 @@ func (e *Executor) admissionScope(guardStore *state.Store, guard state.PlaylistS
 	}
 }
 
+// admissionWriterFault is the typed local storage fault returned when the final
+// admission could not get the SQLite writer: the request was provably never
+// sent. It is not an admission refusal and not a per-video failure; it stops
+// the run, whose retention sweep holds every unfinished video. Its diagnostic is
+// sqlite_error (SQLITE_BUSY where known) under dispatch_request.
+type admissionWriterFault struct {
+	cause error
+	// guardKept is true when the invocation could not remove its own guard.
+	guardKept bool
+}
+
+func newAdmissionWriterFault(cause error, guardKept bool) *admissionWriterFault {
+	return &admissionWriterFault{cause: diag.At(cause, "action_execution", "dispatch_request"), guardKept: guardKept}
+}
+
+func (e *admissionWriterFault) Error() string {
+	if e.guardKept {
+		return "playlist admission could not get the local writer; guard kept"
+	}
+	return "playlist admission could not get the local writer"
+}
+func (e *admissionWriterFault) Unwrap() error { return e.cause }
+
+// resolveAfterWriterUnavailable handles ErrAdmissionWriterUnavailable
+// (authorization ARS-001, "Writer not acquired at final admission"). Nothing
+// was sent, so one detached, bounded writer transaction re-runs the fence checks
+// with the same guard and receipt. If they all pass, the invocation removes its
+// own guard with a no-attempt row and the typed fault is returned. Stop,
+// removal, ownership loss, an unusable claim and integrity failures keep their
+// own paths and never delete a guard for lost work; if the transaction cannot
+// begin or commit, the guard stays.
+func (e *Executor) resolveAfterWriterUnavailable(ctx context.Context, guardStore *state.Store, guard state.PlaylistSendGuard, runID, videoID int64, a action, cause error, retry queue.RetryGroupReceipt, isRetry bool, validateReceipt state.PlaylistRetryAuthority) (state.ActionOutcome, error) {
+	finalizeCtx, cancel := runFinalizationContext(ctx)
+	defer cancel()
+	var recheck error
+	err := e.withWriterTx(finalizeCtx, func(tx *sql.Tx) error {
+		if err := guardStore.CheckPlaylistAdmissionTx(finalizeCtx, tx, guard); err != nil {
+			recheck = err
+			return err
+		}
+		if validateReceipt != nil {
+			if err := validateReceipt(finalizeCtx, tx, guard.RunID, guard.VideoID); err != nil {
+				recheck = err
+				return err
+			}
+		}
+		return guardStore.ResolvePlaylistSendTx(finalizeCtx, tx, guard, state.ActionOutcomeNotAttempted, nil, nil)
+	})
+	switch {
+	case err == nil:
+		return state.ActionOutcomeNotAttempted, newAdmissionWriterFault(cause, false)
+	case recheck != nil && errors.Is(err, recheck):
+		return e.refuseAtAdmission(ctx, guardStore, guard, runID, videoID, a, recheck, retry, isRetry, validateReceipt)
+	}
+	e.logger.ErrorContext(ctx, "release unadmitted playlist claim failed; guard kept", "run_id", runID, "video_id", videoID, "diagnostic", diag.Encode(err, "action_execution", "dispatch_request"))
+	return state.ActionOutcomeFailed, newAdmissionWriterFault(errors.Join(cause, err), true)
+}
+
 // refuseAtAdmission handles a refusal by the final admission fence. Nothing was
 // admitted: no POST, no charge (auth cancelled the hold), no attempt evidence.
 //   - A durable Stop marker wins: this invocation's own guard is removed
@@ -1070,7 +1141,10 @@ func (e *Executor) admissionScope(guardStore *state.Store, guard state.PlaylistS
 //   - Removal, lost ownership or an unusable claim identity keep the guard,
 //     write nothing about the work, and route to run ending as a typed refusal.
 //   - Any other local failure keeps the guard and is reported as such.
-func (e *Executor) refuseAtAdmission(ctx context.Context, guardStore *state.Store, guard state.PlaylistSendGuard, runID, videoID int64, a action, cause error, retry queue.RetryGroupReceipt, isRetry bool) (state.ActionOutcome, error) {
+func (e *Executor) refuseAtAdmission(ctx context.Context, guardStore *state.Store, guard state.PlaylistSendGuard, runID, videoID int64, a action, cause error, retry queue.RetryGroupReceipt, isRetry bool, validateReceipt state.PlaylistRetryAuthority) (state.ActionOutcome, error) {
+	if errors.Is(cause, queue.ErrAdmissionWriterUnavailable) {
+		return e.resolveAfterWriterUnavailable(ctx, guardStore, guard, runID, videoID, a, cause, retry, isRetry, validateReceipt)
+	}
 	if errors.Is(cause, state.ErrPlaylistSendStopped) {
 		outcome, err := e.releaseUnadmittedClaim(ctx, guardStore, guard, runID, videoID, cause)
 		if isRetry {

@@ -309,6 +309,13 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	if errors.As(workErr, &accountingErr) {
 		return workErr
 	}
+	var writerFault *admissionWriterFault
+	if errors.As(workErr, &writerFault) {
+		// A local storage fault at final admission stops the run. The original
+		// receipt stays live until the run-level retention sweep; this video
+		// takes neither FinishRetryFailureTx nor an Errors entry.
+		return workErr
+	}
 	var guardedHandoffErr guardedRetryHandoffError
 	if errors.As(workErr, &guardedHandoffErr) {
 		// A failed auth/quota composition is already an attempted transaction
