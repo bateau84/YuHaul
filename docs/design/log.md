@@ -8,6 +8,7 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-20
 
+- Recorded that the `retry_work_removed` handling of [admin interface design](/docs/design/yuhaul-admin-ui-design.md) section 3a is implemented in the Errors and Deferred views (component tests only, not yet checked in a browser), and that the Deferred `Dismiss` confirmation now also opens for a non-handed-over row while its retry is pending, so the pending-only first line has a place. The designer should confirm that reading.
 - Specified the `retry_work_removed` response (authorization ARS-001) in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): copy that does not claim nothing was sent, an inline alert and removed row instead of toasts, focus, and Dismiss staying usable while a Retry is pending. Design only.
 
 - Recorded the implementation status of the channel scan block in the [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the Errors section and the Run Detail list are in `04aee26`, and the run-wide-cause variants are pending. The block's API need is now supplied by [ARS-002 §4.5](/docs/architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md#45-per-run-channel-scan-outcome-added-2026-11-20-review-833a06fb-major-1) `discovery_scan`. The designer still owes copy for `in_progress` and for the unreachable `null`-with-rows case. Architect, review `833a06fb`.
