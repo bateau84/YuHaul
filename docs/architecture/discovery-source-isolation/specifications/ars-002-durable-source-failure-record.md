@@ -31,7 +31,7 @@ User decisions recorded on 2026-11-20 (relayed by the dispatcher):
 
 ## 1. Schema: migration `030_discovery_source_failure.up.sql`
 
-There is one forward migration and no down file, the same as `029`. This is one additive table with no rebuild and no change to any existing table.
+There is one forward migration and no down file, the same as `029`. This adds one table and one nullable column on `run` (§4.5), with no table rebuild and no change to any other existing table.
 
 ```sql
 CREATE TABLE discovery_source_failure (
