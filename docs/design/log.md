@@ -8,6 +8,8 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-20
 
+- Specified the `retry_work_removed` response (authorization ARS-001) in [admin interface design](/docs/design/yuhaul-admin-ui-design.md): copy that does not claim nothing was sent, an inline alert and removed row instead of toasts, focus, and Dismiss staying usable while a Retry is pending. Design only.
+
 - Recorded the implementation status of the channel scan block in the [admin interface design](/docs/design/yuhaul-admin-ui-design.md): the Errors section and the Run Detail list are in `04aee26`, and the run-wide-cause variants are pending. The block's API need is now supplied by [ARS-002 §4.5](/docs/architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md#45-per-run-channel-scan-outcome-added-2026-11-20-review-833a06fb-major-1) `discovery_scan`. The designer still owes copy for `in_progress` and for the unreachable `null`-with-rows case. Architect, review `833a06fb`.
 - Specified Errors page empty states in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (review 833a06fb): the video list reads `No video errors in the queue.`, no empty state claims overall health, and both-empty and one-empty pages read section by section. Design only.
 
