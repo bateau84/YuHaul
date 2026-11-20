@@ -10,6 +10,8 @@ timestamp: 2026-11-20T00:00:00Z
 
 ## 2026-11-20
 
+**Updated:** [Upgrade notes](/docs/user-docs/upgrade-notes.md). The version 31 legacy-cohort check is now the exact command that was run on the production database (researcher session `ses_e074e4341ffexQQG6yzEbj7Gbn`), with how to read its output, replacing a reconstruction.
+
 **Updated:** [Upgrade notes](/docs/user-docs/upgrade-notes.md). Added the database version 31 section (migration `031`, PR #5), from release check `df803f9f`: stop with no run in progress, the legacy-cohort check with the query, backup of the database and its `-wal` and `-shm` files, the deploy checks (`title search index ready`, no `startup recovery blocked`, `31|0`), rollback by restoring all three files (`967df28` refuses version 31), and the one-way clearing and no-hand-edit warnings.
 
 **Updated:** [Upgrade notes](/docs/user-docs/upgrade-notes.md). `030` now ships in PR #4 (`2930a2d`). Added the release check's (`6d65f7ef`) operator steps, the version-30 check, rollback to `debad57`, and the warning not to deploy onto a database already at version 30 from an interim build.

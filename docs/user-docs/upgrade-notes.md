@@ -51,49 +51,101 @@ Technical contract: [Discovery ARS-002](../architecture/discovery-source-isolati
 2. Re-run the legacy-cohort check below against the stopped database (or a copy) and confirm that **every `[BLOCKS]` line prints `0`**. A non-zero line means unfinished work that an older version claimed for a retry; version 31 treats such work as unverifiable and will not dispatch or hand it off. Do not deploy until you understand the count.
 3. Back up the database: copy `yuhaul.db` together with its `yuhaul.db-wal` and `yuhaul.db-shm` files, if present, from the same stopped state. The default location is `/data/yuhaul.db` (`YUHAUL_DB_PATH`). Label the copy `967df28 / version 30`.
 
-The legacy-cohort check is read-only. Save it as `legacy-cohort-check.sql` and run `sqlite3 -readonly /data/yuhaul.db < legacy-cohort-check.sql`. It works on a version 29 or version 30 database, because it does not use the new column. On the production database, before and after `967df28` was deployed, every `[BLOCKS]` count was 0 (Loom records `997bc861` and `61ae9f35`); those runs used the researcher's query, which is not stored in this repository. The query below is a reconstruction of those checks, tried on a seeded database where it prints 0 for a clean database and for native unfinished work, and 1 for each of a claimed queue row, a foreign unfinished membership and a Stop-marked run holding work.
+The legacy-cohort check is one read-only `sqlite3` command. It is the exact command that was run on the production database before and after `967df28` was deployed, and every `[BLOCKS]` count was 0 both times (Loom records `997bc861` and `61ae9f35`). Run it as one invocation: it is a single statement, so it reads one consistent snapshot, and `-readonly` stops it from writing anything. Its output is `label | count` lines only, with no titles, video IDs or run IDs. The first two lines (`schema.migration_version`, `schema.migration_dirty`) confirm the database is at version 29 or 30 and not dirty. It does not use the new column, so it works on a database that has not been migrated yet.
 
-```sql
--- Legacy retry cohort check. Read-only: run it against a stopped database or a
--- copy. Every [BLOCKS] line must print 0 before you deploy version 31.
-SELECT '[BLOCKS] queue rows claimed by an unfinished run' AS check_name, count(*) AS n
-FROM (
-  SELECT retry_run_id FROM deferred_item WHERE status = 'retrying'
+The database path in the command is the production path of the system it was run on. Replace it with yours (the default is `/data/yuhaul.db`, from `YUHAUL_DB_PATH`), and run it with YuHaul stopped or on the copy from step 3.
+
+```sh
+sqlite3 -readonly -batch /data/disk2/opt/yuhaul/yuhaul.db <<'SQL'
+.headers off
+.mode list
+.separator " | "
+WITH
+rc AS (
+  SELECT id, status,
+    (run_type IN ('manual','scheduled') AND status IN ('running','interrupted')) AS unfinished,
+    (run_type IN ('manual','scheduled') AND status IN ('running','interrupted') AND stop_requested_at IS NOT NULL) AS marked,
+    (run_type = 'manual' AND status = 'interrupted' AND interrupt_cause = 'time_limit' AND initiated_by = 'run_now') AS discard_shape
+  FROM run
+),
+q AS (
+  SELECT 'deferred' AS kind, video_id, retry_run_id AS owner,
+         CASE status WHEN 'retrying' THEN 'claimed' ELSE 'waiting' END AS st
+    FROM deferred_item WHERE status IN ('pending','retrying')
   UNION ALL
-  SELECT retry_run_id FROM error_entry WHERE status = 'retrying'
-)
-WHERE retry_run_id IN (SELECT id FROM run WHERE status IN ('running', 'interrupted'))
-UNION ALL
-SELECT '[BLOCKS] unfinished memberships that are not provably native', count(*)
-FROM run_video_outcome o
-JOIN run r ON r.id = o.run_id
-JOIN video v ON v.id = o.video_id
-WHERE r.status IN ('running', 'interrupted')
-  AND r.run_type IN ('manual', 'scheduled')
-  AND (o.final_outcome IS NULL OR o.final_outcome = 'not_yet_evaluated')
-  AND NOT (
+  SELECT 'error', video_id, retry_run_id,
+         CASE status WHEN 'retrying' THEN 'claimed' ELSE 'waiting' END
+    FROM error_entry WHERE status IN ('active','retrying')
+),
+qc AS (
+  SELECT q.kind, q.st, q.video_id, q.owner,
+    (COALESCE(v.final_outcome,'') IN ('accepted','rejected','excluded','unavailable_on_youtube')) AS on_final,
+    (q.owner IS NULL) AS o_none,
+    COALESCE(r.unfinished,0) AS o_unfin,
+    COALESCE(r.marked,0) AS o_marked,
+    COALESCE(r.discard_shape,0) AS o_disc,
+    (q.owner IS NOT NULL AND r.id IS NOT NULL AND r.unfinished = 0) AS o_term,
+    (q.owner IS NOT NULL AND r.id IS NULL) AS o_missing,
+    EXISTS (SELECT 1 FROM run_video_outcome o WHERE o.run_id = q.owner AND o.video_id = q.video_id) AS has_member
+  FROM q
+  LEFT JOIN video v ON v.id = q.video_id
+  LEFT JOIN rc r ON r.id = q.owner
+),
+m AS (
+  SELECT o.run_id, rc.marked, rc.discard_shape,
+    (COALESCE(v.final_outcome,'') IN ('accepted','rejected','excluded','unavailable_on_youtube')
+       OR v.processing_state = 'completed'
+       OR COALESCE(o.final_outcome,'') IN ('accepted','rejected','excluded','deferred','failed','unavailable_on_youtube')) AS finished,
     (v.discovered_in_run_id = o.run_id
-       OR EXISTS (SELECT 1 FROM route_decision d WHERE d.run_id = o.run_id AND d.video_id = o.video_id))
-    AND NOT EXISTS (SELECT 1 FROM deferred_item q WHERE q.video_id = o.video_id AND q.retry_run_id = o.run_id)
-    AND NOT EXISTS (SELECT 1 FROM error_entry e WHERE e.video_id = o.video_id AND e.retry_run_id = o.run_id)
-  )
-UNION ALL
-SELECT '[BLOCKS] Stop-marked runs that still hold work', count(*)
-FROM run r
-WHERE r.stop_requested_at IS NOT NULL
-  AND r.status IN ('running', 'interrupted')
-  AND (
-    EXISTS (SELECT 1 FROM deferred_item q WHERE q.retry_run_id = r.id AND q.status = 'retrying')
-    OR EXISTS (SELECT 1 FROM error_entry e WHERE e.retry_run_id = r.id AND e.status = 'retrying')
-    OR EXISTS (SELECT 1 FROM run_video_outcome o
-               WHERE o.run_id = r.id AND (o.final_outcome IS NULL OR o.final_outcome = 'not_yet_evaluated'))
-  )
-UNION ALL
-SELECT 'info: open deferred and error queue rows', (SELECT count(*) FROM deferred_item WHERE status IN ('pending', 'retrying'))
-                                                  + (SELECT count(*) FROM error_entry WHERE status IN ('active', 'retrying'))
-UNION ALL
-SELECT 'info: unfinished production runs', count(*) FROM run WHERE status IN ('running', 'interrupted') AND run_type IN ('manual', 'scheduled');
+       OR EXISTS (SELECT 1 FROM route_decision d WHERE d.video_id = o.video_id AND d.run_id = o.run_id)) AS native_ev,
+    (EXISTS (SELECT 1 FROM deferred_item d WHERE d.video_id = o.video_id AND d.retry_run_id = o.run_id)
+       OR EXISTS (SELECT 1 FROM error_entry e WHERE e.video_id = o.video_id AND e.retry_run_id = o.run_id)) AS owner_row
+  FROM run_video_outcome o
+  JOIN rc ON rc.id = o.run_id AND rc.unfinished
+  JOIN video v ON v.id = o.video_id
+),
+mu AS (SELECT * FROM m WHERE NOT finished)
+SELECT 'schema.migration_version' AS label, COALESCE((SELECT version FROM schema_migrations LIMIT 1), -1) AS n
+UNION ALL SELECT 'schema.migration_dirty', COALESCE((SELECT dirty FROM schema_migrations LIMIT 1), -1)
+UNION ALL SELECT 'A.open_queue_rows.total', COUNT(*) FROM qc
+UNION ALL SELECT 'A.open_queue_rows.on_final_video (cleanup, not cohort)', COALESCE(SUM(on_final),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_unfinished_run.total [BLOCKS]', COALESCE(SUM(st='claimed' AND NOT on_final AND o_unfin),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_unfinished_run.deferred', COALESCE(SUM(st='claimed' AND NOT on_final AND o_unfin AND kind='deferred'),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_unfinished_run.error', COALESCE(SUM(st='claimed' AND NOT on_final AND o_unfin AND kind='error'),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_marked_stop_run [BLOCKS]', COALESCE(SUM(st='claimed' AND NOT on_final AND o_marked),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_discard_shaped_run [BLOCKS]', COALESCE(SUM(st='claimed' AND NOT on_final AND o_disc),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_unfinished_run.without_membership', COALESCE(SUM(st='claimed' AND NOT on_final AND o_unfin AND NOT has_member),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_terminal_run (anomaly)', COALESCE(SUM(st='claimed' AND NOT on_final AND o_term),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_none (anomaly)', COALESCE(SUM(st='claimed' AND NOT on_final AND o_none),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_missing_run (anomaly)', COALESCE(SUM(st='claimed' AND NOT on_final AND o_missing),0) FROM qc
+UNION ALL SELECT 'A.waiting.owner_none (ordinary queue)', COALESCE(SUM(st='waiting' AND NOT on_final AND o_none),0) FROM qc
+UNION ALL SELECT 'A.waiting.owner_terminal_run (released marker)', COALESCE(SUM(st='waiting' AND NOT on_final AND o_term),0) FROM qc
+UNION ALL SELECT 'A.waiting.owner_unfinished_run (see B)', COALESCE(SUM(st='waiting' AND NOT on_final AND o_unfin),0) FROM qc
+UNION ALL SELECT 'B.unfinished_runs.memberships.total', COUNT(*) FROM m
+UNION ALL SELECT 'B.unfinished_runs.memberships.finished_member (history)', COALESCE(SUM(finished),0) FROM m
+UNION ALL SELECT 'B.unfinished_runs.memberships.unfinished_member', COUNT(*) FROM mu
+UNION ALL SELECT 'B.unfinished_member.native_proven (no owner row)', COALESCE(SUM(native_ev AND NOT owner_row),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.total [BLOCKS]', COALESCE(SUM(NOT (native_ev AND NOT owner_row)),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.owner_row_no_native', COALESCE(SUM(owner_row AND NOT native_ev),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.owner_row_and_native', COALESCE(SUM(owner_row AND native_ev),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.no_owner_no_native', COALESCE(SUM(NOT owner_row AND NOT native_ev),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.in_marked_stop_run [BLOCKS]', COALESCE(SUM(marked AND NOT (native_ev AND NOT owner_row)),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.in_discard_shaped_run [BLOCKS]', COALESCE(SUM(discard_shape AND NOT (native_ev AND NOT owner_row)),0) FROM mu
+UNION ALL SELECT 'C.runs.production_unfinished', COALESCE(SUM(unfinished),0) FROM rc
+UNION ALL SELECT 'C.runs.marked_stop', COALESCE(SUM(marked),0) FROM rc
+UNION ALL SELECT 'C.runs.discard_shaped', COALESCE(SUM(discard_shape AND unfinished),0) FROM rc
+UNION ALL SELECT 'C.runs.marked_stop_holding_claimed_rows [BLOCKS]', COUNT(DISTINCT CASE WHEN st='claimed' AND NOT on_final AND o_marked THEN owner END) FROM qc
+UNION ALL SELECT 'C.runs.discard_shaped_holding_claimed_rows [BLOCKS]', COUNT(DISTINCT CASE WHEN st='claimed' AND NOT on_final AND o_disc THEN owner END) FROM qc
+UNION ALL SELECT 'C.runs.marked_stop_with_ambiguous_members [BLOCKS]', COUNT(DISTINCT CASE WHEN marked AND NOT (native_ev AND NOT owner_row) THEN run_id END) FROM mu
+UNION ALL SELECT 'C.runs.discard_shaped_with_ambiguous_members [BLOCKS]', COUNT(DISTINCT CASE WHEN discard_shape AND NOT (native_ev AND NOT owner_row) THEN run_id END) FROM mu
+UNION ALL SELECT 'D.history.queue_rows_closed_with_owner', (SELECT COUNT(*) FROM deferred_item WHERE status IN ('completed','discarded') AND retry_run_id IS NOT NULL) + (SELECT COUNT(*) FROM error_entry WHERE status IN ('dismissed','resolved') AND retry_run_id IS NOT NULL)
+UNION ALL SELECT 'D.history.queue_rows_closed_total', (SELECT COUNT(*) FROM deferred_item WHERE status IN ('completed','discarded')) + (SELECT COUNT(*) FROM error_entry WHERE status IN ('dismissed','resolved'))
+UNION ALL SELECT 'D.history.memberships_of_ended_or_nonproduction_runs', (SELECT COUNT(*) FROM run_video_outcome o JOIN rc ON rc.id = o.run_id WHERE NOT rc.unfinished)
+UNION ALL SELECT 'D.memberships.all', (SELECT COUNT(*) FROM run_video_outcome);
+SQL
 ```
+
+Every line labelled `[BLOCKS]` must print `0`. A non-zero `[BLOCKS]` line is unfinished retry work that an older version claimed and that version 31 would leave without a stored claim: it would not be dispatched, handed off or settled, so do not deploy until you understand the count. Lines without `[BLOCKS]` are for context: ordinary queue rows, native unfinished work (`native_proven`), closed history and anomalies. The definitions are in [run-initiation ARS-005 section 5.1.1](../architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md#511-durable-retry-claim-provenance).
 
 **Deploying.**
 
