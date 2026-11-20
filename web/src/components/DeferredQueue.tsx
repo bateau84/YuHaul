@@ -9,10 +9,13 @@ import { isClosedEntry, refusalText, usableEntry } from '../lib/final-outcome'
 import { deferredReasons } from '../types'
 import type { DeferredItem, DeferredPage, DeferredReason } from '../types'
 import { ClosedNotice, RefusalAlert } from './ClosedNotice'
+import { RemovalAlert, RemovedNotice } from './RemovedNotice'
 import { ConfirmDialog } from './ConfirmDialog'
 import { FetchErrorRegion } from './FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
 import { duplicateTitles, targetName, videoIdSuffix } from '../lib/same-title'
+import { pendingRetryDismissLine, RETRY_WORK_REMOVED, retryRunOf, usableRemovedEntry } from '../lib/retry-removed'
+import type { RemovalNoticeData } from '../lib/retry-removed'
 
 const PAGE_SIZE = 50
 const nf = new Intl.NumberFormat()
@@ -119,7 +122,15 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   // stay on this page as closed rows until the next read replaces the page, and
   // are taken out of the totals shown, because the API now counts them closed.
   const [closedHere, setClosedHere] = useState<Record<number, DeferredItem>>({})
-  const closedHereCount = Object.keys(closedHere).length
+  // Items whose Retry ended with 409 retry_work_removed (the person's own removal
+  // won), still on this page as removed rows until the next read. Like closed
+  // rows they are not active, so they leave the totals.
+  const [removedHere, setRemovedHere] = useState<Record<number, { item: DeferredItem; runId?: number; hidden?: boolean }>>({})
+  // Rows whose Retry is running: "Retrying…", aria-disabled, Dismiss still usable.
+  const [retryingIds, setRetryingIds] = useState<ReadonlySet<number>>(new Set())
+  // The removal notice for an item whose row is already gone, at the top of the list.
+  const [topNotices, setTopNotices] = useState<RemovalNoticeData[]>([])
+  const closedHereCount = Object.keys(closedHere).length + Object.keys(removedHere).length
   const activePages = Math.max(1, Math.ceil(Math.max((data?.total ?? 0) - closedHereCount, 0) / PAGE_SIZE))
   const [reloads, setReloads] = useState(0)
   const [reasonDraft, setReasonDraft] = useState<string>(reason ?? '')
@@ -136,6 +147,8 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   const loadedKey = useRef<string | null>(null)
   const queryRef = useRef(query)
   queryRef.current = query
+  const dataRef = useRef<DeferredPage | null>(null)
+  dataRef.current = data
 
   useEffect(() => setReasonDraft(reason ?? ''), [reason])
 
@@ -169,6 +182,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         }
         settledIntent.current = intent
         setClosedHere({})
+        setRemovedHere({})
         setData(page)
         setStatus('ready')
         onQueueTotal(page.queue_total)
@@ -268,14 +282,39 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   }
 
   // Retry now: a 409 video_already_final closes the item and sends nothing, so
-  // it shows the refusal and the closed row in place and does not reload.
-  async function retryItem(d: DeferredItem, index: number) {
+  // it shows the refusal and the closed row in place and does not reload. A 409
+  // retry_work_removed means the person's own removal won a retry that may
+  // already have sent additions: a persistent notice, no toast, a removed row.
+  async function retryItem(d: DeferredItem, index: number, target: string) {
+    if (retryingIds.has(d.id)) return // aria-disabled: a second press does nothing
+    setRetryingIds((prev) => new Set(prev).add(d.id))
     try {
       await api.retryDeferred(d.id)
       addToast('Deferred item queued for retry', 'success')
       intentRef.current = { focus: { kind: 'row', index }, announce: false }
       setReloads((n) => n + 1)
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.code === RETRY_WORK_REMOVED) {
+        const entry = usableRemovedEntry<DeferredItem>(err.entry, d.id, 'discarded')
+        const runId = retryRunOf(err.entry)
+        const onScreen = dataRef.current?.deferred.some((row) => row.id === d.id) ?? false
+        if (onScreen) {
+          // The removed item is no longer part of the queue total.
+          const current = dataRef.current
+          if (current && !(d.id in removedHere)) onQueueTotal(current.queue_total - closedHereCount - 1)
+          if (entry) {
+            setRemovedHere((prev) => ({ ...prev, [d.id]: { item: { ...d, ...entry }, runId } }))
+          } else {
+            // No usable entry: take the row out and keep the notice, focused.
+            setTopNotices((prev) => [...prev.filter((n) => n.id !== d.id), { id: d.id, target, runId, focus: true }])
+            setRemovedHere((prev) => ({ ...prev, [d.id]: { item: { ...d, status: 'discarded' }, runId, hidden: true } }))
+          }
+        } else {
+          // The row is already gone (dismissed in this tab): no second toast, no focus move.
+          setTopNotices((prev) => [...prev.filter((n) => n.id !== d.id), { id: d.id, target, runId, focus: false }])
+        }
+        return
+      }
       if (err instanceof ApiError && err.status === 409 && err.code === 'video_already_final') {
         const entry = usableEntry<DeferredItem>(err.entry, d.id)
         // The item is closed now, so it is no longer part of the queue total.
@@ -289,6 +328,12 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         return
       }
       addToast(err instanceof Error ? err.message : 'Failed to retry deferred item', 'error')
+    } finally {
+      setRetryingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(d.id)
+        return next
+      })
     }
   }
 
@@ -362,6 +407,9 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
       <div role="status" aria-live="polite" className="sr-only">
         {announcement}
       </div>
+      {topNotices.map((n) => (
+        <RemovalAlert key={n.id} target={n.target} runId={n.runId} focus={n.focus} />
+      ))}
 
       <form
         onSubmit={(e) => {
@@ -426,13 +474,23 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
             </thead>
             <tbody ref={bodyRef}>
               {items.map((row, i) => {
-                const d = closedHere[row.id] ?? row
+                const removedRow = removedHere[row.id]
+                if (removedRow?.hidden) return null
+                const d = closedHere[row.id] ?? removedRow?.item ?? row
                 const closed = isClosedEntry(d)
+                const pending = retryingIds.has(d.id)
                 const idText = String(d.external_video_id ?? d.video_id)
                 const suffix = videoIdSuffix(d.video_title, sharedTitles, idText)
                 const target = targetName(d.video_title, sharedTitles, idText)
                 return (
                   <Fragment key={d.id}>
+                    {removedRow && !topNotices.some((n) => n.id === row.id) && (
+                      <tr>
+                        <td colSpan={4}>
+                          <RemovalAlert runId={removedRow.runId} focus />
+                        </td>
+                      </tr>
+                    )}
                     {row.id in closedHere && (
                       <tr>
                         <td colSpan={4}>
@@ -454,23 +512,26 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                         )}
                       </td>
                       <td data-label="Reason">{reasonText(d)}</td>
-                      <td data-label="Retry after">{closed ? '' : eligibilityText(d)}</td>
+                      <td data-label="Retry after">{closed || removedRow ? '' : eligibilityText(d)}</td>
                       <td data-label="Actions">
                         {closed ? (
                           <ClosedNotice outcome={d.video_final_outcome} videoId={d.external_video_id} target={target} />
+                        ) : removedRow ? (
+                          <RemovedNotice videoId={d.external_video_id} target={target} />
                         ) : (
                           <div style={{ display: 'flex', gap: 8 }}>
                             <button
                               className="button"
-                              aria-label={`Retry now: ${target}`}
-                              onClick={() => void retryItem(d, i)}
+                              aria-label={pending ? `Retrying ${target}` : `Retry now: ${target}`}
+                              aria-disabled={pending ? true : undefined}
+                              onClick={() => void retryItem(d, i, target)}
                             >
-                              Retry now
+                              {pending ? 'Retrying…' : 'Retry now'}
                             </button>
                             <button
                               className="button"
                               aria-label={`Dismiss deferred item: ${target}`}
-                              onClick={() => (isHandedOver(d) ? setConfirmDismiss({ item: d, index: i }) : void discard(d, i))}
+                              onClick={() => (isHandedOver(d) || pending ? setConfirmDismiss({ item: d, index: i }) : void discard(d, i))}
                             >
                               Dismiss
                             </button>
@@ -560,6 +621,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         }}
         onCancel={() => setConfirmDismiss(null)}
       >
+        {confirmDismiss !== null && retryingIds.has(confirmDismiss.item.id) && <p style={{ marginTop: 0 }}>{pendingRetryDismissLine}</p>}
         It will not be retried, but the historical record will be preserved.
       </ConfirmDialog>
     </div>

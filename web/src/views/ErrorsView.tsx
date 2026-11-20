@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import * as api from '../api/client'
 import { ApiError } from '../api/core'
 import { ClosedNotice, RefusalAlert } from '../components/ClosedNotice'
+import { RemovalAlert, RemovedNotice } from '../components/RemovedNotice'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { FailureReason } from '../components/FailureReason'
 import { DeferredQueue } from '../components/DeferredQueue'
@@ -19,6 +20,8 @@ import {
   refusalText,
   usableEntry,
 } from '../lib/final-outcome'
+import { RETRY_WORK_REMOVED, retryRunOf, usableRemovedEntry } from '../lib/retry-removed'
+import type { RemovalNoticeData } from '../lib/retry-removed'
 import type { ErrorEntry } from '../types'
 
 const isUnreadableDecision = (e: ErrorEntry) => diagCode(e.error_message) === ORIGINAL_DECISION_UNAVAILABLE
@@ -34,7 +37,9 @@ export function ErrorsView() {
   // A closed entry is no longer active: it is never counted (BR-039).
   // Rows that share a title name their video ID, visibly and in control names.
   const sharedTitles = duplicateTitles(errors)
-  const activeCount = errors.filter((e) => !isClosedEntry(e)).length
+  // A removed entry (the person's own removal won a running Retry) is not active either.
+  const isRemoved = (e: ErrorEntry) => e.status === 'dismissed'
+  const activeCount = errors.filter((e) => !isClosedEntry(e) && !isRemoved(e)).length
   const [queueTotal, setQueueTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState(false)
@@ -42,6 +47,16 @@ export function ErrorsView() {
   // Entries whose Retry was refused with video_already_final (BR-039), by id.
   // The refusal stays on screen next to the closed row until the page is left.
   const [refusals, setRefusals] = useState<Record<number, string | undefined>>({})
+  // Rows whose Retry is running. The control reads "Retrying…" and is
+  // aria-disabled, never disabled, so it keeps focus; Remove stays usable.
+  const [retryingIds, setRetryingIds] = useState<ReadonlySet<number>>(new Set())
+  // Rows still on screen whose Retry ended with 409 retry_work_removed: the
+  // notice sits in the row's place and the row becomes a removed row.
+  const [removals, setRemovals] = useState<Record<number, { runId?: number }>>({})
+  // The same notice for an item whose row is already gone, at the top of the list.
+  const [topNotices, setTopNotices] = useState<RemovalNoticeData[]>([])
+  const errorsRef = useRef<ErrorEntry[]>([])
+  errorsRef.current = errors
   const [confirmDismiss, setConfirmDismiss] = useState<ErrorEntry | null>(null)
   const retryButtonRef = useRef<HTMLButtonElement>(null)
   const firstRowRef = useRef<HTMLTableRowElement>(null)
@@ -110,13 +125,35 @@ export function ErrorsView() {
     }
   }
 
-  async function retryError(id: number) {
+  async function retryError(id: number, target: string) {
+    if (retryingIds.has(id)) return // aria-disabled: a second press does nothing
+    setRetryingIds((prev) => new Set(prev).add(id))
     try {
       await api.retryError(id)
       setFocusAfterDismiss({ index: errors.findIndex((e) => e.id === id) })
       setErrors((prev) => prev.filter((e) => e.id !== id))
       addToast('Error queued for retry', 'success')
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.code === RETRY_WORK_REMOVED) {
+        // The person's own removal won. No toast of either kind; the retry may
+        // already have sent additions, so no text says nothing was sent.
+        const entry = usableRemovedEntry<ErrorEntry>(err.entry, id, 'dismissed')
+        const runId = retryRunOf(err.entry)
+        const onScreen = errorsRef.current.some((e) => e.id === id)
+        if (onScreen && entry) {
+          setRemovals((prev) => ({ ...prev, [id]: { runId } }))
+          setErrors((prev) => prev.map((e) => (e.id === id ? { ...e, ...entry } : e)))
+        } else if (onScreen) {
+          // No usable entry: take the row out and keep the notice, focused,
+          // because the Retry that held focus is gone.
+          setErrors((prev) => prev.filter((e) => e.id !== id))
+          setTopNotices((prev) => [...prev.filter((n) => n.id !== id), { id, target, runId, focus: true }])
+        } else {
+          // The row is already gone (dismissed in this tab): no second toast, no focus move.
+          setTopNotices((prev) => [...prev.filter((n) => n.id !== id), { id, target, runId, focus: false }])
+        }
+        return
+      }
       if (err instanceof ApiError && err.status === 409 && err.code === 'video_already_final') {
         // Nothing was sent. Show the refusal and the closed row, not a toast.
         const entry = usableEntry<ErrorEntry>(err.entry, id)
@@ -131,6 +168,12 @@ export function ErrorsView() {
         return
       }
       addToast(err instanceof Error ? err.message : 'Failed to retry error', 'error')
+    } finally {
+      setRetryingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
   }
 
@@ -187,6 +230,9 @@ export function ErrorsView() {
         <>
           <section className="card" aria-labelledby="video-errors-heading">
             <h2 id="video-errors-heading" className="section-title">Video errors</h2>
+            {topNotices.map((n) => (
+              <RemovalAlert key={n.id} target={n.target} runId={n.runId} focus={n.focus} />
+            ))}
             {loading ? (
               <div className="empty-state" role="status">Loading queue...</div>
             ) : fetchError ? (
@@ -206,6 +252,8 @@ export function ErrorsView() {
                   <tbody ref={bodyRef}>
                     {errors.map((e, i) => {
                       const closed = isClosedEntry(e)
+                      const removed = !closed && isRemoved(e)
+                      const pending = retryingIds.has(e.id)
                       const unreadable = !closed && isUnreadableDecision(e)
                       const videoKey = e.external_video_id
                       const idText = String(e.external_video_id ?? e.video_id)
@@ -213,6 +261,13 @@ export function ErrorsView() {
                       const target = targetName(e.video_title, sharedTitles, idText)
                       return (
                         <Fragment key={e.id}>
+                          {e.id in removals && (
+                            <tr>
+                              <td colSpan={4}>
+                                <RemovalAlert runId={removals[e.id].runId} focus />
+                              </td>
+                            </tr>
+                          )}
                           {e.id in refusals && (
                             <tr>
                               <td colSpan={4}>
@@ -247,6 +302,8 @@ export function ErrorsView() {
                             <td data-label="Actions">
                               {closed ? (
                                 <ClosedNotice outcome={e.video_final_outcome} videoId={videoKey} target={target} />
+                              ) : removed ? (
+                                <RemovedNotice videoId={videoKey} target={target} />
                               ) : unreadable ? (
                                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                                   <button
@@ -267,10 +324,11 @@ export function ErrorsView() {
                                 <div style={{ display: 'flex', gap: 8 }}>
                                   <button
                                     className="button"
-                                    aria-label={`Retry ${target}`}
-                                    onClick={() => retryError(e.id)}
+                                    aria-label={pending ? `Retrying ${target}` : `Retry ${target}`}
+                                    aria-disabled={pending ? true : undefined}
+                                    onClick={() => void retryError(e.id, target)}
                                   >
-                                    Retry
+                                    {pending ? 'Retrying…' : 'Retry'}
                                   </button>
                                   <button className="button" aria-label={`Remove error: ${target}`} onClick={() => dismissError(e.id)}>
                                     Remove

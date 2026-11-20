@@ -100,6 +100,16 @@ func (s *Service) handleRetryError(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		if errors.Is(err, ErrWorkRemoved) {
+			s.writeRetryWorkRemoved(w, r, id, func() (any, error) {
+				e, gerr := s.store.GetErrorEntry(r.Context(), id)
+				if gerr != nil {
+					return nil, gerr
+				}
+				return publicErrorEntry(e), nil
+			})
+			return
+		}
 		if errors.Is(err, ErrInvalidState) {
 			writeError(w, http.StatusConflict, queueFailureMessage(err, "retry"))
 			return
@@ -267,6 +277,16 @@ func (s *Service) handleRetryDeferred(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		if errors.Is(err, ErrWorkRemoved) {
+			s.writeRetryWorkRemoved(w, r, id, func() (any, error) {
+				d, gerr := s.store.GetDeferredItem(r.Context(), id)
+				if gerr != nil {
+					return nil, gerr
+				}
+				return publicDeferredItem(d), nil
+			})
+			return
+		}
 		if errors.Is(err, ErrInvalidState) {
 			writeError(w, http.StatusConflict, queueFailureMessage(err, "retry"))
 			return
@@ -277,6 +297,28 @@ func (s *Service) handleRetryDeferred(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, publicDeferredItem(item))
+}
+
+// retryWorkRemovedMessage is the designed copy (admin UI design 3a). It must
+// not claim that nothing was sent: the removal can follow an admitted POST.
+const retryWorkRemovedMessage = "This item was removed while its retry was running. The retry may already have sent playlist additions to YouTube. It will not be retried again."
+
+// writeRetryWorkRemoved answers a manual retry whose run ended because the
+// user's own removal of the requested work won (authorization ARS-001, manual
+// retry response): 409 with the current entry. The run is already settled; the
+// handler only reports. If the entry cannot be loaded it answers 500.
+func (s *Service) writeRetryWorkRemoved(w http.ResponseWriter, r *http.Request, id int64, load func() (any, error)) {
+	entry, err := load()
+	if err != nil {
+		slog.ErrorContext(r.Context(), "load removed entry failed", "entry_id", id, "diagnostic", diag.Encode(err, "unknown", "retry"))
+		writeError(w, http.StatusInternalServerError, "failed to load removed entry")
+		return
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error": retryWorkRemovedMessage,
+		"code":  "retry_work_removed",
+		"entry": entry,
+	})
 }
 
 // writeAlreadyFinal answers a refused retry of an entry whose video already has

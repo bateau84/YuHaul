@@ -90,6 +90,119 @@ func TestRetryQueueEntryGuardedProduction(t *testing.T) {
 	require.Equal(t, 1, calls)
 }
 
+// The carrier is inspected before execution because the send guard does not
+// yet consume retry receipts. This test does not prove dispatch fencing.
+func TestFreshRetryReceiptTransfer(t *testing.T) {
+	for _, mode := range []string{"scheduled", "run-now"} {
+		for _, change := range []string{"intact", "released", "discarded", "all-released"} {
+			t.Run(mode+"/"+change, func(t *testing.T) {
+				ctx := context.Background()
+				env := setupIdempotencyTest(t, []mockVideo{makeJazzVideo("V1", time.Now().UTC().Add(-time.Hour))})
+				p := env.pipeline
+				qs, err := queue.NewStore(p.db)
+				require.NoError(t, err)
+				p.queueStore = qs
+				require.NoError(t, p.ledger.SetDailyLimit(ctx, 4))
+				origin, err := p.StartRun(ctx, state.RunTypeManual)
+				require.NoError(t, err)
+				p.Execute(ctx, origin.ID)
+				items, err := qs.ListDeferredItems(ctx, queue.DeferredStatusPending)
+				require.NoError(t, err)
+				require.Len(t, items, 1)
+				_, err = p.db.ExecContext(ctx, `UPDATE deferred_item SET retry_after=NULL WHERE id=?`, items[0].ID)
+				require.NoError(t, err)
+				_, err = p.db.ExecContext(ctx, `INSERT INTO deferred_item(video_id,run_id,deferral_reason,status,created_at) VALUES(?,?,'quota_exhausted','pending',?)`, items[0].VideoID, origin.ID, time.Now().UTC())
+				require.NoError(t, err)
+				require.NoError(t, p.ledger.SetDailyLimit(ctx, 1000000))
+				var runID int64
+				var admission *RunNowAdmission
+				if mode == "scheduled" {
+					run, err := p.StartRun(ctx, state.RunTypeScheduled)
+					require.NoError(t, err)
+					runID = run.ID
+				} else {
+					admission, err = p.AdmitRunNow(ctx)
+					require.NoError(t, err)
+					require.False(t, admission.Resumed())
+					runID = admission.RunID()
+					defer admission.Release()
+				}
+				ctl := p.control(runID)
+				require.NotNil(t, ctl)
+				ctl.mu.Lock()
+				require.Len(t, ctl.freshRetries, 1)
+				receipt := ctl.freshRetries[0]
+				ctl.mu.Unlock()
+				require.Equal(t, runID, receipt.ReceivingRunID)
+				require.Len(t, receipt.Deferred, 2)
+				if change != "intact" {
+					status := "pending"
+					if change == "discarded" {
+						status = "discarded"
+					}
+					require.NoError(t, qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+						_, err := tx.ExecContext(ctx, `UPDATE deferred_item SET status=?,retry_run_id=NULL WHERE id=?`, status, receipt.Deferred[0].ID)
+						if err == nil && change == "all-released" {
+							_, err = tx.ExecContext(ctx, `UPDATE deferred_item SET status='pending',retry_run_id=NULL WHERE id=?`, receipt.Deferred[1].ID)
+						}
+						return err
+					}))
+				}
+				err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+					_, err := qs.ValidateRetryReceiptTx(ctx, tx, receipt)
+					return err
+				})
+				if change == "released" || change == "all-released" {
+					require.ErrorIs(t, err, queue.ErrWorkNotOwned)
+				} else {
+					require.NoError(t, err)
+				}
+				// The released case must not execute until the guard implements
+				// receipt validation; this test proves only the carrier identity.
+				if change == "released" {
+					return
+				}
+				if change == "all-released" {
+					var before int
+					require.NoError(t, p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM quota_ledger`).Scan(&before))
+					err := p.processDeferredItems(ctx, runID, []queue.RetryGroupReceipt{receipt}, false)
+					var refusal *retryAdmissionRefusal
+					require.ErrorAs(t, err, &refusal)
+					require.ErrorIs(t, err, queue.ErrWorkNotOwned)
+					require.Equal(t, receipt, refusal.receipt)
+					require.Empty(t, env.server.Insertions())
+					var after, pending int
+					require.NoError(t, p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM quota_ledger`).Scan(&after))
+					require.Equal(t, before, after)
+					require.NoError(t, p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deferred_item WHERE video_id=? AND status='pending' AND retry_run_id IS NULL AND id IN (?,?)`, receipt.VideoID, receipt.Deferred[0].ID, receipt.Deferred[1].ID).Scan(&pending))
+					require.Equal(t, 2, pending)
+					require.NoError(t, p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deferred_item WHERE video_id=?`, receipt.VideoID).Scan(&pending))
+					require.Equal(t, 2, pending)
+				}
+				if admission != nil {
+					admission.Execute(ctx)
+				} else {
+					p.Execute(ctx, runID)
+				}
+				run, err := p.stateStore.GetRun(ctx, runID)
+				require.NoError(t, err)
+				if change == "all-released" {
+					require.NotEqual(t, state.RunStatusCompleted, run.Status)
+					require.Empty(t, env.server.Insertions())
+					var count int
+					require.NoError(t, p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deferred_item WHERE video_id=?`, receipt.VideoID).Scan(&count))
+					require.Equal(t, 2, count)
+					require.NoError(t, p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deferred_item WHERE id IN (?,?) AND status='pending' AND retry_run_id IS NULL`, receipt.Deferred[0].ID, receipt.Deferred[1].ID).Scan(&count))
+					require.Equal(t, 2, count)
+				} else {
+					require.Equal(t, state.RunStatusCompleted, run.Status)
+					require.Len(t, env.server.Insertions(), 1)
+				}
+			})
+		}
+	}
+}
+
 func TestRetryRecovery_ReopenBeforeDecisionAndBeforeAcknowledgement(t *testing.T) {
 	for _, point := range []string{"claim", "terminal", "error claim"} {
 		t.Run(point, func(t *testing.T) {

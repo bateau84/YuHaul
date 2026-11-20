@@ -250,7 +250,7 @@ func main() {
 			logger.InfoContext(ctx, "shutdown during startup classification")
 			return
 		}
-		logger.ErrorContext(ctx, "startup recovery failed", "diagnostic", diag.Encode(err, "unknown", "load_run"))
+		logger.ErrorContext(ctx, "startup recovery failed", "diagnostic", pipeline.StartupFailureDiagnostic(err))
 		os.Exit(1)
 	}
 

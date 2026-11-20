@@ -27,7 +27,7 @@ export const DIAG_SQLITE = set(
   'SQLITE_ERROR SQLITE_BUSY SQLITE_LOCKED SQLITE_READONLY SQLITE_IOERR SQLITE_CORRUPT SQLITE_FULL SQLITE_CANTOPEN SQLITE_CONSTRAINT',
 )
 export const DIAG_CODES = set(
-  'unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user video_unavailable original_decision_unavailable no_source_scanned',
+  'unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user video_unavailable original_decision_unavailable no_source_scanned retry_claim_unverifiable stop_settlement_blocked retry_work_removed',
 )
 const DISCARD_CODES = new Set(['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized'])
 
@@ -65,7 +65,7 @@ export function parseDiag(message: string | null | undefined): DiagFacts | null 
     if (String(n) !== status) return null
     if (code === 'provider_error' ? n < 300 || n > 599 : code === 'oauth_error' ? n < 100 || n > 599 : true) return null
   }
-  if (['credential_persistence_failed', 'authorization_changed', 'mutation_application_uncertain'].includes(code) && (status || reason || sqlite)) return null
+  if (['credential_persistence_failed', 'authorization_changed', 'mutation_application_uncertain', 'retry_claim_unverifiable', 'stop_settlement_blocked', 'retry_work_removed'].includes(code) && (status || reason || sqlite)) return null
   if (reason && !((code === 'provider_error' && DIAG_PROVIDER_REASONS.has(reason)) || (code === 'oauth_error' && DIAG_OAUTH_REASONS.has(reason)))) return null
   if (sqlite && !(code === 'sqlite_error' && DIAG_SQLITE.has(sqlite))) return null
   return { code, status, reason }
@@ -107,6 +107,12 @@ const BY_CODE: Record<string, string> = {
   mutation_application_uncertain:
     'YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.',
   no_source_scanned: 'No channels were scanned successfully.',
+  // Design, "Errors — Category and Reason Presentation", added codes 2026-11-20.
+  // retry_claim_unverifiable and retry_work_removed depend on which run the
+  // reason describes: see runReasonSentence. Neither says that anything was or
+  // was not sent: the code does not establish it.
+  stop_settlement_blocked:
+    "YuHaul could not safely finish stopping this run, so the stop is not settled. This run will not be resumed. Nothing on this page settles it; check YuHaul's logs.",
   video_unavailable: 'YouTube did not return this video when YuHaul asked for its details.',
   timeout: 'YuHaul stopped waiting because a step took too long.',
   transport_error: 'A network connection failed.',
@@ -119,8 +125,45 @@ const BY_CODE: Record<string, string> = {
   unknown_error: 'The cause of this failure is not available.',
 }
 
+// The run a reason describes, for the two retry-run codes (design, "Added
+// codes"): the run whose own page shows it, a run the API named by id, or no
+// run known. Without a context the safest wording is used: it never says "this
+// run" and never links.
+export type ReasonRun = { kind: 'own' } | { kind: 'id'; id: number } | { kind: 'unknown' }
+
+const RETRY_RUN_CODES = new Set(['retry_claim_unverifiable', 'retry_work_removed'])
+export const isRetryRunCode = (code: string) => RETRY_RUN_CODES.has(code)
+
+function knownRunId(run: ReasonRun): number | null {
+  return run.kind === 'id' && Number.isInteger(run.id) && run.id > 0 ? run.id : null
+}
+
+// The run id a "View run {id}" link may name, or null: only for a retry-run
+// code with a run the API supplied. Never the entry's own run_id.
+export function reasonRunLink(message: string | null | undefined, run: ReasonRun): number | null {
+  const facts = parseDiag(message)
+  return facts !== null && isRetryRunCode(facts.code) ? knownRunId(run) : null
+}
+
+function runReasonSentence(code: string, run: ReasonRun): string {
+  const id = knownRunId(run)
+  if (code === 'retry_claim_unverifiable') {
+    const subject = run.kind === 'own' ? 'this run' : id !== null ? `run ${id}` : 'a retry run'
+    const base = `YuHaul could not verify which queue items ${subject} had claimed, so it stopped instead of continuing that work.`
+    if (run.kind === 'own') return `${base} The videos below show what was recorded.`
+    return id !== null ? `${base} Open the run to see what was recorded.` : base
+  }
+  if (run.kind === 'own') {
+    return 'This retry stopped because the item it was working on was removed by you. The videos below show what was recorded.'
+  }
+  if (id !== null) {
+    return `Run ${id}, a retry, stopped because the item it was working on was removed by you. Open the run to see what was recorded.`
+  }
+  return 'A retry stopped because the item it was working on was removed by you.'
+}
+
 // The sentence for a stored failure string; never the raw text.
-export function failureSentence(message: string | null | undefined): string {
+export function failureSentence(message: string | null | undefined, run: ReasonRun = { kind: 'unknown' }): string {
   const facts = parseDiag(message)
   if (!facts) return REASON_UNAVAILABLE
   switch (facts.code) {
@@ -134,6 +177,9 @@ export function failureSentence(message: string | null | undefined): string {
       return facts.reason === 'invalid_grant'
         ? "YouTube no longer accepts YuHaul's saved access."
         : 'YouTube access could not be renewed.'
+    case 'retry_claim_unverifiable':
+    case 'retry_work_removed':
+      return runReasonSentence(facts.code, run)
     default:
       return Object.hasOwn(BY_CODE, facts.code) ? BY_CODE[facts.code] : REASON_UNAVAILABLE
   }

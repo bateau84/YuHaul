@@ -6,7 +6,7 @@ tags: [operations, upgrade, rollback, migration, release-notes]
 timestamp: 2026-11-20T00:00:00Z
 ---
 
-**Status:** current for releases up to and including database version 30 (migration `030`). Migration `030` ships in PR #4 (`2930a2d`). Release check `6d65f7ef` proved the steps below on real binaries, upgrading over a `debad57` (version 29) database and rolling back to `debad57`.
+**Status:** current for releases up to and including database version 31 (migration `031`). Migration `030` ships in PR #4 (`2930a2d`; on `main` as `eed90f1`). Release check `6d65f7ef` proved the version 30 steps on real binaries, upgrading over a `debad57` (version 29) database and rolling back to `debad57`. Migration `031` ships in PR #5; release check `df803f9f` passed for it.
 
 YuHaul upgrades its SQLite database automatically when a new image starts. Some upgrades cannot be undone by starting the older image again. This page lists those upgrades and what to do.
 
@@ -38,3 +38,133 @@ YuHaul upgrades its SQLite database automatically when a new image starts. Some 
 Anything recorded after that copy was taken, including runs, decisions, playlist actions and channel scan errors, is not in the restored database. Do not edit the migration table by hand to make an older image start.
 
 Technical contract: [Discovery ARS-002](../architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md#release-notes).
+
+## Database version 31: exact retry claims
+
+**What changes.** Migration `031` adds one column, `run_video_outcome.retry_claim_provenance`, which stores the exact queue rows a retry run claimed for a video. It also clears, once, the old empty values that earlier versions stored for a missing video description or channel name (`''`) and a missing duration (`0`); they become empty (`NULL`) and are fetched again when a rule needs them. Nothing else in the database changes.
+
+**Deploy only onto a version 30 database** written by `967df28` (`eed90f1` on `main`) or an equivalent build. Do not run an older YuHaul against a version 31 database afterwards: it is not a safe writer for it.
+
+**Before deploying.**
+
+1. Stop YuHaul **at a moment when no run is in progress**. A run that is unfinished when YuHaul stops is resumed or settled by the new version, so start from a quiet moment if you can.
+2. Re-run the legacy-cohort check below against the stopped database (or a copy) and confirm that **every `[BLOCKS]` line prints `0`**. A non-zero line means unfinished work that an older version claimed for a retry; version 31 treats such work as unverifiable and will not dispatch or hand it off. Do not deploy until you understand the count.
+3. Back up the database: copy `yuhaul.db` together with its `yuhaul.db-wal` and `yuhaul.db-shm` files, if present, from the same stopped state. The default location is `/data/yuhaul.db` (`YUHAUL_DB_PATH`). Label the copy `967df28 / version 30`.
+
+The legacy-cohort check is one read-only `sqlite3` command. It is the exact command that was run on the production database before and after `967df28` was deployed, and every `[BLOCKS]` count was 0 both times (Loom records `997bc861` and `61ae9f35`). Run it as one invocation: it is a single statement, so it reads one consistent snapshot, and `-readonly` stops it from writing anything. Its output is `label | count` lines only, with no titles, video IDs or run IDs. The first two lines (`schema.migration_version`, `schema.migration_dirty`) confirm the database is at version 29 or 30 and not dirty. It does not use the new column, so it works on a database that has not been migrated yet.
+
+The database path in the command is the production path of the system it was run on. Replace it with yours (the default is `/data/yuhaul.db`, from `YUHAUL_DB_PATH`), and run it with YuHaul stopped or on the copy from step 3.
+
+```sh
+sqlite3 -readonly -batch /data/disk2/opt/yuhaul/yuhaul.db <<'SQL'
+.headers off
+.mode list
+.separator " | "
+WITH
+rc AS (
+  SELECT id, status,
+    (run_type IN ('manual','scheduled') AND status IN ('running','interrupted')) AS unfinished,
+    (run_type IN ('manual','scheduled') AND status IN ('running','interrupted') AND stop_requested_at IS NOT NULL) AS marked,
+    (run_type = 'manual' AND status = 'interrupted' AND interrupt_cause = 'time_limit' AND initiated_by = 'run_now') AS discard_shape
+  FROM run
+),
+q AS (
+  SELECT 'deferred' AS kind, video_id, retry_run_id AS owner,
+         CASE status WHEN 'retrying' THEN 'claimed' ELSE 'waiting' END AS st
+    FROM deferred_item WHERE status IN ('pending','retrying')
+  UNION ALL
+  SELECT 'error', video_id, retry_run_id,
+         CASE status WHEN 'retrying' THEN 'claimed' ELSE 'waiting' END
+    FROM error_entry WHERE status IN ('active','retrying')
+),
+qc AS (
+  SELECT q.kind, q.st, q.video_id, q.owner,
+    (COALESCE(v.final_outcome,'') IN ('accepted','rejected','excluded','unavailable_on_youtube')) AS on_final,
+    (q.owner IS NULL) AS o_none,
+    COALESCE(r.unfinished,0) AS o_unfin,
+    COALESCE(r.marked,0) AS o_marked,
+    COALESCE(r.discard_shape,0) AS o_disc,
+    (q.owner IS NOT NULL AND r.id IS NOT NULL AND r.unfinished = 0) AS o_term,
+    (q.owner IS NOT NULL AND r.id IS NULL) AS o_missing,
+    EXISTS (SELECT 1 FROM run_video_outcome o WHERE o.run_id = q.owner AND o.video_id = q.video_id) AS has_member
+  FROM q
+  LEFT JOIN video v ON v.id = q.video_id
+  LEFT JOIN rc r ON r.id = q.owner
+),
+m AS (
+  SELECT o.run_id, rc.marked, rc.discard_shape,
+    (COALESCE(v.final_outcome,'') IN ('accepted','rejected','excluded','unavailable_on_youtube')
+       OR v.processing_state = 'completed'
+       OR COALESCE(o.final_outcome,'') IN ('accepted','rejected','excluded','deferred','failed','unavailable_on_youtube')) AS finished,
+    (v.discovered_in_run_id = o.run_id
+       OR EXISTS (SELECT 1 FROM route_decision d WHERE d.video_id = o.video_id AND d.run_id = o.run_id)) AS native_ev,
+    (EXISTS (SELECT 1 FROM deferred_item d WHERE d.video_id = o.video_id AND d.retry_run_id = o.run_id)
+       OR EXISTS (SELECT 1 FROM error_entry e WHERE e.video_id = o.video_id AND e.retry_run_id = o.run_id)) AS owner_row
+  FROM run_video_outcome o
+  JOIN rc ON rc.id = o.run_id AND rc.unfinished
+  JOIN video v ON v.id = o.video_id
+),
+mu AS (SELECT * FROM m WHERE NOT finished)
+SELECT 'schema.migration_version' AS label, COALESCE((SELECT version FROM schema_migrations LIMIT 1), -1) AS n
+UNION ALL SELECT 'schema.migration_dirty', COALESCE((SELECT dirty FROM schema_migrations LIMIT 1), -1)
+UNION ALL SELECT 'A.open_queue_rows.total', COUNT(*) FROM qc
+UNION ALL SELECT 'A.open_queue_rows.on_final_video (cleanup, not cohort)', COALESCE(SUM(on_final),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_unfinished_run.total [BLOCKS]', COALESCE(SUM(st='claimed' AND NOT on_final AND o_unfin),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_unfinished_run.deferred', COALESCE(SUM(st='claimed' AND NOT on_final AND o_unfin AND kind='deferred'),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_unfinished_run.error', COALESCE(SUM(st='claimed' AND NOT on_final AND o_unfin AND kind='error'),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_marked_stop_run [BLOCKS]', COALESCE(SUM(st='claimed' AND NOT on_final AND o_marked),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_discard_shaped_run [BLOCKS]', COALESCE(SUM(st='claimed' AND NOT on_final AND o_disc),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_unfinished_run.without_membership', COALESCE(SUM(st='claimed' AND NOT on_final AND o_unfin AND NOT has_member),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_terminal_run (anomaly)', COALESCE(SUM(st='claimed' AND NOT on_final AND o_term),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_none (anomaly)', COALESCE(SUM(st='claimed' AND NOT on_final AND o_none),0) FROM qc
+UNION ALL SELECT 'A.claimed.owner_missing_run (anomaly)', COALESCE(SUM(st='claimed' AND NOT on_final AND o_missing),0) FROM qc
+UNION ALL SELECT 'A.waiting.owner_none (ordinary queue)', COALESCE(SUM(st='waiting' AND NOT on_final AND o_none),0) FROM qc
+UNION ALL SELECT 'A.waiting.owner_terminal_run (released marker)', COALESCE(SUM(st='waiting' AND NOT on_final AND o_term),0) FROM qc
+UNION ALL SELECT 'A.waiting.owner_unfinished_run (see B)', COALESCE(SUM(st='waiting' AND NOT on_final AND o_unfin),0) FROM qc
+UNION ALL SELECT 'B.unfinished_runs.memberships.total', COUNT(*) FROM m
+UNION ALL SELECT 'B.unfinished_runs.memberships.finished_member (history)', COALESCE(SUM(finished),0) FROM m
+UNION ALL SELECT 'B.unfinished_runs.memberships.unfinished_member', COUNT(*) FROM mu
+UNION ALL SELECT 'B.unfinished_member.native_proven (no owner row)', COALESCE(SUM(native_ev AND NOT owner_row),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.total [BLOCKS]', COALESCE(SUM(NOT (native_ev AND NOT owner_row)),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.owner_row_no_native', COALESCE(SUM(owner_row AND NOT native_ev),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.owner_row_and_native', COALESCE(SUM(owner_row AND native_ev),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.no_owner_no_native', COALESCE(SUM(NOT owner_row AND NOT native_ev),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.in_marked_stop_run [BLOCKS]', COALESCE(SUM(marked AND NOT (native_ev AND NOT owner_row)),0) FROM mu
+UNION ALL SELECT 'B.unfinished_member.AMBIGUOUS.in_discard_shaped_run [BLOCKS]', COALESCE(SUM(discard_shape AND NOT (native_ev AND NOT owner_row)),0) FROM mu
+UNION ALL SELECT 'C.runs.production_unfinished', COALESCE(SUM(unfinished),0) FROM rc
+UNION ALL SELECT 'C.runs.marked_stop', COALESCE(SUM(marked),0) FROM rc
+UNION ALL SELECT 'C.runs.discard_shaped', COALESCE(SUM(discard_shape AND unfinished),0) FROM rc
+UNION ALL SELECT 'C.runs.marked_stop_holding_claimed_rows [BLOCKS]', COUNT(DISTINCT CASE WHEN st='claimed' AND NOT on_final AND o_marked THEN owner END) FROM qc
+UNION ALL SELECT 'C.runs.discard_shaped_holding_claimed_rows [BLOCKS]', COUNT(DISTINCT CASE WHEN st='claimed' AND NOT on_final AND o_disc THEN owner END) FROM qc
+UNION ALL SELECT 'C.runs.marked_stop_with_ambiguous_members [BLOCKS]', COUNT(DISTINCT CASE WHEN marked AND NOT (native_ev AND NOT owner_row) THEN run_id END) FROM mu
+UNION ALL SELECT 'C.runs.discard_shaped_with_ambiguous_members [BLOCKS]', COUNT(DISTINCT CASE WHEN discard_shape AND NOT (native_ev AND NOT owner_row) THEN run_id END) FROM mu
+UNION ALL SELECT 'D.history.queue_rows_closed_with_owner', (SELECT COUNT(*) FROM deferred_item WHERE status IN ('completed','discarded') AND retry_run_id IS NOT NULL) + (SELECT COUNT(*) FROM error_entry WHERE status IN ('dismissed','resolved') AND retry_run_id IS NOT NULL)
+UNION ALL SELECT 'D.history.queue_rows_closed_total', (SELECT COUNT(*) FROM deferred_item WHERE status IN ('completed','discarded')) + (SELECT COUNT(*) FROM error_entry WHERE status IN ('dismissed','resolved'))
+UNION ALL SELECT 'D.history.memberships_of_ended_or_nonproduction_runs', (SELECT COUNT(*) FROM run_video_outcome o JOIN rc ON rc.id = o.run_id WHERE NOT rc.unfinished)
+UNION ALL SELECT 'D.memberships.all', (SELECT COUNT(*) FROM run_video_outcome);
+SQL
+```
+
+Every line labelled `[BLOCKS]` must print `0`. A non-zero `[BLOCKS]` line is unfinished retry work that an older version claimed and that version 31 would leave without a stored claim: it would not be dispatched, handed off or settled, so do not deploy until you understand the count. Lines without `[BLOCKS]` are for context: ordinary queue rows, native unfinished work (`native_proven`), closed history and anomalies. The definitions are in [run-initiation ARS-005 section 5.1.1](../architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md#511-durable-retry-claim-provenance).
+
+**Deploying.**
+
+1. Deploy the new image.
+2. Check the startup log for `title search index ready`.
+3. Check that the startup log has **no** `startup recovery blocked` line. That line means a run could not be settled or resumed and startup stopped.
+4. Check that the database is at version 31 and not dirty, with YuHaul stopped or on a copy: `sqlite3 /data/yuhaul.db "SELECT version, dirty FROM schema_migrations;"` should print `31|0`.
+
+**Rollback.** After `031` has been applied, **`967df28` refuses to start** (`no migration found for version 31`), because it does not know database version 31. The database stays at version 31 and is not damaged. Rolling back the image alone does not work. To roll back:
+
+1. Stop YuHaul.
+2. Restore all three files from the backup: put back `yuhaul.db`, `yuhaul.db-wal` and `yuhaul.db-shm` exactly as copied, and remove any newer `-wal` and `-shm` files.
+3. Start `967df28`. It starts again on the restored version 30 database.
+
+Anything recorded after the backup was taken, including runs, decisions, playlist actions and retry claims, is not in the restored database.
+
+**Warnings.**
+
+- **Clearing the old empty values is one-way.** Migration `031` has no down step. A real empty description or a real zero duration stored before the migration also becomes empty, and only the backup brings the old values back. Values stored after the migration are kept.
+- **Never edit `schema_migrations` by hand** to make an older image start or to skip a migration. The database would then claim a version whose changes are missing or present, and neither image would be safe.
+
+Technical contract: [run-initiation ARS-005 section 5.1.1](../architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md#511-durable-retry-claim-provenance) and [section 6.1.1](../architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md).

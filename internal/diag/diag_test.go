@@ -365,3 +365,26 @@ func TestNoSourceScannedVocabulary(t *testing.T) {
 		}
 	}
 }
+
+func TestRetryClaimStopSettlementAndRemovedWorkVocabulary(t *testing.T) {
+	for _, code := range []string{"retry_claim_unverifiable", "stop_settlement_blocked", "retry_work_removed"} {
+		ok := Facts{Phase: "action_execution", Operation: "retry", Code: code}
+		if !ok.Valid() || ok.String() != "diag:v1 phase=action_execution operation=retry code="+code {
+			t.Fatalf("%s must be a valid code: %q", code, ok.String())
+		}
+		for _, bad := range []Facts{
+			{Phase: "unknown", Operation: "finalize_run", Code: code, Status: "500"},
+			{Phase: "unknown", Operation: "finalize_run", Code: code, Reason: "backendError"},
+			{Phase: "unknown", Operation: "finalize_run", Code: code, SQLite: "SQLITE_BUSY"},
+		} {
+			if bad.Valid() {
+				t.Fatalf("%s admits extra facts: %+v", code, bad)
+			}
+		}
+		marked := At(WithCode(errors.New("secret "+markerFreeSecret), code), "action_execution", "retry")
+		got := Encode(marked, "unknown", "unknown")
+		if got != "diag:v1 phase=action_execution operation=retry code="+code || strings.Contains(got, markerFreeSecret) {
+			t.Fatalf("encoded %q", got)
+		}
+	}
+}

@@ -51,6 +51,9 @@ func (p *Pipeline) classifyAndLog(ctx context.Context) ([]int64, error) {
 		var ce *startupCheckError
 		if errors.As(err, &ce) {
 			attrs = []any{"run_id", ce.RunID, "check", ce.Check}
+			if ce.Check == "stop_settlement" {
+				attrs = append(attrs, stopSettlementAttrs(ce.Cause)...)
+			}
 		}
 		p.logger.ErrorContext(ctx, "startup recovery blocked", attrs...)
 		return nil, err
@@ -64,7 +67,10 @@ func (p *Pipeline) classifyAndLog(ctx context.Context) ([]int64, error) {
 type startupCheckError struct {
 	RunID int64
 	Check string
+	Cause error // the local failure behind the check, if any; never shown to users
 }
+
+func (e *startupCheckError) Unwrap() error { return e.Cause }
 
 func (e *startupCheckError) Error() string {
 	return fmt.Sprintf("startup recovery: run %d failed check %s", e.RunID, e.Check)
@@ -92,8 +98,8 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 		}
 		for _, m := range marked {
 			if _, err := settleStopTx(ctx, qs, p.stateStore, tx, m.id, m.quotaCost, time.Now().UTC()); err != nil {
-				p.logger.ErrorContext(ctx, "startup stop settlement failed", "run_id", m.id, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
-				return nil, &startupCheckError{m.id, "stop_settlement"}
+				p.logger.ErrorContext(ctx, "startup stop settlement failed", append([]any{"run_id", m.id}, stopSettlementAttrs(err)...)...)
+				return nil, &startupCheckError{m.id, "stop_settlement", err}
 			}
 			p.logger.InfoContext(ctx, "startup settled a stopped run", "run_id", m.id)
 		}
@@ -131,11 +137,11 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 				continue
 			}
 			rows.Close()
-			return nil, &startupCheckError{id, "terminal_timestamp_contradiction"}
+			return nil, &startupCheckError{id, "terminal_timestamp_contradiction", nil}
 		}
 		if safety != 1 || authority != 1 {
 			rows.Close()
-			return nil, &startupCheckError{id, "authority"}
+			return nil, &startupCheckError{id, "authority", nil}
 		}
 		if reason := validateResumableRow(completed, phase, snapshot); reason != "" {
 			if timeLimitRunNow {
@@ -143,7 +149,7 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 				continue
 			}
 			rows.Close()
-			return nil, &startupCheckError{id, startupCheckFor(reason)}
+			return nil, &startupCheckError{id, startupCheckFor(reason), nil}
 		}
 		ph := "unknown"
 		if phase.Valid {
@@ -168,7 +174,7 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 			}
 			n, err := result.RowsAffected()
 			if err != nil || n != 1 {
-				return nil, &startupCheckError{c.id, "recheck_at_write"}
+				return nil, &startupCheckError{c.id, "recheck_at_write", nil}
 			}
 		}
 		ids = append(ids, c.id)
@@ -214,7 +220,7 @@ func (p *Pipeline) markedStopRuns(ctx context.Context) ([]markedStopRun, error) 
 	for i := range out {
 		cost, err := p.machine.RunQuotaCost(ctx, out[i].id)
 		if err != nil {
-			return nil, &startupCheckError{out[i].id, "stop_settlement"}
+			return nil, &startupCheckError{out[i].id, "stop_settlement", err}
 		}
 		out[i].quotaCost = cost
 	}

@@ -253,6 +253,7 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 	if err != nil {
 		return err
 	}
+	receipts := make([]queue.RetryGroupReceipt, 0)
 	err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
 		id, err := p.stateStore.CreateGuardedMutationRunTx(ctx, tx, run, true)
 		if err != nil {
@@ -260,8 +261,14 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 		}
 		run.ID = id
 		for _, item := range items {
-			if _, _, err := qs.ClaimDeferredGroupTx(ctx, tx, item.ID, id, time.Now()); err != nil {
+			receipt, _, result, err := qs.ClaimDeferredGroupResultTx(ctx, tx, item.ID, id, time.Now())
+			if err != nil {
 				return err
+			}
+			if result == queue.ClaimTaken {
+				receipt.Deferred = append([]queue.RetryRowRef(nil), receipt.Deferred...)
+				receipt.Errors = append([]queue.RetryRowRef(nil), receipt.Errors...)
+				receipts = append(receipts, receipt)
 			}
 		}
 		return nil
@@ -269,7 +276,10 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 	if err != nil {
 		return fmt.Errorf("pipeline: create and claim run: %w", err)
 	}
-	p.registerRun(run.ID)
+	ctl := p.registerRun(run.ID)
+	ctl.mu.Lock()
+	ctl.freshRetries = receipts
+	ctl.mu.Unlock()
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	return nil
 }
@@ -355,6 +365,7 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 		logger.InfoContext(ctx, "pipeline execute skipped: run stopped before it started")
 		return
 	}
+	freshRetries := ctl.takeFreshRetries()
 	if p.isProductionRun(run.RunType) && p.auth != nil {
 		binding, bindErr := p.auth.Bind(ctx)
 		if bindErr != nil {
@@ -412,7 +423,7 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 
 	// Owned retries precede dispatch even when a crash left an actions checkpoint
 	// before the receiving run's first decision.
-	if err := p.processDeferredItems(ctx, runID); err != nil {
+	if err := p.processDeferredItems(ctx, runID, freshRetries, isResume); err != nil {
 		p.failRun(ctx, runID, "retry processing failed", err)
 		return
 	}
@@ -568,6 +579,19 @@ func (p *Pipeline) completeRun(ctx context.Context, runID int64) {
 }
 
 func (p *Pipeline) failRun(ctx context.Context, runID int64, message string, err error) {
+	if errors.Is(err, state.ErrPlaylistSendStopped) {
+		// A Stop the guard or the admission fence saw before cancellation is the
+		// user's action, not a failure of the phase: no ERROR, and the Stop path
+		// owns the ending.
+		p.logger.InfoContext(ctx, "pipeline phase ended by user stop", "run_id", runID,
+			"diagnostic", diag.Facts{Phase: "unknown", Operation: "stop_run", Code: "stopped_by_user"}.String())
+		var refusal *retryAdmissionRefusal
+		if errors.As(err, &refusal) {
+			p.endRefusedRetry(ctx, runID, refusal, diag.Facts{Phase: "unknown", Operation: "stop_run", Code: "stopped_by_user"}.String())
+		}
+		return
+	}
+	err = withIntegrityCode(err)
 	reason := diag.Reason(err, message)
 	var mutation *mutationFailure
 	if errors.As(err, &mutation) {
@@ -581,6 +605,11 @@ func (p *Pipeline) failRun(ctx context.Context, runID int64, message string, err
 		p.logger.ErrorContext(ctx, "pipeline phase failed", attrs...)
 	} else {
 		p.logger.ErrorContext(ctx, "pipeline phase failed", "run_id", runID, "diagnostic", reason)
+	}
+	var refusal *retryAdmissionRefusal
+	if errors.As(err, &refusal) {
+		p.endRefusedRetry(ctx, runID, refusal, reason)
+		return
 	}
 	var authority *authorityError
 	if errors.As(err, &authority) {
@@ -1271,7 +1300,7 @@ func (p *Pipeline) videosWithMatchedDecisions(ctx context.Context, runID int64, 
 // processDeferredItems retries pending deferred videos before new discoveries.
 // Items are processed oldest-first (FIFO). Quota checks are delegated to the
 // action executor; if quota is exhausted the remaining items stay pending.
-func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64) error {
+func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receipts []queue.RetryGroupReceipt, recovery bool) error {
 	qs := p.queueStore
 	if qs == nil {
 		var err error
@@ -1281,12 +1310,52 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64) error 
 		}
 	}
 
-	ids, err := qs.ListRetryVideoIDs(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("list deferred items: %w", err)
+	if receipts == nil && recovery {
+		ids, err := qs.ListRetryVideoIDs(ctx, runID)
+		if err != nil {
+			return fmt.Errorf("list deferred items: %w", err)
+		}
+		receipts = make([]queue.RetryGroupReceipt, 0, len(ids))
+		for _, id := range ids {
+			receipt, err := qs.RetryGroupReceiptForRunVideo(ctx, runID, id)
+			if errors.Is(err, queue.ErrRetryProvenance) {
+				// Unfinished work with no trustworthy stored claim identity (legacy,
+				// malformed or unsupported): an integrity refusal, not a failure of
+				// the video. Nothing is dispatched, reset, handed off or retained.
+				return &retryAdmissionRefusal{receipt: queue.RetryGroupReceipt{ReceivingRunID: runID, VideoID: id}, cause: err}
+			}
+			if err != nil {
+				return fmt.Errorf("recover retry video %d receipt: %w", id, err)
+			}
+			receipts = append(receipts, receipt)
+		}
 	}
-	for _, id := range ids {
-		if err := p.processRetryVideo(ctx, runID, id); err != nil {
+	if receipts == nil && !recovery {
+		ids, err := qs.ListRetryVideoIDs(ctx, runID)
+		if err != nil {
+			return fmt.Errorf("list deferred items: %w", err)
+		}
+		if len(ids) != 0 {
+			return fmt.Errorf("retry video %d missing exact receipt: %w", ids[0], queue.ErrWorkNotOwned)
+		}
+	}
+	for _, receipt := range receipts {
+		id := receipt.VideoID
+		if receipt.ReceivingRunID != runID || id == 0 {
+			return fmt.Errorf("retry video %d missing exact receipt: %w", id, queue.ErrWorkNotOwned)
+		}
+		err := qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+			_, err := qs.ValidateRetryReceiptTx(ctx, tx, receipt)
+			return err
+		})
+		if err != nil {
+			if isRetryAdmissionRefusal(err) {
+				return &retryAdmissionRefusal{receipt: receipt, cause: err}
+			}
+			return fmt.Errorf("validate retry video %d: %w", id, err)
+		}
+		retryCtx := context.WithValue(ctx, guardedRetryGroupKey{}, receipt)
+		if err := p.processRetryVideo(retryCtx, runID, id); err != nil {
 			return fmt.Errorf("process retry video %d: %w", id, err)
 		}
 	}

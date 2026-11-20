@@ -319,14 +319,19 @@ func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason, scan
 		return qs.WithRetryTx(retainCtx, func(tx *sql.Tx) error { return retain(retainCtx, qs, tx) })
 	}
 	if err = attempt(ctx); err != nil {
-		p.logger.ErrorContext(ctx, "retain run failure", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "retain_failure"))
+		p.logger.ErrorContext(ctx, "retain run failure", "run_id", runID, "diagnostic", diag.Encode(withIntegrityCode(err), "unknown", "retain_failure"))
 		// Retention is the handoff. Retry it independently of the possibly
 		// expired execution context before choosing a terminal status.
 		finalizeCtx, cancel := runFinalizationContext(ctx)
 		err = attempt(finalizeCtx)
 		cancel()
 		if err != nil {
-			p.logger.ErrorContext(ctx, "run retention finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+			if errors.Is(err, queue.ErrRetryProvenance) {
+				// Retention stopped on an unusable stored claim identity; say so,
+				// not the failure that led here.
+				reason = diag.Encode(withIntegrityCode(err), "unknown", "retain_failure")
+			}
+			p.logger.ErrorContext(ctx, "run retention finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(withIntegrityCode(err), "unknown", "finalize_run"))
 			// The candidates remain owned by the run, so interruption is
 			// resumable. Persist it separately; never fail before queue handoff.
 			p.interruptAuthorityRun(ctx, runID, reason)
@@ -349,11 +354,23 @@ func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason, scan
 // a retained queue (ADR-006 §3). It makes no provider call, touches no send
 // guard and writes no action evidence or counters.
 func sweepStrandedWork(ctx context.Context, qs *queue.Store, tx *sql.Tx, runID int64, reason string) error {
+	return sweepStrandedWorkExcept(ctx, qs, tx, runID, reason, 0)
+}
+
+// sweepStrandedWorkExcept is sweepStrandedWork for a run whose retry of
+// protectVideoID was refused because its work was removed, lost or conflicts:
+// that video gets no sink, no release and no other write, so removed or lost
+// work is never recreated and another owner's rows are never touched.
+// protectVideoID 0 protects nothing.
+func sweepStrandedWorkExcept(ctx context.Context, qs *queue.Store, tx *sql.Tx, runID int64, reason string, protectVideoID int64) error {
 	unfinished, err := unfinishedRunMembersTx(ctx, tx, runID)
 	if err != nil {
 		return err
 	}
 	for _, m := range unfinished {
+		if m.videoID == protectVideoID {
+			continue
+		}
 		if m.retryOwned {
 			// Queue work this run claimed returns to its queue with its IDs,
 			// origin run, reasons and history. A group the operator removed
@@ -414,11 +431,13 @@ func unfinishedRunMembersTx(ctx context.Context, tx *sql.Tx, runID int64) ([]unf
 	rows, err := tx.QueryContext(ctx, `SELECT v.id,
 	  EXISTS(SELECT 1 FROM deferred_item d WHERE d.video_id=v.id AND d.retry_run_id=?1)
 	   OR EXISTS(SELECT 1 FROM error_entry e WHERE e.video_id=v.id AND e.retry_run_id=?1)
+	   OR EXISTS(SELECT 1 FROM run_video_outcome c WHERE c.run_id=?1 AND c.video_id=v.id AND c.retry_claim_provenance IS NOT NULL)
 	 FROM video v
 	 WHERE (v.discovered_in_run_id=?1
 	   OR v.id IN (SELECT video_id FROM route_decision WHERE run_id=?1)
 	   OR v.id IN (SELECT video_id FROM deferred_item WHERE retry_run_id=?1)
-	   OR v.id IN (SELECT video_id FROM error_entry WHERE retry_run_id=?1))
+	   OR v.id IN (SELECT video_id FROM error_entry WHERE retry_run_id=?1)
+	   OR v.id IN (SELECT video_id FROM run_video_outcome WHERE run_id=?1 AND retry_claim_provenance IS NOT NULL))
 	  AND v.processing_state <> 'completed'
 	  AND NOT `+state.FinalVideo+`
 	  AND NOT EXISTS(SELECT 1 FROM run_video_outcome o WHERE o.run_id=?1 AND o.video_id=v.id

@@ -176,6 +176,8 @@ func TestU5_SettleFailureBlocksStartup(t *testing.T) {
 	_, err = e.db().Exec(`CREATE TRIGGER block_settle BEFORE UPDATE OF status ON run WHEN NEW.status='stopped' BEGIN SELECT RAISE(ABORT,'injected'); END`)
 	require.NoError(t, err)
 	before := e.dumpRuns(t, id)
+	var logs bytes.Buffer
+	e.pipeline.logger = slog.New(slog.NewTextHandler(&logs, nil))
 
 	_, err = e.pipeline.BeginStartupRecovery(e.ctx)
 	var check *startupCheckError
@@ -183,6 +185,9 @@ func TestU5_SettleFailureBlocksStartup(t *testing.T) {
 	require.Equal(t, "stop_settlement", check.Check)
 	require.Equal(t, id, check.RunID)
 	require.Equal(t, before, e.dumpRuns(t, id))
+	// The block names its closed diagnostic code, not unknown_error.
+	require.Contains(t, logs.String(), "code=stop_settlement_blocked")
+	require.NotContains(t, logs.String(), "code=unknown_error")
 
 	_, err = e.db().Exec(`DROP TRIGGER block_settle`)
 	require.NoError(t, err)

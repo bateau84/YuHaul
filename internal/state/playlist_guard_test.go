@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -604,7 +605,87 @@ func continuationFixture(t *testing.T, decisionSafety int) (*Store, PlaylistSend
 		}
 	}
 	c.RouteDecisionID, c.DecisionRunID = 2, d
+	c.Origin = PlaylistSendRetry
+	c.RetryAuthority = func(ctx context.Context, tx *sql.Tx, runID, videoID int64) error {
+		var found int
+		return tx.QueryRowContext(ctx, `SELECT 1 FROM run WHERE id=?`, runID).Scan(&found)
+	}
 	return s, c, d
+}
+
+func TestPlaylistSendClaimRetryAuthorityAndStop(t *testing.T) {
+	ctx := context.Background()
+	refusal := errors.New("receipt ownership lost")
+	for _, tc := range []struct {
+		name    string
+		stopped bool
+		refuse  bool
+		want    error
+	}{
+		{"owned", false, false, nil},
+		{"refused", false, true, refusal},
+		{"stop precedes receipt loss", true, true, ErrPlaylistSendStopped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c := guardFixture(t)
+			c.Origin = PlaylistSendRetry
+			called := false
+			c.RetryAuthority = func(ctx context.Context, tx *sql.Tx, runID, videoID int64) error {
+				called = true
+				if runID != c.RunID || videoID != c.VideoID {
+					t.Fatalf("authority identity = %d/%d", runID, videoID)
+				}
+				var status string
+				if err := tx.QueryRowContext(ctx, `SELECT status FROM run WHERE id=?`, runID).Scan(&status); err != nil {
+					return err
+				}
+				if tc.refuse {
+					return refusal
+				}
+				return nil
+			}
+			if tc.stopped {
+				if _, err := s.db.Exec(`UPDATE run SET stop_requested_at=? WHERE id=?`, formatRunTime(timeNow()), c.RunID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, guard, err := s.ClaimPlaylistSend(ctx, c, timeNow())
+			if !errors.Is(err, tc.want) || (tc.want == nil && (result != PlaylistClaimed || guard == nil)) {
+				t.Fatalf("claim = %q, %v, %v; want %v", result, guard, err, tc.want)
+			}
+			if called == tc.stopped {
+				t.Fatalf("authority called = %v, stopped = %v", called, tc.stopped)
+			}
+			wantCount := 0
+			if tc.want == nil {
+				wantCount = 1
+			}
+			if n := guardCount(t, s); n != wantCount {
+				t.Fatalf("guards = %d, want %d", n, wantCount)
+			}
+		})
+	}
+}
+
+func TestPlaylistSendClaimRejectsMissingOrNativeContinuationAuthority(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*PlaylistSendClaim)
+	}{
+		{"missing retry validator", func(c *PlaylistSendClaim) { c.Origin = PlaylistSendRetry }},
+		{"native continuation", func(c *PlaylistSendClaim) { c.DecisionRunID = c.RunID + 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c := guardFixture(t)
+			tc.setup(&c)
+			if _, guard, err := s.ClaimPlaylistSend(context.Background(), c, timeNow()); err == nil || guard != nil {
+				t.Fatalf("guard=%v error=%v, want refusal", guard, err)
+			}
+			if n := guardCount(t, s); n != 0 {
+				t.Fatalf("guards = %d, want 0", n)
+			}
+		})
+	}
 }
 
 func guardCount(t *testing.T, s *Store) int {

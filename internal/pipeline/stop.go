@@ -61,6 +61,16 @@ type runControl struct {
 	cancel        context.CancelCauseFunc // nil until the executor attaches
 	stopRequested bool
 	finalizing    bool
+	freshRetries  []queue.RetryGroupReceipt
+	refusedRetry  *retryAdmissionRefusal
+}
+
+func (c *runControl) takeFreshRetries() []queue.RetryGroupReceipt {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	receipts := c.freshRetries
+	c.freshRetries = nil
+	return receipts
 }
 
 // registerRun returns the run's control, creating it on first use.
@@ -215,6 +225,7 @@ func (p *Pipeline) finishRun(ctx context.Context, runID int64) {
 	defer p.unregisterRun(runID)
 	ctl.mu.Lock()
 	stopped := ctl.stopRequested
+	refusal := ctl.refusedRetry
 	cancel := ctl.cancel
 	if !stopped {
 		// The entry point is returning: a stop can no longer take effect.
@@ -222,9 +233,15 @@ func (p *Pipeline) finishRun(ctx context.Context, runID int64) {
 	}
 	ctl.mu.Unlock()
 	if stopped {
-		if err := p.settleStop(ctx, runID); err != nil {
-			// The run stays running with its marker; a restart settles it.
-			p.logger.ErrorContext(ctx, "run stop settle failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+		var err error
+		if refusal != nil {
+			err = p.settleRefusedRetry(ctx, runID, refusal, true, "")
+		} else {
+			err = p.settleStop(ctx, runID)
+		}
+		if err != nil {
+			// The run stays running with its marker for recovery.
+			p.logger.ErrorContext(ctx, "run stop settle failed", append([]any{"run_id", runID}, stopSettlementAttrs(err)...)...)
 		}
 	}
 	if cancel != nil {
@@ -237,6 +254,14 @@ var stopReason = diag.Facts{Phase: "unknown", Operation: "stop_run", Code: "stop
 // settleStop commits the stop: the deferred-queue handoff (production runs),
 // the terminal stopped state and the counters, in one transaction. One retry.
 func (p *Pipeline) settleStop(ctx context.Context, runID int64) error {
+	return p.settleStopProtecting(ctx, runID, 0)
+}
+
+// settleStopProtecting is settleStop for a stopped run whose retry of
+// protectVideoID was refused because its work was removed, lost or conflicts.
+// That video's still-owned members are released with the rest, but it is not
+// handed off as new deferred work. protectVideoID 0 protects nothing.
+func (p *Pipeline) settleStopProtecting(ctx context.Context, runID, protectVideoID int64) error {
 	qs, err := p.retryStore()
 	if err != nil {
 		return err
@@ -249,7 +274,7 @@ func (p *Pipeline) settleStop(ctx context.Context, runID int64) error {
 		if qerr == nil {
 			qerr = qs.WithRetryTx(finalizeCtx, func(tx *sql.Tx) error {
 				var err error
-				result, err = settleStopTx(finalizeCtx, qs, p.stateStore, tx, runID, quotaCost, time.Now().UTC())
+				result, err = settleStopExceptTx(finalizeCtx, qs, p.stateStore, tx, runID, quotaCost, time.Now().UTC(), protectVideoID)
 				return err
 			})
 		}
@@ -262,7 +287,7 @@ func (p *Pipeline) settleStop(ctx context.Context, runID int64) error {
 		}
 		lastErr = qerr
 		if attempt == 0 {
-			p.logger.WarnContext(ctx, "run stop settle failed, retrying", "run_id", runID, "diagnostic", diag.Encode(qerr, "unknown", "finalize_run"))
+			p.logger.WarnContext(ctx, "run stop settle failed, retrying", append([]any{"run_id", runID}, stopSettlementAttrs(qerr)...)...)
 		}
 	}
 	return lastErr
@@ -271,6 +296,10 @@ func (p *Pipeline) settleStop(ctx context.Context, runID int64) error {
 // settleStopTx performs the settle inside tx (ARS-003 §3.3). It is idempotent
 // for a run that is already stopped. It returns the handoff counts for logs.
 func settleStopTx(ctx context.Context, qs *queue.Store, ss *state.Store, tx *sql.Tx, runID int64, quotaCost int, now time.Time) (queue.HandoffResult, error) {
+	return settleStopExceptTx(ctx, qs, ss, tx, runID, quotaCost, now, 0)
+}
+
+func settleStopExceptTx(ctx context.Context, qs *queue.Store, ss *state.Store, tx *sql.Tx, runID int64, quotaCost int, now time.Time, protectVideoID int64) (queue.HandoffResult, error) {
 	var result queue.HandoffResult
 	var runType, status string
 	var marker sql.NullString
@@ -289,7 +318,7 @@ func settleStopTx(ctx context.Context, qs *queue.Store, ss *state.Store, tx *sql
 		if err != nil {
 			return result, err
 		}
-		if result, err = qs.HandOffUnfinishedTx(ctx, tx, runID, queue.DeferredReasonStoppedByUser, ids); err != nil {
+		if result, err = qs.HandOffUnfinishedExceptTx(ctx, tx, runID, queue.DeferredReasonStoppedByUser, ids, protectVideoID); err != nil {
 			return result, err
 		}
 	}

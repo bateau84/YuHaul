@@ -554,6 +554,8 @@ export interface ErrorEntry {
   // final outcome (BR-039); video_final_outcome is then set.
   closed_reason?: 'final_outcome' | null
   video_final_outcome?: VideoFinalOutcome
+  // The run that claimed the entry for a retry, when there is one.
+  retry_run_id?: number
 }
 
 export type DeferredReason =

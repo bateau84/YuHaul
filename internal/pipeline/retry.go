@@ -126,15 +126,133 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 	}
 	p.executionBinding = &binding
 	defer func() { p.executionBinding = nil }()
-	if err := p.processDeferredItems(ctx, run.ID); err != nil {
+	if err := p.processDeferredItems(ctx, run.ID, []queue.RetryGroupReceipt{claimedReceipt}, false); err != nil {
 		p.failRun(ctx, run.ID, "manual retry failed", err)
-		if stopOwnsEnding(ctx) {
+		if stopOwnsEnding(ctx) || errors.Is(err, state.ErrPlaylistSendStopped) {
 			return nil // the user stopped this retry; finishRun settles it
 		}
 		return err
 	}
 	p.completeRun(ctx, run.ID)
 	return nil
+}
+
+// retryAdmissionRefusal preserves the original claim for run-ending settlement.
+// It must not be interpreted as permission to mutate any of its rows.
+type retryAdmissionRefusal struct {
+	receipt queue.RetryGroupReceipt
+	cause   error
+}
+
+func (e *retryAdmissionRefusal) Error() string { return e.cause.Error() }
+func (e *retryAdmissionRefusal) Unwrap() error { return e.cause }
+
+// endRefusedRetry transfers the original receipt to the run-ending boundary.
+// A stop marker may be observed by the guard before the execution context is
+// cancelled; it must still take precedence over ordinary failure.
+func (p *Pipeline) endRefusedRetry(ctx context.Context, runID int64, refusal *retryAdmissionRefusal, reason string) {
+	ctl := p.control(runID)
+	if ctl != nil {
+		ctl.mu.Lock()
+		ctl.refusedRetry = refusal
+		if errors.Is(refusal, state.ErrPlaylistSendStopped) {
+			ctl.stopRequested = true
+		}
+		stopped := ctl.stopRequested
+		ctl.mu.Unlock()
+		if stopped {
+			return
+		}
+	}
+	if err := p.settleRefusedRetry(ctx, runID, refusal, false, reason); err != nil {
+		p.logger.ErrorContext(ctx, "retry refusal settlement unavailable", "run_id", runID, "diagnostic", diag.Encode(withIntegrityCode(err), "unknown", "finalize_run"))
+		p.interruptAuthorityRun(ctx, runID, reason)
+	}
+}
+
+// settleRefusedRetry ends a run whose retry claim was refused at admission:
+// removed work (ErrWorkRemoved), lost or changed ownership (ErrWorkNotOwned,
+// ErrRetryOwnership), a Stop seen at the guard (ErrPlaylistSendStopped) or an
+// integrity failure of the stored claim identity (ErrRetryProvenance).
+//
+// Settlement runs under the reserved writer, keyed by durable claim
+// provenance. The refused video is protected when its work was removed or lost,
+// so no sink or synthetic handoff recreates it and no other owner's row is
+// touched; every other unfinished video keeps its ordinary retention or stop
+// handoff. A marked Stop wins: it settles through settleStop, with the same
+// protection. Without a Stop, retention comes before the failed state, and any
+// retention failure leaves the run interrupted. An unusable claim identity is
+// never settled around: with no Stop the run is only interrupted, and a Stop
+// settlement fails inside the handoff and leaves the marker for recovery.
+func (p *Pipeline) settleRefusedRetry(ctx context.Context, runID int64, refusal *retryAdmissionRefusal, markedStop bool, reason string) error {
+	protect := refusal.protectedVideoID()
+	if markedStop {
+		return p.settleStopProtecting(ctx, runID, protect)
+	}
+	if errors.Is(refusal.cause, queue.ErrRetryProvenance) {
+		return refusal.cause
+	}
+	p.retainThenFail(ctx, runID, reason, "", func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
+		return sweepStrandedWorkExcept(retainCtx, qs, tx, runID, reason, protect)
+	})
+	return nil
+}
+
+// protectedVideoID is the video whose rows a refusal's settlement must not
+// write: the one whose claimed work was removed, lost or conflicts. A Stop or
+// an unusable claim identity protects nothing here.
+func (e *retryAdmissionRefusal) protectedVideoID() int64 {
+	switch {
+	case errors.Is(e.cause, state.ErrPlaylistSendStopped), errors.Is(e.cause, queue.ErrRetryProvenance):
+		return 0
+	}
+	return e.receipt.VideoID
+}
+
+// withIntegrityCode gives the failure that ended a retry run its closed
+// diagnostic code, so the stored reason and the logs do not read unknown_error:
+// retry_claim_unverifiable for a missing or unusable stored claim identity, and
+// retry_work_removed when the person removed the work the run had claimed.
+// Other errors pass through unchanged. The error identity is kept: errors.Is
+// still sees the typed cause, so the 409 handler and the settlement still work.
+func withIntegrityCode(err error) error {
+	switch {
+	case errors.Is(err, queue.ErrRetryProvenance):
+		return diag.WithCode(err, "retry_claim_unverifiable")
+	case errors.Is(err, queue.ErrWorkRemoved):
+		return diag.WithCode(err, "retry_work_removed")
+	}
+	return err
+}
+
+// StartupFailureDiagnostic is the closed diagnostic for a failed startup
+// recovery: stop_settlement_blocked when a marked Stop could not be settled,
+// otherwise the error's own classification.
+func StartupFailureDiagnostic(err error) string {
+	var ce *startupCheckError
+	if errors.As(err, &ce) && ce.Check == "stop_settlement" {
+		return diag.Facts{Phase: "unknown", Operation: "finalize_run", Code: "stop_settlement_blocked"}.String()
+	}
+	return diag.Encode(withIntegrityCode(err), "unknown", "load_run")
+}
+
+// stopSettlementAttrs are the log attributes of a marked Stop that could not
+// be settled: the closed stop_settlement_blocked code and, when the cause is an
+// unusable claim identity, its own code.
+func stopSettlementAttrs(err error) []any {
+	attrs := []any{"diagnostic", diag.Facts{Phase: "unknown", Operation: "finalize_run", Code: "stop_settlement_blocked"}.String()}
+	if cause := withIntegrityCode(err); cause != err {
+		attrs = append(attrs, "cause_diagnostic", diag.Encode(cause, "unknown", "finalize_run"))
+	}
+	return attrs
+}
+
+func isRetryAdmissionRefusal(err error) bool {
+	return errors.Is(err, queue.ErrWorkRemoved) ||
+		errors.Is(err, queue.ErrWorkNotOwned) ||
+		errors.Is(err, queue.ErrRetryOwnership) ||
+		errors.Is(err, queue.ErrRetryProvenance) ||
+		errors.Is(err, state.ErrPlaylistSendStopped)
 }
 
 // A retry's global state was reset by the claim transaction, not inferred from
@@ -147,11 +265,7 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	}
 	receipt, ok := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt)
 	if !ok || receipt.ReceivingRunID != runID || receipt.VideoID != videoID {
-		receipt, err = qs.RetryGroupReceiptForRunVideo(ctx, runID, videoID)
-		if err != nil {
-			return fmt.Errorf("capture retry group receipt: %w", err)
-		}
-		ctx = context.WithValue(ctx, guardedRetryGroupKey{}, receipt)
+		return fmt.Errorf("retry video %d missing exact receipt: %w", videoID, queue.ErrWorkNotOwned)
 	}
 	// BR-039 / ARS-006 §5: a final video is never processed. Settle the claim
 	// and return before any evaluation or send.
@@ -201,7 +315,21 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	// chain (ARD-001); only bounded auxiliary facts reach the log below.
 	message := diag.Reason(workErr, "retry failed")
 	var accountingErr *postCommitAccountingError
+	if isRetryAdmissionRefusal(workErr) {
+		var refusal *retryAdmissionRefusal
+		if errors.As(workErr, &refusal) {
+			return workErr
+		}
+		return &retryAdmissionRefusal{receipt: receipt, cause: workErr}
+	}
 	if errors.As(workErr, &accountingErr) {
+		return workErr
+	}
+	var writerFault *admissionWriterFault
+	if errors.As(workErr, &writerFault) {
+		// A local storage fault at final admission stops the run. The original
+		// receipt stays live until the run-level retention sweep; this video
+		// takes neither FinishRetryFailureTx nor an Errors entry.
 		return workErr
 	}
 	var guardedHandoffErr guardedRetryHandoffError
@@ -477,13 +605,18 @@ func acknowledgeRetryReceiptTx(ctx context.Context, tx *sql.Tx, receipt queue.Re
 	return nil
 }
 
-// Includes requeued and acknowledged rows: a quota requeue must not become a
-// second ordinary phase attempt in the same receiving run.
+// Retry membership is durable even when release clears retry_run_id. Foreign
+// members are handled only through a live receipt, never the ordinary phases.
 func (p *Pipeline) withoutRetryVideos(ctx context.Context, runID int64, videos []*state.Video) ([]*state.Video, error) {
 	out := make([]*state.Video, 0, len(videos))
 	for _, v := range videos {
 		var retry bool
-		if err := p.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM deferred_item WHERE video_id=? AND retry_run_id=? UNION ALL SELECT 1 FROM error_entry WHERE video_id=? AND retry_run_id=?)`, v.ID, runID, v.ID, runID).Scan(&retry); err != nil {
+		if err := p.db.QueryRowContext(ctx, `SELECT
+		 EXISTS(SELECT 1 FROM deferred_item WHERE video_id=?1 AND retry_run_id=?2
+		        UNION ALL SELECT 1 FROM error_entry WHERE video_id=?1 AND retry_run_id=?2)
+		 OR EXISTS(SELECT 1 FROM run_video_outcome o JOIN video v ON v.id=o.video_id
+		           WHERE o.video_id=?1 AND o.run_id=?2
+		             AND (o.retry_claim_provenance IS NOT NULL OR v.discovered_in_run_id IS NOT ?2))`, v.ID, runID).Scan(&retry); err != nil {
 			return nil, err
 		}
 		if !retry {

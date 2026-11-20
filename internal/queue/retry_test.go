@@ -61,6 +61,108 @@ func claimDeferred(t *testing.T, s *Store, item, run int64, want bool) {
 	}
 }
 
+func TestRetryAdmissionFenceSurvivesReleaseAndReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fence.db")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	s, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, owner, later := retryRun(t, db), retryRun(t, db), retryRun(t, db)
+	video := seedVideo(t, db, origin, "fence")
+	item := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	before, err := s.GetDeferredItem(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt RetryGroupReceipt
+	err = s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var taken bool
+		var err error
+		receipt, _, taken, err = s.ClaimDeferredGroupReceiptTx(ctx, tx, item, owner, time.Now())
+		if err == nil && !taken {
+			t.Error("first claim lost")
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimDeferred(t, s, item, owner, true)
+	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error { return s.RequeueRetryReceiptTx(ctx, tx, receipt) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err = NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		run  int64
+		want int
+	}{{owner, 0}, {later, 1}, {0, 1}} {
+		got, err := s.ListDeferredRetryCandidatesForRun(ctx, time.Now(), tc.run, 10)
+		if err != nil || len(got) != tc.want {
+			t.Fatalf("candidates for %d = %v, %v; want %d", tc.run, got, err, tc.want)
+		}
+	}
+	claimDeferred(t, s, item, owner, false)
+	after, err := s.GetDeferredItem(ctx, item)
+	if err != nil || after.RetryCount != 1 || after.RetryRunID != nil || !after.CreatedAt.Equal(before.CreatedAt) {
+		t.Fatalf("released row changed: before=%+v after=%+v err=%v", before, after, err)
+	}
+	claimDeferred(t, s, item, later, true)
+}
+
+func TestManualRetryAdmissionFenceAfterRelease(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, owner, later := retryRun(t, s.db), retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "manual-fence")
+	var entry int64
+	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		entry, err = s.RetainRuntimeErrorTx(ctx, tx, video, origin, "retry", "test")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claim := func(run int64, want bool) RetryGroupReceipt {
+		t.Helper()
+		var receipt RetryGroupReceipt
+		err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+			var taken bool
+			var err error
+			receipt, _, taken, err = s.ClaimErrorGroupReceiptTx(ctx, tx, entry, run, time.Now())
+			if err == nil && taken != want {
+				t.Errorf("manual claim run %d = %v, want %v", run, taken, want)
+			}
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return receipt
+	}
+	receipt := claim(owner, true)
+	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error { return s.RequeueRetryReceiptTx(ctx, tx, receipt) }); err != nil {
+		t.Fatal(err)
+	}
+	claim(owner, false)
+	claim(later, true)
+}
+
 func TestClaimDeferredGroupReturnsExactReceipt(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -140,6 +242,10 @@ func TestValidateRetryReceiptTracksRemovedSiblingsAndSurvivesReopen(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	recovered, err := s.RetryGroupReceiptForRunVideo(ctx, owner, video)
+	if err != nil || !reflect.DeepEqual(recovered, receipt) {
+		t.Fatalf("recovered receipt = %+v, %v; want %+v", recovered, err, receipt)
+	}
 	var got RetryReceiptValidation
 	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
@@ -159,6 +265,9 @@ func TestValidateRetryReceiptTracksRemovedSiblingsAndSurvivesReopen(t *testing.T
 	err = s.WithRetryTx(ctx, func(tx *sql.Tx) error { _, err := s.ValidateRetryReceiptTx(ctx, tx, receipt); return err })
 	if !errors.Is(err, ErrWorkRemoved) {
 		t.Fatalf("all removed validation = %v, want ErrWorkRemoved", err)
+	}
+	if _, err := s.RetryGroupReceiptForRunVideo(ctx, owner, video); !errors.Is(err, ErrWorkRemoved) {
+		t.Fatalf("disposed-only recovery = %v, want ErrWorkRemoved", err)
 	}
 }
 
@@ -191,6 +300,37 @@ func TestValidateRetryReceiptRejectsWrongOwnership(t *testing.T) {
 	})
 	if !errors.Is(err, ErrWorkNotOwned) || len(got.NotOwned) != 1 || got.NotOwned[0].ID != item {
 		t.Fatalf("wrong owner validation = %+v, %v", got, err)
+	}
+}
+
+func TestValidateRetryReceiptRejectsUnexpectedLiveSibling(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, owner := retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "receipt-unexpected-sibling")
+	item := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	var receipt RetryGroupReceipt
+	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var claimed bool
+		var err error
+		receipt, _, claimed, err = s.ClaimDeferredGroupReceiptTx(ctx, tx, item, owner, time.Now())
+		if err == nil && !claimed {
+			t.Error("claim was not admitted")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sibling := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	if _, err := s.db.ExecContext(ctx, `UPDATE deferred_item SET status='retrying', retry_run_id=? WHERE id=?`, owner, sibling); err != nil {
+		t.Fatal(err)
+	}
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		_, err := s.ValidateRetryReceiptTx(ctx, tx, receipt)
+		return err
+	})
+	if !errors.Is(err, ErrWorkNotOwned) {
+		t.Fatalf("unexpected sibling validation = %v, want ErrWorkNotOwned", err)
 	}
 }
 
