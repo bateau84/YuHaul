@@ -320,11 +320,38 @@ func (s *Service) DispatchWithQuota(ctx context.Context, b AuthorizationBinding,
 	return s.dispatch(ctx, b, req, transport, ledger, op)
 }
 
+// AdmissionFenceError carries a local refusal raised by the caller's admission
+// scope (the final retry/Stop/guard fence). It is a typed pre-admission
+// refusal: dispatch returns Cause's chain unchanged inside it, charges
+// nothing and cancels its provisional hold. It is not an accounting failure.
+type AdmissionFenceError struct{ Cause error }
+
+func (e *AdmissionFenceError) Error() string {
+	return "auth: admission fence refused: " + e.Cause.Error()
+}
+func (e *AdmissionFenceError) Unwrap() error { return e.Cause }
+
 var ErrQuotaRefused = errors.New("auth: quota admission refused")
 var ErrAccessExpiredBeforeAdmission = errors.New("auth: access expired before admission")
 var ErrQuotaAccounting = errors.New("auth: quota admission accounting failed")
 
+// DispatchWithQuotaScoped is DispatchWithQuota with a local scope held across
+// the provisional to admitted transition, in the order auth, quota, scope. The
+// scope is released before RoundTrip. A refusal from the scope should be
+// returned as *AdmissionFenceError; it is then neither joined with the
+// accounting error nor retried.
+func (s *Service) DispatchWithQuotaScoped(ctx context.Context, b AuthorizationBinding, req *http.Request, transport http.RoundTripper, ledger *quota.Ledger, op quota.Operation, scope quota.AdmissionScope) (*http.Response, AdmissionReceipt, *quota.Hold, error) {
+	if ledger == nil || scope == nil {
+		return nil, AdmissionReceipt{}, nil, fmt.Errorf("%w: scoped dispatch requires a ledger and a scope", ErrQuotaAccounting)
+	}
+	return s.dispatchScoped(ctx, b, req, transport, ledger, op, scope)
+}
+
 func (s *Service) dispatch(ctx context.Context, b AuthorizationBinding, req *http.Request, transport http.RoundTripper, ledger *quota.Ledger, op quota.Operation) (*http.Response, AdmissionReceipt, *quota.Hold, error) {
+	return s.dispatchScoped(ctx, b, req, transport, ledger, op, nil)
+}
+
+func (s *Service) dispatchScoped(ctx context.Context, b AuthorizationBinding, req *http.Request, transport http.RoundTripper, ledger *quota.Ledger, op quota.Operation, scope quota.AdmissionScope) (*http.Response, AdmissionReceipt, *quota.Hold, error) {
 	if req == nil || req.URL == nil || transport == nil {
 		return nil, AdmissionReceipt{}, nil, errors.New("auth: invalid dispatch request")
 	}
@@ -373,15 +400,21 @@ func (s *Service) dispatch(ctx context.Context, b AuthorizationBinding, req *htt
 				err = ErrQuotaRefused
 			}
 			if err == nil {
-				err = hold.AdmitIf(ctx, func(at time.Time) error {
+				validate := func(at time.Time) error {
 					if !current.Expiry.After(at.Add(10 * time.Second)) {
 						return ErrAccessExpiredBeforeAdmission
 					}
 					return nil
-				})
+				}
+				if scope != nil {
+					err = hold.AdmitScoped(ctx, scope, validate)
+				} else {
+					err = hold.AdmitIf(ctx, validate)
+				}
 			}
+			var fence *AdmissionFenceError
 			if err != nil {
-				if !errors.Is(err, ErrQuotaRefused) && !errors.Is(err, ErrAccessExpiredBeforeAdmission) &&
+				if !errors.As(err, &fence) && !errors.Is(err, ErrQuotaRefused) && !errors.Is(err, ErrAccessExpiredBeforeAdmission) &&
 					!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					err = errors.Join(ErrQuotaAccounting, err)
 				}

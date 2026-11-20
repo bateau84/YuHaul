@@ -303,6 +303,47 @@ func (s *Store) ResolvePlaylistSendTx(ctx context.Context, tx *sql.Tx, g Playlis
 	return nil
 }
 
+// ErrPlaylistGuardLost means the invocation-owned send guard is absent or
+// changed: the full persisted tuple no longer matches the invocation receipt.
+var ErrPlaylistGuardLost = errors.New("state: playlist send guard is not owned by this invocation")
+
+// CheckPlaylistAdmissionTx is the state half of the final POST admission fence.
+// Under the caller's already-reserved writer it requires the sending run to be
+// running, eligible and not Stop-marked, and the whole persisted guard tuple
+// to equal g. A durable Stop marker returns ErrPlaylistSendStopped whether or
+// not the execution context has been cancelled yet. It writes nothing.
+func (s *Store) CheckPlaylistAdmissionTx(ctx context.Context, tx *sql.Tx, g PlaylistSendGuard) error {
+	if tx == nil {
+		return errors.New("state: playlist admission check requires the writer transaction")
+	}
+	var runType, status string
+	var authVersion, mutationSafetyVersion int
+	var stopRequested sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT run_type, status, action_authority_version, mutation_safety_version, stop_requested_at FROM run WHERE id = ?`, g.RunID).
+		Scan(&runType, &status, &authVersion, &mutationSafetyVersion, &stopRequested)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("reading admission run: %w", err)
+	}
+	if stopRequested.Valid {
+		return ErrPlaylistSendStopped
+	}
+	if (runType != string(RunTypeManual) && runType != string(RunTypeScheduled)) || status != string(RunStatusRunning) || authVersion != 1 || mutationSafetyVersion != 1 {
+		return errors.New("state: run is not eligible for playlist mutation")
+	}
+	var owned int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM playlist_send_guard WHERE video_id=? AND target_playlist_id=? AND action_type=? AND run_id=? AND route_decision_id=? AND authorization_id=? AND prepared_at=?`,
+		g.VideoID, g.TargetPlaylistID, g.ActionType, g.RunID, g.RouteDecisionID, g.AuthorizationID, formatRunTime(g.PreparedAt)).Scan(&owned); err != nil {
+		return fmt.Errorf("reading admission guard: %w", err)
+	}
+	if owned != 1 {
+		return ErrPlaylistGuardLost
+	}
+	return nil
+}
+
 func nullableRunTime(t *time.Time) any {
 	if t == nil {
 		return nil

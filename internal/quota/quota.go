@@ -201,6 +201,67 @@ func (h *Hold) AdmitIf(ctx context.Context, validate func(time.Time) error) erro
 	return nil
 }
 
+// AdmissionScope runs transition while it holds a bounded local scope (the
+// composition layer's SQLite writer). It must call transition at most once,
+// only after the scope is held and its own checks pass, and must release the
+// scope before returning. It must not call back into the ledger or auth.
+type AdmissionScope func(ctx context.Context, transition func() error) error
+
+// AdmitScoped is AdmitIf with a local scope held across the provisional to
+// admitted transition (authorization ARS-001, "Authority at guard preparation
+// and POST admission"). The caller holds the authority fence; this takes the
+// ledger mutex; scope then takes the SQLite writer. The order is therefore
+// auth, quota, writer, and the writer is released before AdmitScoped returns,
+// so before transport.
+//
+// The bucket schedule is read before the scope, because no second connection
+// may be used inside the writer. After any wait for the scope, the time, the
+// bucket and ctx are sampled again, then validate runs (it must not block or
+// perform I/O). An error leaves the hold provisional and cancellable. Once
+// the hold is admitted, a failure to release the scope does not retract it.
+func (h *Hold) AdmitScoped(ctx context.Context, scope AdmissionScope, validate func(time.Time) error) error {
+	l := h.ledger
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if h.state != 0 {
+		return fmt.Errorf("quota: hold is not provisional")
+	}
+	if scope == nil {
+		return fmt.Errorf("quota: scoped admission requires a scope")
+	}
+	bucket, err := l.bucketCalculator(ctx)
+	if err != nil {
+		return err
+	}
+	err = scope(ctx, func() error {
+		now := l.now().UTC()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if bucket(now) != h.date {
+			return fmt.Errorf("quota: bucket changed before admission")
+		}
+		if validate != nil {
+			if err := validate(now); err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		h.at = now
+		h.state = 1
+		return nil
+	})
+	if h.state == 1 {
+		return nil
+	}
+	if err == nil {
+		return fmt.Errorf("quota: admission scope did not admit")
+	}
+	return err
+}
+
 // Cancel releases only a positively unadmitted hold.
 func (h *Hold) Cancel() error {
 	l := h.ledger

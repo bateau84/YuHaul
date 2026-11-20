@@ -177,6 +177,53 @@ func (s *Store) WithRetryTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return nil
 }
 
+// WithAdmissionTx runs fn under the SQLite writer for one bounded local scope,
+// the final POST admission fence (authorization ARS-001). The writer is
+// reserved before fn reads anything. bound limits the wait for the writer and
+// the whole scope; statements in fn use the transaction context it receives.
+//
+// A cancelled request ctx ends only the wait for the writer. Once the writer
+// is held, cancelling ctx neither rolls the transaction back nor interrupts
+// fn, so a transition that fn performs cannot be torn from its checks; fn is
+// responsible for observing ctx before that transition. fn must not call auth,
+// quota or any other store connection, and must not perform provider I/O. The
+// transaction commits (a no-op) or rolls back before return, so the writer is
+// never held across transport.
+func (s *Store) WithAdmissionTx(ctx context.Context, bound time.Duration, fn func(txCtx context.Context, tx *sql.Tx) error) error {
+	if bound <= 0 {
+		return errors.New("queue: admission scope requires a positive bound")
+	}
+	txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bound)
+	defer cancel()
+	stop := context.AfterFunc(ctx, cancel)
+	defer stop()
+	tx, err := s.db.BeginTx(txCtx, nil)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		return fmt.Errorf("begin admission transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(txCtx, `UPDATE run SET id = id WHERE id = -1`); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		return fmt.Errorf("lock admission writer: %w", err)
+	}
+	if !stop() {
+		// The request ended while waiting; the wait, not the writer scope, ends.
+		return ctx.Err()
+	}
+	if err := fn(txCtx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommit, err)
+	}
+	return nil
+}
+
 // ErrCommit marks an error returned by WithRetryTx when fn succeeded but the
 // transaction's Commit failed. The commit's outcome is then unconfirmed.
 var ErrCommit = errors.New("queue: commit retry transaction")
