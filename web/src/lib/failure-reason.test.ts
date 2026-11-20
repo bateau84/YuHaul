@@ -84,25 +84,33 @@ describe('failureSentence', () => {
   })
 
   it('reads "Reason unavailable." for run-level, unlisted and prototype-named codes', () => {
-    for (const code of ['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized', 'brand_new_code', 'constructor', 'toString', 'original_decision_unavailable', 'retry_claim_unverifiable', 'stop_settlement_blocked']) {
+    for (const code of ['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized', 'brand_new_code', 'constructor', 'toString', 'original_decision_unavailable', 'retry_work_removed']) {
       expect(failureSentence(diag(code))).toBe(REASON_UNAVAILABLE)
     }
   })
 
-  // The two codes are registered so a stored reason parses and reads honestly. No
-  // sentence is designed for them yet (admin UI design, "Errors — Category and
-  // Reason Presentation"), so they read "Reason unavailable." and are never
-  // shown raw, and they admit no other facts.
-  it('registers retry_claim_unverifiable and stop_settlement_blocked without a sentence', () => {
-    for (const code of ['retry_claim_unverifiable', 'stop_settlement_blocked']) {
+  // The designed sentences for the codes added 2026-11-20. retry_work_removed is
+  // registered so a run's stored reason parses, but the design gives no sentence
+  // for a run or video reason yet, so it reads "Reason unavailable.".
+  it('reads the designed sentences for retry_claim_unverifiable and stop_settlement_blocked', () => {
+    expect(failureSentence(diag('retry_claim_unverifiable'))).toBe(
+      'YuHaul could not verify which queue items this run had claimed, so it stopped instead of continuing that work. Open the run to see what was recorded.',
+    )
+    expect(failureSentence(diag('stop_settlement_blocked'))).toBe(
+      "YuHaul could not safely finish stopping this run, so the stop is not settled. This run will not be resumed. Nothing on this page settles it; check YuHaul's logs.",
+    )
+  })
+
+  it('registers the three codes and admits no other facts with them', () => {
+    for (const code of ['retry_claim_unverifiable', 'stop_settlement_blocked', 'retry_work_removed']) {
       expect(DIAG_CODES.has(code)).toBe(true)
       const text = diag(code)
       expect(parseDiag(text)).toEqual({ code, status: undefined, reason: undefined })
-      expect(failureSentence(text)).toBe(REASON_UNAVAILABLE)
       expect(parseDiag(`${text} status=500`)).toBeNull()
       expect(parseDiag(`${text} reason=backendError`)).toBeNull()
       expect(offersAccountStatus(text)).toBe(false)
     }
+    expect(failureSentence(diag('retry_work_removed'))).toBe(REASON_UNAVAILABLE)
   })
 
   it('never returns raw text: a string outside the diag:v1 grammar reads "Reason unavailable."', () => {

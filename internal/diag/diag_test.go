@@ -366,8 +366,8 @@ func TestNoSourceScannedVocabulary(t *testing.T) {
 	}
 }
 
-func TestRetryClaimAndStopSettlementVocabulary(t *testing.T) {
-	for _, code := range []string{"retry_claim_unverifiable", "stop_settlement_blocked"} {
+func TestRetryClaimStopSettlementAndRemovedWorkVocabulary(t *testing.T) {
+	for _, code := range []string{"retry_claim_unverifiable", "stop_settlement_blocked", "retry_work_removed"} {
 		ok := Facts{Phase: "action_execution", Operation: "retry", Code: code}
 		if !ok.Valid() || ok.String() != "diag:v1 phase=action_execution operation=retry code="+code {
 			t.Fatalf("%s must be a valid code: %q", code, ok.String())

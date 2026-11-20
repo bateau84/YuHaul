@@ -98,7 +98,7 @@ func (p *Pipeline) classifyStartupRuns(ctx context.Context) ([]int64, error) {
 		}
 		for _, m := range marked {
 			if _, err := settleStopTx(ctx, qs, p.stateStore, tx, m.id, m.quotaCost, time.Now().UTC()); err != nil {
-				p.logger.ErrorContext(ctx, "startup stop settlement failed", "run_id", m.id, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+				p.logger.ErrorContext(ctx, "startup stop settlement failed", append([]any{"run_id", m.id}, stopSettlementAttrs(err)...)...)
 				return nil, &startupCheckError{m.id, "stop_settlement", err}
 			}
 			p.logger.InfoContext(ctx, "startup settled a stopped run", "run_id", m.id)

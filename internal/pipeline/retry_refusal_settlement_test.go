@@ -128,6 +128,12 @@ func TestRefusedRetryRemovedWorkIsNotRecreatedByFailure(t *testing.T) {
 	sc.end(t, queue.ErrWorkRemoved, false)
 
 	require.Equal(t, state.RunStatusFailed, sc.status(t))
+	// The run that ended because the person removed its work saves a closed
+	// code, not unknown_error.
+	var reason sql.NullString
+	require.NoError(t, sc.f.db.QueryRow(`SELECT interrupt_reason FROM run WHERE id=?`, sc.recv).Scan(&reason))
+	require.Equal(t, "diag:v1 phase=unknown operation=retry code=retry_work_removed", reason.String)
+	require.NotContains(t, sc.logs.String(), "code=unknown_error")
 	require.Equal(t, queue.ErrorStatusDismissed, sc.sourceStatus(t), "removed source stays removed")
 	require.Zero(t, sc.count(t, `SELECT count(*) FROM error_entry WHERE video_id=? AND id<>?`, sc.f.videoID, sc.source), "no sink for the refused video")
 	require.Zero(t, sc.count(t, `SELECT count(*) FROM deferred_item WHERE video_id=?`, sc.f.videoID))
@@ -281,4 +287,17 @@ func TestStopAtTheFenceIsNotLoggedAsAFailure(t *testing.T) {
 			require.Contains(t, sc.logs.String(), "code=stopped_by_user")
 		})
 	}
+}
+
+// The startup failure diagnostics use registered closed codes, not unknown_error.
+func TestStartupFailureDiagnostics(t *testing.T) {
+	block := &startupCheckError{RunID: 4, Check: "stop_settlement", Cause: fmt.Errorf("handoff: %w", queue.ErrRetryProvenance)}
+	require.Equal(t, "diag:v1 phase=unknown operation=finalize_run code=stop_settlement_blocked", StartupFailureDiagnostic(fmt.Errorf("startup: %w", block)))
+	attrs := fmt.Sprint(stopSettlementAttrs(block.Cause))
+	require.Contains(t, attrs, "code=stop_settlement_blocked")
+	require.Contains(t, attrs, "code=retry_claim_unverifiable")
+	require.NotContains(t, attrs, "unknown_error")
+	// Another check keeps its own classification, and an unusable claim names its code.
+	require.Equal(t, "diag:v1 phase=unknown operation=load_run code=retry_claim_unverifiable", StartupFailureDiagnostic(fmt.Errorf("x: %w", queue.ErrRetryProvenance)))
+	require.Equal(t, "diag:v1 phase=unknown operation=load_run code=retry_work_removed", StartupFailureDiagnostic(queue.ErrWorkRemoved))
 }

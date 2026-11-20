@@ -209,15 +209,31 @@ func (e *retryAdmissionRefusal) protectedVideoID() int64 {
 	return e.receipt.VideoID
 }
 
-// withIntegrityCode names a retry claim whose stored identity is missing or
-// unusable with its closed diagnostic code (retry_claim_unverifiable), so the
-// stored interrupt reason and the logs do not read unknown_error. Other errors
-// pass through unchanged.
+// withIntegrityCode gives the failure that ended a retry run its closed
+// diagnostic code, so the stored reason and the logs do not read unknown_error:
+// retry_claim_unverifiable for a missing or unusable stored claim identity, and
+// retry_work_removed when the person removed the work the run had claimed.
+// Other errors pass through unchanged. The error identity is kept: errors.Is
+// still sees the typed cause, so the 409 handler and the settlement still work.
 func withIntegrityCode(err error) error {
-	if errors.Is(err, queue.ErrRetryProvenance) {
+	switch {
+	case errors.Is(err, queue.ErrRetryProvenance):
 		return diag.WithCode(err, "retry_claim_unverifiable")
+	case errors.Is(err, queue.ErrWorkRemoved):
+		return diag.WithCode(err, "retry_work_removed")
 	}
 	return err
+}
+
+// StartupFailureDiagnostic is the closed diagnostic for a failed startup
+// recovery: stop_settlement_blocked when a marked Stop could not be settled,
+// otherwise the error's own classification.
+func StartupFailureDiagnostic(err error) string {
+	var ce *startupCheckError
+	if errors.As(err, &ce) && ce.Check == "stop_settlement" {
+		return diag.Facts{Phase: "unknown", Operation: "finalize_run", Code: "stop_settlement_blocked"}.String()
+	}
+	return diag.Encode(withIntegrityCode(err), "unknown", "load_run")
 }
 
 // stopSettlementAttrs are the log attributes of a marked Stop that could not

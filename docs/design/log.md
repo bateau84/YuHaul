@@ -8,6 +8,7 @@ timestamp: 2026-11-10T00:00:00Z
 
 ## 2026-11-20
 
+- Implemented the two sentences added for `retry_claim_unverifiable` and `stop_settlement_blocked` in the browser's reason table. Open for the designer: the `View run {id}` action the design names for `retry_claim_unverifiable` is not built (it needs a decision on which run the link names), and a run that ended because the person removed its work now stores the new diagnostic code `retry_work_removed`, for which the design has no run-reason sentence, so it reads `Reason unavailable.`.
 - Added reason sentences for `retry_claim_unverifiable` and `stop_settlement_blocked` to [admin interface design](/docs/design/yuhaul-admin-ui-design.md), and confirmed that the Deferred `Dismiss` confirmation opens only for a handed-over row or a pending retry (as shipped), correcting the earlier wording of section 3a and the Deferred tab. Design only.
 
 - Recorded that the `retry_work_removed` handling of [admin interface design](/docs/design/yuhaul-admin-ui-design.md) section 3a is implemented in the Errors and Deferred views (component tests only, not yet checked in a browser), and that the Deferred `Dismiss` confirmation now also opens for a non-handed-over row while its retry is pending, so the pending-only first line has a place. The designer should confirm that reading.

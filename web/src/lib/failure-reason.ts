@@ -27,7 +27,7 @@ export const DIAG_SQLITE = set(
   'SQLITE_ERROR SQLITE_BUSY SQLITE_LOCKED SQLITE_READONLY SQLITE_IOERR SQLITE_CORRUPT SQLITE_FULL SQLITE_CANTOPEN SQLITE_CONSTRAINT',
 )
 export const DIAG_CODES = set(
-  'unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user video_unavailable original_decision_unavailable no_source_scanned retry_claim_unverifiable stop_settlement_blocked',
+  'unknown_error sqlite_error provider_error oauth_error timeout canceled transport_error invalid_provider_response panic authorization_unavailable action_authority_invalid credential_persistence_failed authorization_changed mutation_application_uncertain snapshot_unavailable snapshot_unreadable checkpoint_unrecognized stopped_by_user ended_by_user video_unavailable original_decision_unavailable no_source_scanned retry_claim_unverifiable stop_settlement_blocked retry_work_removed',
 )
 const DISCARD_CODES = new Set(['snapshot_unavailable', 'snapshot_unreadable', 'checkpoint_unrecognized'])
 
@@ -65,7 +65,7 @@ export function parseDiag(message: string | null | undefined): DiagFacts | null 
     if (String(n) !== status) return null
     if (code === 'provider_error' ? n < 300 || n > 599 : code === 'oauth_error' ? n < 100 || n > 599 : true) return null
   }
-  if (['credential_persistence_failed', 'authorization_changed', 'mutation_application_uncertain', 'retry_claim_unverifiable', 'stop_settlement_blocked'].includes(code) && (status || reason || sqlite)) return null
+  if (['credential_persistence_failed', 'authorization_changed', 'mutation_application_uncertain', 'retry_claim_unverifiable', 'stop_settlement_blocked', 'retry_work_removed'].includes(code) && (status || reason || sqlite)) return null
   if (reason && !((code === 'provider_error' && DIAG_PROVIDER_REASONS.has(reason)) || (code === 'oauth_error' && DIAG_OAUTH_REASONS.has(reason)))) return null
   if (sqlite && !(code === 'sqlite_error' && DIAG_SQLITE.has(sqlite))) return null
   return { code, status, reason }
@@ -107,6 +107,12 @@ const BY_CODE: Record<string, string> = {
   mutation_application_uncertain:
     'YuHaul could not confirm whether this playlist action was applied. Repeating it could add the video again, so it remains blocked.',
   no_source_scanned: 'No channels were scanned successfully.',
+  // Design, "Errors — Category and Reason Presentation", added codes 2026-11-20.
+  // Neither says that anything was or was not sent: the code does not establish it.
+  retry_claim_unverifiable:
+    'YuHaul could not verify which queue items this run had claimed, so it stopped instead of continuing that work. Open the run to see what was recorded.',
+  stop_settlement_blocked:
+    "YuHaul could not safely finish stopping this run, so the stop is not settled. This run will not be resumed. Nothing on this page settles it; check YuHaul's logs.",
   video_unavailable: 'YouTube did not return this video when YuHaul asked for its details.',
   timeout: 'YuHaul stopped waiting because a step took too long.',
   transport_error: 'A network connection failed.',
