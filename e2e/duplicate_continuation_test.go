@@ -92,7 +92,7 @@ func TestE2E_DuplicateContinuationHTTPComposition(t *testing.T) {
 		server.WithConfigHandler(config.NewHandler(env.configSvc, nil)))
 	httpServer := httptest.NewServer(api.Handler())
 	defer httpServer.Close()
-	client, base := httpServer.Client(), httpServer.URL
+	client, base := guardClient(t, httpServer.Client()), httpServer.URL
 	status, body := postJSON(t, client, base+"/api/runs", nil)
 	require.Equal(t, http.StatusAccepted, status, string(body))
 	var started struct {

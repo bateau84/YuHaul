@@ -23,6 +23,8 @@ export {
   startDryRun,
   startReplay,
   startBacktest,
+  stopRun,
+  discardRun,
 } from './runs'
 
 // Overview is wired to the real backend.
@@ -33,10 +35,18 @@ export {
   listErrors,
   retryError,
   dismissError,
-  listDeferred,
   retryDeferred,
   discardDeferred,
 } from './queue'
+
+// Paged deferred queue, stranded-video re-queue and video search (ARS-005,
+// video-search ARS-001). Types and clients only; no view uses them yet.
+export { getDeferredPage } from './deferred-page'
+export { getStrandedPreview, requeueStranded } from './stranded'
+export { searchVideos, getVideo } from './video-search'
+
+// Read-only channel scan records (discovery ARS-002).
+export { getSourceFailures, getRunSourceFailures } from './source-failures'
 
 // Analytics operations are wired to the real backend.
 export {
@@ -90,7 +100,3 @@ export {
   ignoreAdvisory,
   actOnAdvisory,
 } from './advisory'
-
-// The following operations do not yet have backend endpoints and remain
-// mock-backed.
-export { subscribeRunSSE } from './mock'

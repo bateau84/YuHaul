@@ -61,7 +61,7 @@ func TestSimulationDuplicateContinuationResults(t *testing.T) {
 				if mode == "dry-run" {
 					run, err = deps.pipeline.DryRun(ctx, proposal)
 				} else {
-					run, err = deps.pipeline.Backtest(ctx, proposal)
+					run, err = deps.pipeline.Backtest(ctx, proposal, state.PublishedRange{})
 				}
 				require.NoError(t, err)
 				if mode == "replay" {
@@ -71,7 +71,7 @@ func TestSimulationDuplicateContinuationResults(t *testing.T) {
 					cv.Snapshot.DuplicateBehavior = "skip"
 					legacyID, err := deps.pipeline.configStore.Create(ctx, cv.Snapshot, "legacy")
 					require.NoError(t, err)
-					run, err = deps.pipeline.Replay(ctx, &legacyID)
+					run, err = deps.pipeline.Replay(ctx, &legacyID, state.PublishedRange{})
 					require.NoError(t, err)
 				}
 				before := simulationProductionRows(t, deps.db, prodID)

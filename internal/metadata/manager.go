@@ -2,14 +2,15 @@ package metadata
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
+	"net/http"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/quota"
+	"github.com/bateau84/YuHaul/internal/youtube"
 )
 
 // DefaultTTL is the default metadata retention window (30 days).
@@ -22,6 +23,7 @@ const DefaultRefreshBatchSize = 50
 type Manager struct {
 	store     *Store
 	fetcher   Fetcher
+	bound     BoundFetcher
 	ledger    *quota.Ledger
 	logger    *slog.Logger
 	ttl       time.Duration
@@ -68,6 +70,14 @@ func WithNow(now func() time.Time) Option {
 	}
 }
 
+// WithBoundFetcher sets the bound, quota-accounted by-ID read used by
+// FetchForEvaluation.
+func WithBoundFetcher(f BoundFetcher) Option {
+	return func(m *Manager) {
+		m.bound = f
+	}
+}
+
 // NewManager returns a lifecycle manager backed by store and ledger.
 // The fetcher is used for both scheduled and on-demand refresh.
 func NewManager(store *Store, fetcher Fetcher, ledger *quota.Ledger, opts ...Option) *Manager {
@@ -86,27 +96,63 @@ func NewManager(store *Store, fetcher Fetcher, ledger *quota.Ledger, opts ...Opt
 	return m
 }
 
-// RunLifecycle expires stale records and refreshes active routed records that
-// are nearing expiry. It is safe to call repeatedly (e.g., at the start of each
-// processing run). The hybrid policy implemented here refreshes routed videos
-// automatically; older/unrouted videos are refreshed only on demand.
+// RunLifecycle is the metadata sweep. It is safe to call repeatedly (e.g., at
+// the start of each processing run). In order (ARS-001 §10.4):
+//
+//  1. ExpireStale, in chunks of IndexWriteBatch;
+//  2. ReconcileSearchIndex, even when nothing expired or ExpireStale failed;
+//  3. OptimizeSearchIndex, every sweep, even when step 1 or 2 failed;
+//  4. RefreshRoutedNearExpiry, only when ExpireStale succeeded. The hybrid
+//     policy refreshes routed videos automatically; older/unrouted videos are
+//     refreshed only on demand.
+//
+// Every step runs or is skipped on those conditions alone; the errors of the
+// steps that ran are joined.
 func (m *Manager) RunLifecycle(ctx context.Context) error {
-	expired, err := m.ExpireStale(ctx)
-	if err != nil {
-		return err
-	}
-	m.logger.InfoContext(ctx, "metadata lifecycle expired stale records", "count", expired)
+	var errs []error
 
-	refreshed, err := m.RefreshRoutedNearExpiry(ctx)
-	if err != nil {
-		return err
+	expired, expireErr := m.ExpireStale(ctx)
+	if expireErr != nil {
+		errs = append(errs, expireErr)
 	}
-	m.logger.InfoContext(ctx, "metadata lifecycle refreshed routed records", "count", refreshed)
-	return nil
+	m.logger.InfoContext(ctx, "metadata lifecycle expired stale records", "count", expired, "failed", expireErr != nil)
+
+	db := m.store.DB()
+	rec, err := ReconcileSearchIndex(ctx, db, m.now().UTC())
+	if err != nil {
+		errs = append(errs, fmt.Errorf("metadata: reconcile search index: %w", err))
+	}
+	m.logger.InfoContext(ctx, "metadata lifecycle reconciled search index",
+		"orphans_removed", rec.OrphansRemoved, "purged", rec.Purged, "added", rec.Added,
+		"batches", rec.Batches, "longest_hold", rec.LongestHold, "failed", err != nil)
+
+	opt, err := OptimizeSearchIndex(ctx, db)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("metadata: optimize search index: %w", err))
+	}
+	level := slog.LevelInfo
+	if !opt.Complete {
+		// Removed trigrams stay in the segments until a complete optimize (I2b).
+		level = slog.LevelWarn
+	}
+	m.logger.Log(ctx, level, "metadata lifecycle optimized search index",
+		"steps", opt.Steps, "complete", opt.Complete, "longest", opt.Longest,
+		"total", opt.Total, "failed", err != nil)
+
+	if expireErr == nil {
+		refreshed, err := m.RefreshRoutedNearExpiry(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		m.logger.InfoContext(ctx, "metadata lifecycle refreshed routed records", "count", refreshed, "failed", err != nil)
+	}
+	return errors.Join(errs...)
 }
 
-// CleanupExpired deletes metadata records older than the configured TTL.
-// It performs only local DELETE operations and never consumes API quota.
+// CleanupExpired deletes metadata records older than the configured TTL, at
+// most IndexWriteBatch (200) per call, so one call purges one batch of search
+// entries (ARS-001 §10.10). Call it again while it returns IndexWriteBatch. It
+// performs only local DELETE operations and never consumes API quota.
 // Returns the number of records deleted.
 func (m *Manager) CleanupExpired(ctx context.Context) (int, error) {
 	cutoff := m.now().UTC().Add(-m.ttl)
@@ -114,20 +160,27 @@ func (m *Manager) CleanupExpired(ctx context.Context) (int, error) {
 }
 
 // ExpireStale marks active records past expires_at as expired, clearing raw
-// metadata fields. It returns the number of records expired.
+// metadata fields. It lists up to 10,000 IDs and expires them in chunks of at
+// most IndexWriteBatch, one transaction per chunk, so no write lock is held
+// for long (ARS-001 §10.10). It returns the number of records expired. If a
+// chunk fails it returns the count of the chunks already committed with the
+// error; those stay committed and the next sweep continues.
 func (m *Manager) ExpireStale(ctx context.Context) (int, error) {
 	now := m.now().UTC()
 	ids, err := m.store.ListActivePastExpiry(ctx, now, 10000)
 	if err != nil {
 		return 0, err
 	}
-	if len(ids) == 0 {
-		return 0, nil
+	expired := 0
+	for len(ids) > 0 {
+		n := min(IndexWriteBatch, len(ids))
+		if err := m.store.Expire(ctx, ids[:n], now); err != nil {
+			return expired, err
+		}
+		expired += n
+		ids = ids[n:]
 	}
-	if err := m.store.Expire(ctx, ids, now); err != nil {
-		return 0, err
-	}
-	return len(ids), nil
+	return expired, nil
 }
 
 // RefreshRoutedNearExpiry refreshes active records for routed videos whose
@@ -148,7 +201,7 @@ func (m *Manager) RefreshActiveNearExpiry(ctx context.Context) (int, error) {
 }
 
 // RefreshOnDemand re-fetches metadata for a single video and restores display.
-// It records quota cost in the ledger.
+// The provider adapter records actual calls in the ledger.
 func (m *Manager) RefreshOnDemand(ctx context.Context, videoID string) error {
 	cost := quota.OpVideosList.UnitCost()
 	ok, _, err := m.ledger.CanAfford(ctx, cost)
@@ -156,7 +209,7 @@ func (m *Manager) RefreshOnDemand(ctx context.Context, videoID string) error {
 		return fmt.Errorf("metadata: check quota for on-demand refresh: %w", err)
 	}
 	if !ok {
-		m.logger.WarnContext(ctx, "on-demand metadata refresh deferred: quota exhausted", "video_id", videoID)
+		m.logger.WarnContext(ctx, "on-demand metadata refresh deferred: quota exhausted")
 		return nil
 	}
 
@@ -173,11 +226,57 @@ func (m *Manager) RefreshOnDemand(ctx context.Context, videoID string) error {
 		return err
 	}
 
-	runID := sql.NullInt64{Valid: false}
-	if err := m.ledger.Record(ctx, runID, quota.OpVideosList); err != nil {
-		return fmt.Errorf("metadata: record on-demand refresh quota: %w", err)
-	}
 	return nil
+}
+
+// ReadLocalDisplay performs a local-only, bounded metadata read for run members.
+func (m *Manager) ReadLocalDisplay(ctx context.Context, ids []string) (map[string]LocalDisplay, error) {
+	if len(ids) > 100 {
+		return nil, fmt.Errorf("metadata: local display batch exceeds 100 IDs")
+	}
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	rows, err := m.store.readLocalDisplayRows(ctx, unique)
+	if err != nil {
+		return nil, err
+	}
+	// One cutoff is captured only after the database result set has been fully consumed.
+	cutoff := m.now().UTC()
+	out := make(map[string]LocalDisplay, len(unique))
+	for _, id := range unique {
+		out[id] = LocalDisplay{Attribution: "current_local_not_necessarily_evaluated", TitleAvailability: "unknown", ChannelNameAvailability: "unknown", DurationAvailability: "unknown"}
+	}
+	for _, row := range rows {
+		out[row.VideoID] = ProjectLocal(row, cutoff)
+	}
+	return out, nil
+}
+
+// ParseLocalTime parses a stored timestamp in any layout the schema has used.
+// Zero and unparseable values report false.
+func ParseLocalTime(value any) (time.Time, bool) {
+	switch v := value.(type) {
+	case time.Time:
+		if v.IsZero() {
+			return time.Time{}, false
+		}
+		return v.UTC(), true
+	case string:
+		for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05"} {
+			if parsed, err := time.Parse(layout, v); err == nil && !parsed.IsZero() {
+				return parsed.UTC(), true
+			}
+		}
+	case []byte:
+		return ParseLocalTime(string(v))
+	}
+	return time.Time{}, false
 }
 
 // GetDisplayMetadata returns active metadata for a video. If the record has
@@ -259,8 +358,7 @@ func (m *Manager) refreshCandidates(ctx context.Context, src candidateSource, wi
 			ids[j] = c.VideoID
 		}
 
-		calls := int(math.Ceil(float64(len(ids)) / float64(m.batchSize)))
-		cost := calls * quota.OpVideosList.UnitCost()
+		cost := quota.OpVideosList.UnitCost()
 		ok, _, err := m.ledger.CanAfford(ctx, cost)
 		if err != nil {
 			return refreshed, fmt.Errorf("metadata: check quota for refresh: %w", err)
@@ -280,11 +378,6 @@ func (m *Manager) refreshCandidates(ctx context.Context, src candidateSource, wi
 			return refreshed, err
 		}
 
-		runID := sql.NullInt64{Valid: false}
-		if err := m.ledger.RecordCalls(ctx, runID, quota.OpVideosList, calls); err != nil {
-			return refreshed, fmt.Errorf("metadata: record refresh quota: %w", err)
-		}
-
 		refreshed += len(fresh)
 	}
 	return refreshed, nil
@@ -294,4 +387,270 @@ func (m *Manager) refreshCandidates(ctx context.Context, src candidateSource, wi
 func IsMetadataExpired(err error) bool {
 	var expired *MetadataExpiredError
 	return errors.As(err, &expired)
+}
+
+// fetchChunk is the most unique IDs sent in one videos.list call.
+const fetchChunk = 50
+
+// FetchForEvaluation makes the route inputs of reqs locally current, fetching
+// the rest through the bound read seam, at most 50 unique IDs per call
+// (ARS-005 §6.1, Discovery ARS-001 §3).
+//
+// Every unique requested ID gets one status. The returned error is only a local
+// classification, preflight or persistence failure; a failed read is carried
+// in FetchOutcome.Read with its primary, accounting, renewal and interruption
+// facts kept apart, for the run owner to dispose of. After any read failure
+// other than an unusable response no further call is made and the unsent IDs
+// take the failing status. A known quota refusal makes zero calls and writes
+// zero rows. An unusable response does not suspend fetching.
+func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.AuthorizationBinding, reqs []InputRequirement) (FetchOutcome, error) {
+	out := FetchOutcome{Statuses: make(map[string]FetchStatus, len(reqs))}
+	order := make([]string, 0, len(reqs))
+	need := make(map[string]InputRequirement, len(reqs))
+	for _, r := range reqs {
+		if r.VideoID == "" {
+			return out, errors.New("metadata: fetch for evaluation: empty video ID")
+		}
+		if prev, ok := need[r.VideoID]; ok {
+			r.Title, r.ChannelName = r.Title || prev.Title, r.ChannelName || prev.ChannelName
+			r.Description, r.Duration = r.Description || prev.Description, r.Duration || prev.Duration
+			r.Live = r.Live || prev.Live
+		} else {
+			order = append(order, r.VideoID)
+		}
+		need[r.VideoID] = r
+	}
+	failAll := func(ids []string) {
+		for _, id := range ids {
+			if _, done := out.Statuses[id]; !done {
+				out.Statuses[id] = FetchFailed
+			}
+		}
+	}
+
+	var missing []string
+	for i := 0; i < len(order); i += fetchChunk {
+		chunk := order[i:min(i+fetchChunk, len(order))]
+		rows, err := m.store.readInputRows(ctx, chunk)
+		if err != nil {
+			failAll(order)
+			return out, err
+		}
+		// One cutoff is taken only after the rows are fully read.
+		cutoff := m.now().UTC()
+		held := make(map[string]inputRow, len(rows))
+		for _, row := range rows {
+			held[row.VideoID] = row
+		}
+		for _, id := range chunk {
+			if row, ok := held[id]; ok && !need[id].Live && rowSupplies(row, cutoff, need[id]) {
+				out.Statuses[id] = FetchCurrent
+				continue
+			}
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 {
+		return out, nil
+	}
+	if m.bound == nil || m.ledger == nil {
+		failAll(missing)
+		return out, errors.New("metadata: fetch for evaluation: bound fetcher or quota ledger unavailable")
+	}
+
+	for i := 0; i < len(missing); i += fetchChunk {
+		chunk := missing[i:min(i+fetchChunk, len(missing))]
+		if out.Read != nil {
+			status := readStatus(out.Read)
+			for _, id := range chunk {
+				out.Statuses[id] = status
+			}
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			out.Read = &ReadFacts{Err: err, Interruption: err}
+			for _, id := range chunk {
+				out.Statuses[id] = FetchFailed
+			}
+			continue
+		}
+		// Known insufficiency refuses with zero attempts. A preflight error is a
+		// local fault, not a refusal. The positive answer never replaces the
+		// admission inside the read.
+		ok, _, err := m.ledger.CanAfford(ctx, quota.OpVideosList.UnitCost())
+		if err != nil {
+			failAll(missing[i:])
+			return out, fmt.Errorf("metadata: quota preflight for evaluation fetch: %w", err)
+		}
+		if !ok {
+			out.Read = &ReadFacts{Err: auth.ErrQuotaRefused, Primary: auth.ErrQuotaRefused, QuotaRefused: true}
+			for _, id := range chunk {
+				out.Statuses[id] = FetchQuotaRefused
+			}
+			continue
+		}
+
+		res, err := m.bound.FetchMetadataBound(ctx, binding, chunk)
+		if err != nil {
+			facts, status, suspend := classifyRead(err)
+			if facts.Admitted {
+				out.Attempts++
+			}
+			for _, id := range chunk {
+				out.Statuses[id] = status
+			}
+			if suspend {
+				out.Read = &facts
+			} else {
+				m.logger.WarnContext(ctx, "metadata fetch response unusable", "ids", len(chunk))
+			}
+			continue
+		}
+
+		out.Attempts++
+		requested := make(map[string]bool, len(chunk))
+		for _, id := range chunk {
+			requested[id] = true
+		}
+		returned := make(map[string]bool, len(res.Returned))
+		complete := res.Complete
+		for _, id := range res.Returned {
+			if !requested[id] || returned[id] {
+				complete = false // Identity is not reliable; omission proves nothing.
+			}
+			returned[id] = true
+		}
+		for id, live := range res.Live {
+			if requested[id] && returned[id] {
+				if out.Live == nil {
+					out.Live = make(map[string]LiveStatus)
+				}
+				out.Live[id] = live
+			}
+		}
+		var save []TransientMetadata
+		details := make(map[string]TransientMetadata, len(res.Details))
+		for _, d := range res.Details {
+			if !requested[d.VideoID] || !returned[d.VideoID] {
+				continue
+			}
+			if _, dup := details[d.VideoID]; dup {
+				continue
+			}
+			details[d.VideoID] = d
+			save = append(save, d)
+		}
+		saved, err := m.store.UpsertFetched(ctx, save, m.ttl, m.now())
+		if err != nil {
+			failAll(missing[i:])
+			return out, err
+		}
+		out.Saved += saved
+		unusable := 0
+		for _, id := range chunk {
+			d, hasDetail := details[id]
+			switch {
+			case hasDetail && detailSupplies(d, need[id]):
+				out.Statuses[id] = FetchFetched
+			case returned[id] || !complete:
+				out.Statuses[id] = FetchUnusable
+				unusable++
+			default:
+				out.Statuses[id] = FetchAbsent
+			}
+		}
+		if unusable > 0 {
+			m.logger.WarnContext(ctx, "metadata fetch inputs unusable", "count", unusable, "complete", complete)
+		}
+	}
+	// An accounting fault controls fail-closed propagation: the caller must see
+	// it as an error, with the per-ID statuses already filled in.
+	if out.Read != nil && out.Read.Accounting != nil {
+		return out, &ReadFaultError{Facts: *out.Read}
+	}
+	return out, nil
+}
+
+// ReadFaultError reports a metadata read whose local quota accounting failed.
+// It carries the typed facts and unwraps to the original read error. Its text
+// is fixed so no provider or store detail reaches a log through it.
+type ReadFaultError struct{ Facts ReadFacts }
+
+func (e *ReadFaultError) Error() string { return "metadata read accounting failed" }
+
+// Unwrap exposes the original read error and the accounting fault.
+func (e *ReadFaultError) Unwrap() []error { return []error{e.Facts.Err, e.Facts.Accounting} }
+
+// rowSupplies reports whether a stored row is current at cutoff and supplies
+// every input r requires. Presence is a non-NULL column, so a real empty
+// description or zero duration counts.
+func rowSupplies(row inputRow, cutoff time.Time, r InputRequirement) bool {
+	if ProjectLocal(row.LocalRow, cutoff).SourceFetchedAt == nil {
+		return false
+	}
+	return (!r.Title || row.Title != nil) &&
+		(!r.ChannelName || row.ChannelName != nil) &&
+		(!r.Description || row.Description != nil) &&
+		(!r.Duration || row.DurationSeconds != nil)
+}
+
+func detailSupplies(d TransientMetadata, r InputRequirement) bool {
+	return (!r.Title || d.Title != nil) &&
+		(!r.ChannelName || d.ChannelName != nil) &&
+		(!r.Description || d.Description != nil) &&
+		(!r.Duration || d.DurationSeconds != nil)
+}
+
+// readStatus is the status unsent inputs take after a suspending read failure.
+func readStatus(f *ReadFacts) FetchStatus {
+	_, status, _ := classifyRead(f.Err)
+	return status
+}
+
+// classifyRead separates the typed facts of a read error and chooses the
+// per-input status. suspend is false only for an unusable successful response.
+// The original error stays in the facts; nothing is flattened.
+func classifyRead(err error) (facts ReadFacts, status FetchStatus, suspend bool) {
+	facts = ReadFacts{Err: err, Primary: err}
+	var re *youtube.ReadError
+	if errors.As(err, &re) {
+		facts.Primary, facts.Accounting, facts.Renewal = re.Primary, re.Accounting, re.Renewal
+		facts.Interruption, facts.HTTPStatus = re.Interruption, re.Status
+	}
+	var api *youtube.APIError
+	if errors.As(facts.Primary, &api) && facts.HTTPStatus == 0 {
+		facts.HTTPStatus = api.Status
+	}
+	quotaReason := api != nil && (api.Reason == "quotaExceeded" || api.Reason == "dailyLimitExceeded")
+	facts.QuotaRefused = errors.Is(err, auth.ErrQuotaRefused) || quotaReason
+	if facts.Accounting == nil && errors.Is(err, auth.ErrQuotaAccounting) {
+		facts.Accounting = auth.ErrQuotaAccounting
+	}
+
+	var invalid *youtube.InvalidResponseError
+	var transport *youtube.ReadTransportError
+	// A send was admitted only if the provider answered, the transport failed
+	// after admission, the response was unusable, or the read was interrupted.
+	// Local refusals and failures before admission are not attempts.
+	facts.Admitted = facts.HTTPStatus != 0 || facts.Interruption != nil ||
+		errors.As(err, &transport) || errors.As(err, &invalid)
+	switch {
+	case facts.Accounting != nil || errors.Is(err, auth.ErrQuotaAccounting):
+		return facts, FetchFailed, true
+	case facts.QuotaRefused:
+		return facts, FetchQuotaRefused, true
+	case facts.Interruption != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return facts, FetchFailed, true
+	case facts.Renewal != nil || facts.HTTPStatus == http.StatusUnauthorized ||
+		(api != nil && api.Reason == "authError") ||
+		errors.Is(err, auth.ErrAuthorizationChanged) || errors.Is(err, auth.ErrNotConfigured) ||
+		errors.Is(err, auth.ErrAccessExpiredBeforeAdmission):
+		return facts, FetchAuthorizationPending, true
+	case facts.HTTPStatus == http.StatusTooManyRequests ||
+		(api != nil && (api.Reason == "rateLimitExceeded" || api.Reason == "userRateLimitExceeded")):
+		return facts, FetchRateLimited, true
+	case errors.As(err, &invalid):
+		return facts, FetchUnusable, false
+	}
+	return facts, FetchFailed, true
 }

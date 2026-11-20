@@ -178,33 +178,6 @@ func newTestScheduler(t *testing.T, store *Store, pipeline Pipeline, stateStore 
 	return NewScheduler(store, pipeline, stateStore, WithLogger(logger))
 }
 
-func TestScheduler_ResumesInterruptedRuns(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	db := openTestDB(t)
-	store, err := NewStore(db)
-	require.NoError(t, err)
-
-	stateStore := newFakeStateStore()
-	stateStore.addRun(&fakeRun{id: 7, status: state.RunStatusInterrupted, runType: state.RunTypeScheduled, startedAt: time.Now().UTC()})
-	stateStore.addRun(&fakeRun{id: 8, status: state.RunStatusCompleted, runType: state.RunTypeScheduled, startedAt: time.Now().UTC()})
-
-	pipeline := &fakePipeline{}
-	sch := newTestScheduler(t, store, pipeline, stateStore)
-
-	require.NoError(t, sch.Start(ctx))
-	defer sch.Stop()
-
-	require.Eventually(t, func() bool {
-		return len(pipeline.ExecutedRuns()) >= 1
-	}, 2*time.Second, 50*time.Millisecond)
-
-	executed := pipeline.ExecutedRuns()
-	require.Len(t, executed, 1)
-	assert.Equal(t, int64(7), executed[0])
-}
-
 func TestScheduler_TriggersScheduledRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

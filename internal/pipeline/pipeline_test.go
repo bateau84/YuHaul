@@ -81,6 +81,13 @@ func TestPipeline_StartRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), run.ID)
 	assert.Equal(t, state.RunStatusRunning, run.Status)
+	var safetyVersion int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT mutation_safety_version FROM run WHERE id=?`, run.ID).Scan(&safetyVersion))
+	require.Equal(t, 1, safetyVersion)
+	scheduled, err := p.StartRun(ctx, state.RunTypeScheduled)
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT mutation_safety_version FROM run WHERE id=?`, scheduled.ID).Scan(&safetyVersion))
+	require.Equal(t, 1, safetyVersion)
 
 	select {
 	case ev := <-sub:
@@ -212,6 +219,9 @@ func TestPipeline_ResumeFromActionExecutionSkipsEarlierPhases(t *testing.T) {
 	loaded, err := stateStore.GetRun(ctx, runID)
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
+	require.NotNil(t, loaded.VideosSelected,
+		"the run-owned input set captured before interruption must survive the resume")
+	assert.Equal(t, 1, *loaded.VideosSelected)
 
 	actions, err := stateStore.GetExecutedActionsForVideo(ctx, video.ID)
 	require.NoError(t, err)
@@ -302,6 +312,9 @@ func TestPipeline_DeferredItemsCannotReplayEarlierRunDecisions(t *testing.T) {
 	loaded, err := stateStore.GetRun(ctx, run2ID)
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
+	require.NotNil(t, loaded.VideosSelected,
+		"a run whose selector completed with no run-owned inputs stores zero, not unknown")
+	assert.Equal(t, 0, *loaded.VideosSelected)
 
 	// No receiving-run evaluation exists. Retain pending work rather than
 	// replaying the earlier run's match or acknowledging an empty match set.
@@ -335,7 +348,79 @@ func TestPipeline_FailRunSetsFailedStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusFailed, loaded.Status)
 	require.NotNil(t, loaded.InterruptReason)
-	assert.Equal(t, "no active token", *loaded.InterruptReason)
+	assert.Equal(t, "diag:v1 phase=discovery operation=discover code=unknown_error", *loaded.InterruptReason)
+}
+
+// Discovery ADR-001 D5/AC8: the typed error from discovery ends the run failed
+// with the registered no_source_scanned diagnostic, and the public run
+// projection still admits it.
+func TestPipeline_NoSourceScannedFailsRunWithRegisteredCode(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+
+	p.failRun(ctx, runID, "discovery phase failed", fmt.Errorf("discovery: %w", discovery.ErrNoSourceScanned))
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.NotNil(t, loaded.InterruptReason)
+	const want = "diag:v1 phase=discovery operation=discover code=no_source_scanned"
+	assert.Equal(t, want, *loaded.InterruptReason)
+	body, err := json.Marshal(loaded)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"interrupt_reason":"`+want+`"`)
+	assert.NotContains(t, string(body), "failure_reason_unavailable")
+	// The scan outcome is set in the same terminal write, chosen by the typed error.
+	assert.Contains(t, string(body), `"discovery_scan":"no_source_scanned"`)
+}
+
+func TestPipeline_OtherDiscoveryFailureDoesNotSetTheScanOutcome(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	require.NoError(t, stateStore.SetDiscoveryScanOutcome(ctx, runID, state.ScanOutcomeCutShort))
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	p.failRun(ctx, runID, "discovery phase failed", fmt.Errorf("discovery: provider failure"))
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, state.RunStatusFailed, loaded.Status)
+	require.NotNil(t, loaded.DiscoveryScanOutcome)
+	assert.Equal(t, state.ScanOutcomeCutShort, *loaded.DiscoveryScanOutcome, "a non-AC8 failure leaves the saved outcome")
+}
+
+func TestPipeline_StopThatWinsKeepsTheCompletedScanOutcome(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, machine, broadcast, cleanup := setupPipelineTest(t)
+	defer cleanup()
+
+	runID, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	require.NoError(t, stateStore.SetDiscoveryScanOutcome(ctx, runID, state.ScanOutcomeCompleted))
+	_, err = db.ExecContext(ctx, `UPDATE run SET stop_requested_at = ? WHERE id = ?`, time.Now().UTC().Format(state.RunTimestampLayout), runID)
+	require.NoError(t, err)
+	p := NewPipeline(db, machine, stateStore, nil, nil, nil, nil, nil, nil, nil, broadcast,
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	p.failRun(ctx, runID, "discovery phase failed", fmt.Errorf("discovery: %w", discovery.ErrNoSourceScanned))
+
+	loaded, err := stateStore.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.NotEqual(t, state.RunStatusFailed, loaded.Status, "the stop won")
+	require.NotNil(t, loaded.DiscoveryScanOutcome)
+	assert.Equal(t, state.ScanOutcomeCompleted, *loaded.DiscoveryScanOutcome)
 }
 
 func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {
@@ -363,7 +448,9 @@ func TestPipeline_PanicRecoverySetsFailedStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusFailed, loaded.Status)
 	require.NotNil(t, loaded.InterruptReason)
-	assert.Contains(t, *loaded.InterruptReason, "panic:")
+	assert.Equal(t, "diag:v1 phase=unknown operation=unknown code=panic", *loaded.InterruptReason)
+	assert.Nil(t, loaded.VideosSelected,
+		"a panic before the selector ran must keep the count unknown, not zero")
 
 	var errorEvent *Event
 	for {

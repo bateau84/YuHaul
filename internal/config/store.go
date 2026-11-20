@@ -118,7 +118,7 @@ func (s *Store) GetRunsForVersion(ctx context.Context, versionID int64) ([]state
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, started_at, completed_at, run_type, status, config_version_id,
 		        videos_discovered, videos_accepted, videos_rejected, videos_excluded,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, quota_cost,
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable, quota_cost,
 		        duration_seconds, interrupt_reason
 		 FROM run WHERE config_version_id = ? ORDER BY id;`, versionID)
 	if err != nil {
@@ -235,7 +235,7 @@ func scanRun(sc scanner) (*state.Run, error) {
 	var configVersionID sql.NullInt64
 	err := sc.Scan(&r.ID, &r.StartedAt, &completedAt, &r.RunType, &r.Status,
 		&configVersionID, &r.VideosDiscovered, &r.VideosAccepted, &r.VideosRejected,
-		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated,
+		&r.VideosExcluded, &r.VideosDeferred, &r.VideosFailed, &r.VideosNotYetEvaluated, &r.VideosUnavailable,
 		&r.QuotaCost, &durationSeconds, &interruptReason)
 	if err != nil {
 		return nil, err

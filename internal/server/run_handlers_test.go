@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/pipeline"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
@@ -32,6 +34,166 @@ func setupRunVideoTest(t *testing.T) (*sql.DB, *state.Store, *router.Store, *con
 	routerStore.WithOnChange(versioner.Snapshot)
 
 	return db, stateStore, routerStore, versioner, cleanup
+}
+
+type recordingMetadataReader struct {
+	calls  int
+	ids    [][]string
+	values map[string]metadata.LocalDisplay
+	err    error
+}
+
+type failingDecisionRunStore struct{ RunVideoStore }
+
+func (s failingDecisionRunStore) GetRouteDecisionsForVideoInRun(context.Context, int64, int64) ([]state.RouteDecision, error) {
+	return nil, errors.New("decision read failed")
+}
+
+func (r *recordingMetadataReader) ReadLocalDisplay(_ context.Context, ids []string) (map[string]metadata.LocalDisplay, error) {
+	r.calls++
+	r.ids = append(r.ids, append([]string(nil), ids...))
+	return r.values, r.err
+}
+
+func TestRunVideoLocalMetadataMembershipAndFailurePreserveEvidence(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, routeStore, versioner, cleanup := setupRunVideoTest(t)
+	defer cleanup()
+	route := createRouteForRunVideoTests(t, ctx, routeStore)
+	runID, videoID := createRunWithDecision(t, ctx, stateStore, route.ID, nil)
+	prepared := time.Now().UTC().Truncate(time.Second)
+	_, err := db.ExecContext(ctx, `INSERT INTO playlist_send_guard(video_id,target_playlist_id,action_type,run_id,route_decision_id,authorization_id,prepared_at) SELECT ?, 'PL uncertain', 'playlist_insert', ?, id, 'opaque', ? FROM route_decision WHERE run_id=? AND video_id=?`, videoID, runID, prepared.Format(time.RFC3339), runID, videoID)
+	require.NoError(t, err)
+	// Another run's member must never be part of this inspection lookup.
+	otherRun, err := stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusCompleted})
+	require.NoError(t, err)
+	_, err = stateStore.CreateVideo(ctx, &state.Video{VideoID: "other-run-video", ChannelID: "c2", DiscoveredAt: time.Now().UTC(), DiscoveredInRunID: otherRun, ProcessingState: state.VideoStateCompleted, FinalOutcome: state.FinalOutcomeAccepted})
+	require.NoError(t, err)
+	reader := &recordingMetadataReader{values: map[string]metadata.LocalDisplay{"v1": {Attribution: "current_local_not_necessarily_evaluated", TitleAvailability: "unknown"}, "other-run-video": {TitleAvailability: "current_local", Title: strPtr("private")}}}
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRunVideoStore(stateStore), WithRouteStore(routeStore), WithConfigVersionStore(versioner), WithMetadataReader(reader))
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(runID, 10)+"/videos?page_size=100", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	require.Equal(t, 1, reader.calls)
+	require.Equal(t, []string{"v1"}, reader.ids[0])
+	assert.NotContains(t, rec.Body.String(), "private")
+	var listed struct {
+		Videos []videoListItem `json:"videos"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listed))
+	require.Len(t, listed.Videos, 1)
+	require.Len(t, listed.Videos[0].UnresolvedMutations, 1)
+	assert.Equal(t, "add_to_playlist", listed.Videos[0].UnresolvedMutations[0].ActionType)
+	assert.Equal(t, "unknown", listed.Videos[0].UnresolvedMutations[0].ApplicationState)
+	assert.Equal(t, "PL uncertain", listed.Videos[0].UnresolvedMutations[0].TargetPlaylistID)
+
+	reader.calls, reader.ids = 0, nil
+	reader.values = map[string]metadata.LocalDisplay{"v1": {TitleAvailability: "current_local", Title: strPtr("partial secret")}}
+	reader.err = errors.New("local read failed")
+	req = httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(runID, 10)+"/videos/v1", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "partial secret")
+	var detail videoDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	assert.Equal(t, "context_read_failed", detail.Video.MetadataContextStatus)
+	require.Len(t, detail.Video.RouteDecisions, 1)
+	assert.Equal(t, "v1", detail.Video.VideoID)
+	require.Len(t, detail.Video.UnresolvedMutations, 1)
+	assert.Equal(t, "add_to_playlist", detail.Video.UnresolvedMutations[0].ActionType)
+	assert.Equal(t, "unknown", detail.Video.UnresolvedMutations[0].ApplicationState)
+	require.Equal(t, 1, reader.calls)
+	require.Equal(t, []string{"v1"}, reader.ids[0])
+	// A missing production wiring is a context-read failure, not successful absence.
+	unconfigured := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRunVideoStore(stateStore), WithRouteStore(routeStore), WithConfigVersionStore(versioner))
+	rec = httptest.NewRecorder()
+	unconfigured.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(runID, 10)+"/videos/v1", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"metadata_context_status":"context_read_failed"`)
+	_ = videoID
+}
+
+func TestRunVideoDecisionFailurePrecedesOptionalMetadataRead(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, routeStore, versioner, cleanup := setupRunVideoTest(t)
+	defer cleanup()
+	route := createRouteForRunVideoTests(t, ctx, routeStore)
+	runID, _ := createRunWithDecision(t, ctx, stateStore, route.ID, nil)
+	reader := &recordingMetadataReader{values: map[string]metadata.LocalDisplay{}}
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRunVideoStore(failingDecisionRunStore{stateStore}), WithRouteStore(routeStore), WithConfigVersionStore(versioner), WithMetadataReader(reader))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(runID, 10)+"/videos", nil))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Zero(t, reader.calls)
+}
+
+func TestRunVideoAPIWithholdsMalformedExpiredMarkerAndLabelsClearedExpiredRow(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, routeStore, versioner, cleanup := setupRunVideoTest(t)
+	defer cleanup()
+	route := createRouteForRunVideoTests(t, ctx, routeStore)
+	runID, _ := createRunWithDecision(t, ctx, stateStore, route.ID, nil)
+	_, err := stateStore.CreateVideo(ctx, &state.Video{VideoID: "cleared-expired-video", ChannelID: "c1", DiscoveredAt: time.Now().UTC(), DiscoveredInRunID: runID, ProcessingState: state.VideoStateCompleted, FinalOutcome: state.FinalOutcomeAccepted})
+	require.NoError(t, err)
+	manager := metadata.NewManager(metadata.NewStore(db), nil, nil, metadata.WithNow(func() time.Time { return time.Now().UTC() }))
+	now := time.Now().UTC()
+	title, channel, duration := "must not leak", "must not leak channel", 42
+	storeA := metadata.NewStore(db)
+	require.NoError(t, storeA.Upsert(ctx, metadata.TransientMetadata{VideoID: "v1", Title: &title, ChannelName: &channel, DurationSeconds: &duration, FetchedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour), IsActive: true}))
+	require.NoError(t, storeA.Upsert(ctx, metadata.TransientMetadata{VideoID: "cleared-expired-video", FetchedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour), ExpiredAt: ptrTime(now.Add(-time.Hour)), IsActive: false}))
+	_, err = db.Exec(`UPDATE transient_metadata SET expired_at='not-a-timestamp' WHERE video_id='v1'`)
+	require.NoError(t, err)
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRunVideoStore(stateStore), WithRouteStore(routeStore), WithConfigVersionStore(versioner), WithMetadataReader(manager))
+	getDetail := func(videoID string) videoDetailResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(runID, 10)+"/videos/"+videoID, nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		var response videoDetailResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+		return response
+	}
+	malformed := getDetail("v1").Video.CurrentLocalMetadata
+	require.NotNil(t, malformed)
+	assert.Nil(t, malformed.Title)
+	assert.Nil(t, malformed.ChannelName)
+	assert.Nil(t, malformed.DurationSeconds)
+	assert.Equal(t, "withheld", malformed.TitleAvailability)
+	assert.Equal(t, "withheld", malformed.ChannelNameAvailability)
+	assert.Equal(t, "withheld", malformed.DurationAvailability)
+	expired := getDetail("cleared-expired-video").Video.CurrentLocalMetadata
+	require.NotNil(t, expired)
+	assert.Equal(t, "known_expired", expired.TitleAvailability)
+	assert.Equal(t, "known_expired", expired.ChannelNameAvailability)
+	assert.Equal(t, "known_expired", expired.DurationAvailability)
+	assert.Nil(t, expired.Title)
+	assert.Nil(t, expired.DurationSeconds)
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+func TestRunVideoLocalMetadataListUsesOneBoundedPageRead(t *testing.T) {
+	ctx := context.Background()
+	_, stateStore, routeStore, versioner, cleanup := setupRunVideoTest(t)
+	defer cleanup()
+	route := createRouteForRunVideoTests(t, ctx, routeStore)
+	runID, _ := createRunWithDecision(t, ctx, stateStore, route.ID, nil)
+	for i := 2; i < 102; i++ {
+		_, err := stateStore.CreateVideo(ctx, &state.Video{VideoID: fmt.Sprintf("v%d", i), ChannelID: "c1", DiscoveredAt: time.Now().UTC(), DiscoveredInRunID: runID, ProcessingState: state.VideoStateCompleted, FinalOutcome: state.FinalOutcomeAccepted})
+		require.NoError(t, err)
+	}
+	reader := &recordingMetadataReader{values: map[string]metadata.LocalDisplay{}}
+	srv := NewServer(&fakePipeline{}, pipeline.NewBroadcaster(), WithRunVideoStore(stateStore), WithRouteStore(routeStore), WithConfigVersionStore(versioner), WithMetadataReader(reader))
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+strconv.FormatInt(runID, 10)+"/videos?page_size=100", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, 1, reader.calls)
+	require.Len(t, reader.ids[0], 100)
+	assert.LessOrEqual(t, len(reader.ids[0]), 100)
 }
 
 func recordRunVideoOutcomeForTest(t *testing.T, db *sql.DB, runID, videoID int64, outcome state.VideoFinalOutcome) {

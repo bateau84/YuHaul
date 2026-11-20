@@ -8,12 +8,14 @@ import {
   FlaskConical,
   History,
   Settings,
+  Search,
 } from 'lucide-react'
 
 const items = [
   { path: '/', label: 'Overview', icon: LayoutDashboard },
   { path: '/routes', label: 'Routes', icon: Route },
   { path: '/runs', label: 'Runs', icon: PlayCircle },
+  { path: '/videos', label: 'Videos', icon: Search },
   { path: '/analytics', label: 'Analytics', icon: BarChart3 },
   { path: '/errors', label: 'Errors', icon: AlertCircle },
   { path: '/backtest', label: 'Backtest', icon: FlaskConical },

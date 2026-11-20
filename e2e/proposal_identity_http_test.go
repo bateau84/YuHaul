@@ -135,7 +135,7 @@ func TestE2E_ProposalIdentityThroughAssembledHTTPServer(t *testing.T) {
 	)
 	httpSrv := httptest.NewServer(api.Handler())
 	t.Cleanup(httpSrv.Close)
-	client := httpSrv.Client()
+	client := guardClient(t, httpSrv.Client())
 	baseURL := httpSrv.URL
 
 	// A production run through the assembled HTTP path populates the retained

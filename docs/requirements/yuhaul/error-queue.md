@@ -3,6 +3,7 @@ type: requirement
 title: Error Queue
 description: Failed work must be retained in an inspectable error queue with retry and resolution options; resolution preserves historical evidence.
 tags: [requirement, errors, MUST]
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted
@@ -20,6 +21,8 @@ The system SHALL retain failed work in an inspectable error queue that exposes t
 4. The user can retry a failed item, re-attempting its processing
 5. The user can resolve or dismiss a failed item from the active error queue
 6. Resolving or dismissing an error queue entry preserves the failure history; the record remains available for historical inspection
+
+These criteria apply to failed video processing items. Permanent uploads-source entries are inspectable in Errors but are read-only, as specified in [OC-001](oc-001-youtube-api-quota-and-failure-semantics.md).
 
 ## Derived from
 

@@ -1,10 +1,12 @@
 package stats
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -221,6 +223,28 @@ func TestService_RunStats(t *testing.T) {
 	assert.NotNil(t, stats.QuotaByOperation)
 }
 
+func TestRouteStatsMalformedSnapshotLogIsVetted(t *testing.T) {
+	ctx := context.Background()
+	db, statsStore, _, cleanup := setupStatsTest(t)
+	defer cleanup()
+	routeID := seedRoute(t, ctx, db, "Snapshot route", 1)
+	runID := seedRunWithSnapshotRoutes(t, ctx, db, []snapshotRouteSpec{{RouteKey: routeID, Name: "Snapshot route", Order: 1}})
+	var configVersionID int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT config_version_id FROM run WHERE id=?`, runID).Scan(&configVersionID))
+	const secret = "plainASCIISecretValue9081"
+	_, err := db.ExecContext(ctx, `UPDATE config_version SET snapshot=? WHERE id=?`, secret, configVersionID)
+	require.NoError(t, err)
+
+	var logOutput bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logOutput, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	_, err = statsStore.ListRouteStats(ctx, runID)
+	require.NoError(t, err, "an invalid snapshot falls back to current route context")
+	require.Contains(t, logOutput.String(), "diag:v1 phase=unknown operation=inspect_run code=unknown_error")
+	require.NotContains(t, logOutput.String(), secret)
+}
+
 func TestService_RouteStats(t *testing.T) {
 	ctx := context.Background()
 	db, _, service, cleanup := setupStatsTest(t)
@@ -249,6 +273,124 @@ func TestService_RouteStats(t *testing.T) {
 	assert.Equal(t, "Music", routeStats[0].RouteName)
 	assert.Equal(t, 1, routeStats[0].VideosEvaluated)
 	assert.Equal(t, 1, routeStats[0].VideosMatched)
+}
+
+// seedMatchedDecision records one matched route decision for a video in a run
+// and returns its row id so tests can attach executed_action evidence.
+func seedMatchedDecision(t *testing.T, ctx context.Context, db *sql.DB, videoKey, runID, routeID int64) int64 {
+	t.Helper()
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO route_decision (video_id, run_id, route_id, evaluation_order, decision, skip_reason, rejection_reason)
+		 VALUES (?, ?, ?, 1, 'matched', NULL, NULL);`, videoKey, runID, routeID)
+	require.NoError(t, err)
+	id, err := res.LastInsertId()
+	require.NoError(t, err)
+	return id
+}
+
+// seedActionDisposition inserts one executed_action disposition row. Targets
+// must be unique per (run, video) because of the table's action identity.
+func seedActionDisposition(t *testing.T, ctx context.Context, db *sql.DB, decisionKey, runID, videoKey int64, target, outcome, reason string, executedAt *time.Time) {
+	t.Helper()
+	var reasonArg any
+	if reason != "" {
+		reasonArg = reason
+	}
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO executed_action (route_decision_id, run_id, video_id, action_type,
+		                              target_playlist_id, outcome, outcome_reason, executed_at)
+		 VALUES (?, ?, ?, 'playlist_insert', ?, ?, ?, ?);`,
+		decisionKey, runID, videoKey, target, outcome, reasonArg, executedAt)
+	require.NoError(t, err)
+}
+
+// TestRouteStats_ActionsExecutedCountsOnlyActualAttempts proves the accepted
+// BR-020 / run-route-statistics meaning of the route metric: ActionsExecuted
+// counts actual external attempts — succeeded rows and the producer's
+// attempted-and-failed rows — while deferred and not_attempted dispositions
+// (quota deferral, skipped-after-failure, idempotency suppression) never
+// count. A historical simulation row that carries a stale executed_at
+// timestamp (written before the machine stopped stamping it) must also stay
+// out of the count: the classification is by outcome, not by timestamp.
+func TestRouteStats_ActionsExecutedCountsOnlyActualAttempts(t *testing.T) {
+	ctx := context.Background()
+	db, _, service, cleanup := setupStatsTest(t)
+	defer cleanup()
+
+	runID := seedRun(t, ctx, db)
+	routeID := seedRoute(t, ctx, db, "Music", 1)
+	attemptedAt := time.Now().UTC().Add(-time.Minute)
+
+	cases := []struct {
+		video, target, outcome, reason string
+		executedAt                     *time.Time
+	}{
+		{"av1", "PLa", "succeeded", "", &attemptedAt},
+		{"av2", "PLa", "failed", "", &attemptedAt}, // attempted provider failure
+		{"av3", "PLa", "deferred", "quota_exhausted", nil},
+		{"av4", "PLa", "not_attempted", "prior_action_failed", nil},
+		{"av5", "PLa", "not_attempted", "already_completed", nil},
+		// Historical simulation row: not_attempted written before t1.3 with a
+		// fabricated attempt timestamp. Still not an external attempt.
+		{"av6", "PLa", "not_attempted", "", &attemptedAt},
+	}
+	for _, c := range cases {
+		videoKey := seedVideo(t, ctx, db, c.video, "UC1", runID)
+		decisionKey := seedMatchedDecision(t, ctx, db, videoKey, runID, routeID)
+		seedActionDisposition(t, ctx, db, decisionKey, runID, videoKey, c.target, c.outcome, c.reason, c.executedAt)
+	}
+
+	routeStats, err := service.RouteStats(ctx, runID)
+	require.NoError(t, err)
+	require.Len(t, routeStats, 1)
+	rs := routeStats[0]
+	assert.Equal(t, 6, rs.VideosMatched, "every matched video counts regardless of action disposition")
+	assert.Equal(t, 1, rs.ActionsSucceeded)
+	assert.Equal(t, 1, rs.ActionsFailed)
+	assert.Equal(t, 2, rs.ActionsExecuted,
+		"only the succeeded and actually attempted failed actions are external attempts")
+}
+
+// TestRouteStats_ActionsExecutedIgnoresSimulationAndOtherRuns proves
+// simulation isolation for the attempt metric: a backtest run's matched
+// decisions with simulated not_attempted evidence report zero executed
+// actions, and neither it nor another production run's attempts leak across
+// the requested-run scope.
+func TestRouteStats_ActionsExecutedIgnoresSimulationAndOtherRuns(t *testing.T) {
+	ctx := context.Background()
+	db, _, service, cleanup := setupStatsTest(t)
+	defer cleanup()
+
+	productionRun := seedRun(t, ctx, db)
+	backtestRun := seedRunOfType(t, ctx, db, "backtest")
+	routeID := seedRoute(t, ctx, db, "Music", 1)
+	attemptedAt := time.Now().UTC().Add(-time.Minute)
+
+	// Production run: one real attempt.
+	prodVideo := seedVideo(t, ctx, db, "pv1", "UC1", productionRun)
+	prodDecision := seedMatchedDecision(t, ctx, db, prodVideo, productionRun, routeID)
+	seedActionDisposition(t, ctx, db, prodDecision, productionRun, prodVideo, "PLa", "succeeded", "", &attemptedAt)
+
+	// Backtest run: simulated evidence for its own matched decision, plus a
+	// historical-style simulated row that carries a stale timestamp.
+	simVideo := seedVideo(t, ctx, db, "sv1", "UC1", backtestRun)
+	simDecision := seedMatchedDecision(t, ctx, db, simVideo, backtestRun, routeID)
+	seedActionDisposition(t, ctx, db, simDecision, backtestRun, simVideo, "PLa", "not_attempted", "", nil)
+	seedActionDisposition(t, ctx, db, simDecision, backtestRun, simVideo, "PLb", "not_attempted", "", &attemptedAt)
+
+	stats, err := service.RouteStats(ctx, backtestRun)
+	require.NoError(t, err)
+	require.Len(t, stats, 1)
+	assert.Equal(t, 1, stats[0].VideosMatched)
+	assert.Equal(t, 0, stats[0].ActionsExecuted,
+		"simulated not_attempted evidence must never count as an executed action")
+
+	prodStats, err := service.RouteStats(ctx, productionRun)
+	require.NoError(t, err)
+	require.Len(t, prodStats, 1)
+	assert.Equal(t, 1, prodStats[0].ActionsExecuted,
+		"the production run counts only its own actual attempt")
+	assert.Equal(t, 1, prodStats[0].ActionsSucceeded)
 }
 
 func TestService_ChannelStats(t *testing.T) {

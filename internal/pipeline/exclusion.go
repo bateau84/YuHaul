@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
@@ -32,6 +33,9 @@ func (p *Pipeline) filterExcludedVideos(ctx context.Context, runID int64, videos
 // recorded for each enabled route. The returned slice contains only videos that
 // are not fully excluded and should proceed to route condition evaluation.
 func (p *Pipeline) runExclusionGate(ctx context.Context, runID int64, videos []*state.Video, routes []router.Route, mutate bool) ([]*state.Video, error) {
+	if err := p.ValidateRunRoutes(ctx, runID, routes); err != nil {
+		return nil, fmt.Errorf("validate exclusion gate routes: %w", err)
+	}
 	var remaining []*state.Video
 
 	for _, v := range videos {
@@ -69,10 +73,14 @@ func (p *Pipeline) runExclusionGate(ctx context.Context, runID int64, videos []*
 		}
 
 		excludedRoutes := enabledRoutesThatExclude(routes, vc)
+		excludedRouteIDs := make(map[int64]bool)
+		for _, candidate := range excludedRoutes {
+			excludedRouteIDs[candidate.route.ID] = true
+		}
 		// Durable exclusion evidence survives unavailable transient metadata.
 		for _, r := range routes {
-			if r.IsEnabled && excludedDecisionRoutes[r.ID] && router.Excluded(r, vc) == nil {
-				excludedRoutes = append(excludedRoutes, r)
+			if r.IsEnabled && excludedDecisionRoutes[r.ID] && !excludedRouteIDs[r.ID] {
+				excludedRoutes = append(excludedRoutes, exclusionCandidate{route: r})
 			}
 		}
 		if len(excludedRoutes) == 0 || len(excludedRoutes) < enabledRouteCount(routes) {
@@ -88,18 +96,24 @@ func (p *Pipeline) runExclusionGate(ctx context.Context, runID int64, videos []*
 				return nil, err
 			}
 		} else {
-			for _, r := range excludedRoutes {
+			for _, candidate := range excludedRoutes {
+				r := candidate.route
 				if excludedDecisionRoutes[r.ID] {
 					continue
 				}
-				if _, err := p.machine.RecordRouteDecision(ctx, &state.RouteDecision{
+				decision := &state.RouteDecision{
 					VideoID:         v.ID,
 					RunID:           runID,
 					RouteID:         r.ID,
 					EvaluationOrder: r.EvaluationOrder,
 					Decision:        state.RouteDecisionSkipped,
 					SkipReason:      skipReasonPtr(state.SkipReasonExclusion),
-				}); err != nil {
+				}
+				if candidate.match != nil {
+					decision.ExclusionIndex = intPointer(candidate.match.Index)
+					decision.ExclusionSemanticsVersion = intPointer(candidate.match.SemanticsVersion)
+				}
+				if _, err := p.machine.RecordRouteEvaluation(ctx, decision, nil); err != nil {
 					return nil, fmt.Errorf("record exclusion decision: %w", err)
 				}
 			}
@@ -120,20 +134,25 @@ func enabledRouteCount(routes []router.Route) int {
 	return n
 }
 
-func enabledRoutesThatExclude(routes []router.Route, vc router.VideoContext) []router.Route {
-	var out []router.Route
+type exclusionCandidate struct {
+	route router.Route
+	match *router.ExclusionMatchResult
+}
+
+func enabledRoutesThatExclude(routes []router.Route, vc router.VideoContext) []exclusionCandidate {
+	var out []exclusionCandidate
 	for _, r := range routes {
 		if !r.IsEnabled {
 			continue
 		}
-		if router.Excluded(r, vc) != nil {
-			out = append(out, r)
+		if match, reason := router.ExclusionMatch(r, vc); reason != nil {
+			out = append(out, exclusionCandidate{route: r, match: match})
 		}
 	}
 	return out
 }
 
-func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.Video, routes []router.Route, recorded map[int64]bool) error {
+func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.Video, routes []exclusionCandidate, recorded map[int64]bool) error {
 	if v.ProcessingState != state.VideoStateEvaluating {
 		if _, err := p.machine.TransitionVideoState(ctx, v.ID,
 			state.VideoStateNotYetEvaluated, state.VideoStateEvaluating); err != nil {
@@ -141,18 +160,24 @@ func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.
 		}
 	}
 
-	for _, r := range routes {
+	for _, candidate := range routes {
+		r := candidate.route
 		if recorded[r.ID] {
 			continue
 		}
-		if _, err := p.machine.RecordRouteDecision(ctx, &state.RouteDecision{
+		decision := &state.RouteDecision{
 			VideoID:         v.ID,
 			RunID:           runID,
 			RouteID:         r.ID,
 			EvaluationOrder: r.EvaluationOrder,
 			Decision:        state.RouteDecisionSkipped,
 			SkipReason:      skipReasonPtr(state.SkipReasonExclusion),
-		}); err != nil {
+		}
+		if candidate.match != nil {
+			decision.ExclusionIndex = intPointer(candidate.match.Index)
+			decision.ExclusionSemanticsVersion = intPointer(candidate.match.SemanticsVersion)
+		}
+		if _, err := p.machine.RecordRouteEvaluation(ctx, decision, nil); err != nil {
 			return fmt.Errorf("record exclusion decision for route %d: %w", r.ID, err)
 		}
 	}
@@ -165,12 +190,14 @@ func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.
 	return nil
 }
 
+func intPointer(v int) *int { return &v }
+
 func (p *Pipeline) videoContextForExclusion(ctx context.Context, v *state.Video) (router.VideoContext, error) {
 	meta := &metadata.TransientMetadata{VideoID: v.VideoID}
 	if p.meta != nil {
 		fetched, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
 		if err != nil {
-			p.logger.DebugContext(ctx, "exclusion gate using degraded metadata", "video_id", v.VideoID, "error", err)
+			p.logger.DebugContext(ctx, "exclusion gate using degraded metadata", "diagnostic", diag.Encode(err, "exclusion", "load_metadata"))
 		} else {
 			meta = fetched
 		}

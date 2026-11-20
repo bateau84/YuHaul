@@ -158,8 +158,8 @@ func TestRunAuthorityDefaultsAndExplicitCreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	runs, err := m.store.ListInterruptedRuns(ctx)
-	if err != nil || len(runs) != 1 || runs[0].ActionAuthorityVersion != 0 {
-		t.Fatalf("resume marker = %+v, %v", runs, err)
+	if err != nil || len(runs) != 0 {
+		t.Fatalf("version-0 history must not be auto-resumable = %+v, %v", runs, err)
 	}
 	tx, err := m.store.db.BeginTx(ctx, nil)
 	if err != nil {

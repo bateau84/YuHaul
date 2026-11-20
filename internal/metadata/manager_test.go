@@ -10,6 +10,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,6 +21,95 @@ func openTestDB(t *testing.T) *metadata.Store {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return metadata.NewStore(db)
+}
+
+func TestReadLocalDisplayRequiresActiveUnexpiredMembershipBatch(t *testing.T) {
+	ms := openTestDB(t)
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	title, channel, zero := "cached title", "cached channel", 0
+	for _, item := range []metadata.TransientMetadata{
+		{VideoID: "ok", Title: &title, ChannelName: &channel, DurationSeconds: &zero, FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), IsActive: true},
+		{VideoID: "future-deadline", Title: &title, FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Nanosecond), IsActive: true},
+		{VideoID: "deadline", Title: &title, FetchedAt: now.Add(-time.Hour), ExpiresAt: now, IsActive: true},
+		{VideoID: "inactive", Title: &title, FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), IsActive: false},
+	} {
+		require.NoError(t, ms.Upsert(context.Background(), item))
+	}
+	manager := metadata.NewManager(ms, nil, nil, metadata.WithNow(func() time.Time { return now }))
+	got, err := manager.ReadLocalDisplay(context.Background(), []string{"ok", "future-deadline", "deadline", "inactive", "missing"})
+	require.NoError(t, err)
+	require.Equal(t, "current_local", got["ok"].DurationAvailability)
+	require.Equal(t, "current_local", got["future-deadline"].TitleAvailability)
+	require.NotNil(t, got["ok"].DurationSeconds)
+	require.Equal(t, 0, *got["ok"].DurationSeconds)
+	require.Equal(t, "known_expired", got["deadline"].TitleAvailability)
+	require.Nil(t, got["deadline"].Title)
+	require.Equal(t, "withheld", got["inactive"].TitleAvailability)
+	require.Nil(t, got["inactive"].Title)
+	_, err = manager.ReadLocalDisplay(context.Background(), make([]string, 101))
+	require.Error(t, err)
+}
+
+func TestReadLocalDisplayWithholdsUntrustworthyLifecycleAndEmptyNames(t *testing.T) {
+	ms := openTestDB(t)
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	title, empty, duration := "title", "", 0
+	for _, item := range []metadata.TransientMetadata{
+		{VideoID: "bad-fetch", Title: &title, FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), IsActive: true},
+		{VideoID: "marker", Title: &title, FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), IsActive: true},
+		{VideoID: "malformed-marker", Title: &title, ChannelName: &title, DurationSeconds: &duration, FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), IsActive: true},
+		{VideoID: "cleared-expired", FetchedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour), IsActive: false},
+		{VideoID: "empty", Title: &empty, ChannelName: &empty, DurationSeconds: &duration, FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), IsActive: true},
+	} {
+		require.NoError(t, ms.Upsert(context.Background(), item))
+	}
+	_, err := ms.DB().Exec(`UPDATE transient_metadata SET fetched_at='not-a-timestamp' WHERE video_id='bad-fetch'`)
+	require.NoError(t, err)
+	_, err = ms.DB().Exec(`UPDATE transient_metadata SET expired_at=? WHERE video_id='marker'`, now.Add(-time.Minute))
+	require.NoError(t, err)
+	_, err = ms.DB().Exec(`UPDATE transient_metadata SET expired_at='not-a-timestamp' WHERE video_id='malformed-marker'`)
+	require.NoError(t, err)
+	_, err = ms.DB().Exec(`UPDATE transient_metadata SET expired_at=? WHERE video_id='cleared-expired'`, now.Add(-time.Hour))
+	require.NoError(t, err)
+	manager := metadata.NewManager(ms, nil, nil, metadata.WithNow(func() time.Time { return now }))
+	got, err := manager.ReadLocalDisplay(context.Background(), []string{"bad-fetch", "marker", "malformed-marker", "cleared-expired", "empty", "missing"})
+	require.NoError(t, err)
+	assert.Nil(t, got["bad-fetch"].Title)
+	assert.Equal(t, "withheld", got["bad-fetch"].TitleAvailability)
+	assert.Nil(t, got["bad-fetch"].SourceFetchedAt)
+	assert.Nil(t, got["marker"].Title)
+	assert.Equal(t, "known_expired", got["marker"].TitleAvailability)
+	assert.Nil(t, got["malformed-marker"].Title)
+	assert.Nil(t, got["malformed-marker"].ChannelName)
+	assert.Nil(t, got["malformed-marker"].DurationSeconds)
+	assert.Equal(t, "withheld", got["malformed-marker"].TitleAvailability)
+	assert.Equal(t, "withheld", got["malformed-marker"].ChannelNameAvailability)
+	assert.Equal(t, "withheld", got["malformed-marker"].DurationAvailability)
+	assert.Equal(t, "known_expired", got["cleared-expired"].TitleAvailability)
+	assert.Equal(t, "known_expired", got["cleared-expired"].ChannelNameAvailability)
+	assert.Equal(t, "known_expired", got["cleared-expired"].DurationAvailability)
+	assert.Nil(t, got["cleared-expired"].Title)
+	assert.Nil(t, got["cleared-expired"].DurationSeconds)
+	assert.Nil(t, got["empty"].Title)
+	assert.Equal(t, "unknown", got["empty"].TitleAvailability)
+	assert.Nil(t, got["empty"].ChannelName)
+	assert.Equal(t, "current_local", got["empty"].DurationAvailability)
+	assert.Nil(t, got["missing"].Title)
+	assert.Equal(t, "unknown", got["missing"].TitleAvailability)
+	assert.Equal(t, "current_local_not_necessarily_evaluated", got["missing"].Attribution)
+}
+
+func TestReadLocalDisplayUsesProjectionCutoffAfterQuery(t *testing.T) {
+	ms := openTestDB(t)
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	title := "crossed deadline"
+	require.NoError(t, ms.Upsert(context.Background(), metadata.TransientMetadata{VideoID: "cross", Title: &title, FetchedAt: base.Add(-time.Minute), ExpiresAt: base.Add(time.Second), IsActive: true}))
+	// Manager captures this cutoff only after Store has consumed the SQLite rows.
+	manager := metadata.NewManager(ms, nil, nil, metadata.WithNow(func() time.Time { return base.Add(2 * time.Second) }))
+	got, err := manager.ReadLocalDisplay(context.Background(), []string{"cross"})
+	require.NoError(t, err)
+	assert.Nil(t, got["cross"].Title)
+	assert.Equal(t, "known_expired", got["cross"].TitleAvailability)
 }
 
 func setupLedger(t *testing.T, db interface {

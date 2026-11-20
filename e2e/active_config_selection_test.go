@@ -35,7 +35,7 @@ func TestProposalHistoryDoesNotSelectProductionConfiguration(t *testing.T) {
 				server.WithConfigHandler(config.NewHandler(env.configSvc, logger)))
 			srv := httptest.NewServer(api.Handler())
 			defer srv.Close()
-			client := srv.Client()
+			client := guardClient(t, srv.Client())
 			req, err := http.NewRequest(http.MethodPut, srv.URL+"/api/settings", bytes.NewBufferString(`{"duplicate_threshold":0.99}`))
 			require.NoError(t, err)
 			resp, err := client.Do(req)
@@ -68,8 +68,8 @@ func TestProposalHistoryDoesNotSelectProductionConfiguration(t *testing.T) {
 			proposalRunID := startRun(path, map[string]any{key: map[string]any{
 				"duplicate_threshold": proposalThreshold, "duplicate_behavior": "skip",
 				"routes": []map[string]any{{"id": e3ProposalUUID, "name": "ProposalRock", "evaluation_order": 1, "is_enabled": true, "condition_composition": "AND",
-					"conditions": []map[string]any{{"field": "title", "operator": "contains", "value": "rock"}},
-					"actions":    []map[string]any{{"action_type": "add_to_playlist", "target_playlist_id": "PLproposal"}}}},
+					"conditions": []map[string]any{{"field": "title", "operator": "contains", "value": "rock", "condition_index": 0}},
+					"actions":    []map[string]any{{"action_type": "add_to_playlist", "target_playlist_id": "PLproposal", "action_index": 0}}}},
 			}})
 			proposalRun, err := env.stateStore.GetRun(ctx, proposalRunID)
 			require.NoError(t, err)

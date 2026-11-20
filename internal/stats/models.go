@@ -19,6 +19,7 @@ type RunStats struct {
 	VideosDeferred        int            `json:"videos_deferred"`
 	VideosFailed          int            `json:"videos_failed"`
 	VideosNotYetEvaluated int            `json:"videos_not_yet_evaluated"`
+	VideosUnavailable     int            `json:"videos_unavailable"`
 	RejectionByReason     map[string]int `json:"rejection_by_reason"`
 	QuotaByOperation      map[string]int `json:"quota_by_operation"`
 	DurationSeconds       *float64       `json:"duration_seconds,omitempty"`
@@ -47,9 +48,13 @@ type RouteStats struct {
 	VideosSkipped     int            `json:"videos_skipped"`
 	RejectionByReason map[string]int `json:"rejection_by_reason"`
 	SkipBreakdown     map[string]int `json:"skip_breakdown"`
-	ActionsExecuted   int            `json:"actions_executed"`
-	ActionsSucceeded  int            `json:"actions_succeeded"`
-	ActionsFailed     int            `json:"actions_failed"`
+	// ActionsExecuted counts actual external action attempts: succeeded rows
+	// plus the producer's attempted-and-failed rows. Deferred and
+	// not_attempted dispositions (quota deferral, idempotency suppression,
+	// skipped-after-failure, simulation) never count (BR-020).
+	ActionsExecuted  int `json:"actions_executed"`
+	ActionsSucceeded int `json:"actions_succeeded"`
+	ActionsFailed    int `json:"actions_failed"`
 }
 
 // ChannelStats are materialized counters for a channel.
@@ -75,6 +80,7 @@ type TemporalBucket struct {
 	VideosDeferred        int    `json:"videos_deferred"`
 	VideosFailed          int    `json:"videos_failed"`
 	VideosNotYetEvaluated int    `json:"videos_not_yet_evaluated"`
+	VideosUnavailable     int    `json:"videos_unavailable"`
 }
 
 // DuplicateProvenance describes one distinct-pair duplicate match anchored at

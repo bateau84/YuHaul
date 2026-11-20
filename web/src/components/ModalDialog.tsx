@@ -28,13 +28,30 @@ export function ModalDialog({
   children,
 }: ModalDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
+  const backdropRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const previouslyFocused =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const target = initialFocusRef?.current ?? dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
+    const dialog = dialogRef.current
+    const container = backdropRef.current?.parentElement ?? null
+    const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    // Under StrictMode the effect runs twice and the second run starts inside the dialog;
+    // that is never an element to return to.
+    const previouslyFocused = focused && !dialog?.contains(focused) ? focused : null
+    const target = initialFocusRef?.current ?? dialog?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
     target?.focus()
-    return () => previouslyFocused?.focus()
+    // Give focus back when it was lost with the dialog: on <body>, inside the dialog, or
+    // on an ancestor of the dialog (a backdrop click focuses the nearest focusable
+    // ancestor, such as <main tabindex="-1">). Focus that something else took when the
+    // dialog closed, such as an acknowledgement attached in the same commit, is kept.
+    return () => {
+      const active = document.activeElement
+      const lost =
+        !active ||
+        active === document.body ||
+        !!dialog?.contains(active) ||
+        (container !== null && active.contains(container))
+      if (lost) previouslyFocused?.focus()
+    }
   }, [initialFocusRef])
 
   useEffect(() => {
@@ -62,6 +79,7 @@ export function ModalDialog({
 
   return (
     <div
+      ref={backdropRef}
       className="modal-backdrop"
       role="presentation"
       onClick={(e) => {

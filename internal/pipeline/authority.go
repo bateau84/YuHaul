@@ -3,11 +3,14 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/router"
@@ -29,12 +32,51 @@ func productionAuthority(ctx context.Context, db *sql.DB, cs ConfigStore, runID 
 		(run.ActionAuthorityVersion != 0 && run.ActionAuthorityVersion != 1) {
 		return nil, nil, fmt.Errorf("run %d has no production action authority", runID)
 	}
+	routes, err := snapshotRoutes(ctx, cs, run)
+	if err != nil {
+		return nil, nil, err
+	}
+	return run, routes, nil
+}
+
+// decisionAuthority is productionAuthority without the run-status gate
+// (ARS-006 §7.1): it reads the captured snapshot of the run whose decision a
+// partly done video continues, whatever state that run ended in. Any failure
+// is ErrOriginalDecisionUnavailable, so the caller sends nothing.
+func decisionAuthority(ctx context.Context, db *sql.DB, cs ConfigStore, decisionRunID int64) ([]router.Route, error) {
+	unavailable := func(err error) ([]router.Route, error) {
+		return nil, fmt.Errorf("%w: decision run %d: %v", state.ErrOriginalDecisionUnavailable, decisionRunID, err)
+	}
+	s, err := state.NewStore(db)
+	if err != nil {
+		return unavailable(err)
+	}
+	run, err := s.GetRun(ctx, decisionRunID)
+	if err != nil {
+		return unavailable(err)
+	}
+	if run.RunType != state.RunTypeManual && run.RunType != state.RunTypeScheduled {
+		return unavailable(errors.New("not a production run"))
+	}
+	routes, err := snapshotRoutes(ctx, cs, run)
+	if err != nil {
+		return unavailable(err)
+	}
+	return routes, nil
+}
+
+// snapshotRoutes reads and orders the routes of the run's captured
+// configuration snapshot.
+func snapshotRoutes(ctx context.Context, cs ConfigStore, run *state.Run) ([]router.Route, error) {
 	if cs == nil || run.ConfigVersionID == nil {
-		return nil, nil, fmt.Errorf("run %d missing captured configuration", runID)
+		return nil, fmt.Errorf("run %d missing captured configuration", run.ID)
 	}
 	cv, err := cs.Get(ctx, *run.ConfigVersionID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("run %d snapshot: %w", runID, err)
+		return nil, fmt.Errorf("run %d snapshot: %w", run.ID, err)
+	}
+	if err := validateSnapshotRoutes(cv.Snapshot); err != nil {
+		return nil, fmt.Errorf("run %d snapshot: %w", run.ID, err)
 	}
 	routes := routesFromSnapshot(cv.Snapshot)
 	sort.SliceStable(routes, func(i, j int) bool { return routes[i].EvaluationOrder < routes[j].EvaluationOrder })
@@ -42,13 +84,13 @@ func productionAuthority(ctx context.Context, db *sql.DB, cs ConfigStore, runID 
 	for i := range routes {
 		r := &routes[i]
 		if r.ID <= 0 || seen[r.ID] {
-			return nil, nil, fmt.Errorf("run %d invalid snapshot route %d", runID, r.ID)
+			return nil, fmt.Errorf("run %d invalid snapshot route %d", run.ID, r.ID)
 		}
 		seen[r.ID] = true
 		sort.SliceStable(r.Conditions, func(i, j int) bool { return r.Conditions[i].ConditionIndex < r.Conditions[j].ConditionIndex })
 		sort.SliceStable(r.Actions, func(i, j int) bool { return r.Actions[i].ActionIndex < r.Actions[j].ActionIndex })
 	}
-	return run, routes, nil
+	return routes, nil
 }
 
 func (p *Pipeline) productionRoutes(ctx context.Context, runID int64) ([]router.Route, error) {
@@ -162,7 +204,29 @@ func checkedLegacyEvaluation(ctx context.Context, db *sql.DB, run *state.Run, vi
 		e, ok := byRoute[d.RouteID]
 		want := e.Decision
 		want.ID = d.ID
-		if !ok || !reflect.DeepEqual(d, want) {
+		// Legacy generic exclusion rows predate causal references. Compare the
+		// original evaluation evidence independently; never enrich the stored row.
+		actualBase, wantBase := d, want
+		actualBase.ExclusionIndex, actualBase.ExclusionSemanticsVersion = nil, nil
+		wantBase.ExclusionIndex, wantBase.ExclusionSemanticsVersion = nil, nil
+		refMatches := d.ExclusionIndex == nil && d.ExclusionSemanticsVersion == nil
+		if d.ExclusionIndex != nil && d.ExclusionSemanticsVersion != nil {
+			refMatches = false
+			r := findRoute(routes, d.RouteID)
+			if r != nil && *d.ExclusionIndex >= 0 && *d.ExclusionIndex < len(r.Exclusions) &&
+				*d.ExclusionSemanticsVersion == 1 && d.Decision == state.RouteDecisionSkipped &&
+				d.SkipReason != nil && *d.SkipReason == state.SkipReasonExclusion {
+				ex := r.Exclusions[*d.ExclusionIndex]
+				switch ex.ExclusionType {
+				case router.ExclusionTypeChannel, router.ExclusionTypeVideo, router.ExclusionTypeTitle, router.ExclusionTypeWord:
+					refMatches = true
+				case router.ExclusionTypeDurationMin, router.ExclusionTypeDurationMax:
+					_, err := strconv.Atoi(ex.ExclusionValue)
+					refMatches = err == nil
+				}
+			}
+		}
+		if !ok || !reflect.DeepEqual(actualBase, wantBase) || !refMatches {
 			return nil, fmt.Errorf("legacy run %d video %d decision %d route %d snapshot mismatch", run.ID, videoID, d.ID, d.RouteID)
 		}
 		audits, err := s.GetConditionAuditsForDecision(ctx, d.ID)
@@ -185,6 +249,9 @@ func checkedLegacyEvaluation(ctx context.Context, db *sql.DB, run *state.Run, vi
 }
 
 func (p *Pipeline) completeLegacyEvaluation(ctx context.Context, run *state.Run, v *state.Video, routes []router.Route) (*router.EvaluationResult, error) {
+	if err := p.ValidateRunRoutes(ctx, run.ID, routes); err != nil {
+		return nil, fmt.Errorf("validate legacy evaluation routes: %w", err)
+	}
 	expected, err := checkedLegacyEvaluation(ctx, p.db, run, v.ID, routes, false)
 	if err != nil {
 		return nil, err
@@ -204,37 +271,191 @@ func (p *Pipeline) completeLegacyEvaluation(ctx context.Context, run *state.Run,
 	return result, nil
 }
 
-// Keep the checkpoint resumable until queue integration can atomically hand off
-// owned groups. Retain all candidates, not only the first conflicting video.
+// Retain all unfinished candidates before marking an authority failure
+// terminal. If the atomic handoff cannot complete, leave the run resumable.
 func (p *Pipeline) retainAuthorityFailure(ctx context.Context, runID int64, videos []*state.Video, cause error) {
-	qs, err := queue.NewStore(p.db)
-	if err != nil {
-		p.logger.ErrorContext(ctx, "open authority retention store", "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, cause.Error())
-		return
-	}
-	err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+	// Persisted reasons, queue detail, and SSE carry only the vetted bounded
+	// summary; the full chain stays in the server log (ARD-001).
+	reason := diag.Reason(cause, "snapshot action authority failure")
+	p.retainThenFail(ctx, runID, reason, "", func(retainCtx context.Context, qs *queue.Store, tx *sql.Tx) error {
 		for _, v := range videos {
-			if v.ProcessingState == state.VideoStateCompleted {
-				continue
-			}
-			if _, err := qs.RetainRuntimeErrorTx(ctx, tx, v.ID, runID, "snapshot action authority failure", cause.Error()); err != nil {
+			// A final video is never re-queued (BR-039); classify inside the
+			// retention transaction so a concurrent finalization is seen.
+			class, _, err := state.ClassifyVideoTx(retainCtx, tx, v.ID)
+			if err != nil {
 				return err
 			}
-			if err := qs.AcknowledgeRetryGroupTx(ctx, tx, v.ID, runID); err != nil {
+			if class == state.VideoClassFinal {
+				continue
+			}
+			if _, err := qs.RetainRuntimeErrorTx(retainCtx, tx, v.ID, runID, "snapshot action authority failure", reason); err != nil {
+				return err
+			}
+			if err := qs.AcknowledgeRetryGroupTx(retainCtx, tx, v.ID, runID); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// retainThenFail is the one place that orders retention before terminal
+// failure (ADR-002, ADR-006 §3). retain runs in a single writer transaction,
+// once under ctx and once more under a detached bounded context. Only after it
+// commits is the run marked failed. If retention or the failed transition
+// cannot complete, the run is left resumable as interrupted and is never
+// failed. It reports whether the run became failed.
+func (p *Pipeline) retainThenFail(ctx context.Context, runID int64, reason, scanOutcome string, retain func(context.Context, *queue.Store, *sql.Tx) error) bool {
+	if !p.mayFinalize(runID) {
+		return false
+	}
+	qs, err := queue.NewStore(p.db)
 	if err != nil {
-		p.logger.ErrorContext(ctx, "retain authority failure", "run_id", runID, "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, cause.Error())
+		p.logger.ErrorContext(ctx, "open run retention store", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "retain_failure"))
+		p.interruptAuthorityRun(ctx, runID, reason)
+		return false
+	}
+	attempt := func(retainCtx context.Context) error {
+		return qs.WithRetryTx(retainCtx, func(tx *sql.Tx) error { return retain(retainCtx, qs, tx) })
+	}
+	if err = attempt(ctx); err != nil {
+		p.logger.ErrorContext(ctx, "retain run failure", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "retain_failure"))
+		// Retention is the handoff. Retry it independently of the possibly
+		// expired execution context before choosing a terminal status.
+		finalizeCtx, cancel := runFinalizationContext(ctx)
+		err = attempt(finalizeCtx)
+		cancel()
+		if err != nil {
+			p.logger.ErrorContext(ctx, "run retention finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+			// The candidates remain owned by the run, so interruption is
+			// resumable. Persist it separately; never fail before queue handoff.
+			p.interruptAuthorityRun(ctx, runID, reason)
+			return false
+		}
+	}
+	finalizeCtx, cancel := runFinalizationContext(ctx)
+	_, err = p.machine.FailRunWithScanOutcome(finalizeCtx, runID, reason, scanOutcome)
+	cancel()
+	if err != nil {
+		p.logger.ErrorContext(ctx, "fail retained run", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+		p.interruptAuthorityRun(ctx, runID, reason)
+		return false
+	}
+	p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: reason}))
+	return true
+}
+
+// sweepStrandedWork hands every video this production run has not finished to
+// a retained queue (ADR-006 §3). It makes no provider call, touches no send
+// guard and writes no action evidence or counters.
+func sweepStrandedWork(ctx context.Context, qs *queue.Store, tx *sql.Tx, runID int64, reason string) error {
+	unfinished, err := unfinishedRunMembersTx(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	for _, m := range unfinished {
+		if m.retryOwned {
+			// Queue work this run claimed returns to its queue with its IDs,
+			// origin run, reasons and history. A group the operator removed
+			// stays removed; a requeued group is already retained.
+			if err := qs.RequeueRetryGroupTx(ctx, tx, m.videoID, runID); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := qs.RetainRunSinkTx(ctx, tx, m.videoID, runID, queue.ErrorCategoryRuntime, "run stopped before this video finished", reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Pipeline) interruptAuthorityRun(ctx context.Context, runID int64, reason string) {
+	p.interruptRunWithCause(ctx, runID, reason, "")
+}
+
+// interruptRunWithCause persists an interruption under the bounded finalization
+// context. A non-empty cause is stored with the status in the same write; an
+// empty cause means the cause is not proven and is stored as NULL.
+func (p *Pipeline) interruptRunWithCause(ctx context.Context, runID int64, reason, cause string) {
+	if !p.mayFinalize(runID) {
 		return
 	}
-	if _, err := p.machine.FailRun(ctx, runID, cause.Error()); err != nil {
-		p.logger.ErrorContext(ctx, "fail retained authority run", "run_id", runID, "error", err)
-		_ = p.stateStore.InterruptRun(ctx, runID, cause.Error())
+	finalizeCtx, cancel := runFinalizationContext(ctx)
+	defer cancel()
+	var err error
+	if cause == "" {
+		err = p.stateStore.InterruptRun(finalizeCtx, runID, reason)
+	} else {
+		err = p.stateStore.InterruptRunWithCause(finalizeCtx, runID, reason, cause)
 	}
-	p.broadcastEvent(runID, EventRunError, payload(errorPayload{Message: cause.Error()}))
+	if err != nil {
+		p.logger.ErrorContext(ctx, "interrupt authority run finalization failed", "run_id", runID, "reason", reason, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+	}
+}
+
+// unfinishedMember is a video a production run has not finished, and whether a
+// queue row it claimed refers to it.
+type unfinishedMember struct {
+	videoID    int64
+	retryOwned bool
+}
+
+// unfinishedRunMembersTx selects the videos a production run has not finished
+// (ADR-006 §3). A non-production run has none.
+func unfinishedRunMembersTx(ctx context.Context, tx *sql.Tx, runID int64) ([]unfinishedMember, error) {
+	var runType string
+	if err := tx.QueryRowContext(ctx, `SELECT run_type FROM run WHERE id=?`, runID).Scan(&runType); err != nil {
+		return nil, fmt.Errorf("sweep run %d: %w", runID, err)
+	}
+	if runType != string(state.RunTypeManual) && runType != string(state.RunTypeScheduled) {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT v.id,
+	  EXISTS(SELECT 1 FROM deferred_item d WHERE d.video_id=v.id AND d.retry_run_id=?1)
+	   OR EXISTS(SELECT 1 FROM error_entry e WHERE e.video_id=v.id AND e.retry_run_id=?1)
+	 FROM video v
+	 WHERE (v.discovered_in_run_id=?1
+	   OR v.id IN (SELECT video_id FROM route_decision WHERE run_id=?1)
+	   OR v.id IN (SELECT video_id FROM deferred_item WHERE retry_run_id=?1)
+	   OR v.id IN (SELECT video_id FROM error_entry WHERE retry_run_id=?1))
+	  AND v.processing_state <> 'completed'
+	  AND NOT `+state.FinalVideo+`
+	  AND NOT EXISTS(SELECT 1 FROM run_video_outcome o WHERE o.run_id=?1 AND o.video_id=v.id
+	   AND o.final_outcome IN ('accepted','rejected','excluded','deferred','failed','unavailable_on_youtube'))
+	 ORDER BY v.id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("select unfinished videos: %w", err)
+	}
+	var unfinished []unfinishedMember
+	for rows.Next() {
+		var m unfinishedMember
+		if err := rows.Scan(&m.videoID, &m.retryOwned); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan unfinished video: %w", err)
+		}
+		unfinished = append(unfinished, m)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return unfinished, nil
+}
+
+// listUnfinishedRunVideosTx returns the IDs of the videos a production run has
+// not finished, for the deferred-queue handoff (ARS-003 §2). Non-production
+// runs return an empty set.
+func listUnfinishedRunVideosTx(ctx context.Context, tx *sql.Tx, runID int64) ([]int64, error) {
+	members, err := unfinishedRunMembersTx(ctx, tx, runID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(members))
+	for _, m := range members {
+		ids = append(ids, m.videoID)
+	}
+	return ids, nil
 }

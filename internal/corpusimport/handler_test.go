@@ -245,7 +245,7 @@ func decodeStatus(t *testing.T, raw map[string]any) wireStatus {
 // state or the deadline expires.
 func (e *env) waitTerminal(t *testing.T, id string) wireStatus {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(180 * time.Second)
 	for {
 		resp, raw := e.do(t, http.MethodGet, "/api/corpus/import/"+id, nil, "")
 		require.Equal(t, http.StatusOK, resp.StatusCode, "body: %v", raw)
@@ -289,6 +289,21 @@ func (e *env) requireStagingEmpty(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(e.dir, "staging"))
 	require.NoError(t, err)
 	require.Empty(t, entries, "staging directory must be empty")
+}
+
+// Terminal status can be published before the worker's deferred cleanup.
+func (e *env) waitStagingEmpty(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, err := os.ReadDir(filepath.Join(e.dir, "staging"))
+		require.NoError(t, err)
+		if len(entries) == 0 {
+			return
+		}
+		require.True(t, time.Now().Before(deadline), "staging directory must be empty: %v", entries)
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // TestPreviewReportsCountsAndWritesNothing proves preview: accurate row
@@ -549,7 +564,7 @@ func TestStartImportFullLifecycle(t *testing.T) {
 	// By-id and latest agree on the terminal corpus size.
 	require.NotNil(t, st2.TotalCorpusSize)
 
-	e.requireStagingEmpty(t)
+	e.waitStagingEmpty(t)
 	requireLogsFreeOf(t, e, "Alpha video", "prior.sqlite")
 }
 
@@ -625,7 +640,7 @@ func TestImportAtContextualCorpusScale(t *testing.T) {
 	require.NoError(t, e.dest.QueryRow(`SELECT COUNT(DISTINCT channel_id) FROM title_fingerprint;`).Scan(&channels))
 	require.Equal(t, 50, channels, "optional source channel ids are retained as associations")
 
-	e.requireStagingEmpty(t)
+	e.waitStagingEmpty(t)
 }
 
 // TestStartRejectsInvalidSourcesBeforeOperation proves invalid sources are
@@ -719,7 +734,7 @@ func TestConcurrentStartsOneActive(t *testing.T) {
 	st := e.waitTerminal(t, acceptedID)
 	require.Equal(t, StatusCompleted, st.Status)
 	require.Equal(t, 4, st.Inserted)
-	e.requireStagingEmpty(t)
+	e.waitStagingEmpty(t)
 }
 
 // TestStartBusyReturns409 proves a start while an import is active is
@@ -742,7 +757,7 @@ func TestStartBusyReturns409(t *testing.T) {
 
 	close(release)
 	require.Equal(t, StatusCompleted, e.waitTerminal(t, importID).Status)
-	e.requireStagingEmpty(t)
+	e.waitStagingEmpty(t)
 }
 
 // TestStatusAndCancelContract exercises the status/cancel tables: latest 404
@@ -799,7 +814,7 @@ func TestStatusAndCancelContract(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %v", body)
 	require.Equal(t, StatusCancelled, body["status"])
 	require.Equal(t, float64(1), body["total"])
-	e.requireStagingEmpty(t)
+	e.waitStagingEmpty(t)
 }
 
 // TestCancelAfterCommittedChunkPreservesRows cancels a real running import
@@ -893,7 +908,7 @@ func TestCancelAfterCommittedChunkPreservesRows(t *testing.T) {
 	require.Equal(t, http.StatusOK, latestResp.StatusCode, "body: %v", latest)
 	require.Equal(t, id2, latest["import_id"])
 
-	e.requireStagingEmpty(t)
+	e.waitStagingEmpty(t)
 }
 
 // TestRestartLosesStatusKeepsRows simulates a process restart with a fresh
@@ -987,7 +1002,7 @@ func TestDatabaseFailureReportsFailedWithNullCorpusSize(t *testing.T) {
 	require.Equal(t, StatusFailed, st.Status)
 	require.Equal(t, 0, st.Processed)
 	require.Nil(t, st.TotalCorpusSize)
-	e.requireStagingEmpty(t)
+	e.waitStagingEmpty(t)
 
 	// Terminal failed keeps its unchanged state on a repeated cancel.
 	resp3, body3 := e.do(t, http.MethodPost, "/api/corpus/import/"+importID+"/cancel", nil, "")

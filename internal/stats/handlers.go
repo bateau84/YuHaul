@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/state"
 )
 
@@ -61,7 +62,7 @@ func (h *Handler) handleRunStats(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
-		h.logger.ErrorContext(r.Context(), "run stats failed", "error", err, "run_id", id)
+		h.logger.ErrorContext(r.Context(), "run stats failed", "run_id", id, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load run stats")
 		return
 	}
@@ -76,7 +77,7 @@ func (h *Handler) handleRouteStats(w http.ResponseWriter, r *http.Request) {
 	}
 	stats, err := h.service.RouteStats(r.Context(), id)
 	if err != nil {
-		h.logger.ErrorContext(r.Context(), "route stats failed", "error", err, "run_id", id)
+		h.logger.ErrorContext(r.Context(), "route stats failed", "run_id", id, "diagnostic", diag.Encode(err, "unknown", "inspect_run"))
 		writeError(w, http.StatusInternalServerError, "failed to load route stats")
 		return
 	}

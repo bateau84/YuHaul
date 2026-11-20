@@ -2,8 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import * as api from '../api/client'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
+import { StopRunControl, StopRunMessage, type StopOutcome } from '../components/StopRunControl'
 import { useToast } from '../hooks/useToast'
+import { canOfferStop, isStopping } from '../types'
+import { runEnding } from '../lib/run-ending'
+import { unavailableSummary } from '../lib/outcome'
 import type { Run, RunStatus, RunType } from '../types'
+
+// Persisted-state polling interval (ARD-001: while a listed run is stored as
+// running, the client re-reads stored run state; start acknowledgement is
+// never treated as completion).
+export const RUN_POLL_INTERVAL_MS = 5000
 
 const runTypeLabels: Record<RunType, string> = {
   scheduled: 'Scheduled',
@@ -16,14 +25,72 @@ const runTypeLabels: Record<RunType, string> = {
 const runStatusLabels: Record<RunStatus, string> = {
   running: 'Running',
   completed: 'Completed',
+  failed: 'Failed',
   interrupted: 'Interrupted',
+  stopped: 'Stopped by user',
+}
+
+// "Stopping" is not a stored status: it is a running run with a recorded stop
+// (isStopping). It is offered as its own filter value.
+type StatusFilter = RunStatus | 'stopping'
+
+const statusFilterLabels: Record<StatusFilter, string> = {
+  ...runStatusLabels,
+  stopping: 'Stopping',
+}
+
+// A stopping run is still running, so it matches both the Stopping and the
+// Running filters. A stopped run matches only Stopped by user: it is neither
+// Failed nor Completed.
+function matchesStatus(run: Run, filter: StatusFilter | ''): boolean {
+  if (filter === '') return true
+  if (filter === 'stopping') return isStopping(run)
+  return run.status === filter
+}
+
+function StopSquareIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+      <rect x="1" y="1" width="8" height="8" rx="1" fill="currentColor" />
+    </svg>
+  )
+}
+
+// Neutral badge with icon and text: never colour alone, and not styled as a
+// failure.
+function StatusCell({ run }: { run: Run }) {
+  if (isStopping(run) || run.status === 'stopped') {
+    return (
+      <span className="badge badge--not-evaluated">
+        <StopSquareIcon />
+        {isStopping(run) ? 'Stopping' : runStatusLabels.stopped}
+      </span>
+    )
+  }
+  if (runEnding(run) === 'ended_by_user') {
+    // Counts as failed; the second line says it was the user's end of a legacy run.
+    return (
+      <>
+        {runStatusLabels.failed}
+        <br />
+        <span style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Ended by user (legacy run)</span>
+      </>
+    )
+  }
+  return <>{runStatusLabels[run.status] ?? run.status}</>
+}
+
+// Selected shows "Unknown" for a null/absent count (never captured) and "0"
+// only for a captured empty selection (BR-020).
+function selectedCountLabel(run: Run): string {
+  return run.videos_selected == null ? 'Unknown' : String(run.videos_selected)
 }
 
 interface RunFilters {
   from: string
   to: string
   runType: RunType | ''
-  status: RunStatus | ''
+  status: StatusFilter | ''
 }
 
 const emptyFilters: RunFilters = { from: '', to: '', runType: '', status: '' }
@@ -39,11 +106,15 @@ export function RunsView() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  const [refreshError, setRefreshError] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [filters, setFilters] = useState<RunFilters>(emptyFilters)
   const retryButtonRef = useRef<HTMLButtonElement>(null)
   const firstRowRef = useRef<HTMLTableRowElement>(null)
   const recoveredRef = useRef(false)
   const { addToast } = useToast()
+  const [stopOutcome, setStopOutcome] = useState<StopOutcome | null>(null)
+  const stopMessageRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -64,11 +135,44 @@ export function RunsView() {
     }
   }, [])
 
+  // Persisted-state refresh: while any listed run is stored as running, keep
+  // re-reading the run list so a terminal status replaces "running" without
+  // user action (ARD-001). A failed background read never clears the list it
+  // could not refresh; it surfaces a visible retry instead of implying the
+  // data is current.
+  // An endable run is saved as running but nothing executes it: it is not progressing.
+  const hasRunning = runs.some((r) => r.status === 'running' && r.endable !== true)
+  useEffect(() => {
+    if (!hasRunning || fetchError) return
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      api.listRuns()
+        .then((r) => {
+          if (cancelled) return
+          setRuns(r)
+          setRefreshError(false)
+        })
+        .catch(() => {
+          if (cancelled) return
+          setRefreshError(true)
+        })
+    }, RUN_POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [hasRunning, fetchError])
+
   // Focus the Retry button whenever the view settles into the fetch-error
   // state: on first entry and again after a failed retry re-enables it.
   useEffect(() => {
     if (fetchError && !retrying) retryButtonRef.current?.focus()
   }, [fetchError, retrying])
+
+  // A background refresh failure renders its own alert with a Retry control
+  // (see refreshErrorRegion) and deliberately does not move focus; the
+  // fetch-error region above keeps its focus-on-entry behavior for full load
+  // failures.
 
   // After a successful retry, move focus to the first run row.
   useEffect(() => {
@@ -91,6 +195,36 @@ export function RunsView() {
     }
   }
 
+  async function handleRefreshRetry() {
+    setRefreshing(true)
+    try {
+      const r = await api.listRuns()
+      setRuns(r)
+      setRefreshError(false)
+    } catch {
+      addToast('Refresh failed. Please try again.', 'error')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  // Acknowledgements take focus (the Stop button was replaced); refusals do not.
+  const stopKind = stopOutcome?.kind
+  useEffect(() => {
+    if (stopKind === 'accepted' || stopKind === 'already_stopping') stopMessageRef.current?.focus()
+  }, [stopKind])
+
+  // Re-read the list so the row shows the saved status, not the press.
+  async function handleStopOutcome(outcome: StopOutcome) {
+    setStopOutcome(outcome)
+    try {
+      setRuns(await api.listRuns())
+      setRefreshError(false)
+    } catch {
+      setRefreshError(true)
+    }
+  }
+
   function updateFilter<K extends keyof RunFilters>(key: K, value: RunFilters[K]) {
     setFilters((prev) => ({ ...prev, [key]: value }))
   }
@@ -101,7 +235,7 @@ export function RunsView() {
   const visibleRuns = useMemo(() => {
     return runs.filter((r) => {
       if (filters.runType !== '' && r.run_type !== filters.runType) return false
-      if (filters.status !== '' && r.status !== filters.status) return false
+      if (!matchesStatus(r, filters.status)) return false
       const day = utcDay(r.started_at)
       if (filters.from !== '' && day < filters.from) return false
       if (filters.to !== '' && day > filters.to) return false
@@ -173,9 +307,9 @@ export function RunsView() {
             onChange={(e) => updateFilter('status', e.target.value as RunFilters['status'])}
           >
             <option value="">All statuses</option>
-            {(Object.keys(runStatusLabels) as RunStatus[]).map((s) => (
+            {(Object.keys(statusFilterLabels) as StatusFilter[]).map((s) => (
               <option key={s} value={s}>
-                {runStatusLabels[s]}
+                {statusFilterLabels[s]}
               </option>
             ))}
           </select>
@@ -184,6 +318,27 @@ export function RunsView() {
       <p style={{ margin: '8px 0 0', color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
         Format: YYYY-MM-DD
       </p>
+    </div>
+  )
+
+  const refreshErrorRegion = refreshError && (
+    <div
+      className="card"
+      role="alert"
+      aria-live="assertive"
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}
+    >
+      <p style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--color-status-failed)' }}>
+        Could not refresh run status. The list below may be out of date.
+      </p>
+      <button
+        type="button"
+        className="button"
+        onClick={handleRefreshRetry}
+        disabled={refreshing}
+      >
+        {refreshing ? 'Retrying…' : 'Retry'}
+      </button>
     </div>
   )
 
@@ -200,39 +355,60 @@ export function RunsView() {
           onRetry={handleRetry}
           retrying={retrying}
         />
-      ) : visibleRuns.length === 0 ? (
-        <div className="card empty-state">
-          {filtersActive
-            ? 'No runs match the current filters.'
-            : 'No runs yet. Start a processing run to see results here.'}
-        </div>
       ) : (
-        <div className="card">
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Started</th>
-                <th scope="col">Type</th>
-                <th scope="col">Status</th>
-                <th scope="col">Videos</th>
-                <th scope="col">Quota</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleRuns.map((r, i) => (
-                <tr key={r.id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
-                  <td data-label="Started">
-                    <Link to={`/runs/${r.id}`}>{new Date(r.started_at).toLocaleString()}</Link>
-                  </td>
-                  <td data-label="Type">{runTypeLabels[r.run_type] ?? r.run_type}</td>
-                  <td data-label="Status">{r.status}</td>
-                  <td data-label="Videos">{r.videos_discovered}</td>
-                  <td data-label="Quota">{r.quota_cost}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          {refreshErrorRegion}
+          {stopOutcome && (
+            <StopRunMessage ref={stopMessageRef} outcome={stopOutcome} onDismiss={() => setStopOutcome(null)} />
+          )}
+          {visibleRuns.length === 0 ? (
+            <div className="card empty-state">
+              {filtersActive
+                ? 'No runs match the current filters.'
+                : 'No runs yet. Start a processing run to see results here.'}
+            </div>
+          ) : (
+            <div className="card">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th scope="col">Started</th>
+                    <th scope="col">Type</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Selected</th>
+                    <th scope="col">Evaluated</th>
+                    <th scope="col">Discovered</th>
+                    <th scope="col">Quota</th>
+                    <th scope="col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRuns.map((r, i) => (
+                    <tr key={r.id} ref={i === 0 ? firstRowRef : undefined} tabIndex={i === 0 ? -1 : undefined}>
+                      <td data-label="Started">
+                        <Link to={`/runs/${r.id}`}>{new Date(r.started_at).toLocaleString()}</Link>
+                      </td>
+                      <td data-label="Type">{runTypeLabels[r.run_type] ?? r.run_type}</td>
+                      <td data-label="Status">
+                        <StatusCell run={r} />
+                        {unavailableSummary(r.videos_unavailable) && <small style={{ display: 'block', marginTop: 4 }}>{unavailableSummary(r.videos_unavailable)}</small>}
+                      </td>
+                      <td data-label="Selected">{selectedCountLabel(r)}</td>
+                      <td data-label="Evaluated">{r.videos_evaluated ?? '—'}</td>
+                      <td data-label="Discovered">{r.videos_discovered}</td>
+                      <td data-label="Quota">{r.quota_cost}</td>
+                      {/* Below 768px rows stack full width, so the 44px Stop
+                          button wraps inside the row at 320px with no clipping. */}
+                      <td data-label={canOfferStop(r) ? 'Actions' : undefined}>
+                        {canOfferStop(r) && <StopRunControl run={r} onOutcome={handleStopOutcome} />}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </>
   )

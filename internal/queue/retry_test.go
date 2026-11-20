@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -29,6 +31,13 @@ func retryRun(t *testing.T, db *sql.DB) int64 {
 	return run
 }
 
+func retryRequireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func deferredSibling(t *testing.T, s *Store, video, origin int64, status DeferredStatus) int64 {
 	t.Helper()
 	id, err := s.CreateDeferredItem(context.Background(), &DeferredItem{VideoID: video, RunID: origin, Reason: DeferredReasonQuotaExhausted, Status: status, CreatedAt: time.Now().UTC()})
@@ -49,6 +58,297 @@ func claimDeferred(t *testing.T, s *Store, item, run int64, want bool) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClaimDeferredGroupReturnsExactReceipt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	originA, originB, receiving := retryRun(t, s.db), retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, originA, "receipt")
+	first := deferredSibling(t, s, video, originA, DeferredStatusPending)
+	second := deferredSibling(t, s, video, originB, DeferredStatusPending)
+	var got RetryGroupReceipt
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var claimed bool
+		var err error
+		got, _, claimed, err = s.ClaimDeferredGroupReceiptTx(ctx, tx, first, receiving, time.Now())
+		if err == nil && !claimed {
+			t.Fatal("claim not admitted")
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := RetryGroupReceipt{ReceivingRunID: receiving, VideoID: video, Deferred: []RetryRowRef{{ID: first, OriginRunID: originA}, {ID: second, OriginRunID: originB}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("receipt = %#v, want %#v", got, want)
+	}
+}
+
+func TestValidateRetryReceiptTracksRemovedSiblingsAndSurvivesReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "receipt.db")
+	db, err := sql.Open("sqlite", path+"?_fk=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, owner := retryRun(t, db), retryRun(t, db)
+	video := seedVideo(t, db, origin, "receipt-reopen")
+	discarded := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	var errorID int64
+	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		errorID, err = s.RetainRuntimeErrorTx(ctx, tx, video, owner, "retry", "test")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var receipt RetryGroupReceipt
+	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var claimed bool
+		var err error
+		receipt, _, claimed, err = s.ClaimErrorGroupReceiptTx(ctx, tx, errorID, owner, time.Now())
+		if err == nil && !claimed {
+			t.Error("claim was not admitted")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE deferred_item SET status='discarded' WHERE id=?`, discarded); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sql.Open("sqlite", path+"?_fk=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s, err = NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got RetryReceiptValidation
+	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		got, err = s.ValidateRetryReceiptTx(ctx, tx, receipt)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Deferred) != 0 || len(got.Errors) != 1 || got.Errors[0].ID != errorID || len(got.Removed) != 1 || got.Removed[0].ID != discarded {
+		t.Fatalf("validation = %+v", got)
+	}
+	// Dismissing the last live receipt member is explicit removal, not permission
+	// to create replacement work.
+	if _, err := db.ExecContext(ctx, `UPDATE error_entry SET status='dismissed' WHERE id=?`, errorID); err != nil {
+		t.Fatal(err)
+	}
+	err = s.WithRetryTx(ctx, func(tx *sql.Tx) error { _, err := s.ValidateRetryReceiptTx(ctx, tx, receipt); return err })
+	if !errors.Is(err, ErrWorkRemoved) {
+		t.Fatalf("all removed validation = %v, want ErrWorkRemoved", err)
+	}
+}
+
+func TestValidateRetryReceiptRejectsWrongOwnership(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, owner, other := retryRun(t, s.db), retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "receipt-owner")
+	item := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	var receipt RetryGroupReceipt
+	if err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var claimed bool
+		var err error
+		receipt, _, claimed, err = s.ClaimDeferredGroupReceiptTx(ctx, tx, item, owner, time.Now())
+		if err == nil && !claimed {
+			t.Error("claim was not admitted")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE deferred_item SET retry_run_id=? WHERE id=?`, other, item); err != nil {
+		t.Fatal(err)
+	}
+	var got RetryReceiptValidation
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		got, err = s.ValidateRetryReceiptTx(ctx, tx, receipt)
+		return err
+	})
+	if !errors.Is(err, ErrWorkNotOwned) || len(got.NotOwned) != 1 || got.NotOwned[0].ID != item {
+		t.Fatalf("wrong owner validation = %+v, %v", got, err)
+	}
+}
+
+func TestFinishRetryFailureTxCreatesSinkAndResolvesOnlyLiveReceiptMembers(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, owner := retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "finish-retry-failure")
+	removed := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	live := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	var receipt RetryGroupReceipt
+	retryRequireNoError(t, s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var claimed bool
+		var err error
+		receipt, _, claimed, err = s.ClaimDeferredGroupReceiptTx(ctx, tx, live, owner, time.Now())
+		if err == nil && !claimed {
+			return errors.New("claim not admitted")
+		}
+		return err
+	}))
+	if _, err := s.db.ExecContext(ctx, `UPDATE deferred_item SET status='discarded' WHERE id=?`, removed); err != nil {
+		t.Fatal(err)
+	}
+	var sink int64
+	retryRequireNoError(t, s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		sink, err = s.FinishRetryFailureTx(ctx, tx, receipt, RetryFailureFacts{Message: "provider failed", Detail: "bounded detail"})
+		return err
+	}))
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM error_entry WHERE id=? AND video_id=? AND run_id=? AND error_category='runtime' AND status='active'`, sink, video, owner).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("receiving-run sink count = %d", count)
+	}
+	var removedStatus, liveStatus string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM deferred_item WHERE id=?`, removed).Scan(&removedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM deferred_item WHERE id=?`, live).Scan(&liveStatus); err != nil {
+		t.Fatal(err)
+	}
+	if removedStatus != "discarded" || liveStatus != "completed" {
+		t.Fatalf("source states removed=%q live=%q", removedStatus, liveStatus)
+	}
+}
+
+func TestFinishRetryFailureTxAllRemovedDoesNotCreateSink(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, owner := retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "all-retry-removed")
+	item := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	var receipt RetryGroupReceipt
+	retryRequireNoError(t, s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var claimed bool
+		var err error
+		receipt, _, claimed, err = s.ClaimDeferredGroupReceiptTx(ctx, tx, item, owner, time.Now())
+		if err == nil && !claimed {
+			return errors.New("claim not admitted")
+		}
+		return err
+	}))
+	if _, err := s.db.ExecContext(ctx, `UPDATE deferred_item SET status='discarded' WHERE id=?`, item); err != nil {
+		t.Fatal(err)
+	}
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		_, err := s.FinishRetryFailureTx(ctx, tx, receipt, RetryFailureFacts{Message: "failure"})
+		return err
+	})
+	if !errors.Is(err, ErrWorkRemoved) {
+		t.Fatalf("FinishRetryFailureTx error = %v, want ErrWorkRemoved", err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM error_entry WHERE video_id=? AND run_id=? AND error_category='runtime'`, video, owner).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("created %d runtime sinks for removed work", count)
+	}
+}
+
+func TestFinishRetryFailureTxRejectsCrossQueueOwnerConflict(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, owner, other := retryRun(t, s.db), retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "cross-queue-owner")
+	item := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	var receipt RetryGroupReceipt
+	retryRequireNoError(t, s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var claimed bool
+		var err error
+		receipt, _, claimed, err = s.ClaimDeferredGroupReceiptTx(ctx, tx, item, owner, time.Now())
+		if err == nil && !claimed {
+			return errors.New("claim not admitted")
+		}
+		return err
+	}))
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO error_entry (video_id,run_id,error_category,error_message,status,created_at,retry_run_id) VALUES (?,?,'runtime','other owner','retrying',?,?)`, video, origin, time.Now().UTC().Format(time.RFC3339), other); err != nil {
+		t.Fatal(err)
+	}
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		_, err := s.FinishRetryFailureTx(ctx, tx, receipt, RetryFailureFacts{Message: "failure"})
+		return err
+	})
+	if !errors.Is(err, ErrRetryOwnership) {
+		t.Fatalf("FinishRetryFailureTx error = %v, want ErrRetryOwnership", err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM error_entry WHERE video_id=? AND run_id=? AND error_category='runtime' AND status='active'`, video, owner).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("created sink despite cross-queue conflict: %d", count)
+	}
+}
+
+func TestFinishRetryFailureTxCallerRollbackUndoesSinkAndSourceResolution(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, owner := retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "rollback-retry-failure")
+	item := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	var receipt RetryGroupReceipt
+	retryRequireNoError(t, s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var claimed bool
+		var err error
+		receipt, _, claimed, err = s.ClaimDeferredGroupReceiptTx(ctx, tx, item, owner, time.Now())
+		if err == nil && !claimed {
+			return errors.New("claim not admitted")
+		}
+		return err
+	}))
+	_, err := s.db.ExecContext(ctx, `CREATE TRIGGER reject_retry_resolution BEFORE UPDATE OF status ON deferred_item WHEN OLD.id=`+fmt.Sprint(item)+` AND NEW.status='completed' BEGIN SELECT RAISE(ABORT,'injected resolution failure'); END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		_, err := s.FinishRetryFailureTx(ctx, tx, receipt, RetryFailureFacts{Message: "failure"})
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected injected resolution failure")
+	}
+	var status string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM deferred_item WHERE id=?`, item).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "retrying" {
+		t.Fatalf("source status after rollback = %q", status)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM error_entry WHERE video_id=? AND run_id=? AND error_category='runtime' AND status='active'`, video, owner).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("runtime sink survived rollback: %d", count)
 	}
 }
 
@@ -232,7 +532,7 @@ func TestRetryCrossQueueOwnersAndFailureHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	e, err := s.GetErrorEntry(ctx, entry)
-	if err != nil || e.Status != ErrorStatusResolved || *e.RetryRunID != contender || e.RunID != origin || e.Detail != "decision 1 route 1" {
+	if err != nil || e.Status != ErrorStatusResolved || *e.RetryRunID != contender || e.RunID != origin || e.Detail != "diag:v1 phase=unknown operation=unknown code=unknown_error" {
 		t.Fatalf("old error = %+v, %v", e, err)
 	}
 	e, err = s.GetErrorEntry(ctx, retained)
@@ -490,5 +790,141 @@ func TestErrorOwnerBlocksDeferredClaimWithoutOwnedDeferredRow(t *testing.T) {
 	})
 	if !errors.Is(err, ErrRetryOwnership) {
 		t.Fatalf("completed unfinished owner = %v", err)
+	}
+}
+
+func TestRetainErrorForRetryRequiresActiveExpectedOwner(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		status     ErrorStatus
+		owner      any
+		wantErr    error
+		wantIDZero bool
+	}{
+		{name: "retrying owner", status: ErrorStatusRetrying, owner: int64(20)},
+		{name: "dismissed is explicit removal", status: ErrorStatusDismissed, owner: int64(20), wantErr: ErrWorkRemoved, wantIDZero: true},
+		{name: "resolved is explicit removal", status: ErrorStatusResolved, owner: int64(20), wantErr: ErrWorkRemoved, wantIDZero: true},
+		{name: "wrong owner", status: ErrorStatusRetrying, owner: int64(21), wantErr: ErrWorkNotOwned, wantIDZero: true},
+		{name: "unowned", status: ErrorStatusRetrying, owner: nil, wantErr: ErrWorkNotOwned, wantIDZero: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			origin, retry, other := retryRun(t, s.db), retryRun(t, s.db), retryRun(t, s.db)
+			video := seedVideo(t, s.db, origin, tc.name)
+			owner := tc.owner
+			if owner != nil {
+				owner = retry
+				if tc.name == "wrong owner" {
+					owner = other
+				}
+			}
+			res, err := s.db.ExecContext(ctx, `INSERT INTO error_entry (video_id,run_id,error_category,error_message,error_detail,status,created_at,retry_run_id) VALUES (?,?,?,?,?,?,?,?)`, video, origin, ErrorCategoryAuthorization, "old", "old", tc.status, time.Now().UTC().Format(time.RFC3339), owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotID := int64(-1)
+			err = s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+				var callErr error
+				gotID, callErr = s.RetainAuthorizationPendingForRetryTx(ctx, tx, video, origin, retry, "new", "new")
+				return callErr
+			})
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantIDZero && gotID != 0 {
+				t.Fatalf("id = %d, want 0", gotID)
+			}
+			if tc.wantErr == nil && gotID != id {
+				t.Fatalf("id = %d, want existing %d", gotID, id)
+			}
+		})
+	}
+}
+
+func TestRetainErrorForRetryDistinguishesMissingSink(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, retry := retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "missing-sink")
+	var got int64 = -1
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		got, err = s.RetainAuthorizationPendingForRetryTx(ctx, tx, video, origin, retry, "new", "new")
+		return err
+	})
+	if !errors.Is(err, ErrWorkRemoved) || got != 0 {
+		t.Fatalf("missing sink = (%d, %v), want removed", got, err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM error_entry WHERE video_id=? AND run_id=?`, video, origin).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("missing sink resurrected: count=%d err=%v", count, err)
+	}
+}
+
+func TestRetainDeferredForRetryRechecksDiscardInTransaction(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, retry := retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "discard-race")
+	item := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	if _, err := s.db.ExecContext(ctx, `UPDATE deferred_item SET retry_run_id=? WHERE id=?`, retry, item); err != nil {
+		t.Fatal(err)
+	}
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE deferred_item SET status='discarded' WHERE id=?`, item); err != nil {
+			return err
+		}
+		_, err := s.RetainDeferredForRetryTx(ctx, tx, item, video, origin, retry)
+		return err
+	})
+	if !errors.Is(err, ErrWorkRemoved) {
+		t.Fatalf("discarded sink error = %v, want ErrWorkRemoved", err)
+	}
+	got, err := s.GetDeferredItem(ctx, item)
+	if err != nil || got.Status != DeferredStatusPending {
+		t.Fatalf("transaction rollback item=%+v err=%v", got, err)
+	}
+}
+
+func TestRetainDeferredForRetryUsesExactReceiptWhenNewestSiblingRemoved(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	origin, retry := retryRun(t, s.db), retryRun(t, s.db)
+	video := seedVideo(t, s.db, origin, "exact-deferred-receipt")
+	older := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	newer := deferredSibling(t, s, video, origin, DeferredStatusPending)
+	if _, err := s.db.ExecContext(ctx, `UPDATE deferred_item SET status='retrying', retry_run_id=? WHERE id IN (?,?)`, retry, older, newer); err != nil {
+		t.Fatal(err)
+	}
+	var got int64
+	err := s.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE deferred_item SET status='discarded', retry_run_id=NULL WHERE id=?`, newer); err != nil {
+			return err
+		}
+		var err error
+		got, err = s.RetainDeferredForRetryTx(ctx, tx, older, video, origin, retry)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != older {
+		t.Fatalf("retained id = %d, want exact receipt row %d", got, older)
+	}
+	item, err := s.GetDeferredItem(ctx, older)
+	if err != nil || item.Status != DeferredStatusRetrying || item.RetryRunID == nil || *item.RetryRunID != retry {
+		t.Fatalf("older receipt row = %+v, err=%v", item, err)
+	}
+	item, err = s.GetDeferredItem(ctx, newer)
+	if err != nil || item.Status != DeferredStatusDiscarded {
+		t.Fatalf("removed newer sibling = %+v, err=%v", item, err)
 	}
 }

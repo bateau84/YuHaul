@@ -80,7 +80,10 @@ func TestDryRunExclusionBeforeDuplicate(t *testing.T) {
 			if tc.brokenDetector && !tc.allExcluded {
 				require.Equal(t, state.RunStatusFailed, after.Status)
 				require.NotNil(t, after.InterruptReason)
-				require.Contains(t, *after.InterruptReason, "database is closed")
+				require.Equal(t, "diag:v1 phase=unknown operation=unknown code=unknown_error", *after.InterruptReason)
+				require.NotNil(t, after.VideosSelected,
+					"the pending selection known before the detection failure must survive it")
+				require.Equal(t, 1, *after.VideosSelected)
 				require.Empty(t, decisions, "detection must precede conditions")
 				require.Empty(t, actions)
 			} else {

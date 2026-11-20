@@ -13,8 +13,16 @@ import (
 
 // Engine evaluates videos against ordered routes and records decisions.
 type Engine struct {
-	store  *Store
-	logger *slog.Logger
+	store             *Store
+	logger            *slog.Logger
+	validateRunRoutes func(context.Context, int64, []Route) error
+}
+
+// WithRunRoutesValidator binds recording to the run's persisted route snapshot.
+// Configure the engine before it is used concurrently.
+func (e *Engine) WithRunRoutesValidator(validate func(context.Context, int64, []Route) error) *Engine {
+	e.validateRunRoutes = validate
+	return e
 }
 
 // ExpectedEvaluation is non-recording evidence, independent of persisted rows.
@@ -43,6 +51,11 @@ func (e *Engine) ExpectedEvaluations(runID, videoID int64, vc VideoContext, rout
 		matched := false
 		if enabled && allExcluded {
 			d = state.RouteDecision{EvaluationOrder: r.EvaluationOrder, Decision: state.RouteDecisionSkipped, SkipReason: skipPtr(state.SkipReasonExclusion)}
+			match, _ := ExclusionMatch(r, vc)
+			if match != nil {
+				d.ExclusionIndex = exclusionIntPtr(match.Index)
+				d.ExclusionSemanticsVersion = exclusionIntPtr(match.SemanticsVersion)
+			}
 		} else if final {
 			d = state.RouteDecision{EvaluationOrder: r.EvaluationOrder, Decision: state.RouteDecisionSkipped, SkipReason: skipPtr(state.SkipReasonFinalRouteMatched)}
 		} else {
@@ -93,6 +106,12 @@ func (e *Engine) Evaluate(ctx context.Context, runID int64, videoID int64,
 func (e *Engine) EvaluateWithRoutes(ctx context.Context, runID int64, videoID int64,
 	vc VideoContext, machine *state.Machine, routes []Route) (*EvaluationResult, error) {
 
+	if e.validateRunRoutes == nil {
+		return nil, fmt.Errorf("router: run routes validator is required")
+	}
+	if err := e.validateRunRoutes(ctx, runID, routes); err != nil {
+		return nil, fmt.Errorf("router: validate run routes: %w", err)
+	}
 	result := &EvaluationResult{}
 	finalMatched := false
 	for _, route := range routes {
@@ -143,11 +162,13 @@ func (e *Engine) evaluateRoute(route Route, vc VideoContext) (state.RouteDecisio
 		}, nil, false
 	}
 
-	if reason := Excluded(route, vc); reason != nil {
+	if match, reason := ExclusionMatch(route, vc); reason != nil {
 		return state.RouteDecision{
-			EvaluationOrder: order,
-			Decision:        state.RouteDecisionSkipped,
-			SkipReason:      reason,
+			EvaluationOrder:           order,
+			Decision:                  state.RouteDecisionSkipped,
+			SkipReason:                reason,
+			ExclusionIndex:            exclusionIntPtr(match.Index),
+			ExclusionSemanticsVersion: exclusionIntPtr(match.SemanticsVersion),
 		}, nil, false
 	}
 
@@ -185,42 +206,57 @@ func (e *Engine) evaluateRoute(route Route, vc VideoContext) (state.RouteDecisio
 // Excluded returns the exclusion skip reason if the video matches any of the
 // route's exclusion rules, or nil if it does not.
 func Excluded(route Route, vc VideoContext) *state.SkipReason {
-	for _, ex := range route.Exclusions {
+	_, reason := ExclusionMatch(route, vc)
+	return reason
+}
+
+// ExclusionMatch returns the first matching occurrence in the complete ordered
+// route exclusion array. The index is snapshot-relative; no compared input is
+// copied into the result.
+type ExclusionMatchResult struct {
+	Index            int
+	SemanticsVersion int
+}
+
+func ExclusionMatch(route Route, vc VideoContext) (*ExclusionMatchResult, *state.SkipReason) {
+	for index, ex := range route.Exclusions {
 		switch ex.ExclusionType {
 		case ExclusionTypeChannel:
 			if vc.ChannelID == ex.ExclusionValue {
-				return skipPtr(state.SkipReasonExclusion)
+				return &ExclusionMatchResult{index, 1}, skipPtr(state.SkipReasonExclusion)
 			}
 		case ExclusionTypeVideo:
 			if vc.VideoID == ex.ExclusionValue {
-				return skipPtr(state.SkipReasonExclusion)
+				return &ExclusionMatchResult{index, 1}, skipPtr(state.SkipReasonExclusion)
 			}
 		case ExclusionTypeTitle:
 			if strings.EqualFold(strings.TrimSpace(vc.Title), strings.TrimSpace(ex.ExclusionValue)) {
-				return skipPtr(state.SkipReasonExclusion)
+				return &ExclusionMatchResult{index, 1}, skipPtr(state.SkipReasonExclusion)
 			}
 		case ExclusionTypeWord:
 			if strings.Contains(strings.ToLower(vc.Title), strings.ToLower(ex.ExclusionValue)) {
-				return skipPtr(state.SkipReasonExclusion)
+				return &ExclusionMatchResult{index, 1}, skipPtr(state.SkipReasonExclusion)
 			}
 		case ExclusionTypeDurationMax:
 			if vc.DurationSeconds != nil {
 				max, err := strconv.Atoi(ex.ExclusionValue)
 				if err == nil && *vc.DurationSeconds > max {
-					return skipPtr(state.SkipReasonExclusion)
+					return &ExclusionMatchResult{index, 1}, skipPtr(state.SkipReasonExclusion)
 				}
 			}
 		case ExclusionTypeDurationMin:
 			if vc.DurationSeconds != nil {
 				min, err := strconv.Atoi(ex.ExclusionValue)
 				if err == nil && *vc.DurationSeconds < min {
-					return skipPtr(state.SkipReasonExclusion)
+					return &ExclusionMatchResult{index, 1}, skipPtr(state.SkipReasonExclusion)
 				}
 			}
 		}
 	}
-	return nil
+	return nil, nil
 }
+
+func exclusionIntPtr(v int) *int { return &v }
 
 func (e *Engine) evaluateCondition(routeID int64, c RouteCondition, vc VideoContext) (bool, string) {
 	actual := conditionValue(c.Field, vc)

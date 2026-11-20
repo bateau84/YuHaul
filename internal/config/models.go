@@ -6,7 +6,10 @@
 // runs can be interpreted against the configuration that was active at the time.
 package config
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ConfigVersion is a persisted full snapshot of the effective configuration.
 type ConfigVersion struct {
@@ -37,14 +40,51 @@ type SnapshotRoute struct {
 	Conditions           []SnapshotCondition `json:"conditions"`
 	Actions              []SnapshotAction    `json:"actions"`
 	Exclusions           []SnapshotExclusion `json:"exclusions"`
+	missingRequired      bool
+}
+
+// HasRequiredFields reports whether decoded evaluation fields were present and non-null.
+func (r SnapshotRoute) HasRequiredFields() bool { return !r.missingRequired }
+
+func (r *SnapshotRoute) UnmarshalJSON(data []byte) error {
+	type plain SnapshotRoute
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	missing, err := missingSnapshotFields(data, "id", "evaluation_order", "is_final", "is_enabled", "condition_composition")
+	if err != nil {
+		return err
+	}
+	*r = SnapshotRoute(value)
+	r.missingRequired = missing
+	return nil
 }
 
 // SnapshotCondition is the serializable form of a route condition.
 type SnapshotCondition struct {
-	ConditionIndex int    `json:"condition_index"`
-	Field          string `json:"field"`
-	Operator       string `json:"operator"`
-	Value          string `json:"value"`
+	ConditionIndex  int    `json:"condition_index"`
+	Field           string `json:"field"`
+	Operator        string `json:"operator"`
+	Value           string `json:"value"`
+	missingRequired bool
+}
+
+func (c SnapshotCondition) HasRequiredFields() bool { return !c.missingRequired }
+
+func (c *SnapshotCondition) UnmarshalJSON(data []byte) error {
+	type plain SnapshotCondition
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	missing, err := missingSnapshotFields(data, "condition_index", "field", "operator", "value")
+	if err != nil {
+		return err
+	}
+	*c = SnapshotCondition(value)
+	c.missingRequired = missing
+	return nil
 }
 
 // SnapshotAction is the serializable form of a route action.
@@ -52,13 +92,70 @@ type SnapshotAction struct {
 	ActionIndex      int    `json:"action_index"`
 	ActionType       string `json:"action_type"`
 	TargetPlaylistID string `json:"target_playlist_id"`
+	missingRequired  bool
+}
+
+func (a SnapshotAction) HasRequiredFields() bool { return !a.missingRequired }
+
+func (a *SnapshotAction) UnmarshalJSON(data []byte) error {
+	type plain SnapshotAction
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	missing, err := missingSnapshotFields(data, "action_index", "action_type", "target_playlist_id")
+	if err != nil {
+		return err
+	}
+	*a = SnapshotAction(value)
+	a.missingRequired = missing
+	return nil
+}
+
+func missingSnapshotFields(data []byte, names ...string) (bool, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		value, ok := fields[name]
+		if !ok || string(value) == "null" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // SnapshotExclusion is the serializable form of a route exclusion.
 type SnapshotExclusion struct {
 	ExclusionType  string `json:"exclusion_type"`
 	ExclusionValue string `json:"exclusion_value"`
+	missingType    bool
+	missingValue   bool
 }
+
+// UnmarshalJSON preserves absent or null fields for historical inspection.
+func (e *SnapshotExclusion) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Type  *string `json:"exclusion_type"`
+		Value *string `json:"exclusion_value"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*e = SnapshotExclusion{missingType: raw.Type == nil, missingValue: raw.Value == nil}
+	if raw.Type != nil {
+		e.ExclusionType = *raw.Type
+	}
+	if raw.Value != nil {
+		e.ExclusionValue = *raw.Value
+	}
+	return nil
+}
+
+// HasType and HasValue distinguish missing or null snapshot fields from empty strings.
+func (e SnapshotExclusion) HasType() bool  { return !e.missingType }
+func (e SnapshotExclusion) HasValue() bool { return !e.missingValue }
 
 // ProposalSnapshot is the public request shape of a dry-run draft
 // (`draft_configuration`) or backtest proposed configuration
@@ -92,6 +189,25 @@ type ProposalRoute struct {
 	Conditions           []SnapshotCondition `json:"conditions"`
 	Actions              []SnapshotAction    `json:"actions"`
 	Exclusions           []SnapshotExclusion `json:"exclusions"`
+	missingRequired      bool
+}
+
+// HasRequiredFields reports whether decoded evaluation fields were present and non-null.
+func (r ProposalRoute) HasRequiredFields() bool { return !r.missingRequired }
+
+func (r *ProposalRoute) UnmarshalJSON(data []byte) error {
+	type plain ProposalRoute
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	missing, err := missingSnapshotFields(data, "id", "evaluation_order", "is_final", "is_enabled", "condition_composition")
+	if err != nil {
+		return err
+	}
+	*r = ProposalRoute(value)
+	r.missingRequired = missing
+	return nil
 }
 
 // PublicConfigVersion is the public API representation of a configuration

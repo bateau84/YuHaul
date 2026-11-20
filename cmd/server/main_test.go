@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -83,22 +84,45 @@ func TestServerRunVideoStoreIsWired(t *testing.T) {
 
 type fakePipeline struct{}
 
-func (f *fakePipeline) StartRun(ctx context.Context, runType state.RunType) (*state.Run, error) {
+func (f *fakePipeline) AdmitRunNow(ctx context.Context) (*pipeline.RunNowAdmission, error) {
 	return nil, nil
 }
-func (f *fakePipeline) Execute(ctx context.Context, runID int64) {}
 func (f *fakePipeline) DryRun(ctx context.Context, draft *config.ProposalSnapshot) (*state.Run, error) {
 	return nil, nil
 }
 func (f *fakePipeline) ExecuteDryRun(ctx context.Context, runID int64) {}
-func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64) (*state.Run, error) {
+func (f *fakePipeline) Replay(ctx context.Context, configVersionID *int64, rng state.PublishedRange) (*state.Run, error) {
 	return nil, nil
 }
 func (f *fakePipeline) ExecuteReplay(ctx context.Context, runID int64) {}
-func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot) (*state.Run, error) {
+func (f *fakePipeline) Backtest(ctx context.Context, proposed *config.ProposalSnapshot, rng state.PublishedRange) (*state.Run, error) {
 	return nil, nil
 }
 func (f *fakePipeline) ExecuteBacktest(ctx context.Context, runID int64) {}
+
+func (f *fakePipeline) StopRun(ctx context.Context, runID int64) (*pipeline.StopResult, error) {
+	return nil, errors.New("fake pipeline cannot stop a run")
+}
+
+func (f *fakePipeline) DiscardRun(ctx context.Context, runID int64) (*pipeline.DiscardResult, error) {
+	return nil, errors.New("fake pipeline cannot discard a run")
+}
+
+func (f *fakePipeline) DiscardableRun(ctx context.Context) (int64, string, bool, error) {
+	return 0, "", false, nil
+}
+
+func (f *fakePipeline) PrecheckEndLegacyRun(ctx context.Context, runID int64) error { return nil }
+
+func (f *fakePipeline) EndLegacyRun(ctx context.Context, runID int64) (*pipeline.EndResult, error) {
+	return nil, errors.New("fake pipeline cannot end a run")
+}
+
+func (f *fakePipeline) EndableRuns(ctx context.Context) (map[int64]bool, error) {
+	return map[int64]bool{}, nil
+}
+
+func (f *fakePipeline) ExecutingRuns() map[int64]bool { return map[int64]bool{} }
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))
@@ -200,6 +224,45 @@ func newTestPlaylistProvider(t *testing.T, baseURL string) (*playlistProvider, *
 	}
 
 	return &playlistProvider{auth: authSvc, baseURL: baseURL, ledger: quota.New(db)}, db
+}
+
+func TestStandaloneReadsObserveRejectedAuthorization(t *testing.T) {
+	for _, kind := range []string{"playlists", "metadata"} {
+		t.Run(kind, func(t *testing.T) {
+			calls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":401,"message":"unauthorized"}}`))
+			}))
+			defer upstream.Close()
+			provider, db := newTestPlaylistProvider(t, upstream.URL)
+			fetcher := &metadataFetcher{auth: provider.auth, baseURL: upstream.URL, ledger: provider.ledger}
+			read := func() error {
+				if kind == "playlists" {
+					_, err := provider.ListPlaylists(context.Background())
+					return err
+				}
+				_, err := fetcher.FetchMetadata(context.Background(), []string{"v1"})
+				return err
+			}
+			if err := read(); err == nil {
+				t.Fatal("rejected read succeeded")
+			}
+			if err := read(); err == nil {
+				t.Fatal("read after rejection succeeded")
+			}
+			if calls != 1 {
+				t.Fatalf("upstream calls = %d, want 1 (no replay or stale credential reuse)", calls)
+			}
+			if kind == "playlists" {
+				_, count, _ := playlistsListQuota(t, db)
+				if count != 1 {
+					t.Fatalf("playlist quota calls = %d, want 1", count)
+				}
+			}
+		})
+	}
 }
 
 // newFakeYouTubePlaylists serves playlists.list pages keyed by pageToken (the
@@ -337,9 +400,9 @@ func TestHandleListPlaylists_LaterPageFailureNoPartialList(t *testing.T) {
 		t.Fatalf("partial playlist list leaked on later-page failure: %s", body)
 	}
 
-	// The successful first page's quota entry is retained.
-	if units, calls, rows := playlistsListQuota(t, db); units != 1 || calls != 1 || rows != 1 {
-		t.Fatalf("quota ledger = %d units, %d calls, %d rows; want 1/1/1 retained from the successful first page", units, calls, rows)
+	// Both requests reached the provider, including the failed second page.
+	if units, calls, rows := playlistsListQuota(t, db); units != 2 || calls != 2 || rows != 2 {
+		t.Fatalf("quota ledger = %d units, %d calls, %d rows; want 2/2/2 for both pages", units, calls, rows)
 	}
 }
 

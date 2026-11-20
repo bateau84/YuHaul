@@ -22,6 +22,10 @@ spec:
       labels:
         app: yuhaul
     spec:
+      # In-process shutdown takes at most 15 s (run drain) + 10 s (HTTP) +
+      # 15 s (corpus import) = 40 s (ADR-007); 60 s leaves headroom before
+      # SIGKILL. Interrupted runs resume at the next start.
+      terminationGracePeriodSeconds: 60
       # Single-container deployment per architecture decision OQ-5.
       securityContext:
         runAsUser: 1000
@@ -30,6 +34,10 @@ spec:
       containers:
         - name: yuhaul
           image: yuhaul:latest
+          # IfNotPresent is kept so locally loaded images (kind/minikube) work.
+          # It also means a rebuilt :latest is NOT picked up by a node that
+          # already has it: deploy each build under a unique tag (for example
+          # yuhaul:$(git rev-parse --short HEAD)) and check GET /api/version.
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

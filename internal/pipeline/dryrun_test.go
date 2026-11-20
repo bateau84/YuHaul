@@ -38,6 +38,7 @@ func setupDryRunPipeline(t *testing.T) (*dryRunDeps, func()) {
 		meta:        metaMgr,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	p.router.WithRunRoutesValidator(p.ValidateRunRoutes)
 
 	return &dryRunDeps{db: db, stateStore: stateStore, machine: machine, pipeline: p, routerStore: routerStore, metaStore: metaStore}, cleanup
 }
@@ -49,6 +50,46 @@ type dryRunDeps struct {
 	pipeline    *Pipeline
 	routerStore *router.Store
 	metaStore   *metadata.Store
+}
+
+func TestSnapshotRouteLoadingRejectsMissingExclusionFields(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, exclusion string
+		valid           bool
+	}{
+		{"null value", `{"exclusion_type":"word","exclusion_value":null}`, false},
+		{"missing value", `{"exclusion_type":"word"}`, false},
+		{"null type", `{"exclusion_type":null,"exclusion_value":"x"}`, false},
+		{"empty value", `{"exclusion_type":"word","exclusion_value":""}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, cleanup := setupDryRunPipeline(t)
+			defer cleanup()
+			runID := createRunOnly(t, ctx, deps.db, deps.stateStore)
+			run, err := deps.stateStore.GetRun(ctx, runID)
+			require.NoError(t, err)
+			snapshot := `{"routes":[{"id":1,"evaluation_order":0,"is_final":false,"is_enabled":true,"condition_composition":"AND","exclusions":[` + tc.exclusion + `]}]}`
+			_, err = deps.db.ExecContext(ctx, `UPDATE config_version SET snapshot = ? WHERE id = ?`, snapshot, *run.ConfigVersionID)
+			require.NoError(t, err)
+			_, dryErr := deps.pipeline.dryRunRoutes(ctx, run)
+			_, _, prodErr := productionAuthority(ctx, deps.db, deps.pipeline.configStore, runID)
+			if tc.valid {
+				require.NoError(t, dryErr)
+				require.NoError(t, prodErr)
+			} else {
+				require.Error(t, dryErr)
+				require.Error(t, prodErr)
+			}
+		})
+	}
+}
+
+func TestDryRunRoutesRequiresSnapshot(t *testing.T) {
+	deps, cleanup := setupDryRunPipeline(t)
+	defer cleanup()
+	_, err := deps.pipeline.dryRunRoutes(context.Background(), &state.Run{ID: 1})
+	require.ErrorContains(t, err, "missing captured configuration")
 }
 
 func createPendingVideo(t *testing.T, ctx context.Context, deps *dryRunDeps, runID int64, videoID, channelID, title string) *state.Video {
@@ -120,6 +161,9 @@ func TestDryRun_EvaluatesPendingVideoWithoutMutations(t *testing.T) {
 	loaded, err := deps.stateStore.GetRun(ctx, run.ID)
 	require.NoError(t, err)
 	assert.Equal(t, state.RunStatusCompleted, loaded.Status)
+	require.NotNil(t, loaded.VideosSelected, "the pending selector's input set is captured")
+	assert.Equal(t, 1, *loaded.VideosSelected)
+	assert.Equal(t, 1, loaded.VideosEvaluated, "evaluated counts decision evidence, distinct from selected")
 
 	decisions, err := deps.stateStore.GetRouteDecisionsForVideoInRun(ctx, video.ID, run.ID)
 	require.NoError(t, err)
@@ -249,6 +293,11 @@ func TestDryRun_OnlyEvaluatesPendingVideos(t *testing.T) {
 	rejectedDecisions, err := deps.stateStore.GetRouteDecisionsForVideoInRun(ctx, rejected.ID, run.ID)
 	require.NoError(t, err)
 	assert.Empty(t, rejectedDecisions)
+
+	loadedRun, err := deps.stateStore.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	require.NotNil(t, loadedRun.VideosSelected)
+	assert.Equal(t, 1, *loadedRun.VideosSelected, "only pending videos are dry-run selector inputs")
 }
 
 func TestDryRun_DoesNotChangeDuplicateReferenceCorpus(t *testing.T) {
@@ -307,4 +356,33 @@ func TestDryRun_NoSucceededActions(t *testing.T) {
 		assert.NotEqual(t, string(state.ActionOutcomeSucceeded), outcome)
 	}
 	require.NoError(t, rows.Err())
+}
+
+// TestDryRun_SimulatedActionHasNoAttemptTimestamp proves ARD-001 at the
+// simulation boundary: a matched simulated action stays not_attempted and
+// records no executed_at — a simulation never attempts a YouTube action.
+func TestDryRun_SimulatedActionHasNoAttemptTimestamp(t *testing.T) {
+	ctx := context.Background()
+	deps, cleanup := setupDryRunPipeline(t)
+	defer cleanup()
+
+	createRouteWithAction(t, ctx, deps, "Jazz", "jazz", "PLjazz")
+
+	prodRun := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	prodRunID, err := deps.stateStore.CreateRun(ctx, prodRun)
+	require.NoError(t, err)
+	video := createPendingVideo(t, ctx, deps, prodRunID, "vid1", "ch1", "cool jazz live")
+
+	run, err := deps.pipeline.DryRun(ctx, nil)
+	require.NoError(t, err)
+	deps.pipeline.ExecuteDryRun(ctx, run.ID)
+
+	actions, err := deps.stateStore.GetExecutedActionsForVideoInRun(ctx, video.ID, run.ID)
+	require.NoError(t, err)
+	require.Len(t, actions, 1, "the matched route records exactly one simulated action")
+	assert.Equal(t, state.ActionOutcomeNotAttempted, actions[0].Outcome)
+	assert.Nil(t, actions[0].ExecutedAt,
+		"a simulated action must never carry an attempt timestamp")
+	assert.Nil(t, actions[0].OutcomeReason,
+		"simulation is identified by not_attempted, not by a no-attempt reason")
 }

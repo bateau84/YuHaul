@@ -451,6 +451,21 @@ trusted main-push Actions environment and is a publishing command.
 
 Implementation details and boundaries: [ADR-016](docs/architecture/release-automation/decisions/adr-016-semantic-release-image-publication.md).
 
+## Verification commands
+
+Run these from the repository root. There is no Makefile; these commands are the standard gate.
+
+```sh
+go build ./...
+go vet ./...
+go test ./...
+go test -race -timeout 60m ./...
+go test -tags=integration ./cmd/server
+(cd web && npm ci && npm test && npm run build && npm run lint)
+```
+
+The `-race` run needs the explicit `-timeout 60m`: the `internal/pipeline` package alone takes about 39 minutes under the race detector, far beyond Go's default 10-minute per-package limit.
+
 ## Deployment
 
 YuHaul ships as a single container. The container serves the admin SPA and the
@@ -470,6 +485,21 @@ Docker Compose file.
    # Push the image to a registry your cluster can reach, or load it into
    # your local cluster (e.g. `kind load docker-image yuhaul:latest`).
    ```
+
+   To make a build identifiable, pass the build identity and use a unique
+   tag per build (the manifest uses `imagePullPolicy: IfNotPresent`, so a
+   rebuilt `:latest` is not re-pulled by a node that already has it):
+
+   ```bash
+   docker build -t yuhaul:$(git rev-parse --short HEAD) \
+     --build-arg VERSION=dev \
+     --build-arg COMMIT=$(git rev-parse HEAD) \
+     --build-arg BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
+   ```
+
+   The running build is reported once in the startup log and by
+   `GET /api/version` (`{"version","commit","built_at"}`; `unknown` when
+   not injected).
 
 2. **Traefik v3 controller.** The cluster must run a Traefik v3 ingress
    controller with the Kubernetes Ingress and CRD providers enabled (the CRD

@@ -7,6 +7,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -22,6 +23,79 @@ import (
 
 const proposalTestUUID = "2f6b9a7c-5d8e-4c3b-a1f0-9e8d7c6b5a49"
 
+func TestProposalIngest_RejectsMissingFieldsBeforePersistence(t *testing.T) {
+	fields := map[string][]string{
+		"route":     {"id", "evaluation_order", "is_final", "is_enabled", "condition_composition"},
+		"condition": {"condition_index", "field", "operator", "value"},
+		"action":    {"action_index", "action_type", "target_playlist_id"},
+		"exclusion": {"exclusion_type", "exclusion_value"},
+	}
+	for group, names := range fields {
+		for _, name := range names {
+			for _, absent := range []bool{false, true} {
+				for _, mode := range []string{"dry-run", "backtest"} {
+					t.Run(fmt.Sprintf("%s/%s/absent=%t/%s", group, name, absent, mode), func(t *testing.T) {
+						ctx := context.Background()
+						deps, cleanup := setupDryRunPipeline(t)
+						defer cleanup()
+						condition := map[string]any{"condition_index": 0, "field": "title", "operator": "contains", "value": ""}
+						action := map[string]any{"action_index": 0, "action_type": "playlist_insert", "target_playlist_id": ""}
+						exclusion := map[string]any{"exclusion_type": "word", "exclusion_value": ""}
+						route := map[string]any{"id": proposalTestUUID, "evaluation_order": 1, "is_final": false, "is_enabled": true, "condition_composition": "AND", "conditions": []any{condition}, "actions": []any{action}, "exclusions": []any{exclusion}}
+						target := map[string]map[string]any{"route": route, "condition": condition, "action": action, "exclusion": exclusion}[group]
+						if absent {
+							delete(target, name)
+						} else {
+							target[name] = nil
+						}
+						data, err := json.Marshal(map[string]any{"routes": []any{route}})
+						require.NoError(t, err)
+						var proposal config.ProposalSnapshot
+						require.NoError(t, json.Unmarshal(data, &proposal))
+						var run *state.Run
+						if mode == "dry-run" {
+							run, err = deps.pipeline.DryRun(ctx, &proposal)
+						} else {
+							run, err = deps.pipeline.Backtest(ctx, &proposal, state.PublishedRange{})
+						}
+						require.Error(t, err)
+						require.Nil(t, run)
+						require.Zero(t, countRows(t, ctx, deps, `SELECT COUNT(*) FROM route_identity WHERE public_id = ?`, proposalTestUUID))
+						require.Zero(t, countRows(t, ctx, deps, `SELECT COUNT(*) FROM run`))
+						require.Zero(t, countRows(t, ctx, deps, `SELECT COUNT(*) FROM config_version`))
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestProposalIngest_ExplicitEmptyExclusionSurvivesDryRun(t *testing.T) {
+	ctx := context.Background()
+	deps, cleanup := setupDryRunPipeline(t)
+	defer cleanup()
+	prodID, err := deps.stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+	video := createPendingVideo(t, ctx, deps, prodID, "v", "ch", "a title")
+	var proposal config.ProposalSnapshot
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"routes":[{"id":%q,"name":"draft","evaluation_order":1,"is_final":false,"is_enabled":true,"condition_composition":"AND","exclusions":[{"exclusion_type":"word","exclusion_value":""}]}]}`, proposalTestUUID)), &proposal))
+	run, err := deps.pipeline.DryRun(ctx, &proposal)
+	require.NoError(t, err)
+	stored, err := deps.pipeline.configStore.Get(ctx, *run.ConfigVersionID)
+	require.NoError(t, err)
+	require.True(t, stored.Snapshot.Routes[0].Exclusions[0].HasValue())
+	require.Equal(t, "", stored.Snapshot.Routes[0].Exclusions[0].ExclusionValue)
+	deps.pipeline.ExecuteDryRun(ctx, run.ID)
+	loaded, err := deps.stateStore.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusCompleted, loaded.Status)
+	decisions, err := deps.stateStore.GetRouteDecisionsForVideoInRun(ctx, video.ID, run.ID)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.NotNil(t, decisions[0].ExclusionIndex)
+	require.Equal(t, 0, *decisions[0].ExclusionIndex)
+}
+
 func TestProposalIngest_CapturesFixedContinuation(t *testing.T) {
 	for _, mode := range []string{"dry-run", "backtest"} {
 		for _, legacy := range []string{"skip", "flag", "", "arbitrary"} {
@@ -36,7 +110,7 @@ func TestProposalIngest_CapturesFixedContinuation(t *testing.T) {
 				if mode == "dry-run" {
 					run, err = deps.pipeline.DryRun(ctx, proposal)
 				} else {
-					run, err = deps.pipeline.Backtest(ctx, proposal)
+					run, err = deps.pipeline.Backtest(ctx, proposal, state.PublishedRange{})
 				}
 				require.NoError(t, err)
 				cv, err := deps.pipeline.configStore.Get(ctx, *run.ConfigVersionID)
@@ -219,7 +293,7 @@ func TestProposalIngest_RepeatedUnknownUUIDConverges(t *testing.T) {
 	require.NoError(t, err)
 
 	backtest, err := deps.pipeline.Backtest(ctx, proposalSnapshot(
-		proposalRoute(proposalTestUUID, "ProposedB", "classical")))
+		proposalRoute(proposalTestUUID, "ProposedB", "classical")), state.PublishedRange{})
 	require.NoError(t, err)
 
 	dryKey := identityFor(t, ctx, deps, proposalTestUUID)
@@ -261,7 +335,7 @@ func TestProposalIngest_SnapshotOnlyIdentityRecreatesAnchorAtSameKey(t *testing.
 	require.NoError(t, err)
 
 	run, err := deps.pipeline.Backtest(ctx, proposalSnapshot(
-		proposalRoute(snapshotOnlyUUID, "HistoricalOnly", "jazz")))
+		proposalRoute(snapshotOnlyUUID, "HistoricalOnly", "jazz")), state.PublishedRange{})
 	require.NoError(t, err)
 
 	assert.Equal(t, snapshotOnlyKey, identityFor(t, ctx, deps, snapshotOnlyUUID),
@@ -446,7 +520,7 @@ func TestProposalIngest_DecisionsSatisfyForeignKey(t *testing.T) {
 	video := createPendingVideo(t, ctx, deps, prodRunID, "vid_jazz", "ch1", "cool jazz live")
 
 	run, err := deps.pipeline.Backtest(ctx, proposalSnapshot(
-		proposalRoute(proposalTestUUID, "Proposed", "jazz")))
+		proposalRoute(proposalTestUUID, "Proposed", "jazz")), state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteBacktest(ctx, run.ID)
 
@@ -503,7 +577,7 @@ func TestProposalIngest_DryRunBacktestAndProductionIsolation(t *testing.T) {
 
 	const backtestUUID = "7c6b5a49-3827-4f1e-9a8b-0c1d2e3f4a5b"
 	backtest, err := deps.pipeline.Backtest(ctx, proposalSnapshot(
-		proposalRoute(backtestUUID, "BackProposed", "classical")))
+		proposalRoute(backtestUUID, "BackProposed", "classical")), state.PublishedRange{})
 	require.NoError(t, err)
 	deps.pipeline.ExecuteBacktest(ctx, backtest.ID)
 
@@ -527,9 +601,7 @@ func TestProposalIngest_DryRunBacktestAndProductionIsolation(t *testing.T) {
 	require.Len(t, activeRoutes, 1)
 	assert.Equal(t, active.ID, activeRoutes[0].ID)
 
-	prod := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
-	prod2ID, err := deps.stateStore.CreateRun(ctx, prod)
-	require.NoError(t, err)
+	prod2ID := createRunOnly(t, ctx, deps.db, deps.stateStore)
 	prodVideo := createPendingVideo(t, ctx, deps, prod2ID, "vid_prod", "ch1", "cool jazz live")
 	_, err = deps.pipeline.router.EvaluateWithRoutes(ctx, prod2ID, prodVideo.ID,
 		router.VideoContext{VideoID: "vid_prod", ChannelID: "ch1", Title: "cool jazz live"},
@@ -581,7 +653,7 @@ func TestProposalIngest_RejectsInvalidRouteIDs(t *testing.T) {
 
 		_, err := deps.pipeline.Backtest(ctx, proposalSnapshot(
 			proposalRoute(proposalTestUUID, "First", "jazz"),
-			proposalRoute(proposalTestUUID, "Second", "rock")))
+			proposalRoute(proposalTestUUID, "Second", "rock")), state.PublishedRange{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "duplicate route id")
 		assert.Zero(t, countRows(t, ctx, deps, `SELECT COUNT(*) FROM run;`))

@@ -1,13 +1,41 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import * as api from '../api/client'
+import { ApiError } from '../api/core'
 import { RouteEditor } from '../components/RouteEditor'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
 import { shortRouteId } from '../lib/route'
-import type { Route, Run, BacktestComparison } from '../types'
+import { simulationExplanation } from '../lib/outcome'
+import type { Route, Run, RunStatus } from '../types'
 
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString()
+// Persisted-status polling for the requested run (ARD-001): while the stored
+// run is `running`, the client re-reads it. The start acknowledgement is never
+// completion, and a failed status read never becomes a success.
+export const RUN_STATUS_POLL_INTERVAL_MS = 5000
+
+type RequestedRun = { runId: number; kind: 'backtest' | 'replay' }
+
+function kindLabel(kind: RequestedRun['kind']): string {
+  return kind === 'backtest' ? 'Backtest' : 'Replay'
+}
+
+// Status copy derived only from the persisted run record. "Completed" means
+// the evaluation finished — a simulation never performed a playlist action
+// (ARD-001). Detailed failure evidence stays owned by Run Detail.
+function persistedStatusText(status: RunStatus): string {
+  switch (status) {
+    case 'running':
+      return 'Evaluation in progress…'
+    case 'completed':
+      return 'Evaluation finished'
+    case 'failed':
+      return 'Failed'
+    case 'interrupted':
+      return 'Interrupted'
+    default:
+      return `Status: ${status}`
+  }
 }
 
 // ADR-012 §1 / ARS-004: every route in a dry-run draft or backtest proposal is
@@ -121,40 +149,6 @@ function ScenarioDiff({ current, proposed }: { current: Route[]; proposed: Route
   )
 }
 
-function ComparisonResult({ comparison, run }: { comparison: BacktestComparison; run?: Run }) {
-  return (
-    <div>
-      <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', marginBottom: 16 }}>
-        <div className="card" style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{comparison.baseline_accepted}</div>
-          <div style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Historical accepted</div>
-        </div>
-        <div className="card" style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{comparison.proposed_accepted}</div>
-          <div style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Proposed accepted</div>
-        </div>
-        <div className="card" style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--color-success)' }}>{comparison.new_catches}</div>
-          <div style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>New catches</div>
-        </div>
-        <div className="card" style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--color-danger)' }}>{comparison.lost_catches}</div>
-          <div style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Lost catches</div>
-        </div>
-        <div className="card" style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{comparison.net_change > 0 ? `+${comparison.net_change}` : comparison.net_change}</div>
-          <div style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Net change</div>
-        </div>
-      </div>
-      {run && (
-        <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
-          Backtest run <strong>#{run.id}</strong> completed at {run.completed_at ? formatDate(run.completed_at) : '—'}.
-        </p>
-      )}
-    </div>
-  )
-}
-
 export function BacktestView() {
   const [mode, setMode] = useState<'hypothetical' | 'replay'>('hypothetical')
   const [inputMode, setInputMode] = useState<'editor' | 'upload'>('editor')
@@ -168,10 +162,21 @@ export function BacktestView() {
   const [selectedVersion, setSelectedVersion] = useState<number | ''>('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  // The server's invalid_date_range message, kept beside the date controls
+  // until the next start; nothing is started when it is set.
+  const [rangeError, setRangeError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const [retrying, setRetrying] = useState(false)
-  const [resultRun, setResultRun] = useState<Run | null>(null)
-  const [comparison, setComparison] = useState<BacktestComparison | null>(null)
+  // The run requested by the last start acknowledgement, its latest persisted
+  // status read, and whether that read failed (ARD-001): the persisted record
+  // — never the start response — decides the displayed result.
+  const [requested, setRequested] = useState<RequestedRun | null>(null)
+  const [runDetail, setRunDetail] = useState<Run | null>(null)
+  const [statusReadError, setStatusReadError] = useState(false)
+  const [statusRetrying, setStatusRetrying] = useState(false)
+  const requestedRef = useRef<RequestedRun | null>(null)
+  const terminalToastedRef = useRef<number | null>(null)
+  const statusRetryRef = useRef<HTMLButtonElement>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const routesRetryRef = useRef<HTMLButtonElement>(null)
   const versionsRetryRef = useRef<HTMLButtonElement>(null)
@@ -287,45 +292,101 @@ export function BacktestView() {
     reader.readAsText(file)
   }
 
+  // The single persisted-status read used by the post-start read, the running
+  // poll, and the status-error retry. A read that fails — including a missing
+  // run record — leaves the result unknown; it is never converted into a
+  // completion claim. A late answer for a run the user has already replaced
+  // is ignored so it cannot commit stale state.
+  const loadStatus = useCallback(
+    (target: RequestedRun | null): Promise<void> => {
+      if (!target) return Promise.resolve()
+      return api.getRun(target.runId).then(
+        (next) => {
+          if (requestedRef.current?.runId !== target.runId) return
+          if (next === undefined) {
+            setStatusReadError(true)
+            return
+          }
+          setStatusReadError(false)
+          setRunDetail(next)
+          if (next.status !== 'running' && terminalToastedRef.current !== target.runId) {
+            terminalToastedRef.current = target.runId
+            const completed = next.status === 'completed'
+            addToast(
+              completed
+                ? `${kindLabel(target.kind)} evaluation finished`
+                : `${kindLabel(target.kind)} run ${next.status}`,
+              completed ? 'success' : 'error'
+            )
+          }
+        },
+        () => {
+          if (requestedRef.current?.runId !== target.runId) return
+          setStatusReadError(true)
+        }
+      )
+    },
+    [addToast]
+  )
+
+  // While the persisted status is running, keep re-reading it so a terminal
+  // stored status replaces the active display without user action. A failed
+  // background read surfaces its own alert and retry; it never clears the
+  // last status that was actually read.
+  const isPolling = requested !== null && runDetail?.status === 'running'
+  useEffect(() => {
+    if (!isPolling) return
+    const timer = window.setInterval(() => {
+      void loadStatus(requestedRef.current)
+    }, RUN_STATUS_POLL_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [isPolling, loadStatus])
+
+  // A failed *first* status read leaves the result unknown: focus the retry so
+  // the failure is reachable by keyboard. A failed background refresh keeps
+  // focus where it is (same rule as the run-list refresh alert).
+  useEffect(() => {
+    if (statusReadError && !runDetail && !statusRetrying) statusRetryRef.current?.focus()
+  }, [statusReadError, runDetail, statusRetrying])
+
+  function handleStatusRetry() {
+    setStatusRetrying(true)
+    loadStatus(requestedRef.current).finally(() => setStatusRetrying(false))
+  }
+
   async function run() {
     setRunning(true)
-    setResultRun(null)
-    setComparison(null)
+    // A new start supersedes any previously requested run: drop its result and
+    // ignore its still-in-flight status reads.
+    requestedRef.current = null
+    terminalToastedRef.current = null
+    setRequested(null)
+    setRunDetail(null)
+    setStatusReadError(false)
+    setRangeError(null)
     try {
-      let runId: number
-      let backtestComparison: BacktestComparison | undefined
-      if (mode === 'hypothetical') {
-        const res = await api.startBacktest({ routes: draft, duplicate_threshold: 0.5 })
-        runId = res.run_id
-        backtestComparison = res.comparison
-      } else {
-        const res = await api.startReplay(selectedVersion ? Number(selectedVersion) : undefined)
-        runId = res.run_id
-      }
-      const runDetail = await api.getRun(runId)
-      setResultRun(runDetail ?? null)
-      if (backtestComparison) {
-        setComparison(backtestComparison)
-      } else if (runDetail) {
-        // Compute a minimal comparison from the run summary when the backend
-        // does not provide a pre-computed comparison.
-        const baseline = await api.listRuns().then((runs) =>
-          runs
-            .filter((r) => r.run_type === 'scheduled' || r.run_type === 'manual')
-            .reduce((sum, r) => sum + r.videos_accepted, 0)
-        )
-        setComparison({
-          baseline_run_ids: [],
-          baseline_accepted: baseline,
-          proposed_accepted: runDetail.videos_accepted,
-          new_catches: Math.max(0, runDetail.videos_accepted - baseline),
-          lost_catches: Math.max(0, baseline - runDetail.videos_accepted),
-          net_change: runDetail.videos_accepted - baseline,
-        })
-      }
-      addToast(`${mode === 'hypothetical' ? 'Backtest' : 'Replay'} completed`, 'success')
+      const kind = mode === 'hypothetical' ? 'backtest' : 'replay'
+      // The day strings are the inputs' own values, sent unchanged (no Date).
+      const days = { from: dateFrom, to: dateTo }
+      const res =
+        kind === 'backtest'
+          ? await api.startBacktest({ routes: draft, duplicate_threshold: 0.5 }, days)
+          : await api.startReplay(selectedVersion ? Number(selectedVersion) : undefined, days)
+      // The start response is only an acknowledgement that a run was requested
+      // (ARD-001). The run id is shown immediately; its persisted state —
+      // never the ack — decides whether the result is running, finished,
+      // failed, or unknown.
+      const target: RequestedRun = { runId: res.run_id, kind }
+      requestedRef.current = target
+      setRequested(target)
+      await loadStatus(target)
     } catch (err) {
-      addToast(err instanceof Error ? err.message : 'Failed to run backtest', 'error')
+      // A failed start fabricates no run id and no result.
+      if (err instanceof ApiError && err.status === 400 && err.message.startsWith('invalid date range')) {
+        setRangeError(err.message)
+        return
+      }
+      addToast(err instanceof Error ? err.message : 'Failed to start run', 'error')
     } finally {
       setRunning(false)
     }
@@ -472,25 +533,82 @@ export function BacktestView() {
             <label className="form-label" htmlFor="from-date">
               From date
             </label>
-            <input id="from-date" type="date" className="form-input" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            <input id="from-date" type="date" className="form-input" aria-describedby="date-range-notice" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
           </div>
           <div>
             <label className="form-label" htmlFor="to-date">
               To date
             </label>
-            <input id="to-date" type="date" className="form-input" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+            <input id="to-date" type="date" className="form-input" aria-describedby="date-range-notice" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
           </div>
         </div>
+        <p id="date-range-notice" style={{ margin: '8px 0 0', color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>
+          Days are UTC days and both days are included. The filter only covers videos whose details YuHaul still holds
+          locally, which is roughly the last 30 days. Videos whose details have expired are left out, and nothing is
+          requested from YouTube. With no days chosen, nothing is filtered.
+        </p>
+        {rangeError && (
+          <p role="alert" style={{ margin: '8px 0 0', color: 'var(--color-status-failed)' }}>
+            {rangeError}. No run was started.
+          </p>
+        )}
       </div>
 
       <button className="button button--primary" onClick={run} disabled={running || (mode === 'hypothetical' && draft.length === 0)}>
-        {running ? 'Running...' : mode === 'hypothetical' ? 'Run backtest' : 'Run replay'}
+        {running ? 'Starting…' : mode === 'hypothetical' ? 'Run backtest' : 'Run replay'}
       </button>
 
-      {comparison && (
+      {requested && (
         <div className="card" style={{ marginTop: 16 }}>
-          <h2 className="section-title">Comparison results</h2>
-          <ComparisonResult comparison={comparison} run={resultRun ?? undefined} />
+          <h2 className="section-title">Requested run</h2>
+          {/* A failed first status read leaves the result unknown: same
+              FetchErrorRegion recovery shape as Run Detail's initial-load
+              failure (ARD-001) — never a completion claim. */}
+          {statusReadError && !runDetail && (
+            <FetchErrorRegion
+              ref={statusRetryRef}
+              message={`Could not read run #${requested.runId}'s persisted status. The result is unknown — it is not treated as completed.`}
+              onRetry={handleStatusRetry}
+              retrying={statusRetrying}
+            />
+          )}
+          {/* A failed background refresh keeps the last actually-read status
+              on screen and says it may be out of date, with a visible retry. */}
+          {statusReadError && runDetail && (
+            <div
+              role="alert"
+              aria-live="assertive"
+              style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 12, marginBottom: 12 }}
+            >
+              <p style={{ margin: 0, color: 'var(--color-status-failed)' }}>
+                Could not refresh run #{requested.runId}'s persisted status. The status shown may be out of date.
+              </p>
+              <button type="button" className="button" onClick={handleStatusRetry} disabled={statusRetrying}>
+                {statusRetrying ? 'Retrying…' : 'Retry'}
+              </button>
+            </div>
+          )}
+          <p role="status" aria-live="polite" style={{ margin: '0 0 8px' }}>
+            <strong>Run #{requested.runId}</strong> ({kindLabel(requested.kind)}) —{' '}
+            <span>
+              {runDetail
+                ? persistedStatusText(runDetail.status)
+                : statusReadError
+                  ? 'Status unknown'
+                  : 'Start accepted; reading persisted status…'}
+            </span>
+          </p>
+          <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem', margin: '0 0 12px' }}>
+            {simulationExplanation}
+          </p>
+          {runDetail && (runDetail.status === 'failed' || runDetail.status === 'interrupted') && (
+            <p style={{ color: 'var(--color-status-failed)', fontSize: '0.875rem', margin: '0 0 12px' }}>
+              Open the run detail for the recorded reason and per-video evidence.
+            </p>
+          )}
+          <Link to={`/runs/${requested.runId}`} className="button">
+            View run #{requested.runId} detail
+          </Link>
         </div>
       )}
     </>

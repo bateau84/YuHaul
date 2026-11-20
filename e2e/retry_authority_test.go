@@ -42,11 +42,11 @@ func TestRetryAuthority_QuotaProposalChangedRouteAndSiblings(t *testing.T) {
 				require.Equal(t, 1, d.RetryCount, "no second attempt in the same run")
 			}
 			var proposal config.ProposalSnapshot
-			require.NoError(t, json.Unmarshal([]byte(`{"duplicate_threshold":0.9,"routes":[{"id":"11111111-1111-4111-8111-111111111111","name":"Forbidden","evaluation_order":1,"is_enabled":true,"condition_composition":"AND","conditions":[{"field":"title","operator":"contains","value":"jazz"}],"actions":[{"action_type":"add_to_playlist","target_playlist_id":"PLforbidden"}]}]}`), &proposal))
+			require.NoError(t, json.Unmarshal([]byte(`{"duplicate_threshold":0.9,"routes":[{"id":"11111111-1111-4111-8111-111111111111","name":"Forbidden","evaluation_order":1,"is_enabled":true,"is_final":false,"condition_composition":"AND","conditions":[{"field":"title","operator":"contains","value":"jazz","condition_index":0}],"actions":[{"action_type":"add_to_playlist","target_playlist_id":"PLforbidden","action_index":0}],"exclusions":[]}]}`), &proposal))
 			// Direct pipeline callers use internal action vocabulary; HTTP normally
 			// translates add_to_playlist before this seam.
 			proposal.Routes[0].Actions[0].ActionType = "playlist_insert"
-			bt, err := env.pipeline.Backtest(ctx, &proposal)
+			bt, err := env.pipeline.Backtest(ctx, &proposal, state.PublishedRange{})
 			require.NoError(t, err)
 			env.pipeline.ExecuteBacktest(ctx, bt.ID)
 			ds, err := env.stateStore.GetRouteDecisionsForVideoInRun(ctx, items[0].VideoID, bt.ID)

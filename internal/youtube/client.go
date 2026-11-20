@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/oauth2"
 )
@@ -42,15 +43,99 @@ const (
 // batch for videos.list and channels.list).
 type CostRecorder func(ctx context.Context, op Operation, calls int) error
 
-// APIError describes an HTTP error returned by the YouTube API.
+// ReadAttempt describes one admitted Data API read, not a planned batch.
+type ReadAttempt struct {
+	Operation  Operation
+	AdmittedAt time.Time
+	Status     int
+	Category   string
+}
+
+type ReadRecorder func(context.Context, ReadAttempt) error
+
+// ReadError keeps the primary read error separate from accounting and renewal.
+// Its text never includes the latter errors, which may contain sensitive data.
+type ReadError struct {
+	Primary      error
+	Accounting   error
+	Renewal      error
+	Interruption error
+	Status       int
+}
+
+// ReadTransportError marks a failed admitted or refused transport operation
+// without retaining request URLs or untrusted transport error text.
+type ReadTransportError struct{ Canceled bool }
+
+func (e *ReadTransportError) Error() string { return "youtube read transport failed" }
+
+func (e *ReadError) Error() string {
+	if e.Primary != nil {
+		return e.Primary.Error() + " (read processing failed)"
+	}
+	return "youtube read accounting failed"
+}
+func (e *ReadError) Unwrap() error { return e.Primary }
+
+var providerReasons = map[string]struct{}{
+	"quotaExceeded": {}, "dailyLimitExceeded": {}, "rateLimitExceeded": {}, "userRateLimitExceeded": {},
+	"authError": {}, "forbidden": {}, "insufficientPermissions": {}, "backendError": {}, "internalError": {},
+	"badRequest": {}, "invalidParameter": {}, "notFound": {}, "playlistNotFound": {}, "videoNotFound": {},
+	"playlistItemsNotAccessible": {}, "playlistContainsMaximumNumberOfVideos": {}, "videoAlreadyInPlaylist": {},
+}
+
+func registeredProviderReason(reason string) bool { _, ok := providerReasons[reason]; return ok }
+
+// APIError describes an HTTP error returned by the YouTube API. It carries
+// only the status and a vetted provider reason; the raw response body is
+// never retained so it cannot reach storage, API projections, events, or
+// logs through err.Error().
 type APIError struct {
-	Status int
-	Reason string
-	Body   string
+	Status   int
+	Reason   string
+	Reasons  []string
+	Complete bool
+}
+
+// InvalidResponseError marks a successful HTTP response whose body could not
+// be decoded into the expected YouTube response shape. Its rendered message is
+// fixed; the parse error remains available only through Unwrap for control
+// flow and typed inspection.
+type InvalidResponseError struct {
+	cause     error
+	operation Operation
+}
+
+func (e *InvalidResponseError) Error() string { return "invalid YouTube API response" }
+func (e *InvalidResponseError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *InvalidResponseError) Operation() Operation {
+	if e == nil {
+		return ""
+	}
+	return e.operation
+}
+
+func invalidResponseError(cause error, operation Operation) error {
+	return &InvalidResponseError{cause: cause, operation: operation}
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("youtube API returned %d: %s", e.Status, e.Body)
+	if e == nil {
+		return "youtube API error"
+	}
+	if e.Status < 300 || e.Status > 599 {
+		return "youtube API error"
+	}
+	if !registeredProviderReason(e.Reason) {
+		return fmt.Sprintf("youtube API returned %d", e.Status)
+	}
+	return fmt.Sprintf("youtube API returned %d: %s", e.Status, e.Reason)
 }
 
 // IsQuotaExceeded reports whether err represents YouTube's quotaExceeded reason.
@@ -61,10 +146,67 @@ func IsQuotaExceeded(err error) bool {
 
 // Client makes authenticated YouTube Data API v3 calls.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	recorder   CostRecorder
-	logger     *slog.Logger
+	baseURL           string
+	httpClient        *http.Client
+	recorder          CostRecorder
+	logger            *slog.Logger
+	observeRejected   APIReadRejectionObserver
+	requestDispatcher RequestDispatcher
+	readRecorder      ReadRecorder
+	readPreflight     func(context.Context, Operation) error
+	quotaReads        bool
+	transportErr      error
+	singleAttempt     http.RoundTripper
+}
+
+// RequestAdmission identifies the authorization revision used by one read request.
+type RequestAdmission struct {
+	AuthorizationID    string
+	CredentialRevision int64
+	AdmittedAt         time.Time
+	Finalize           func(context.Context, string, int) error
+	Accounting         error
+}
+
+// RejectionObserver lets a caller fence a rejected credential for subsequent requests.
+type APIReadRejectionObserver func(context.Context, RequestAdmission) error
+
+// RequestDispatcher admits a request and returns its exact credential receipt.
+type RequestDispatcher func(context.Context, *http.Request, http.RoundTripper) (*http.Response, RequestAdmission, error)
+
+type rejectionObservationKey struct{}
+type rejectionObservation struct {
+	err       error
+	admission RequestAdmission
+	operation Operation
+	observe   APIReadRejectionObserver
+}
+
+// ReadOperation returns the operation associated with an authorized read.
+func ReadOperation(ctx context.Context) (Operation, bool) {
+	state, ok := ctx.Value(rejectionObservationKey{}).(*rejectionObservation)
+	if !ok || state.operation == "" {
+		return "", false
+	}
+	return state.operation, true
+}
+
+// WithReadAccounting installs per-attempt preflight and accounting for reads.
+func WithReadAccounting(preflight func(context.Context, Operation) error, recorder ReadRecorder) Option {
+	return func(c *Client) { c.readPreflight, c.readRecorder = preflight, recorder }
+}
+
+// WithQuotaReads enables read error handling for dispatchers that return a finalizer.
+func WithQuotaReads() Option { return func(c *Client) { c.quotaReads = true } }
+
+// WithRejectionObserver observes 401 responses for the exact credential that made a request.
+func WithRejectionObserver(observer APIReadRejectionObserver) Option {
+	return func(c *Client) { c.observeRejected = observer }
+}
+
+// WithRequestDispatcher installs an authority admission fence for requests.
+func WithRequestDispatcher(dispatch RequestDispatcher) Option {
+	return func(c *Client) { c.requestDispatcher = dispatch }
 }
 
 // Option configures a Client.
@@ -84,6 +226,13 @@ func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) {
 		c.httpClient = hc
 	}
+}
+
+// WithSingleAttemptTransport supplies a controlled transport whose owner guarantees
+// that RoundTrip issues at most one request and does not follow redirects. It is
+// intended for controlled test transports, not arbitrary middleware wrappers.
+func WithSingleAttemptTransport(transport http.RoundTripper) Option {
+	return func(c *Client) { c.singleAttempt = transport }
 }
 
 // WithRecorder sets the cost recorder invoked after each API call.
@@ -112,6 +261,103 @@ func NewClient(ctx context.Context, token *oauth2.Token, opts ...Option) *Client
 		opt(c)
 	}
 	return c
+}
+
+// NewAuthorizedClient constructs a client whose authorization is resolved for
+// each outgoing request. The resolver should be bound to one invocation's
+// authorization identity (for example, Service.Resolve with a Bind result).
+func NewAuthorizedClient(ctx context.Context, resolve func(context.Context) (*oauth2.Token, error), opts ...Option) *Client {
+	baseClient, _ := ctx.Value(oauth2.HTTPClient).(*http.Client)
+	if baseClient == nil {
+		baseClient = http.DefaultClient
+	}
+	httpClient := *baseClient
+	c := &Client{baseURL: "https://www.googleapis.com/youtube/v3", httpClient: &httpClient, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(c)
+	}
+	if c.httpClient == nil {
+		c.httpClient = &http.Client{}
+		c.transportErr = errors.New("youtube: nil HTTP client")
+	}
+	// Never modify the caller's client, which may also be used for OAuth.
+	clientCopy := *c.httpClient
+	c.httpClient = &clientCopy
+	base := c.httpClient.Transport
+	if base == nil {
+		base = baseClient.Transport
+	}
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if c.singleAttempt != nil {
+		base = c.singleAttempt
+	} else if transport, ok := base.(*http.Transport); ok && transport != nil && transport.DialTLS == nil && transport.DialTLSContext == nil {
+		clone := transport.Clone()
+		clone.DisableKeepAlives = true
+		// Discard alternate protocol handlers, including any installed after
+		// the source transport's first use. Clone drops registered schemes.
+		clone.TLSNextProto = nil
+		if clone.TLSClientConfig != nil {
+			clone.TLSClientConfig = clone.TLSClientConfig.Clone()
+			clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
+		}
+		clone.Protocols = new(http.Protocols)
+		clone.Protocols.SetHTTP1(true)
+		base = clone
+	} else {
+		c.transportErr = errors.New("youtube: unsupported transport for single-attempt dispatch")
+	}
+	c.httpClient.Transport = authorizationTransport{resolve: resolve, base: base, dispatch: c.requestDispatcher, observe: c.observeRejected, transportErr: c.transportErr}
+	c.httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return c
+}
+
+type authorizationTransport struct {
+	resolve      func(context.Context) (*oauth2.Token, error)
+	base         http.RoundTripper
+	dispatch     RequestDispatcher
+	observe      APIReadRejectionObserver
+	transportErr error
+}
+
+func (t authorizationTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.transportErr != nil {
+		return nil, t.transportErr
+	}
+	if t.dispatch != nil {
+		resp, admission, err := t.dispatch(req.Context(), req, t.base)
+		if state, ok := req.Context().Value(rejectionObservationKey{}).(*rejectionObservation); ok {
+			state.admission = admission
+			state.observe = t.observe
+		} else if resp != nil && admission.AuthorizationID != "" && t.observe != nil {
+			rejected := resp.StatusCode == http.StatusUnauthorized
+			if resp.StatusCode == http.StatusForbidden {
+				body, readErr := io.ReadAll(resp.Body)
+				if readErr == nil {
+					resp.Body.Close()
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+					api := youtubeAPIError(resp.StatusCode, body).(*APIError)
+					rejected = api.Complete && len(api.Reasons) == 1 && api.Reasons[0] == "authError"
+				}
+			}
+			if rejected {
+				_ = t.observe(req.Context(), admission)
+			}
+		}
+		return resp, err
+	}
+	if t.resolve == nil {
+		return nil, errors.New("youtube: authorization resolver is unavailable")
+	}
+	token, err := t.resolve(req.Context())
+	if err != nil {
+		return nil, err
+	}
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	token.SetAuthHeader(clone)
+	return t.base.RoundTrip(clone)
 }
 
 // Subscription represents a channel the authenticated user is subscribed to.
@@ -147,7 +393,7 @@ func (c *Client) ListSubscriptions(ctx context.Context, nextPageToken string) (*
 		NextPageToken string             `json:"nextPageToken"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("decode subscriptions: %w", err)
+		return nil, fmt.Errorf("decode subscriptions: %w", invalidResponseError(err, OpSubscriptionsList))
 	}
 
 	out := &SubscriptionList{
@@ -198,7 +444,7 @@ func (c *Client) ListPlaylists(ctx context.Context, nextPageToken string) ([]Pla
 		NextPageToken string             `json:"nextPageToken"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, "", fmt.Errorf("decode playlists: %w", err)
+		return nil, "", fmt.Errorf("decode playlists: %w", invalidResponseError(err, OpPlaylistsList))
 	}
 
 	out := make([]Playlist, 0, len(raw.Items))
@@ -251,7 +497,7 @@ func (c *Client) GetChannels(ctx context.Context, channelIDs []string) ([]Channe
 		Items []channelItem `json:"items"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("decode channels: %w", err)
+		return nil, fmt.Errorf("decode channels: %w", invalidResponseError(err, OpChannelsList))
 	}
 
 	out := make([]Channel, 0, len(raw.Items))
@@ -313,7 +559,7 @@ func (c *Client) ListPlaylistItems(ctx context.Context, playlistID, nextPageToke
 		NextPageToken string         `json:"nextPageToken"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, "", fmt.Errorf("decode playlist items: %w", err)
+		return nil, "", fmt.Errorf("decode playlist items: %w", invalidResponseError(err, OpPlaylistItemsList))
 	}
 
 	out := make([]PlaylistItem, 0, len(raw.Items))
@@ -323,10 +569,7 @@ func (c *Client) ListPlaylistItems(ctx context.Context, playlistID, nextPageToke
 		}
 		pub, err := parseTime(it.Snippet.PublishedAt)
 		if err != nil {
-			c.logger.DebugContext(ctx, "skipping playlist item with invalid publishedAt",
-				"video_id", it.Snippet.ResourceID.VideoID,
-				"published_at", it.Snippet.PublishedAt,
-				"error", err)
+			c.logger.DebugContext(ctx, "skipping playlist item with invalid publishedAt")
 			continue
 		}
 		out = append(out, PlaylistItem{
@@ -362,6 +605,267 @@ type VideoDetail struct {
 	DurationSeconds int
 	PublishedAt     time.Time
 	ThumbnailURL    string
+	// Present identifies valid route inputs in GetVideosWithReturnedIDs.
+	// GetVideos does not populate it.
+	Present VideoDetailPresence
+}
+
+// VideoDetailPresence distinguishes valid empty or zero values from missing or invalid inputs.
+type VideoDetailPresence struct {
+	Title, ChannelID, ChannelTitle, Description, Duration bool
+}
+
+// VideoIDs reports identities in a fully validated by-ID response.
+type VideoIDs struct {
+	IDs      []string
+	Complete bool
+	// Live has one entry for every ID in IDs (BR-042, live-status ARS-001 §2).
+	Live map[string]LiveStatus
+}
+
+// LiveStatus is the parser's classification of one returned video.
+type LiveStatus string
+
+const (
+	LiveNone        LiveStatus = "none"
+	LiveNow         LiveStatus = "live"
+	LiveUpcoming    LiveStatus = "upcoming"
+	LiveUnconfirmed LiveStatus = "unconfirmed"
+)
+
+// classifyLive applies the first matching rule of live-status ARS-001 §2. It
+// never reads the duration, and keeps no raw value.
+func classifyLive(item map[string]json.RawMessage, duplicateItem map[string]bool) LiveStatus {
+	if duplicateItem["snippet"] {
+		return LiveUnconfirmed
+	}
+	snippet, snippetDups, ok := readJSONObject(item["snippet"])
+	if !ok || len(snippetDups) > 0 {
+		return LiveUnconfirmed
+	}
+	lbc, ok := jsonString(snippet["liveBroadcastContent"])
+	if !ok {
+		return LiveUnconfirmed
+	}
+	switch lbc {
+	case "live":
+		return LiveNow
+	case "upcoming":
+		return LiveUpcoming
+	case "none":
+	default:
+		return LiveUnconfirmed
+	}
+	rawDetails, has := item["liveStreamingDetails"]
+	if !has && !duplicateItem["liveStreamingDetails"] {
+		return LiveNone
+	}
+	if duplicateItem["liveStreamingDetails"] {
+		return LiveUnconfirmed
+	}
+	details, detailDups, ok := readJSONObject(rawDetails)
+	if !ok || len(detailDups) > 0 {
+		return LiveUnconfirmed
+	}
+	endRaw, hasEnd := jsonString(details["actualEndTime"])
+	if !hasEnd {
+		return LiveUnconfirmed
+	}
+	end, err := parseTime(endRaw)
+	if err != nil {
+		return LiveUnconfirmed
+	}
+	if _, present := details["activeLiveChatId"]; present {
+		return LiveUnconfirmed
+	}
+	if _, present := details["concurrentViewers"]; present {
+		return LiveUnconfirmed
+	}
+	if rawStart, present := details["actualStartTime"]; present {
+		startRaw, ok := jsonString(rawStart)
+		if !ok {
+			return LiveUnconfirmed
+		}
+		start, err := parseTime(startRaw)
+		if err != nil || start.After(end) {
+			return LiveUnconfirmed
+		}
+	}
+	return LiveNone
+}
+
+// GetVideosWithReturnedIDs fetches at most 50 distinct IDs and validates the
+// complete response before allowing callers to infer an omitted ID.
+func (c *Client) GetVideosWithReturnedIDs(ctx context.Context, videoIDs []string) ([]VideoDetail, VideoIDs, error) {
+	transport, guarded := c.httpClient.Transport.(authorizationTransport)
+	if (c.readRecorder == nil && !c.quotaReads) || !guarded || transport.dispatch == nil {
+		return nil, VideoIDs{}, &ReadError{Accounting: errors.New("youtube read admission or accounting unavailable")}
+	}
+	requested := make(map[string]bool, len(videoIDs))
+	for _, id := range videoIDs {
+		if !validVideoID(id) || requested[id] {
+			return nil, VideoIDs{}, errors.New("get videos: invalid requested IDs")
+		}
+		requested[id] = true
+	}
+	if len(videoIDs) == 0 || len(videoIDs) > 50 {
+		return nil, VideoIDs{}, errors.New("get videos: expected 1 to 50 distinct IDs")
+	}
+	q := url.Values{}
+	q.Set("part", "snippet,contentDetails,liveStreamingDetails")
+	q.Set("id", strings.Join(videoIDs, ","))
+	q.Set("maxResults", strconv.Itoa(len(videoIDs)))
+	body, err := c.getByID(ctx, "/videos", q, OpVideosList, 1, true)
+	if err != nil {
+		return nil, VideoIDs{}, fmt.Errorf("get videos: %w", err)
+	}
+	invalid := func() ([]VideoDetail, VideoIDs, error) {
+		return nil, VideoIDs{}, invalidResponseError(nil, OpVideosList)
+	}
+	envelope, duplicates, ok := readJSONObject(body)
+	if !ok || duplicates["items"] || duplicates["nextPageToken"] {
+		return invalid()
+	}
+	if token, ok := envelope["nextPageToken"]; ok {
+		var s string
+		if string(token) == "null" || json.Unmarshal(token, &s) != nil || s != "" {
+			return invalid()
+		}
+	}
+	items, ok := envelope["items"]
+	if !ok || len(items) == 0 || items[0] != '[' {
+		return invalid()
+	}
+	var rawItems []json.RawMessage
+	if json.Unmarshal(items, &rawItems) != nil {
+		return invalid()
+	}
+	result := VideoIDs{IDs: make([]string, 0, len(rawItems)), Live: make(map[string]LiveStatus, len(rawItems))}
+	details := make([]VideoDetail, 0, len(rawItems))
+	seen := make(map[string]bool, len(rawItems))
+	for _, raw := range rawItems {
+		item, duplicateItem, ok := readJSONObject(raw)
+		if !ok || duplicateItem["id"] {
+			return invalid()
+		}
+		id, valid := jsonString(item["id"])
+		if !valid || !validVideoID(id) || !requested[id] || seen[id] {
+			return invalid()
+		}
+		seen[id] = true
+		result.IDs = append(result.IDs, id)
+		result.Live[id] = classifyLive(item, duplicateItem)
+		// Ambiguous detail fields are unavailable, but a reliable ID remains returned.
+		var snippet, content map[string]json.RawMessage
+		if !duplicateItem["snippet"] {
+			snippet = readJSONObjectWithoutDuplicates(item["snippet"])
+		}
+		if !duplicateItem["contentDetails"] {
+			content = readJSONObjectWithoutDuplicates(item["contentDetails"])
+		}
+		var d VideoDetail
+		d.ID = id
+		d.Title, d.Present.Title = jsonString(snippet["title"])
+		d.ChannelID, d.Present.ChannelID = jsonString(snippet["channelId"])
+		d.ChannelTitle, d.Present.ChannelTitle = jsonString(snippet["channelTitle"])
+		d.Description, d.Present.Description = jsonString(snippet["description"])
+		duration, hasDuration := jsonString(content["duration"])
+		if hasDuration && duration != "" {
+			d.DurationSeconds, d.Present.Duration = validDuration(duration)
+		}
+		published, present := jsonString(snippet["publishedAt"])
+		if !present {
+			continue
+		}
+		d.PublishedAt, err = parseTime(published)
+		if err != nil {
+			continue
+		}
+		var thumbs thumbnails
+		_ = json.Unmarshal(snippet["thumbnails"], &thumbs)
+		d.ThumbnailURL = bestThumbnail(thumbs)
+		details = append(details, d)
+	}
+	result.Complete = true
+	return details, result, nil
+}
+
+var videoIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+var byIDDurationRe = regexp.MustCompile(`^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$`)
+
+// readJSONObject preserves duplicate-member evidence which map decoding loses.
+func readJSONObject(raw []byte) (map[string]json.RawMessage, map[string]bool, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	token, err := dec.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, nil, false
+	}
+	values := make(map[string]json.RawMessage)
+	duplicates := make(map[string]bool)
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, nil, false
+		}
+		name, ok := key.(string)
+		if !ok {
+			return nil, nil, false
+		}
+		var value json.RawMessage
+		if dec.Decode(&value) != nil {
+			return nil, nil, false
+		}
+		if _, exists := values[name]; exists {
+			duplicates[name] = true
+		}
+		values[name] = value
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, nil, false
+	}
+	var extra json.RawMessage
+	if dec.Decode(&extra) != io.EOF {
+		return nil, nil, false
+	}
+	return values, duplicates, true
+}
+
+func readJSONObjectWithoutDuplicates(raw []byte) map[string]json.RawMessage {
+	values, duplicates, _ := readJSONObject(raw)
+	for name := range duplicates {
+		delete(values, name)
+	}
+	return values
+}
+
+func validVideoID(id string) bool { return videoIDRe.MatchString(id) }
+
+func jsonString(raw json.RawMessage) (string, bool) {
+	var value string
+	if len(raw) == 0 || !utf8.Valid(raw) || string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func validDuration(s string) (int, bool) {
+	m := byIDDurationRe.FindStringSubmatch(s)
+	if m == nil || (m[1] == "" && m[2] == "" && m[3] == "" && m[4] == "") || strings.HasSuffix(s, "T") {
+		return 0, false
+	}
+	max := int(^uint(0) >> 1)
+	total := 0
+	for i, factor := range []int{86400, 3600, 60, 1} {
+		if m[i+1] == "" {
+			continue
+		}
+		n, err := strconv.Atoi(m[i+1])
+		if err != nil || n > (max-total)/factor {
+			return 0, false
+		}
+		total += n * factor
+	}
+	return total, true
 }
 
 // GetVideos fetches full video metadata for up to 50 video IDs per API call.
@@ -387,17 +891,14 @@ func (c *Client) GetVideos(ctx context.Context, videoIDs []string) ([]VideoDetai
 		Items []videoItem `json:"items"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("decode videos: %w", err)
+		return nil, fmt.Errorf("decode videos: %w", invalidResponseError(err, OpVideosList))
 	}
 
 	out := make([]VideoDetail, 0, len(raw.Items))
 	for _, it := range raw.Items {
 		pub, err := parseTime(it.Snippet.PublishedAt)
 		if err != nil {
-			c.logger.DebugContext(ctx, "skipping video with invalid publishedAt",
-				"video_id", it.ID,
-				"published_at", it.Snippet.PublishedAt,
-				"error", err)
+			c.logger.DebugContext(ctx, "skipping video with invalid publishedAt")
 			continue
 		}
 		dur, _ := parseDuration(it.ContentDetails.Duration)
@@ -475,29 +976,27 @@ func (c *Client) InsertPlaylistItem(ctx context.Context, playlistID, videoID str
 	}
 	return nil
 }
-
 func (c *Client) post(ctx context.Context, path string, q url.Values, op Operation, payload []byte) ([]byte, error) {
 	u, err := url.Parse(c.baseURL + path)
 	if err != nil {
-		return nil, fmt.Errorf("build url: %w", err)
+		return nil, fmt.Errorf("build url: %w", boundedTransportError(err))
 	}
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", boundedTransportError(err))
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
-	c.logger.DebugContext(ctx, "youtube api request", "method", "POST", "path", path, "op", op)
+	c.logger.DebugContext(ctx, "youtube api request", "method", "POST", "op", op)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("execute request: %w", err)
+		return nil, boundedRequestError(err)
 	}
 	defer resp.Body.Close()
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response body: %w", err)
@@ -506,7 +1005,6 @@ func (c *Client) post(ctx context.Context, path string, q url.Values, op Operati
 	if resp.StatusCode >= 300 {
 		return nil, youtubeAPIError(resp.StatusCode, body)
 	}
-
 	if c.recorder != nil {
 		if err := c.recorder(ctx, op, 1); err != nil {
 			return nil, fmt.Errorf("record quota: %w", err)
@@ -517,42 +1015,309 @@ func (c *Client) post(ctx context.Context, path string, q url.Values, op Operati
 }
 
 func (c *Client) get(ctx context.Context, path string, q url.Values, op Operation, calls int) ([]byte, error) {
+	return c.getByID(ctx, path, q, op, calls, false)
+}
+
+// strict is used only by the by-ID completeness boundary; legacy reads keep
+// their existing status, accounting and error behavior.
+func (c *Client) getByID(ctx context.Context, path string, q url.Values, op Operation, calls int, strict bool) ([]byte, error) {
+	observation := &rejectionObservation{operation: op}
+	ctx = context.WithValue(ctx, rejectionObservationKey{}, observation)
 	u, err := url.Parse(c.baseURL + path)
 	if err != nil {
-		return nil, fmt.Errorf("build url: %w", err)
+		return nil, fmt.Errorf("build url: %w", boundedTransportError(err))
 	}
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", boundedTransportError(err))
 	}
 	req.Header.Set("Accept", "application/json")
 
-	c.logger.DebugContext(ctx, "youtube api request", "method", "GET", "path", path, "op", op)
+	c.logger.DebugContext(ctx, "youtube api request", "method", "GET", "op", op)
+	if c.readPreflight != nil {
+		if err := c.readPreflight(ctx, op); err != nil {
+			return nil, err
+		}
+	}
 
 	resp, err := c.httpClient.Do(req)
+	if c.readRecorder != nil || c.quotaReads {
+		return c.finishRead(ctx, resp, err, observation, op, strict)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("execute request: %w", err)
+		return nil, boundedRequestError(err)
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-
-	if resp.StatusCode >= 300 {
-		return nil, youtubeAPIError(resp.StatusCode, body)
-	}
-
+	// Count every Data API request that reached the provider, including 401.
 	if c.recorder != nil {
 		if err := c.recorder(ctx, op, calls); err != nil {
 			return nil, fmt.Errorf("record quota: %w", err)
 		}
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	var readErr error
+	if resp.StatusCode >= 300 {
+		if err != nil {
+			readErr = youtubeReadAPIError(resp.StatusCode, nil)
+		} else {
+			readErr = youtubeReadAPIError(resp.StatusCode, body)
+		}
+	}
+	observation.observeRejection(ctx, resp.StatusCode, readErr)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	if resp.StatusCode >= 300 {
+		if observation.err != nil {
+			return nil, fmt.Errorf("%w (authorization renewal was unavailable)", readErr)
+		}
+		return nil, readErr
+	}
+
 	return body, nil
+}
+
+func (c *Client) finishRead(ctx context.Context, resp *http.Response, transportErr error, observation *rejectionObservation, op Operation, strict bool) ([]byte, error) {
+	var body []byte
+	var primary error
+	var interruption error
+	status := 0
+	if transportErr != nil {
+		if observation.admission.AdmittedAt.IsZero() {
+			primary = boundedRequestError(transportErr)
+		} else {
+			primary = &ReadTransportError{Canceled: errors.Is(transportErr, context.Canceled) || errors.Is(transportErr, context.DeadlineExceeded)}
+		}
+	} else if resp != nil {
+		defer resp.Body.Close()
+		status = resp.StatusCode
+		var err error
+		body, err = io.ReadAll(resp.Body)
+		switch {
+		case errors.Is(err, context.Canceled), err != nil && errors.Is(ctx.Err(), context.Canceled):
+			interruption = context.Canceled
+		case errors.Is(err, context.DeadlineExceeded), err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
+			interruption = context.DeadlineExceeded
+		}
+		if status >= 300 {
+			if err != nil {
+				body = nil // An incomplete rejection cannot establish a provider reason.
+			}
+			primary = youtubeReadAPIError(status, body)
+		} else if err != nil {
+			if strict {
+				switch {
+				case errors.Is(err, context.Canceled), errors.Is(ctx.Err(), context.Canceled):
+					primary = context.Canceled
+				case errors.Is(err, context.DeadlineExceeded), errors.Is(ctx.Err(), context.DeadlineExceeded):
+					primary = context.DeadlineExceeded
+				default:
+					primary = invalidResponseError(nil, op)
+				}
+			} else {
+				primary = errors.New("read YouTube response body failed")
+			}
+		} else if strict && status != http.StatusOK {
+			primary = invalidResponseError(nil, op)
+		}
+	} else {
+		primary = errors.New("youtube request returned no response")
+	}
+	accounting := observation.admission.Accounting
+	if observation.admission.Finalize != nil {
+		accounting = errors.Join(accounting, observation.admission.Finalize(ctx, readCategory(status, primary), status))
+	} else if c.readRecorder != nil && !observation.admission.AdmittedAt.IsZero() {
+		accounting = errors.Join(accounting, c.readRecorder(ctx, ReadAttempt{Operation: op, AdmittedAt: observation.admission.AdmittedAt, Status: status, Category: readCategory(status, primary)}))
+	}
+	if strict && ((resp != nil && observation.admission.AdmittedAt.IsZero()) ||
+		(!observation.admission.AdmittedAt.IsZero() && observation.admission.Finalize == nil && c.readRecorder == nil)) {
+		accounting = errors.Join(accounting, errors.New("youtube read admission or accounting unavailable"))
+	}
+	observation.observeRejection(ctx, status, primary)
+	if accounting != nil || observation.err != nil || interruption != nil {
+		return nil, &ReadError{Primary: primary, Accounting: accounting, Renewal: observation.err, Interruption: interruption, Status: status}
+	}
+	return body, primary
+}
+
+func (o *rejectionObservation) observeRejection(ctx context.Context, status int, readErr error) {
+	if o.observe == nil || o.admission.AuthorizationID == "" {
+		return
+	}
+	rejected := status == http.StatusUnauthorized
+	if status == http.StatusForbidden {
+		var api *APIError
+		rejected = errors.As(readErr, &api) && api.Complete && len(api.Reasons) == 1 && api.Reasons[0] == "authError"
+	}
+	if rejected {
+		o.err = o.observe(ctx, o.admission)
+	}
+}
+
+func readCategory(status int, err error) string {
+	if status >= 200 && status < 300 {
+		return "success"
+	}
+	if status == 0 || status == 429 || status >= 500 {
+		return "transient"
+	}
+	if status == 401 {
+		return "auth"
+	}
+	var api *APIError
+	if errors.As(err, &api) {
+		switch api.Reason {
+		case "authError":
+			return "auth"
+		case "quotaExceeded", "dailyLimitExceeded":
+			return "quota"
+		case "rateLimitExceeded", "userRateLimitExceeded":
+			return "transient"
+		}
+	}
+	return "permanent"
+}
+
+// boundedTransportError wraps a transport- or URL-construction failure
+// without the request URL or query. net/url errors embed the full URL
+// (including query parameters) in their message; that URL/query data must
+// not cross diagnostic boundaries, so only the underlying error is kept
+// (ARD-001).
+func boundedTransportError(err error) error {
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return uerr.Err
+	}
+	return err
+}
+
+// boundedRequestError is the request-execution form of boundedTransportError.
+func boundedRequestError(err error) error {
+	return fmt.Errorf("execute request: %w", boundedTransportError(err))
+}
+
+// Read decisions share one interpretation of the provider error; mutation
+// responses retain the legacy parser below.
+func youtubeReadAPIError(status int, body []byte) error {
+	api := &APIError{Status: status}
+	if !utf8.Valid(body) {
+		return api
+	}
+	root, ok := readJSONValue(body)
+	if !ok {
+		return api
+	}
+	errorObj, ok := readJSONField(root, "error")
+	if !ok {
+		return api
+	}
+	items, ok := readJSONField(errorObj, "errors")
+	if !ok {
+		return api
+	}
+	list, ok := items.([]any)
+	if !ok || len(list) == 0 {
+		return api
+	}
+	reasons := make([]string, 0, len(list))
+	for _, item := range list {
+		raw, ok := readJSONField(item, "reason")
+		reason, valid := raw.(string)
+		if !ok || !valid || !registeredProviderReason(reason) {
+			return api
+		}
+		reasons = append(reasons, reason)
+	}
+	api.Complete = true
+	api.Reasons = reasons
+	if len(reasons) == 1 {
+		api.Reason = reasons[0]
+	}
+	return api
+}
+
+// Field matching follows the case-insensitive provider schema, but rejects
+// multiple spellings rather than choosing whichever appeared last.
+func readJSONField(value any, field string) (any, bool) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	var result any
+	found := false
+	for key, candidate := range object {
+		if strings.EqualFold(key, field) {
+			if found {
+				return nil, false
+			}
+			found, result = true, candidate
+		}
+	}
+	return result, found
+}
+
+func readJSONValue(body []byte) (any, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var value func() (any, error)
+	value = func() (any, error) {
+		token, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return token, nil
+		}
+		var result any
+		switch delim {
+		case '{':
+			object := make(map[string]any)
+			for dec.More() {
+				key, err := dec.Token()
+				if err != nil {
+					return nil, err
+				}
+				name, ok := key.(string)
+				if !ok {
+					return nil, errors.New("invalid JSON object key")
+				}
+				if _, exists := object[name]; exists {
+					return nil, errors.New("duplicate JSON object key")
+				}
+				item, err := value()
+				if err != nil {
+					return nil, err
+				}
+				object[name] = item
+			}
+			result = object
+		case '[':
+			var items []any
+			for dec.More() {
+				item, err := value()
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, item)
+			}
+			result = items
+		default:
+			return nil, errors.New("unexpected JSON delimiter")
+		}
+		_, err = dec.Token()
+		return result, err
+	}
+	result, err := value()
+	if err != nil {
+		return nil, false
+	}
+	_, err = dec.Token()
+	return result, errors.Is(err, io.EOF)
 }
 
 func youtubeAPIError(status int, body []byte) error {
@@ -563,12 +1328,27 @@ func youtubeAPIError(status int, body []byte) error {
 			} `json:"errors"`
 		} `json:"error"`
 	}
-	_ = json.Unmarshal(body, &payload)
-	reason := ""
-	if len(payload.Error.Errors) > 0 {
-		reason = payload.Error.Errors[0].Reason
+	complete := json.Unmarshal(body, &payload) == nil && len(payload.Error.Errors) > 0
+	reasons := make([]string, 0, len(payload.Error.Errors))
+	if complete {
+		for _, item := range payload.Error.Errors {
+			if !registeredProviderReason(item.Reason) {
+				complete = false
+				break
+			}
+			reasons = append(reasons, item.Reason)
+		}
 	}
-	return &APIError{Status: status, Reason: reason, Body: string(body)}
+	if !complete {
+		reasons = nil
+	}
+	reason := ""
+	if len(reasons) == 1 {
+		reason = reasons[0]
+	}
+	// The raw response body is deliberately discarded: only the status and a
+	// vetted reason token are retained (ARD-001 failure diagnostic boundary).
+	return &APIError{Status: status, Reason: reason, Reasons: reasons, Complete: complete}
 }
 
 func parseTime(s string) (time.Time, error) {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { MemoryRouter, Routes, Route } from 'react-router-dom'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
+import { MemoryRouter, Routes, Route, Link } from 'react-router-dom'
 import { DecisionDetailView } from './DecisionDetailView'
 import { ToastProvider } from '../components/ToastProvider'
 import type { DecisionDetail } from '../types'
@@ -24,11 +24,19 @@ const baseDetail: DecisionDetail = {
     title: 'Late Night Jazz Mix',
     channel_name: 'Jazz Club',
     duration_seconds: 184,
+    current_local_metadata: {
+      attribution: 'current_local_not_necessarily_evaluated',
+      title: 'Late Night Jazz Mix', title_availability: 'current_local',
+      channel_name: 'Jazz Club', channel_name_availability: 'current_local',
+      duration_seconds: 184, duration_availability: 'current_local',
+    },
+    metadata_context_status: 'available',
     processing_state: 'completed',
     final_outcome: 'accepted',
   },
   processing_state: 'completed',
   final_outcome: 'accepted',
+  continued_actions: [],
   route_decisions: [
     {
       id: ROUTE_A,
@@ -58,6 +66,7 @@ const baseDetail: DecisionDetail = {
 describe('DecisionDetailView', () => {
   beforeEach(() => {
     mockGetRun.mockReset().mockResolvedValue({ id: 1, run_type: 'manual' })
+    mockGetDecisionDetail.mockReset()
   })
   function renderView(runId: string, videoId: string) {
     return render(
@@ -89,6 +98,52 @@ describe('DecisionDetailView', () => {
     expect(screen.getAllByText('Succeeded').length).toBeGreaterThanOrEqual(1)
     // Public action representations use the canonical API action type (ADR-007).
     expect(screen.getAllByText('add_to_playlist → PLmusic').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('Source channel: Jazz Club')).toBeInTheDocument()
+    // One attribution notice per video context block, not one per field.
+    expect(screen.getAllByText(/Current\/local information/)).toHaveLength(1)
+    expect(screen.queryByText('Current/local information')).not.toBeInTheDocument()
+    expect(screen.getByText('Current/local information — not necessarily the information evaluated by this run.')).toBeInTheDocument()
+    expect(screen.queryByText(/^Observed at /)).not.toBeInTheDocument()
+  })
+
+  it('shows unresolved playlist application as unknown without inventing an attempt', async () => {
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      video: {
+        ...baseDetail.video,
+        unresolved_mutations: [{ action_type: 'add_to_playlist', target_playlist_id: 'PLuncertain', prepared_at: '2026-11-07T10:00:00Z', application_state: 'unknown' }],
+      },
+      route_decisions: [{
+        ...baseDetail.route_decisions[0],
+        actions: [{ id: 1, action_type: 'add_to_playlist', target_playlist_id: 'PLpending', outcome: 'deferred', outcome_reason: 'authorization_pending' }],
+      }],
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    await screen.findAllByText('Waiting for YouTube access')
+    expect(screen.getByText('Playlist outcome unknown')).toBeInTheDocument()
+    expect(screen.queryByText('Not attempted — unresolved playlist action')).not.toBeInTheDocument()
+    expect(screen.getByText('YuHaul cannot confirm whether this playlist action was sent or applied. Repeating it could add the video again, so it remains blocked.')).toBeInTheDocument()
+    expect(screen.getByText('Playlist PLuncertain')).toBeInTheDocument()
+    expect(screen.getByText(/Prepared .* — not an attempt time\./)).toBeInTheDocument()
+    expect(screen.queryByText(/Attempted /)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry|replay/i })).not.toBeInTheDocument()
+  })
+
+  it('does not claim a guard-only playlist action was or was not sent', async () => {
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      video: {
+        ...baseDetail.video,
+        unresolved_mutations: [{ action_type: 'add_to_playlist', target_playlist_id: 'PLguard', application_state: 'unknown' }],
+      },
+      route_decisions: [],
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+
+    expect(await screen.findByText('Playlist outcome unknown')).toBeInTheDocument()
+    expect(screen.getByText('YuHaul cannot confirm whether this playlist action was sent or applied. Repeating it could add the video again, so it remains blocked.')).toBeInTheDocument()
+    expect(screen.queryByText(/Not attempted/)).not.toBeInTheDocument()
+    expect(screen.getByText('An unresolved playlist action is recorded above; no action outcome was recorded.')).toBeInTheDocument()
   })
 
   it.each(['backtest', 'replay', 'dry_run'] as const)('preserves %s context on a direct video URL', async (run_type) => {
@@ -128,6 +183,189 @@ describe('DecisionDetailView', () => {
     expect(screen.queryByText('Accepted')).not.toBeInTheDocument()
   })
 
+  // Requested-run production evidence (ARD-001): a real attempt shows its
+  // outcome, safe error text, and the attempt timestamp — and only an
+  // actually attempted action carries a timestamp.
+  it('shows a failed production action with its safe error message and attempt timestamp', async () => {
+    const executedAt = '2026-10-27T09:30:00Z'
+    mockGetRun.mockResolvedValue({ id: 1, run_type: 'manual' })
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      route_decisions: [
+        {
+          ...baseDetail.route_decisions[0],
+          actions: [
+            {
+              id: 0,
+              action_type: 'add_to_playlist',
+              target_playlist_id: 'PLmusic',
+              outcome: 'failed',
+              error_message: 'diag:v1 phase=action_execution operation=execute_action code=provider_error status=403 reason=quotaExceeded',
+              executed_at: executedAt,
+            },
+          ],
+        },
+        baseDetail.route_decisions[1],
+      ],
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    await waitFor(() => expect(screen.getByText('Late Night Jazz Mix')).toBeInTheDocument())
+
+    expect(screen.getAllByText('Failed').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText("YouTube's API quota was used up.").length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(`Attempted ${new Date(executedAt).toLocaleString()}`).length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByText(/Succeeded/)).not.toBeInTheDocument()
+  })
+
+  // already_completed is an idempotency suppression in THIS run: the prior
+  // success is not a current-run success and has no attempt timestamp.
+  it('presents already_completed as not attempted in this run, never as a success', async () => {
+    mockGetRun.mockResolvedValue({ id: 1, run_type: 'manual' })
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      route_decisions: [
+        {
+          ...baseDetail.route_decisions[0],
+          actions: [
+            {
+              id: 0,
+              action_type: 'add_to_playlist',
+              target_playlist_id: 'PLmusic',
+              outcome: 'not_attempted',
+              outcome_reason: 'already_completed',
+            },
+          ],
+        },
+        baseDetail.route_decisions[1],
+      ],
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    await waitFor(() => expect(screen.getByText('Late Night Jazz Mix')).toBeInTheDocument())
+
+    expect(screen.getAllByText('Not attempted').length).toBeGreaterThanOrEqual(1)
+    expect(
+      screen.getAllByText('Not attempted in this run — already completed by an earlier run').length,
+    ).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByText(/Succeeded/)).not.toBeInTheDocument()
+    // No attempt was made in this run, so no attempt timestamp appears.
+    expect(screen.queryByText(/Attempted/)).not.toBeInTheDocument()
+  })
+
+  // A quota deferral is an explanation of a recorded outcome, with no
+  // external attempt and therefore no attempt timestamp.
+  it('shows a deferred action reason without an attempt timestamp', async () => {
+    mockGetRun.mockResolvedValue({ id: 1, run_type: 'manual' })
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      route_decisions: [
+        {
+          ...baseDetail.route_decisions[0],
+          actions: [
+            {
+              id: 0,
+              action_type: 'add_to_playlist',
+              target_playlist_id: 'PLmusic',
+              outcome: 'deferred',
+              outcome_reason: 'quota_exhausted',
+            },
+          ],
+        },
+        baseDetail.route_decisions[1],
+      ],
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    await waitFor(() => expect(screen.getByText('Late Night Jazz Mix')).toBeInTheDocument())
+
+    expect(screen.getAllByText('Deferred').length).toBeGreaterThanOrEqual(1)
+    expect(
+      screen.getAllByText('Not attempted — the daily quota was exhausted before this action could run').length,
+    ).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByText(/Attempted/)).not.toBeInTheDocument()
+  })
+
+  // Withheld legacy error text is stated as unavailable, never rendered raw
+  // and never treated as a fabricated success or rejection.
+  it('marks a withheld action error reason as unavailable instead of showing raw text', async () => {
+    mockGetRun.mockResolvedValue({ id: 1, run_type: 'manual' })
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      route_decisions: [
+        {
+          ...baseDetail.route_decisions[0],
+          actions: [
+            {
+              id: 0,
+              action_type: 'add_to_playlist',
+              target_playlist_id: 'PLmusic',
+              outcome: 'failed',
+              error_message_unavailable: true,
+            },
+          ],
+        },
+        baseDetail.route_decisions[1],
+      ],
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    await waitFor(() => expect(screen.getByText('Late Night Jazz Mix')).toBeInTheDocument())
+
+    expect(
+      screen.getAllByText('An error reason was recorded for this action, but it cannot be displayed safely.').length,
+    ).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByText(/Succeeded/)).not.toBeInTheDocument()
+  })
+
+  // Video-level withheld legacy text (Layer 1) is stated as unavailable and
+  // never rendered raw or inferred as a failure/success of its own.
+  it('marks a withheld video error reason as unavailable on Layer 1', async () => {
+    mockGetRun.mockResolvedValue({ id: 1, run_type: 'manual' })
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      video: { ...baseDetail.video, error_message_unavailable: true },
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    await waitFor(() => expect(screen.getByText('Late Night Jazz Mix')).toBeInTheDocument())
+
+    expect(
+      screen.getByText('An error reason was recorded for this video, but it cannot be displayed safely.'),
+    ).toBeInTheDocument()
+  })
+
+  // Simulation rows are hypothetical even against adversarial input: a stored
+  // outcome/timestamp from a simulation row must never read as execution
+  // success or as an attempt (ARD-001 / Simulation Inspection).
+  it('never presents a simulation action as executed or succeeded', async () => {
+    mockGetRun.mockResolvedValue({ id: 1, run_type: 'backtest' })
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      route_decisions: [
+        {
+          ...baseDetail.route_decisions[0],
+          actions: [
+            {
+              id: 0,
+              action_type: 'add_to_playlist',
+              target_playlist_id: 'PLmusic',
+              outcome: 'succeeded',
+              executed_at: '2026-10-27T09:30:00Z',
+              error_message: 'provider error text',
+            },
+          ],
+        },
+        baseDetail.route_decisions[1],
+      ],
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    await screen.findByText('Hypothetical accepted')
+
+    expect(screen.getAllByText('Not attempted').length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByText('Succeeded')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Attempted/)).not.toBeInTheDocument()
+    expect(screen.queryByText('provider error text')).not.toBeInTheDocument()
+    expect(
+      screen.getByText("These actions were not executed. Accepted means the video matched this simulation's routing rules, not that a playlist was changed."),
+    ).toBeInTheDocument()
+  })
+
   it('does not interpret results when the run type is unsupported', async () => {
     mockGetRun.mockResolvedValue({ id: 1, run_type: 'future_mode' })
     mockGetDecisionDetail.mockResolvedValue(baseDetail)
@@ -151,6 +389,46 @@ describe('DecisionDetailView', () => {
     await screen.findByText('Hypothetical accepted')
   })
 
+  it('shows a read error and retries the detail request without implying an outcome', async () => {
+    mockGetDecisionDetail.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(baseDetail)
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load decision detail.')
+    expect(screen.queryByText('Accepted')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Rejected/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await screen.findByText('Late Night Jazz Mix')
+    expect(mockGetDecisionDetail).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows not-found as unavailable evidence, not a routing result', async () => {
+    mockGetDecisionDetail.mockResolvedValue(undefined)
+    renderView('1', 'missing-video')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Decision detail not found.')
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to run' })).toHaveAttribute('href', '/runs/1')
+    expect(screen.queryByText(/Accepted|Rejected|Succeeded/)).not.toBeInTheDocument()
+  })
+
+  it('ignores a stale detail response after navigating to another video', async () => {
+    let resolveOld!: (value: DecisionDetail) => void
+    mockGetDecisionDetail.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve }))
+      .mockResolvedValueOnce({ ...baseDetail, video: {
+        ...baseDetail.video, video_id: 'new-video', title: 'New video',
+        current_local_metadata: { ...baseDetail.video.current_local_metadata!, title: 'New video' },
+      } })
+    render(
+      <MemoryRouter initialEntries={['/runs/1/video/old-video']}>
+        <ToastProvider><Link to="/runs/1/video/new-video">Next video</Link><Routes>
+          <Route path="/runs/:id/video/:videoId" element={<DecisionDetailView />} />
+        </Routes></ToastProvider>
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('link', { name: 'Next video' }))
+    await screen.findByText('New video')
+    resolveOld({ ...baseDetail, video: { ...baseDetail.video, title: 'Stale video' } })
+    expect(screen.queryByText('Stale video')).not.toBeInTheDocument()
+  })
+
   it('shows skipped route reason after a final route matched', async () => {
     mockGetDecisionDetail.mockResolvedValue(baseDetail)
     renderView('1', 'dQw4w9WgXcQ')
@@ -169,6 +447,12 @@ describe('DecisionDetailView', () => {
         title: 'Ambient Study Session',
         channel_name: 'Focus Sounds',
         duration_seconds: 620,
+        current_local_metadata: {
+          attribution: 'current_local_not_necessarily_evaluated',
+          title: 'Ambient Study Session', title_availability: 'current_local',
+          channel_name: 'Focus Sounds', channel_name_availability: 'current_local',
+          duration_seconds: 620, duration_availability: 'current_local',
+        },
         processing_state: 'evaluated',
         final_outcome: 'rejected',
       },
@@ -255,5 +539,192 @@ describe('DecisionDetailView', () => {
       outcomeRows.find((li) => li.textContent?.includes(suffix))
     expect(rowFor('(3a554e96)')?.textContent).toContain('PLmusic')
     expect(rowFor('(b7e9d4f2)')?.textContent).toContain('PLother')
+  })
+
+  it('does not present legacy names when current/local metadata is missing', async () => {
+    mockGetDecisionDetail.mockResolvedValue({ ...baseDetail, video: { ...baseDetail.video, current_local_metadata: undefined } })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText('Video title unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Source channel name unavailable')).toBeInTheDocument()
+    expect(screen.getByText('UCdemo1')).toBeInTheDocument()
+    expect(screen.getByText('Duration unavailable')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Late Night Jazz Mix' })).not.toBeInTheDocument()
+  })
+
+  it.each(['known_expired', 'withheld'] as const)('shows %s availability without exposing a legacy value', async (availability) => {
+    mockGetDecisionDetail.mockResolvedValue({ ...baseDetail, video: {
+      ...baseDetail.video,
+      current_local_metadata: {
+        ...baseDetail.video.current_local_metadata!, title: null, title_availability: availability,
+        channel_name: null, channel_name_availability: availability,
+        duration_seconds: null, duration_availability: availability,
+      },
+    } })
+    renderView('1', 'dQw4w9WgXcQ')
+    const expected = availability === 'known_expired'
+      ? ['Video title unavailable — local metadata expired', 'Source channel name unavailable — local metadata expired', 'Duration unavailable — local metadata expired']
+      : ['Video title unavailable for display', 'Source channel name unavailable for display', 'Duration unavailable for display']
+    for (const label of expected) expect(await screen.findByText(label)).toBeInTheDocument()
+    expect(screen.queryByText(/^Observed at /)).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Late Night Jazz Mix' })).not.toBeInTheDocument()
+  })
+
+  it('shows current duration zero as known and distinguishes metadata read failure', async () => {
+    mockGetDecisionDetail.mockResolvedValue({ ...baseDetail, video: {
+      ...baseDetail.video,
+      metadata_context_status: 'context_read_failed',
+      current_local_metadata: {
+        ...baseDetail.video.current_local_metadata!,
+        source_fetched_at: '2026-11-07T10:15:30Z',
+        title: null, title_availability: 'unknown',
+        channel_name: null, channel_name_availability: 'unknown',
+        duration_seconds: 0, duration_availability: 'current_local',
+      },
+    } })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText('0 seconds')).toBeInTheDocument()
+    expect(screen.getByText('Video title unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Observed at 2026-11-07T10:15:30Z')).toBeInTheDocument()
+  })
+
+  it('retries only local context while preserving run evidence and identity', async () => {
+    mockGetDecisionDetail.mockResolvedValueOnce({ ...baseDetail, video: { ...baseDetail.video, metadata_context_status: 'context_read_failed', current_local_metadata: null } })
+      .mockResolvedValueOnce({ ...baseDetail, video: { ...baseDetail.video, title: 'Untrusted old title', current_local_metadata: { ...baseDetail.video.current_local_metadata!, title: 'Recovered local title' } } })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText('Could not load local video information. Decision evidence remains available.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry local information' }))
+    expect(await screen.findByText('Recovered local title')).toBeInTheDocument()
+    expect(screen.getByText('Matched')).toBeInTheDocument()
+    expect(mockGetDecisionDetail).toHaveBeenNthCalledWith(2, 1, 'dQw4w9WgXcQ')
+  })
+
+  it('keeps route-scoped exclusion separate from a hypothetical accepted outcome', async () => {
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      route_decisions: [
+        { ...baseDetail.route_decisions[0], decision: 'skipped', skip_reason: 'exclusion', condition_audits: [], actions: [] },
+        { ...baseDetail.route_decisions[1], decision: 'matched', skip_reason: undefined },
+      ],
+    })
+    mockGetRun.mockResolvedValue({ id: 1, run_type: 'backtest' })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText('Hypothetical accepted')).toBeInTheDocument()
+    expect(screen.getByText('Skipped — excluded from this route.')).toBeInTheDocument()
+    expect(screen.getByText('Route exclusion recorded; rule unavailable. This explanation is incomplete.')).toBeInTheDocument()
+    expect(screen.getByText('Compared input unavailable in this rule-reference record.')).toBeInTheDocument()
+    expect(screen.queryByText('This video was excluded')).not.toBeInTheDocument()
+  })
+
+  it('shows the captured cause in the excluded route card', async () => {
+    const route = baseDetail.route_decisions[0]
+    mockGetDecisionDetail.mockResolvedValue({ ...baseDetail, route_decisions: [{ ...route, route_name_source: 'run_snapshot', decision: 'skipped', skip_reason: 'exclusion', condition_audits: [], actions: [], causal_exclusion: { status: 'available', config_version_id: 42, exclusion_index: 2, semantics_version: 1, exclusion_type: 'word', field: 'title', comparison: 'lowercase_substring', configured_value: 'live', configured_value_status: 'available', matched: true, compared_input_status: 'unavailable' } }] })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText('Recorded causal exclusion: configuration 42, exclusion #3.')).toBeInTheDocument()
+    expect(screen.getByText('Matched rule: Title contains configured substring “live”, ignoring case.')).toBeInTheDocument()
+    expect(screen.getByText(`Route: ${route.route_name} (ID: ${route.route_id})`)).toBeInTheDocument()
+  })
+
+  describe('continued actions (BR-039)', () => {
+    const continuedDetail = (over: Partial<DecisionDetail> = {}): DecisionDetail => ({
+      ...baseDetail,
+      route_decisions: [],
+      continued_actions: [
+        { id: 0, action_type: 'add_to_playlist', target_playlist_id: 'PL2', outcome: 'succeeded', executed_at: '2026-11-12T10:00:00Z', decision_run_id: 1, route_decision_id: 9, route_id: ROUTE_A, route_name: 'Music Discovery' },
+        { id: 1, action_type: 'add_to_playlist', target_playlist_id: 'PL3', outcome: 'deferred', outcome_reason: 'quota_exhausted', decision_run_id: 1, route_decision_id: 9, route_id: ROUTE_B, route_name: null },
+        { id: 2, action_type: 'add_to_playlist', target_playlist_id: 'PL4', outcome: 'failed', outcome_reason: 'mutation_application_uncertain', decision_run_id: 1, route_decision_id: 9, route_id: ROUTE_B, route_name: 'Ambient' },
+      ],
+      ...over,
+    })
+
+    it('shows the continued group after Layer 3, with the Layer 2 text and each row labelled', async () => {
+      mockGetRun.mockResolvedValue({ id: 2, run_type: 'manual' })
+      mockGetDecisionDetail.mockResolvedValue(continuedDetail())
+      renderView('2', 'dQw4w9WgXcQ')
+      const group = await screen.findByRole('region', { name: 'Continued from an earlier run' })
+      expect(within(group).getByRole('heading', { level: 3 })).toBeInTheDocument()
+      expect(within(group).getByText('Run 2 did not evaluate this video again. These playlist additions finish a decision made by run 1.')).toBeInTheDocument()
+      expect(screen.getByText("No routes were evaluated for this video in this run. Its routes were decided in run 1.")).toBeInTheDocument()
+      // The group replaces the usual empty Layer 3 text.
+      expect(screen.queryByText('No action outcomes recorded for this video.')).toBeNull()
+
+      const layer3 = screen.getByText('Layer 3 — Action outcomes')
+      expect(layer3.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+      const first = within(group).getByRole('group', { name: "PL2 — Continues run 1's decision" })
+      expect(within(first).getByText('Succeeded')).toBeInTheDocument()
+      expect(within(first).getByText("Continues run 1's decision")).toBeInTheDocument()
+      expect(within(first).getByText('Route: Music Discovery')).toBeInTheDocument()
+      expect(within(first).getByRole('link', { name: "See run 1's decision" })).toHaveAttribute('href', '/runs/1/video/dQw4w9WgXcQ')
+
+      const second = within(group).getByRole('group', { name: "PL3 — Continues run 1's decision" })
+      expect(within(second).getByText('Deferred')).toBeInTheDocument()
+      expect(within(second).getByText('Route name unavailable')).toBeInTheDocument()
+      // An uncertain continued addition keeps its existing presentation.
+      expect(within(group).getByText('Playlist outcome unknown')).toBeInTheDocument()
+    })
+
+    it('keeps the run\'s own actions in their usual place and the usual Layer 2', async () => {
+      mockGetDecisionDetail.mockResolvedValue(continuedDetail({ route_decisions: baseDetail.route_decisions }))
+      renderView('2', 'dQw4w9WgXcQ')
+      const group = await screen.findByRole('region', { name: 'Continued from an earlier run' })
+      expect(screen.getByText('Routes evaluated in order. Numbers show evaluation sequence.')).toBeInTheDocument()
+      expect(screen.queryByText(/No routes were evaluated for this video in this run/)).toBeNull()
+      expect(screen.getAllByText('add_to_playlist → PLmusic').length).toBeGreaterThanOrEqual(1)
+      expect(within(group).queryByText('add_to_playlist → PLmusic')).toBeNull()
+    })
+
+    it('shows no group and the usual empty text when nothing was continued', async () => {
+      mockGetDecisionDetail.mockResolvedValue({ ...baseDetail, route_decisions: [] })
+      renderView('1', 'dQw4w9WgXcQ')
+      await screen.findByText('Layer 3 — Action outcomes')
+      expect(screen.queryByRole('region', { name: 'Continued from an earlier run' })).toBeNull()
+      expect(screen.getByText('No action outcomes recorded for this video.')).toBeInTheDocument()
+    })
+
+    it('never shows the group in a simulation', async () => {
+      mockGetRun.mockResolvedValue({ id: 2, run_type: 'dry_run' })
+      mockGetDecisionDetail.mockResolvedValue(continuedDetail())
+      renderView('2', 'dQw4w9WgXcQ')
+      await screen.findByText('Layer 3 — Simulated action outcomes')
+      expect(screen.queryByRole('region', { name: 'Continued from an earlier run' })).toBeNull()
+    })
+
+    it('names the runs when the additions finish decisions of more than one run', async () => {
+      const d = continuedDetail()
+      d.continued_actions[1] = { ...d.continued_actions[1], decision_run_id: 5 }
+      mockGetDecisionDetail.mockResolvedValue(d)
+      renderView('7', 'dQw4w9WgXcQ')
+      expect(await screen.findByText('Run 7 did not evaluate this video again. These playlist additions finish decisions made by runs 1 and 5.')).toBeInTheDocument()
+      expect(screen.getByText('No routes were evaluated for this video in this run. Its routes were decided in runs 1 and 5.')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a stored video failure as a sentence with the support code only under Technical details', async () => {
+    const stored = 'diag:v1 phase=discovery operation=discover code=timeout'
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      processing_state: 'failed',
+      final_outcome: 'failed',
+      video: { ...baseDetail.video, final_outcome: 'failed', error_message: stored },
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText('YuHaul stopped waiting because a step took too long.')).toBeInTheDocument()
+    const summary = screen.getByText('Technical details')
+    expect(summary.closest('details')!.open).toBe(false)
+    expect(summary.getAttribute('aria-label')).toMatch(/^Technical details for .+/)
+    expect(screen.getByText(stored)).toBeInTheDocument()
+    expect(summary.closest('p')).toBeNull()
+  })
+
+  it('replaces the diagnostic of an unreadable original decision with the plain reason', async () => {
+    mockGetDecisionDetail.mockResolvedValue({
+      ...baseDetail,
+      processing_state: 'failed',
+      final_outcome: 'failed',
+      video: { ...baseDetail.video, final_outcome: 'failed', error_message: 'diag:v1 phase=action_execution operation=load_run code=original_decision_unavailable' },
+    })
+    renderView('1', 'dQw4w9WgXcQ')
+    expect(await screen.findByText("Playlist additions not finished: the earlier run's decision could not be read.")).toBeInTheDocument()
+    expect(screen.queryByText(/diag:v1/)).toBeNull()
   })
 })

@@ -1,5 +1,5 @@
-import type { Route, Run, BacktestComparison } from '../types'
-import { api } from './core'
+import type { Route, Run, BacktestComparison, DiscardCause, RunStatus } from '../types'
+import { api, ApiError } from './core'
 
 export async function listRuns(): Promise<Run[]> {
   const data = await api<{ runs: Run[] }>('/api/runs')
@@ -22,8 +22,115 @@ export async function getRun(id: number): Promise<Run | undefined> {
   }
 }
 
-export async function startRun(): Promise<{ run_id: number; status: string }> {
-  return api<{ run_id: number; status: string }>('/api/runs', { method: 'POST' })
+// Run Now either resumes the oldest run that stopped at its time limit
+// ("resumed") or starts a new one ("started"). Progress follows run_id in both
+// cases. A refusal is a 409 ApiError carrying code (production_run_active |
+// resume_unavailable) and, for resume_unavailable, runId and reason.
+export interface StartRunResult {
+  run_id: number
+  status: string
+  // Optional on purpose: a 202 without a known admission is accepted without
+  // claiming it was new or resumed.
+  admission?: 'started' | 'resumed'
+}
+
+export async function startRun(): Promise<StartRunResult> {
+  return api<StartRunResult>('/api/runs', { method: 'POST' })
+}
+
+// Stop and Discard refusals are ApiErrors whose code is one of these closed
+// values (ARS-002 §3, ARS-003 §4.1). reason accompanies run_not_active
+// (not_executing | ending) and run_not_discardable
+// (resumable | not_oldest | not_eligible); runId is always set for them.
+export type StopRefusalCode =
+  | 'invalid_run_id'
+  | 'shutting_down'
+  | 'run_not_found'
+  | 'run_ended'
+  | 'run_not_active'
+  | 'stop_failed'
+
+export type DiscardRefusalCode =
+  | 'invalid_run_id'
+  | 'shutting_down'
+  | 'startup_recovery_active'
+  | 'production_run_active'
+  | 'run_not_found'
+  | 'run_ended'
+  | 'run_not_discardable'
+  | 'discard_failed'
+  | 'discard_outcome_unknown'
+
+const STOP_REFUSAL_CODES: readonly string[] = ['invalid_run_id', 'shutting_down', 'run_not_found', 'run_ended', 'run_not_active', 'stop_failed']
+const DISCARD_REFUSAL_CODES: readonly string[] = [
+  'invalid_run_id', 'shutting_down', 'startup_recovery_active', 'production_run_active', 'run_not_found',
+  'run_ended', 'run_not_discardable', 'discard_failed', 'discard_outcome_unknown',
+]
+
+// Narrow an error from stopRun/discardRun to its closed refusal code. Returns
+// undefined for network failures and any error without a known code.
+export function stopRefusalCode(err: unknown): StopRefusalCode | undefined {
+  return err instanceof ApiError && err.code && STOP_REFUSAL_CODES.includes(err.code) ? (err.code as StopRefusalCode) : undefined
+}
+
+export function discardRefusalCode(err: unknown): DiscardRefusalCode | undefined {
+  return err instanceof ApiError && err.code && DISCARD_REFUSAL_CODES.includes(err.code) ? (err.code as DiscardRefusalCode) : undefined
+}
+
+export interface StopRunResult {
+  run_id: number
+  status: 'running'
+  // already_stopping is a success: a stop was recorded earlier.
+  stop: 'accepted' | 'already_stopping'
+}
+
+export async function stopRun(id: number): Promise<StopRunResult> {
+  return api<StopRunResult>(`/api/runs/${id}/stop`, { method: 'POST' })
+}
+
+export interface DiscardRunResult {
+  run_id: number
+  status: Extract<RunStatus, 'failed'>
+  outcome: 'discarded'
+  cause: DiscardCause
+}
+
+export async function discardRun(id: number): Promise<DiscardRunResult> {
+  return api<DiscardRunResult>(`/api/runs/${id}/discard`, { method: 'POST' })
+}
+
+// End ("Mark as ended", BR-036) refusals are ApiErrors with one of these closed
+// codes. reason accompanies run_not_endable (not_production | not_legacy |
+// executing); runType accompanies not_production; savedStatus accompanies
+// run_ended and end_failed.
+export type EndRefusalCode =
+  | 'invalid_run_id'
+  | 'shutting_down'
+  | 'startup_recovery_active'
+  | 'production_run_active'
+  | 'run_not_found'
+  | 'run_ended'
+  | 'run_not_endable'
+  | 'end_failed'
+  | 'end_outcome_unknown'
+
+const END_REFUSAL_CODES: readonly string[] = [
+  'invalid_run_id', 'shutting_down', 'startup_recovery_active', 'production_run_active', 'run_not_found',
+  'run_ended', 'run_not_endable', 'end_failed', 'end_outcome_unknown',
+]
+
+export function endRefusalCode(err: unknown): EndRefusalCode | undefined {
+  return err instanceof ApiError && err.code && END_REFUSAL_CODES.includes(err.code) ? (err.code as EndRefusalCode) : undefined
+}
+
+export interface EndRunResult {
+  run_id: number
+  status: Extract<RunStatus, 'failed'>
+  outcome: 'ended'
+}
+
+export async function endRun(id: number): Promise<EndRunResult> {
+  return api<EndRunResult>(`/api/runs/${id}/end`, { method: 'POST' })
 }
 
 export async function startDryRun(draft?: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string }> {
@@ -33,16 +140,35 @@ export async function startDryRun(draft?: { routes: Route[]; duplicate_threshold
   })
 }
 
-export async function startReplay(configVersionId?: number): Promise<{ run_id: number; status: string }> {
+// Calendar-day strings exactly as a date input holds them (YYYY-MM-DD). They
+// are sent unchanged and never pass through Date, so the browser's time zone
+// cannot move a day (run-initiation ADR-002). An empty string means unchosen.
+export interface PublishedDays {
+  from?: string
+  to?: string
+}
+
+function publishedDayFields(days?: PublishedDays): { published_from?: string; published_to?: string } {
+  const out: { published_from?: string; published_to?: string } = {}
+  if (days?.from) out.published_from = days.from
+  if (days?.to) out.published_to = days.to
+  return out
+}
+
+export async function startReplay(configVersionId?: number, days?: PublishedDays): Promise<{ run_id: number; status: string }> {
+  const body = {
+    ...(configVersionId !== undefined ? { config_version_id: configVersionId } : {}),
+    ...publishedDayFields(days),
+  }
   return api<{ run_id: number; status: string }>('/api/runs/replay', {
     method: 'POST',
-    body: configVersionId !== undefined ? JSON.stringify({ config_version_id: configVersionId }) : undefined,
+    body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
   })
 }
 
-export async function startBacktest(proposed: { routes: Route[]; duplicate_threshold: number }): Promise<{ run_id: number; status: string; comparison?: BacktestComparison }> {
+export async function startBacktest(proposed: { routes: Route[]; duplicate_threshold: number }, days?: PublishedDays): Promise<{ run_id: number; status: string; comparison?: BacktestComparison }> {
   return api<{ run_id: number; status: string; comparison?: BacktestComparison }>('/api/backtest', {
     method: 'POST',
-    body: JSON.stringify({ proposed_configuration: proposed }),
+    body: JSON.stringify({ proposed_configuration: proposed, ...publishedDayFields(days) }),
   })
 }

@@ -3,6 +3,7 @@ type: requirement
 title: BR-028 — Historical Run Inspection
 description: User can inspect historical runs and understand why videos were accepted, rejected, deferred, or failed
 tags: [requirement, inspection, history, run-history, transparency, priority:MUST]
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 **Status:** accepted
@@ -23,6 +24,8 @@ The system SHALL allow the user to inspect historical runs and understand the fu
 7. For failed videos, the failure reason and retry count are shown.
 8. The user can search for a video across all historical runs by video identifier or title.
 9. All inspection data is derived from persisted evidence, not reconstructed from live API calls.
+
+For partial discovery, all-local scan failures, and restart when the only source is confirmed ineligible after saving a page, [BR-002 AC7–10](br-002-subscription-discovery-without-live-monitoring.md) governs the applicable discovery coverage and status shown on Run Detail. Those are run facts, not video outcomes.
 
 ## Derived from
 

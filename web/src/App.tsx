@@ -8,6 +8,8 @@ import { RouteEditorView } from './views/RouteEditorView'
 import { RunsView } from './views/RunsView'
 import { RunDetailView } from './views/RunDetailView'
 import { DecisionDetailView } from './views/DecisionDetailView'
+import { VideosView } from './views/VideosView'
+import { VideoView } from './views/VideoView'
 import { AnalyticsView } from './views/AnalyticsView'
 import { ChannelsView } from './views/ChannelsView'
 import { ErrorsView } from './views/ErrorsView'
@@ -65,6 +67,8 @@ function AppRoutes() {
       <Route path="/runs" element={<RunsView />} />
       <Route path="/runs/:id" element={<RunDetailView />} />
       <Route path="/runs/:id/video/:videoId" element={<DecisionDetailView />} />
+      <Route path="/videos" element={<VideosView />} />
+      <Route path="/videos/:videoId" element={<VideoView />} />
       <Route path="/analytics" element={<AnalyticsView />} />
       <Route path="/analytics/channels" element={<ChannelsView />} />
       <Route path="/analytics/channels/:channelId" element={<ChannelsView />} />

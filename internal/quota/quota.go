@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,17 @@ const DefaultDailyLimit = 10_000
 
 // Operation names the categories of external API calls whose costs are tracked.
 type Operation string
+
+// OutcomeCategory is the bounded provider response category for an admitted call.
+type OutcomeCategory string
+
+const (
+	OutcomeSuccess   OutcomeCategory = "success"
+	OutcomeQuota     OutcomeCategory = "quota"
+	OutcomeTransient OutcomeCategory = "transient"
+	OutcomeAuth      OutcomeCategory = "auth"
+	OutcomePermanent OutcomeCategory = "permanent"
+)
 
 // Known YouTube Data API v3 operations and their unit costs per architecture.
 const (
@@ -81,6 +93,149 @@ type Ledger struct {
 	db           *sql.DB
 	logger       *slog.Logger
 	defaultLimit int
+	mu           sync.Mutex
+	holds        map[*Hold]struct{}
+	now          func() time.Time
+}
+
+// Hold is an opaque capacity reservation. Its lifecycle is guarded by Ledger.
+type Hold struct {
+	ledger *Ledger
+	op     Operation
+	date   string
+	at     time.Time
+	state  uint8 // 0 provisional, 1 admitted, 2 finished, 3 accounting uncertain, 4 cancelled
+}
+
+// AdmissionTime is the UTC timestamp to use in the authorization receipt.
+func (h *Hold) AdmissionTime() time.Time { return h.at }
+
+// Acquire reserves capacity for one operation. A nil hold with nil error is a
+// quota refusal. Call under the authority fence after credential resolution.
+func (l *Ledger) Acquire(ctx context.Context, op Operation) (*Hold, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	limit, err := l.DailyLimit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bucket, err := l.bucketCalculator(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		at := l.now().UTC()
+		date := bucket(at)
+		consumed, err := l.ConsumedOn(ctx, date)
+		if err != nil {
+			return nil, err
+		}
+		// Local reads may cross a reset boundary. Recheck after they finish.
+		now := l.now().UTC()
+		current := bucket(now)
+		if current != date {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		held := 0
+		for h := range l.holds {
+			if h.date == date {
+				held += h.op.UnitCost()
+			}
+		}
+		if limit > 0 && (consumed+held > limit || op.UnitCost() > limit-consumed-held) {
+			return nil, nil
+		}
+		h := &Hold{ledger: l, op: op, date: date, at: now}
+		if l.holds == nil {
+			l.holds = make(map[*Hold]struct{})
+		}
+		l.holds[h] = struct{}{}
+		return h, nil
+	}
+}
+
+// Admit commits a provisional hold to an attempt. It must be called under the
+// authority fence immediately before sending; after this it cannot be cancelled.
+func (h *Hold) Admit(ctx context.Context) error {
+	return h.AdmitIf(ctx, nil)
+}
+
+// AdmitIf commits a provisional hold only if validate accepts the admission
+// time, after all local schedule reads. validate runs under the ledger mutex
+// and the caller's authority fence; it must not block, perform I/O, or call
+// back into the ledger. An error leaves the hold provisional and cancellable.
+// The caller must retain the authority fence through this call and release it
+// before sending. A nil validator performs no additional authority check.
+func (h *Hold) AdmitIf(ctx context.Context, validate func(time.Time) error) error {
+	l := h.ledger
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if h.state != 0 {
+		return fmt.Errorf("quota: hold is not provisional")
+	}
+	bucket, err := l.bucketCalculator(ctx)
+	if err != nil {
+		return err
+	}
+	now := l.now().UTC()
+	date := bucket(now)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if date != h.date {
+		return fmt.Errorf("quota: bucket changed before admission")
+	}
+	if validate != nil {
+		if err := validate(now); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h.at = now
+	h.state = 1
+	return nil
+}
+
+// Cancel releases only a positively unadmitted hold.
+func (h *Hold) Cancel() error {
+	l := h.ledger
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if h.state != 0 {
+		return fmt.Errorf("quota: hold is not provisional")
+	}
+	h.state = 4
+	delete(l.holds, h)
+	return nil
+}
+
+// Finalize records exactly one admitted attempt. An insert error leaves the
+// reservation debited and cannot be retried because commit may be unknown.
+func (h *Hold) Finalize(ctx context.Context, runID sql.NullInt64, category OutcomeCategory, status sql.NullInt64) error {
+	l := h.ledger
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if h.state != 1 {
+		return fmt.Errorf("quota: hold is not an unfinalized admission")
+	}
+	switch category {
+	case OutcomeSuccess, OutcomeQuota, OutcomeTransient, OutcomeAuth, OutcomePermanent:
+	default:
+		return fmt.Errorf("quota: invalid outcome category")
+	}
+	_, err := l.db.ExecContext(ctx, `INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, run_id, recorded_at, outcome_category, http_status) VALUES (?, ?, ?, 1, ?, ?, ?, ?)`, h.date, string(h.op), h.op.UnitCost(), runID, h.at, string(category), status)
+	if err != nil {
+		h.state = 3
+		return fmt.Errorf("quota: record attempt: %w", err)
+	}
+	h.state = 2
+	delete(l.holds, h)
+	return nil
 }
 
 // Option configures a Ledger.
@@ -110,6 +265,7 @@ func New(db *sql.DB, opts ...Option) *Ledger {
 		db:           db,
 		logger:       slog.Default(),
 		defaultLimit: DefaultDailyLimit,
+		now:          time.Now,
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -124,6 +280,8 @@ func (l *Ledger) Record(ctx context.Context, runID sql.NullInt64, op Operation) 
 
 // RecordCalls records multiple API calls of the same type in one ledger row.
 func (l *Ledger) RecordCalls(ctx context.Context, runID sql.NullInt64, op Operation, callCount int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if callCount <= 0 {
 		return nil
 	}
@@ -148,6 +306,34 @@ func (l *Ledger) RecordCalls(ctx context.Context, runID sql.NullInt64, op Operat
 		"call_count", callCount,
 		"date", date,
 	)
+	return nil
+}
+
+// RecordAttempt records one admitted API call using its admission time for the
+// quota bucket and recorded timestamp. A missing HTTP response has null status.
+func (l *Ledger) RecordAttempt(ctx context.Context, runID sql.NullInt64, op Operation, admittedAt time.Time, category OutcomeCategory, httpStatus sql.NullInt64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if admittedAt.IsZero() {
+		return fmt.Errorf("quota: admission time is required")
+	}
+	switch category {
+	case OutcomeSuccess, OutcomeQuota, OutcomeTransient, OutcomeAuth, OutcomePermanent:
+	default:
+		return fmt.Errorf("quota: invalid outcome category")
+	}
+	date, err := l.bucketDate(ctx, admittedAt)
+	if err != nil {
+		return fmt.Errorf("quota: determine bucket date: %w", err)
+	}
+	_, err = l.db.ExecContext(ctx,
+		`INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, run_id, recorded_at, outcome_category, http_status)
+		 VALUES (?, ?, ?, 1, ?, ?, ?, ?)`,
+		date, string(op), op.UnitCost(), runID, admittedAt.UTC(), string(category), httpStatus,
+	)
+	if err != nil {
+		return fmt.Errorf("quota: record attempt: %w", err)
+	}
 	return nil
 }
 
@@ -226,6 +412,8 @@ func (l *Ledger) Budget(ctx context.Context) (*BudgetSnapshot, error) {
 // exceeding the daily limit. It returns the remaining capacity for the current
 // bucket. If the limit is unlimited (<= 0), the check always succeeds.
 func (l *Ledger) CanAfford(ctx context.Context, estimate int) (bool, int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	budget, err := l.Budget(ctx)
 	if err != nil {
 		return false, 0, err
@@ -235,10 +423,19 @@ func (l *Ledger) CanAfford(ctx context.Context, estimate int) (bool, int, error)
 		return true, budget.Remaining, nil
 	}
 
-	ok := budget.Consumed+estimate <= budget.DailyLimit
-	remaining := budget.Remaining
+	held := 0
+	for h := range l.holds {
+		if h.date == budget.Date {
+			held += h.op.UnitCost()
+		}
+	}
+	ok := budget.Consumed+held+estimate <= budget.DailyLimit
+	remaining := budget.Remaining - held
+	if remaining < 0 {
+		remaining = 0
+	}
 	if !ok {
-		remaining = budget.DailyLimit - budget.Consumed - estimate
+		remaining = budget.DailyLimit - budget.Consumed - held - estimate
 		if remaining < 0 {
 			remaining = 0
 		}
@@ -273,6 +470,8 @@ func (l *Ledger) DailyLimit(ctx context.Context) (int, error) {
 
 // SetDailyLimit stores the daily limit.
 func (l *Ledger) SetDailyLimit(ctx context.Context, limit int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.setSetting(ctx, "daily_limit", strconv.Itoa(limit))
 }
 
@@ -301,6 +500,8 @@ func (l *Ledger) ResetSchedule(ctx context.Context) (*ResetSchedule, bool, error
 // SetResetSchedule stores the daily reset schedule and clears any stale
 // API-reported next-reset value.
 func (l *Ledger) SetResetSchedule(ctx context.Context, tz, timeOfDay string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if _, err := time.LoadLocation(tz); err != nil {
 		return fmt.Errorf("quota: invalid timezone %q: %w", tz, err)
 	}
@@ -379,25 +580,34 @@ func (l *Ledger) setSettingTx(ctx context.Context, tx *sql.Tx, key, value string
 
 // bucketDate returns the ISO date of the quota bucket containing now.
 func (l *Ledger) bucketDate(ctx context.Context, now time.Time) (string, error) {
-	sch, ok, err := l.ResetSchedule(ctx)
+	bucket, err := l.bucketCalculator(ctx)
 	if err != nil {
 		return "", err
 	}
+	return bucket(now), nil
+}
+
+// bucketCalculator loads the schedule before the caller samples its clock.
+func (l *Ledger) bucketCalculator(ctx context.Context) (func(time.Time) string, error) {
+	sch, ok, err := l.ResetSchedule(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		// Without a configured schedule, fall back to UTC calendar day.
-		return now.UTC().Format("2006-01-02"), nil
+		return func(now time.Time) string { return now.UTC().Format("2006-01-02") }, nil
 	}
 
 	loc, err := time.LoadLocation(sch.Timezone)
 	if err != nil {
-		return "", fmt.Errorf("quota: load timezone %q: %w", sch.Timezone, err)
+		return nil, fmt.Errorf("quota: load timezone %q: %w", sch.Timezone, err)
 	}
 	offset, err := parseTimeOfDay(sch.TimeOfDay)
 	if err != nil {
-		return "", fmt.Errorf("quota: parse time of day %q: %w", sch.TimeOfDay, err)
+		return nil, fmt.Errorf("quota: parse time of day %q: %w", sch.TimeOfDay, err)
 	}
 
-	return bucketDateFor(now, loc, offset), nil
+	return func(now time.Time) string { return bucketDateFor(now, loc, offset) }, nil
 }
 
 // nextReset returns the next reset time, if one can be determined.
