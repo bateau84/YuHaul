@@ -28,7 +28,10 @@ func (p *Pipeline) withoutUnroutableVideos(ctx context.Context, runID int64, vid
 		return nil, fmt.Errorf("encode member ids: %w", err)
 	}
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT v.id, `+state.RoutableByRun+`, `+state.FinalVideo+`
+		`SELECT v.id, (`+state.RoutableByRun+`
+		  AND NOT EXISTS (SELECT 1 FROM run_video_outcome o
+		    WHERE o.run_id=:run AND o.video_id=v.id
+		      AND v.discovered_in_run_id=:run AND o.final_outcome='deferred')), `+state.FinalVideo+`
 		 FROM video v WHERE v.id IN (SELECT value FROM json_each(:ids))`,
 		sql.Named("ids", string(idsJSON)), sql.Named("run", runID))
 	if err != nil {

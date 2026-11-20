@@ -358,6 +358,9 @@ func (e *Executor) execute(ctx context.Context, runID, decisionRunID, videoID in
 		actionCtx := context.WithValue(ctx, guardedDeferredActionsKey{}, actions[i+1:])
 		outcome, err := e.executeAction(actionCtx, runID, videoID, videoIDText, action, binding)
 		if err != nil {
+			if isRetryAdmissionRefusal(err) {
+				return state.FinalOutcomeFailed, err
+			}
 			var accountingErr *postCommitAccountingError
 			if errors.As(err, &accountingErr) {
 				return state.FinalOutcomeDeferred, err
@@ -727,8 +730,29 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 		return state.ActionOutcomeFailed, err
 	}
 	claim := state.PlaylistSendClaim{RunID: runID, VideoID: videoID, RouteDecisionID: a.RouteDecisionID, TargetPlaylistID: a.TargetPlaylistID, ActionType: a.ActionType, AuthorizationID: identity, DecisionRunID: a.DecisionRunID}
+	if retry, ok := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt); ok {
+		retry.Deferred = append([]queue.RetryRowRef(nil), retry.Deferred...)
+		retry.Errors = append([]queue.RetryRowRef(nil), retry.Errors...)
+		claim.Origin = state.PlaylistSendRetry
+		claim.RetryAuthority = func(ctx context.Context, tx *sql.Tx, claimedRunID, claimedVideoID int64) error {
+			if retry.ReceivingRunID != claimedRunID || retry.VideoID != claimedVideoID {
+				return queue.ErrWorkNotOwned
+			}
+			qs, err := queue.NewStore(e.db)
+			if err != nil {
+				return err
+			}
+			_, err = qs.ValidateRetryReceiptTx(ctx, tx, retry)
+			return err
+		}
+	}
 	claimed, receipt, err := guardStore.ClaimPlaylistSend(ctx, claim, time.Now().UTC())
 	if err != nil {
+		if retry, ok := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt); ok && isRetryAdmissionRefusal(err) {
+			retry.Deferred = append([]queue.RetryRowRef(nil), retry.Deferred...)
+			retry.Errors = append([]queue.RetryRowRef(nil), retry.Errors...)
+			return state.ActionOutcomeFailed, &retryAdmissionRefusal{receipt: retry, cause: err}
+		}
 		return state.ActionOutcomeFailed, err
 	}
 	switch claimed {

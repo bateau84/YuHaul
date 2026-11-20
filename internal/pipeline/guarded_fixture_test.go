@@ -619,10 +619,12 @@ func TestGuardedFinalQuotaRefusalRetryReceipt(t *testing.T) {
 			retryCtx := context.WithValue(withGuardedDeferral(ctx, handoff), guardedRetryGroupKey{}, receipt)
 			e := NewExecutor(f.db, f.ledger, f.auth)
 			outcome, err := e.executeGuardedAction(retryCtx, run.ID, f.videoID, "guarded-external-video", action{RouteDecisionID: decision, ActionType: "playlist_insert", TargetPlaylistID: f.target}, &f.binding)
-			var guards, rows int
+			var guards, rows, deferred int
 			require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM playlist_send_guard WHERE run_id=?`, run.ID).Scan(&guards))
 			require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM quota_ledger`).Scan(&rows))
+			require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM deferred_item WHERE video_id=?`, f.videoID).Scan(&deferred))
 			require.Zero(t, rows)
+			require.Equal(t, 1, deferred)
 			actions, readErr := f.state.GetExecutedActionsForVideoInRun(ctx, f.videoID, run.ID)
 			require.NoError(t, readErr)
 			item, readErr := qs.GetDeferredItem(ctx, id)
@@ -636,12 +638,16 @@ func TestGuardedFinalQuotaRefusalRetryReceipt(t *testing.T) {
 				require.Equal(t, queue.DeferredStatusPending, item.Status)
 				require.Equal(t, run.ID, *item.RetryRunID)
 			} else {
-				require.Error(t, err)
-				require.Equal(t, 1, guards)
+				var refusal *retryAdmissionRefusal
+				require.ErrorAs(t, err, &refusal)
+				require.Zero(t, guards, "ownership is lost before guard preparation")
 				require.Empty(t, actions)
 				if mode == "removed" {
+					require.ErrorIs(t, err, queue.ErrWorkRemoved)
 					require.Equal(t, queue.DeferredStatusDiscarded, item.Status)
 				} else {
+					require.ErrorIs(t, err, queue.ErrWorkNotOwned)
+					require.Equal(t, queue.DeferredStatusRetrying, item.Status)
 					require.Equal(t, f.runID, *item.RetryRunID)
 				}
 			}

@@ -126,15 +126,62 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 	}
 	p.executionBinding = &binding
 	defer func() { p.executionBinding = nil }()
-	if err := p.processDeferredItems(ctx, run.ID); err != nil {
+	if err := p.processDeferredItems(ctx, run.ID, []queue.RetryGroupReceipt{claimedReceipt}, false); err != nil {
 		p.failRun(ctx, run.ID, "manual retry failed", err)
-		if stopOwnsEnding(ctx) {
+		if stopOwnsEnding(ctx) || errors.Is(err, state.ErrPlaylistSendStopped) {
 			return nil // the user stopped this retry; finishRun settles it
 		}
 		return err
 	}
 	p.completeRun(ctx, run.ID)
 	return nil
+}
+
+// retryAdmissionRefusal preserves the original claim for run-ending settlement.
+// It must not be interpreted as permission to mutate any of its rows.
+type retryAdmissionRefusal struct {
+	receipt queue.RetryGroupReceipt
+	cause   error
+}
+
+func (e *retryAdmissionRefusal) Error() string { return e.cause.Error() }
+func (e *retryAdmissionRefusal) Unwrap() error { return e.cause }
+
+// endRefusedRetry transfers the original receipt to the run-ending boundary.
+// A stop marker may be observed by the guard before the execution context is
+// cancelled; it must still take precedence over ordinary failure.
+func (p *Pipeline) endRefusedRetry(ctx context.Context, runID int64, refusal *retryAdmissionRefusal, reason string) {
+	ctl := p.control(runID)
+	if ctl != nil {
+		ctl.mu.Lock()
+		ctl.refusedRetry = refusal
+		if errors.Is(refusal, state.ErrPlaylistSendStopped) {
+			ctl.stopRequested = true
+		}
+		stopped := ctl.stopRequested
+		ctl.mu.Unlock()
+		if stopped {
+			return
+		}
+	}
+	if err := p.settleRefusedRetry(ctx, runID, refusal, false); err != nil {
+		p.logger.ErrorContext(ctx, "retry refusal settlement unavailable", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
+		p.interruptAuthorityRun(ctx, runID, reason)
+	}
+}
+
+// settleRefusedRetry is the private receipt-aware settlement boundary. Until
+// retention validates provenance under the reserved writer, neither the
+// generic failure sweep nor the generic stop handoff is safe for this receipt.
+func (p *Pipeline) settleRefusedRetry(_ context.Context, _ int64, _ *retryAdmissionRefusal, _ bool) error {
+	return errors.New("receipt-aware retry settlement unavailable")
+}
+
+func isRetryAdmissionRefusal(err error) bool {
+	return errors.Is(err, queue.ErrWorkRemoved) ||
+		errors.Is(err, queue.ErrWorkNotOwned) ||
+		errors.Is(err, queue.ErrRetryOwnership) ||
+		errors.Is(err, state.ErrPlaylistSendStopped)
 }
 
 // A retry's global state was reset by the claim transaction, not inferred from
@@ -147,11 +194,7 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	}
 	receipt, ok := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt)
 	if !ok || receipt.ReceivingRunID != runID || receipt.VideoID != videoID {
-		receipt, err = qs.RetryGroupReceiptForRunVideo(ctx, runID, videoID)
-		if err != nil {
-			return fmt.Errorf("capture retry group receipt: %w", err)
-		}
-		ctx = context.WithValue(ctx, guardedRetryGroupKey{}, receipt)
+		return fmt.Errorf("retry video %d missing exact receipt: %w", videoID, queue.ErrWorkNotOwned)
 	}
 	// BR-039 / ARS-006 §5: a final video is never processed. Settle the claim
 	// and return before any evaluation or send.
@@ -201,6 +244,13 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	// chain (ARD-001); only bounded auxiliary facts reach the log below.
 	message := diag.Reason(workErr, "retry failed")
 	var accountingErr *postCommitAccountingError
+	if isRetryAdmissionRefusal(workErr) {
+		var refusal *retryAdmissionRefusal
+		if errors.As(workErr, &refusal) {
+			return workErr
+		}
+		return &retryAdmissionRefusal{receipt: receipt, cause: workErr}
+	}
 	if errors.As(workErr, &accountingErr) {
 		return workErr
 	}
@@ -477,13 +527,17 @@ func acknowledgeRetryReceiptTx(ctx context.Context, tx *sql.Tx, receipt queue.Re
 	return nil
 }
 
-// Includes requeued and acknowledged rows: a quota requeue must not become a
-// second ordinary phase attempt in the same receiving run.
+// Retry membership is durable even when release clears retry_run_id. Foreign
+// members are handled only through a live receipt, never the ordinary phases.
 func (p *Pipeline) withoutRetryVideos(ctx context.Context, runID int64, videos []*state.Video) ([]*state.Video, error) {
 	out := make([]*state.Video, 0, len(videos))
 	for _, v := range videos {
 		var retry bool
-		if err := p.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM deferred_item WHERE video_id=? AND retry_run_id=? UNION ALL SELECT 1 FROM error_entry WHERE video_id=? AND retry_run_id=?)`, v.ID, runID, v.ID, runID).Scan(&retry); err != nil {
+		if err := p.db.QueryRowContext(ctx, `SELECT
+		 EXISTS(SELECT 1 FROM deferred_item WHERE video_id=?1 AND retry_run_id=?2
+		        UNION ALL SELECT 1 FROM error_entry WHERE video_id=?1 AND retry_run_id=?2)
+		 OR EXISTS(SELECT 1 FROM run_video_outcome o JOIN video v ON v.id=o.video_id
+		           WHERE o.video_id=?1 AND o.run_id=?2 AND v.discovered_in_run_id IS NOT ?2)`, v.ID, runID).Scan(&retry); err != nil {
 			return nil, err
 		}
 		if !retry {

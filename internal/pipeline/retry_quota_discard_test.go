@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,8 +18,68 @@ import (
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
+	"github.com/bateau84/YuHaul/internal/store"
 	"github.com/stretchr/testify/require"
 )
+
+func TestReleasedForeignMembershipExcludedAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "receipt.db")
+	db, err := store.Open(ctx, path)
+	require.NoError(t, err)
+	f := newGuardedProductionFixtureOnDB(t, db, []string{"PL1"}, http.StatusOK)
+	qs, err := queue.NewStore(db)
+	require.NoError(t, err)
+	item, err := qs.CreateDeferredItem(ctx, &queue.DeferredItem{
+		VideoID: f.videoID, RunID: f.runID, Reason: queue.DeferredReasonQuotaExhausted,
+		Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning}
+	run.ConfigVersionID, err = config.NewService(router.NewStore(db), config.NewStore(db)).ActiveVersionID(ctx)
+	require.NoError(t, err)
+	var receipt queue.RetryGroupReceipt
+	require.NoError(t, qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		run.ID, err = f.state.CreateGuardedMutationRunTx(ctx, tx, run, true)
+		if err != nil {
+			return err
+		}
+		var claimed bool
+		receipt, _, claimed, err = qs.ClaimDeferredGroupReceiptTx(ctx, tx, item, run.ID, time.Now())
+		if err == nil && !claimed {
+			return errRetryClaimLost
+		}
+		return err
+	}))
+	require.NoError(t, qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		return qs.RequeueRetryReceiptTx(ctx, tx, receipt)
+	}))
+	require.NoError(t, db.Close())
+	db, err = store.Open(ctx, path)
+	require.NoError(t, err)
+	defer db.Close()
+	ss, err := state.NewStore(db)
+	require.NoError(t, err)
+	v, err := ss.GetVideo(ctx, f.videoID)
+	require.NoError(t, err)
+	p := &Pipeline{db: db, stateStore: ss, logger: discardLogger()}
+	got, err := p.withoutRetryVideos(ctx, run.ID, []*state.Video{v})
+	require.NoError(t, err)
+	require.Empty(t, got, "released foreign membership is not ordinary input")
+	got, err = p.withoutRetryVideos(ctx, f.runID, []*state.Video{v})
+	require.NoError(t, err)
+	require.Len(t, got, 1, "native membership is not mistaken for a foreign claim")
+	// An origin's committed deferred outcome remains a veto after its queue
+	// item is removed; the retry-owner filter alone cannot express that.
+	_, err = db.ExecContext(ctx, `UPDATE run_video_outcome SET final_outcome='deferred', deferred_reason='quota_exhausted' WHERE run_id=? AND video_id=?`, f.runID, f.videoID)
+	require.NoError(t, err)
+	qs, err = queue.NewStore(db)
+	require.NoError(t, err)
+	require.NoError(t, qs.DiscardDeferredItem(ctx, item))
+	got, err = p.withoutUnroutableVideos(ctx, f.runID, []*state.Video{v})
+	require.NoError(t, err)
+	require.Empty(t, got, "released native input remains excluded after removal")
+}
 
 func TestClaimedDeferredRetryQuotaWithConcurrentDiscard(t *testing.T) {
 	ctx := context.Background()
@@ -335,8 +396,7 @@ func TestErrorOnlyRetryAuthorizationPendingHandoff(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			// Claim the exact error group and establish the receiving run's send
-			// guard in the same committed SQLite transaction.
+			// Claim the exact error group and create the receiving run.
 			versioner := config.NewService(router.NewStore(f.db), config.NewStore(f.db))
 			run := &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning, ActionAuthorityVersion: 1}
 			run.ConfigVersionID, err = versioner.ActiveVersionID(ctx)
@@ -393,6 +453,8 @@ func TestErrorOnlyRetryAuthorizationPendingHandoff(t *testing.T) {
 			outcome, err := p.executeVideoActions(retryCtx, run.ID, video)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
+				var refusal *retryAdmissionRefusal
+				require.ErrorAs(t, err, &refusal)
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, state.FinalOutcomeDeferred, outcome)
@@ -401,15 +463,22 @@ func TestErrorOnlyRetryAuthorizationPendingHandoff(t *testing.T) {
 			source, err := qs.GetErrorEntry(ctx, sourceID)
 			require.NoError(t, err)
 			require.Equal(t, tt.wantSource, source.Status)
-			var sinks, guards int
+			if tt.wrongOwner {
+				require.NotNil(t, source.RetryRunID)
+				require.Equal(t, run.ID, *source.RetryRunID)
+			}
+			var sinks, guards, ledgerRows int
 			require.NoError(t, f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deferred_item WHERE video_id=? AND status='pending' AND deferral_reason='authorization_pending'`, f.videoID).Scan(&sinks))
 			require.NoError(t, f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM playlist_send_guard WHERE run_id=? AND video_id=?`, run.ID, f.videoID).Scan(&guards))
+			require.NoError(t, f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM quota_ledger`).Scan(&ledgerRows))
 			require.Equal(t, tt.wantSink, sinks)
-			wantGuards := 0
-			if tt.dismiss || tt.wrongOwner {
-				wantGuards = 1
+			require.Zero(t, guards, "invalid receipts are refused before guard preparation")
+			require.Zero(t, ledgerRows)
+			if tt.wantErr != nil {
+				actions, err := f.state.GetExecutedActionsForVideoInRun(ctx, f.videoID, run.ID)
+				require.NoError(t, err)
+				require.Empty(t, actions)
 			}
-			require.Equal(t, wantGuards, guards, "guard removal must be atomic with a retained pending sink")
 			if !tt.dismiss && !tt.wrongOwner {
 				actions, err := f.state.GetExecutedActionsForVideoInRun(ctx, f.videoID, run.ID)
 				require.NoError(t, err)

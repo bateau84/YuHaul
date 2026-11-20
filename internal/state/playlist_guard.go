@@ -11,6 +11,23 @@ import (
 
 const playlistInsert = "playlist_insert"
 
+// ErrPlaylistSendStopped identifies a durable Stop marker observed before a
+// playlist guard can be prepared, even before execution context cancellation.
+var ErrPlaylistSendStopped = errors.New("state: playlist send stopped")
+
+type PlaylistSendOrigin uint8
+
+const (
+	// The zero value preserves existing native callers.
+	PlaylistSendNative PlaylistSendOrigin = iota
+	PlaylistSendRetry
+)
+
+// PlaylistRetryAuthority validates the captured receipt against runID and
+// videoID using the supplied, already-reserved writer. It must not start a
+// separate transaction or perform network operations.
+type PlaylistRetryAuthority func(ctx context.Context, tx *sql.Tx, runID, videoID int64) error
+
 type PlaylistSendClaim struct {
 	VideoID, RunID, RouteDecisionID   int64
 	TargetPlaylistID, AuthorizationID string
@@ -19,7 +36,9 @@ type PlaylistSendClaim struct {
 	// send (ARS-006 §7.3). 0, or a value equal to RunID, means the sending run
 	// made the decision. It is carried only so callers can log it; it is never
 	// persisted and ResolvePlaylistSendTx must not read it.
-	DecisionRunID int64
+	DecisionRunID  int64
+	Origin         PlaylistSendOrigin
+	RetryAuthority PlaylistRetryAuthority
 }
 
 // continuedAuthorityQuery replaces the same-run authority query when a retry
@@ -116,15 +135,34 @@ func (s *Store) ClaimPlaylistSend(ctx context.Context, c PlaylistSendClaim, now 
 	}
 	var runType, status string
 	var authVersion, mutationSafetyVersion int
-	err = tx.QueryRowContext(ctx, `SELECT run_type, status, action_authority_version, mutation_safety_version FROM run WHERE id = ?`, c.RunID).Scan(&runType, &status, &authVersion, &mutationSafetyVersion)
+	var stopRequested sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT run_type, status, action_authority_version, mutation_safety_version, stop_requested_at FROM run WHERE id = ?`, c.RunID).Scan(&runType, &status, &authVersion, &mutationSafetyVersion, &stopRequested)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, ErrNotFound
 	}
 	if err != nil {
 		return "", nil, fmt.Errorf("reading playlist claim run: %w", err)
 	}
+	if stopRequested.Valid {
+		return "", nil, ErrPlaylistSendStopped
+	}
 	if (runType != string(RunTypeManual) && runType != string(RunTypeScheduled)) || status != string(RunStatusRunning) || authVersion != 1 || mutationSafetyVersion != 1 {
 		return "", nil, errors.New("state: run is not eligible for playlist mutation")
+	}
+	switch c.Origin {
+	case PlaylistSendNative:
+		if c.RetryAuthority != nil || c.DecisionRunID != 0 {
+			return "", nil, errors.New("state: invalid native playlist send origin")
+		}
+	case PlaylistSendRetry:
+		if c.RetryAuthority == nil {
+			return "", nil, errors.New("state: retry playlist send lacks receipt authority")
+		}
+		if err := c.RetryAuthority(ctx, tx, c.RunID, c.VideoID); err != nil {
+			return "", nil, fmt.Errorf("validating playlist retry receipt: %w", err)
+		}
+	default:
+		return "", nil, errors.New("state: invalid playlist send origin")
 	}
 	var authorized int
 	if c.DecisionRunID != 0 {
@@ -185,6 +223,7 @@ AND EXISTS (SELECT 1 FROM json_each(cv.snapshot, '$.routes') route,
 	if err := tx.Commit(); err != nil {
 		return "", nil, fmt.Errorf("committing playlist guard: %w", err)
 	}
+	c.RetryAuthority = nil
 	return PlaylistClaimed, &PlaylistSendGuard{PlaylistSendClaim: c, PreparedAt: prepared}, nil
 }
 

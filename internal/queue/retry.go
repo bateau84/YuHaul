@@ -109,6 +109,30 @@ func (s *Store) ValidateRetryReceiptTx(ctx context.Context, tx *sql.Tx, receipt 
 	if owner != 0 && owner != receipt.ReceivingRunID {
 		return result, fmt.Errorf("retry receipt video %d owned by run %d: %w", receipt.VideoID, owner, ErrWorkNotOwned)
 	}
+	for _, table := range []string{"deferred_item", "error_entry"} {
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM `+table+` WHERE video_id=? AND status='retrying'`, receipt.VideoID)
+		if err != nil {
+			return result, fmt.Errorf("validate retry siblings in %s: %w", table, err)
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return result, fmt.Errorf("scan retry sibling in %s: %w", table, err)
+			}
+			if _, ok := seen[fmt.Sprintf("%s:%d", table, id)]; !ok {
+				rows.Close()
+				return result, fmt.Errorf("unexpected live retry sibling in %s: %w", table, ErrWorkNotOwned)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("read retry siblings in %s: %w", table, err)
+		}
+		if err := rows.Close(); err != nil {
+			return result, fmt.Errorf("close retry siblings in %s: %w", table, err)
+		}
+	}
 	if len(result.NotOwned) != 0 {
 		return result, ErrWorkNotOwned
 	}
@@ -342,6 +366,29 @@ func (s *Store) claimRetryGroupTx(ctx context.Context, tx *sql.Tx, entryID, runI
 		}
 		s.logFamilyClosed(ctx, runID, videoID, entryID, string(outcome), rows)
 		return receipt, videoID, ClaimClosedFinal, nil
+	}
+	if owner == runID {
+		receipt, err := s.ownedReceiptTx(ctx, tx, videoID, runID, manual)
+		if err != nil {
+			return RetryGroupReceipt{}, videoID, ClaimLost, err
+		}
+		refs := receipt.Deferred
+		if manual {
+			refs = receipt.Errors
+		}
+		for _, ref := range refs {
+			if ref.ID == entryID {
+				return receipt, videoID, ClaimTaken, nil
+			}
+		}
+		return RetryGroupReceipt{}, videoID, ClaimLost, nil
+	}
+	var admitted bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM run_video_outcome WHERE run_id=? AND video_id=?)`, runID, videoID).Scan(&admitted); err != nil {
+		return receipt, videoID, ClaimLost, fmt.Errorf("read retry run %d membership for video %d: %w", runID, videoID, err)
+	}
+	if admitted {
+		return receipt, videoID, ClaimLost, nil
 	}
 	if !manual && owner == 0 {
 		var eligible bool
@@ -638,37 +685,40 @@ func (s *Store) ListRetryVideoIDs(ctx context.Context, runID int64) ([]int64, er
 	return ids, rows.Err()
 }
 
-// RetryGroupReceiptForRunVideo snapshots the exact currently owned rows before
+// RetryGroupReceiptForRunVideo snapshots the receiving run's row history before
 // evaluation begins. Claim paths should prefer the receipt returned by claim;
 // this loader supports automatic-run dispatch/recovery after the claim commit.
 func (s *Store) RetryGroupReceiptForRunVideo(ctx context.Context, runID, videoID int64) (RetryGroupReceipt, error) {
 	r := RetryGroupReceipt{ReceivingRunID: runID, VideoID: videoID}
-	for _, table := range []struct {
-		name   string
-		target *[]RetryRowRef
-	}{{"deferred_item", &r.Deferred}, {"error_entry", &r.Errors}} {
-		rows, err := s.db.QueryContext(ctx, `SELECT id, run_id FROM `+table.name+` WHERE video_id=? AND status='retrying' AND retry_run_id=? ORDER BY id`, videoID, runID)
-		if err != nil {
-			return RetryGroupReceipt{}, err
-		}
-		for rows.Next() {
-			var ref RetryRowRef
-			if err := rows.Scan(&ref.ID, &ref.OriginRunID); err != nil {
-				rows.Close()
-				return RetryGroupReceipt{}, err
-			}
-			*table.target = append(*table.target, ref)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return RetryGroupReceipt{}, err
-		}
-		if err := rows.Close(); err != nil {
-			return RetryGroupReceipt{}, err
-		}
+	rows, err := s.db.QueryContext(ctx, `SELECT kind, id, run_id, status FROM (
+		SELECT 0 AS kind, id, run_id, status FROM deferred_item WHERE video_id=? AND retry_run_id=?
+		UNION ALL
+		SELECT 1 AS kind, id, run_id, status FROM error_entry WHERE video_id=? AND retry_run_id=?
+	) ORDER BY kind, id`, videoID, runID, videoID, runID)
+	if err != nil {
+		return RetryGroupReceipt{}, fmt.Errorf("load retry receipt: %w", err)
 	}
-	if len(r.Deferred)+len(r.Errors) == 0 {
-		return RetryGroupReceipt{}, fmt.Errorf("no retry rows owned by run %d for video %d", runID, videoID)
+	defer rows.Close()
+	live := false
+	for rows.Next() {
+		var kind int
+		var status string
+		var ref RetryRowRef
+		if err := rows.Scan(&kind, &ref.ID, &ref.OriginRunID, &status); err != nil {
+			return RetryGroupReceipt{}, fmt.Errorf("scan retry receipt: %w", err)
+		}
+		if kind == 0 {
+			r.Deferred = append(r.Deferred, ref)
+		} else {
+			r.Errors = append(r.Errors, ref)
+		}
+		live = live || status == "retrying"
+	}
+	if err := rows.Err(); err != nil {
+		return RetryGroupReceipt{}, fmt.Errorf("read retry receipt: %w", err)
+	}
+	if !live {
+		return RetryGroupReceipt{}, fmt.Errorf("no live retry rows owned by run %d for video %d: %w", runID, videoID, ErrWorkRemoved)
 	}
 	return r, nil
 }
@@ -677,13 +727,20 @@ func (s *Store) RetryGroupReceiptForRunVideo(ctx context.Context, runID, videoID
 // video, in FIFO order. A claim rechecks eligibility and owners; this list is not
 // authority. Track attempted videos for the execution even after requeueing.
 func (s *Store) ListDeferredRetryCandidates(ctx context.Context, now time.Time) ([]DeferredItem, error) {
+	return s.ListDeferredRetryCandidatesForRun(ctx, now, 0, -1)
+}
+
+// ListDeferredRetryCandidatesForRun excludes work already admitted by the
+// receiving run. A zero run ID excludes nothing; a negative limit is unbounded.
+func (s *Store) ListDeferredRetryCandidatesForRun(ctx context.Context, now time.Time, receivingRunID int64, limit int) ([]DeferredItem, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT d.id, d.video_id, v.video_id, d.run_id, d.deferral_reason, d.retry_after, d.retry_count, d.status, d.created_at, d.retry_run_id,
 	 d.closed_reason, CASE WHEN d.closed_reason IS NOT NULL THEN v.final_outcome END
 	 FROM deferred_item d JOIN video v ON v.id = d.video_id
 	 WHERE d.id = (SELECT x.id FROM deferred_item x WHERE x.video_id = d.video_id AND x.status IN ('pending','retrying') ORDER BY x.created_at, x.id LIMIT 1)
 	 AND EXISTS (SELECT 1 FROM deferred_item x LEFT JOIN run r ON r.id = x.retry_run_id WHERE x.video_id = d.video_id AND
 	 ((x.status = 'pending' AND (x.retry_after IS NULL OR julianday(x.retry_after) <= julianday(?))) OR (x.status = 'retrying' AND (x.retry_run_id IS NULL OR r.status IN ('failed','stopped')))))
-	 ORDER BY d.created_at, d.id`, now.UTC().Format(time.RFC3339Nano))
+	 AND NOT EXISTS (SELECT 1 FROM run_video_outcome o WHERE o.run_id = ? AND o.video_id = d.video_id)
+	 ORDER BY d.created_at, d.id LIMIT ?`, now.UTC().Format(time.RFC3339Nano), receivingRunID, limit)
 	if err != nil {
 		return nil, err
 	}

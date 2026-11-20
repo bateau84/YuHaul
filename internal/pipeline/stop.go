@@ -61,6 +61,16 @@ type runControl struct {
 	cancel        context.CancelCauseFunc // nil until the executor attaches
 	stopRequested bool
 	finalizing    bool
+	freshRetries  []queue.RetryGroupReceipt
+	refusedRetry  *retryAdmissionRefusal
+}
+
+func (c *runControl) takeFreshRetries() []queue.RetryGroupReceipt {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	receipts := c.freshRetries
+	c.freshRetries = nil
+	return receipts
 }
 
 // registerRun returns the run's control, creating it on first use.
@@ -215,6 +225,7 @@ func (p *Pipeline) finishRun(ctx context.Context, runID int64) {
 	defer p.unregisterRun(runID)
 	ctl.mu.Lock()
 	stopped := ctl.stopRequested
+	refusal := ctl.refusedRetry
 	cancel := ctl.cancel
 	if !stopped {
 		// The entry point is returning: a stop can no longer take effect.
@@ -222,8 +233,14 @@ func (p *Pipeline) finishRun(ctx context.Context, runID int64) {
 	}
 	ctl.mu.Unlock()
 	if stopped {
-		if err := p.settleStop(ctx, runID); err != nil {
-			// The run stays running with its marker; a restart settles it.
+		var err error
+		if refusal != nil {
+			err = p.settleRefusedRetry(ctx, runID, refusal, true)
+		} else {
+			err = p.settleStop(ctx, runID)
+		}
+		if err != nil {
+			// The run stays running with its marker for recovery.
 			p.logger.ErrorContext(ctx, "run stop settle failed", "run_id", runID, "diagnostic", diag.Encode(err, "unknown", "finalize_run"))
 		}
 	}
