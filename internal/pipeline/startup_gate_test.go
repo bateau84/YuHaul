@@ -89,11 +89,11 @@ type cancelBeforeDispatch struct {
 	cancel context.CancelFunc
 }
 
-// DispatchWithQuota ends the caller context after the guard claim committed
-// and before the real dispatch can admit a request.
-func (s cancelBeforeDispatch) DispatchWithQuota(ctx context.Context, b auth.AuthorizationBinding, req *http.Request, rt http.RoundTripper, l *quota.Ledger, op quota.Operation) (*http.Response, auth.AdmissionReceipt, *quota.Hold, error) {
+// DispatchWithQuotaScoped ends the caller context after the guard claim
+// committed and before the real dispatch can admit a request.
+func (s cancelBeforeDispatch) DispatchWithQuotaScoped(ctx context.Context, b auth.AuthorizationBinding, req *http.Request, rt http.RoundTripper, l *quota.Ledger, op quota.Operation, scope quota.AdmissionScope) (*http.Response, auth.AdmissionReceipt, *quota.Hold, error) {
 	s.cancel()
-	return s.Service.DispatchWithQuota(ctx, b, req, rt, l, op)
+	return s.Service.DispatchWithQuotaScoped(ctx, b, req, rt, l, op, scope)
 }
 
 // ADR-007 required test 5: shutdown between guard claim and admission sends

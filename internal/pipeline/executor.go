@@ -61,6 +61,22 @@ type Executor struct {
 	insertCost    int
 	baseURL       string
 	customFactory bool
+	// admissionBound limits the final admission scope: the wait for the SQLite
+	// writer and everything done under it.
+	admissionBound time.Duration
+	// beforeAdmissionWriter is a test seam called, with no lock of its own,
+	// just before the admission scope waits for the SQLite writer.
+	beforeAdmissionWriter func()
+}
+
+// defaultAdmissionBound bounds the final POST admission scope. The writer is
+// held only for local reads and the quota transition, so this is generous.
+const defaultAdmissionBound = 5 * time.Second
+
+// WithAdmissionWriterBound overrides the bound on the final POST admission
+// scope (the wait for the SQLite writer included).
+func WithAdmissionWriterBound(d time.Duration) ExecutorOption {
+	return func(e *Executor) { e.admissionBound = d }
 }
 
 type guardedDeferralKey struct{}
@@ -164,11 +180,12 @@ func WithTokenSource(src TokenSource) ExecutorOption {
 // NewExecutor returns an action executor.
 func NewExecutor(db *sql.DB, ledger *quota.Ledger, auth TokenSource, opts ...ExecutorOption) *Executor {
 	e := &Executor{
-		db:         db,
-		ledger:     ledger,
-		auth:       auth,
-		logger:     slog.Default(),
-		insertCost: quota.OpPlaylistItemsInsert.UnitCost(),
+		db:             db,
+		ledger:         ledger,
+		auth:           auth,
+		logger:         slog.Default(),
+		insertCost:     quota.OpPlaylistItemsInsert.UnitCost(),
+		admissionBound: defaultAdmissionBound,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -730,11 +747,14 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 		return state.ActionOutcomeFailed, err
 	}
 	claim := state.PlaylistSendClaim{RunID: runID, VideoID: videoID, RouteDecisionID: a.RouteDecisionID, TargetPlaylistID: a.TargetPlaylistID, ActionType: a.ActionType, AuthorizationID: identity, DecisionRunID: a.DecisionRunID}
-	if retry, ok := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt); ok {
+	// The same copied receipt serves guard preparation and final admission; it
+	// is never recaptured after a wait.
+	retry, isRetry := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt)
+	var validateReceipt state.PlaylistRetryAuthority
+	if isRetry {
 		retry.Deferred = append([]queue.RetryRowRef(nil), retry.Deferred...)
 		retry.Errors = append([]queue.RetryRowRef(nil), retry.Errors...)
-		claim.Origin = state.PlaylistSendRetry
-		claim.RetryAuthority = func(ctx context.Context, tx *sql.Tx, claimedRunID, claimedVideoID int64) error {
+		validateReceipt = func(ctx context.Context, tx *sql.Tx, claimedRunID, claimedVideoID int64) error {
 			if retry.ReceivingRunID != claimedRunID || retry.VideoID != claimedVideoID {
 				return queue.ErrWorkNotOwned
 			}
@@ -745,12 +765,12 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 			_, err = qs.ValidateRetryReceiptTx(ctx, tx, retry)
 			return err
 		}
+		claim.Origin = state.PlaylistSendRetry
+		claim.RetryAuthority = validateReceipt
 	}
 	claimed, receipt, err := guardStore.ClaimPlaylistSend(ctx, claim, time.Now().UTC())
 	if err != nil {
-		if retry, ok := ctx.Value(guardedRetryGroupKey{}).(queue.RetryGroupReceipt); ok && isRetryAdmissionRefusal(err) {
-			retry.Deferred = append([]queue.RetryRowRef(nil), retry.Deferred...)
-			retry.Errors = append([]queue.RetryRowRef(nil), retry.Errors...)
+		if isRetry && isRetryAdmissionRefusal(err) {
 			return state.ActionOutcomeFailed, &retryAdmissionRefusal{receipt: retry, cause: err}
 		}
 		return state.ActionOutcomeFailed, err
@@ -778,7 +798,7 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 		return state.ActionOutcomeFailed, errors.New("guarded playlist adapter unavailable")
 	}
 	dispatcher, ok := e.auth.(interface {
-		DispatchWithQuota(context.Context, auth.AuthorizationBinding, *http.Request, http.RoundTripper, *quota.Ledger, quota.Operation) (*http.Response, auth.AdmissionReceipt, *quota.Hold, error)
+		DispatchWithQuotaScoped(context.Context, auth.AuthorizationBinding, *http.Request, http.RoundTripper, *quota.Ledger, quota.Operation, quota.AdmissionScope) (*http.Response, auth.AdmissionReceipt, *quota.Hold, error)
 		ObserveAccessRejection(context.Context, auth.AuthorizationBinding, auth.AdmissionReceipt) error
 	})
 	if !ok {
@@ -786,11 +806,18 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 	}
 	desc := youtube.PlaylistClaim{RunID: fmt.Sprint(runID), VideoID: fmt.Sprint(videoID), RouteDecisionID: fmt.Sprint(a.RouteDecisionID), ActionType: a.ActionType, TargetPlaylistID: a.TargetPlaylistID, AuthorizationID: identity}
 	var hold *quota.Hold
+	var fenceErr error
 	result := guardedClient.InsertGuardedPlaylistItem(ctx, desc, videoIDText, func(ctx context.Context, req *http.Request, transport http.RoundTripper) (*http.Response, youtube.DispatchAdmission, bool, error) {
-		resp, admission, admittedHold, dispatchErr := dispatcher.DispatchWithQuota(ctx, *binding, req, transport, e.ledger, quota.OpPlaylistItemsInsert)
+		resp, admission, admittedHold, dispatchErr := dispatcher.DispatchWithQuotaScoped(ctx, *binding, req, transport, e.ledger, quota.OpPlaylistItemsInsert, e.admissionScope(guardStore, *receipt, validateReceipt))
 		hold = admittedHold
 		mapped := youtube.DispatchAdmission{AuthorizationID: admission.AuthorizationID, CredentialRevision: admission.CredentialRevision, AdmittedAt: admission.AdmittedAt}
-		if ctxErr := ctx.Err(); ctxErr != nil && dispatchErr != nil && admission.AuthorizationID == "" && errors.Is(dispatchErr, ctxErr) {
+		var fence *auth.AdmissionFenceError
+		if errors.As(dispatchErr, &fence) && admission.AuthorizationID == "" {
+			// The final fence refused before admission. Keep the typed cause for
+			// the executor; the adapter only needs to know nothing was issued.
+			fenceErr = fence.Cause
+			dispatchErr = youtube.DispatchRefusalError{Kind: youtube.DispatchRefusalLocalValidation}
+		} else if ctxErr := ctx.Err(); ctxErr != nil && dispatchErr != nil && admission.AuthorizationID == "" && errors.Is(dispatchErr, ctxErr) {
 			// The caller's own context ended before any request was admitted.
 			dispatchErr = youtube.DispatchRefusalError{Kind: youtube.DispatchRefusalCanceled}
 		} else if auth.IsPreAdmissionAuthorizationRefusal(dispatchErr) && admission.AuthorizationID == "" {
@@ -800,6 +827,9 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 		}
 		return resp, mapped, dispatchErr != nil && admission.AuthorizationID == "", dispatchErr
 	}, nil)
+	if fenceErr != nil && hold == nil && result.Admission == nil {
+		return e.refuseAtAdmission(ctx, guardStore, *receipt, runID, videoID, a, fenceErr, retry, isRetry)
+	}
 	if hold != nil {
 		// An admitted attempt is accounted exactly once even when shutdown
 		// cancelled the request: use the bounded detached context (ADR-007 §3.2).
@@ -965,7 +995,13 @@ func (e *Executor) withWriterTx(ctx context.Context, fn func(*sql.Tx) error) err
 // uncertain, which is the safe side. It always returns the context error so
 // the run stops as interrupted.
 func (e *Executor) releaseCanceledClaim(ctx context.Context, guardStore *state.Store, receipt state.PlaylistSendGuard, runID, videoID int64, a action) (state.ActionOutcome, error) {
-	cause := ctx.Err()
+	return e.releaseUnadmittedClaim(ctx, guardStore, receipt, runID, videoID, ctx.Err())
+}
+
+// releaseUnadmittedClaim removes this invocation's own guard with a no-attempt
+// row after proven non-admission, and returns cause. Detached and bounded; on
+// failure the guard stays and the error still wraps cause.
+func (e *Executor) releaseUnadmittedClaim(ctx context.Context, guardStore *state.Store, receipt state.PlaylistSendGuard, runID, videoID int64, cause error) (state.ActionOutcome, error) {
 	finalizeCtx, cancel := runFinalizationContext(ctx)
 	defer cancel()
 	err := e.withWriterTx(finalizeCtx, func(tx *sql.Tx) error {
@@ -976,6 +1012,76 @@ func (e *Executor) releaseCanceledClaim(ctx context.Context, guardStore *state.S
 		return state.ActionOutcomeFailed, fmt.Errorf("%w; guard kept: %v", cause, err)
 	}
 	return state.ActionOutcomeNotAttempted, cause
+}
+
+// admissionScope is the final POST admission fence (authorization ARS-001,
+// "Authority at guard preparation and POST admission"). It runs under the
+// quota ledger's transition, after auth and quota, and holds the SQLite writer
+// across the provisional to admitted transition only. Under that writer it
+// requires the run to be running and not Stop-marked, the invocation's full
+// guard tuple to be intact and, for retry-origin work, the same copied
+// receipt to validate against the stored claim. It makes no auth, quota or
+// provider call and uses only its own transaction.
+func (e *Executor) admissionScope(guardStore *state.Store, guard state.PlaylistSendGuard, validateReceipt state.PlaylistRetryAuthority) quota.AdmissionScope {
+	return func(ctx context.Context, transition func() error) error {
+		qs, err := queue.NewStore(e.db)
+		if err != nil {
+			return &auth.AdmissionFenceError{Cause: err}
+		}
+		if e.beforeAdmissionWriter != nil {
+			e.beforeAdmissionWriter()
+		}
+		var transitionErr error
+		err = qs.WithAdmissionTx(ctx, e.admissionBound, func(txCtx context.Context, tx *sql.Tx) error {
+			if err := guardStore.CheckPlaylistAdmissionTx(txCtx, tx, guard); err != nil {
+				return &auth.AdmissionFenceError{Cause: err}
+			}
+			if validateReceipt != nil {
+				if err := validateReceipt(txCtx, tx, guard.RunID, guard.VideoID); err != nil {
+					return &auth.AdmissionFenceError{Cause: err}
+				}
+			}
+			// The ledger's own refusals (bucket, access expiry, context) are not
+			// fence refusals; auth classifies them.
+			transitionErr = transition()
+			return transitionErr
+		})
+		switch {
+		case err == nil, transitionErr != nil && errors.Is(err, transitionErr):
+			return err
+		case errors.Is(err, queue.ErrCommit):
+			return err // after a successful transition quota ignores it
+		case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+			return err // the request ended: an ordinary caller cancellation
+		}
+		var fence *auth.AdmissionFenceError
+		if errors.As(err, &fence) {
+			return err
+		}
+		// Local storage failure, or the bounded wait for the writer ran out.
+		return &auth.AdmissionFenceError{Cause: err}
+	}
+}
+
+// refuseAtAdmission handles a refusal by the final admission fence. Nothing was
+// admitted: no POST, no charge (auth cancelled the hold), no attempt evidence.
+//   - A durable Stop marker wins: this invocation's own guard is removed
+//     through the existing detached, atomic non-admission path.
+//   - Removal, lost ownership or an unusable claim identity keep the guard,
+//     write nothing about the work, and route to run ending as a typed refusal.
+//   - Any other local failure keeps the guard and is reported as such.
+func (e *Executor) refuseAtAdmission(ctx context.Context, guardStore *state.Store, guard state.PlaylistSendGuard, runID, videoID int64, a action, cause error, retry queue.RetryGroupReceipt, isRetry bool) (state.ActionOutcome, error) {
+	if errors.Is(cause, state.ErrPlaylistSendStopped) {
+		outcome, err := e.releaseUnadmittedClaim(ctx, guardStore, guard, runID, videoID, cause)
+		if isRetry {
+			return outcome, &retryAdmissionRefusal{receipt: retry, cause: err}
+		}
+		return outcome, err
+	}
+	if isRetry && isRetryAdmissionRefusal(cause) {
+		return state.ActionOutcomeFailed, &retryAdmissionRefusal{receipt: retry, cause: cause}
+	}
+	return state.ActionOutcomeFailed, fmt.Errorf("playlist admission fence refused; guard kept: %w", cause)
 }
 
 // errGuardBlocked is the cause of a video blocked by an unresolved send guard.

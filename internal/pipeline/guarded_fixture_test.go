@@ -417,7 +417,7 @@ type refusingDispatchService struct {
 	err error
 }
 
-func (s refusingDispatchService) DispatchWithQuota(context.Context, auth.AuthorizationBinding, *http.Request, http.RoundTripper, *quota.Ledger, quota.Operation) (*http.Response, auth.AdmissionReceipt, *quota.Hold, error) {
+func (s refusingDispatchService) DispatchWithQuotaScoped(context.Context, auth.AuthorizationBinding, *http.Request, http.RoundTripper, *quota.Ledger, quota.Operation, quota.AdmissionScope) (*http.Response, auth.AdmissionReceipt, *quota.Hold, error) {
 	return nil, auth.AdmissionReceipt{}, nil, s.err
 }
 
