@@ -1803,6 +1803,24 @@ For Deferred/Failed in simulations, visible adjacent explanation is respectively
   - Summary statistics region: lifetime and period aggregates
 - **Components:** Date range picker, line chart, bar chart, statistic card, sparkline, quota ledger table
 
+**Analytics — counting basis, copy and layout (2026-11-21).** Design only; not implemented and not checked in a browser. [BR-023](/docs/requirements/yuhaul/br-023-historical-statistics-over-time.md) AC10–AC13 give two bases on one page: outcome counts (accepted, rejected, deferred, failed, unavailable, not yet evaluated) come from every production run that has ended, and **Discovered** and the **acceptance rate** come only from runs whose discovery finished. So a page can read `1281 discovered, 394 accepted, acceptance rate 15.4%`, where 394 ÷ 1281 is 30.8%: the rate's accepted count is 197, taken from the same runs as the 1,281. Nothing on the page said so, and the outcome counts can also add up to more than Discovered. This is a copy fix. It needs no new data, though one optional figure improves it (below). Words used: `finished discovery` (BR-023's term; it does not claim that every channel was scanned, because older completed runs are counted on weaker evidence), and `ended` for a production run that is completed, failed or stopped.
+
+*Two persistent notes, visible text and not tooltips:*
+- Under the `Acceptance rate` heading, before the chart: `Acceptance rate is accepted ÷ discovered, counting only runs that finished discovery. Videos accepted by other runs are not part of this rate.`
+- Under the `Volume & outcome breakdown` heading and above the data table (one note, shown once for each, tied to its chart or table with `aria-describedby`): `Accepted, rejected, deferred, failed and the other outcomes count every production run that has ended. Discovered counts only runs that finished discovery, so outcomes can add up to more than Discovered. Dry runs, replays and backtests are never counted.`
+
+*Data table.* Two headers change, and nothing else: `Discovered` becomes `Discovered (runs that finished discovery)` and `Acceptance rate` becomes `Acceptance rate (runs that finished discovery)`. The outcome headers stay as they are. The stacked label on a narrow screen uses the same header text. A period with no run that finished discovery shows `No data` in both cells, never 0 or 0%, as today.
+
+*Chart text.* The acceptance-rate tooltip reads `Acceptance rate: {rate}% (runs that finished discovery)` or `Acceptance rate: No data (no run finished discovery)`. The outcome tooltip and legend stay as they are.
+
+*Summaries read by screen readers (replacing `{n} periods. {D} discovered, {A} accepted. Average acceptance rate {r}.`):*
+- Acceptance chart: `{n} periods. Overall acceptance rate {r}%: {Af} accepted of {D} discovered, counting only runs that finished discovery.` When the exact {Af} is not available: `{n} periods. Overall acceptance rate {r}% of {D} videos discovered in runs that finished discovery.` With no rate: `{n} periods. No acceptance rate: no run finished discovery in this range.`
+- Outcome chart: `{n} periods. Across all ended production runs: {A} accepted, {Rj} rejected, {Df} deferred, {F} failed. {D} discovered in runs that finished discovery.` The two summaries never put the all-runs accepted count next to the discovered count in one sentence.
+
+*Optional data, not needed for the copy fix.* The exact {Af} needs the accepted count of the same runs as the rate, per period (BR-023 AC13's numerator). Without it the UI may derive {Af} from the per-period rates only if it is exact; if rounding makes it uncertain, use the second form above. With it, the table may also show a `Accepted (runs that finished discovery)` column beside Discovered, so the rate can be checked on the row; not designed unless asked. The API stays open.
+
+*Accessibility.* Target WCAG 2.2 AA. The notes are persistent text in reading order before their chart or table; the table's accessible description is the second note. Header text stays short enough to wrap at 320 CSS px and 200% zoom without clipping (SC 1.4.10). Meaning is in text, not color (SC 1.4.1). *Check:* a range whose runs include a failed run that did not finish discovery shows both notes, the revised headers and a summary whose numbers match BR-023 (for example 197 of 1,281, 15.4%, with 394 accepted across all runs); a range with no run that finished discovery shows `No data` and the no-rate summary; keyboard and screen-reader pass.
+
 **View: Channel Analysis** — Per-channel performance and advisories; user job: evaluate which channels produce valuable content and act on system suggestions.
 - **Regions:**
   - Channel list region: sortable table of channels with usefulness metrics and advisory badges

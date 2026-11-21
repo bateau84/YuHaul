@@ -6,6 +6,10 @@ tags: [design, documentation, change-log]
 timestamp: 2026-11-10T00:00:00Z
 ---
 
+## 2026-11-21
+
+- Specified the Analytics counting-basis copy in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (PR #6): two persistent notes, revised Discovered and Acceptance rate headers, and rewritten summaries, so outcome counts from all ended runs are not read against the rate from runs that finished discovery. Copy fix; one optional data figure noted. Design only.
+
 ## 2026-11-20
 
 - Section 3a of the [admin interface design](/docs/design/yuhaul-admin-ui-design.md) no longer says the `retry_work_removed` handling is unchecked in a browser: release check `df803f9f` checked it in a browser.
