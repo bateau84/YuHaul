@@ -447,6 +447,8 @@ export interface TrendBucket {
   videos_failed: number
   videos_not_yet_evaluated: number
   videos_unavailable: number
+  // Accepted count of the runs behind videos_discovered and acceptance_rate.
+  videos_accepted_discovery_finished: number
   acceptance_rate: number | null
 }
 

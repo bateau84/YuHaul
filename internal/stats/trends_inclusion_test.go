@@ -109,6 +109,7 @@ func TestGetTemporalStats_RunInclusion(t *testing.T) {
 	// Rate uses accepted from the same two runs: 15/150.
 	require.NotNil(t, b.AcceptanceRate)
 	assert.InDelta(t, 0.10, *b.AcceptanceRate, 1e-9)
+	assert.Equal(t, 15, b.VideosAcceptedDiscoveryFinished, "numerator comes from the same runs as discovered")
 }
 
 func TestGetTemporalStats_NoDataIsNotZeroPercent(t *testing.T) {
@@ -124,6 +125,7 @@ func TestGetTemporalStats_NoDataIsNotZeroPercent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, buckets, 1)
 	assert.Equal(t, 7, buckets[0].VideosAccepted, "accepted from the failed run still counts")
+	assert.Equal(t, 0, buckets[0].VideosAcceptedDiscoveryFinished)
 	assert.Equal(t, 0, buckets[0].VideosDiscovered, "discovered from a run whose discovery did not finish is excluded")
 	assert.Nil(t, buckets[0].AcceptanceRate, "no finished-discovery run means no data, not 0%")
 
@@ -205,6 +207,7 @@ func TestHandler_Trends_WebContract(t *testing.T) {
 			VideosFailed          *int     `json:"videos_failed"`
 			VideosNotYetEvaluated *int     `json:"videos_not_yet_evaluated"`
 			VideosUnavailable     *int     `json:"videos_unavailable"`
+			AcceptedFinished      *int     `json:"videos_accepted_discovery_finished"`
 			AcceptanceRate        *float64 `json:"acceptance_rate"`
 		} `json:"buckets"`
 	}
@@ -215,12 +218,13 @@ func TestHandler_Trends_WebContract(t *testing.T) {
 		"videos_discovered": b.VideosDiscovered, "videos_accepted": b.VideosAccepted,
 		"videos_rejected": b.VideosRejected, "videos_deferred": b.VideosDeferred,
 		"videos_failed": b.VideosFailed, "videos_not_yet_evaluated": b.VideosNotYetEvaluated,
-		"videos_unavailable": b.VideosUnavailable,
+		"videos_unavailable": b.VideosUnavailable, "videos_accepted_discovery_finished": b.AcceptedFinished,
 	} {
 		require.NotNil(t, p, "key %s missing from the trends JSON", name)
 	}
 	assert.Equal(t, 40, *b.VideosDiscovered)
 	assert.Equal(t, 8, *b.VideosAccepted)
+	assert.Equal(t, 8, *b.AcceptedFinished)
 	require.NotNil(t, b.AcceptanceRate)
 	assert.InDelta(t, 0.2, *b.AcceptanceRate, 1e-9)
 }

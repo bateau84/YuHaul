@@ -303,6 +303,7 @@ const mockTrends: TrendBucket[] = Array.from({ length: 14 }).map((_, i) => ({
   videos_failed: i % 5 === 0 ? 1 : 0,
   videos_not_yet_evaluated: 0,
   videos_unavailable: i % 7 === 0 ? 1 : 0,
+  videos_accepted_discovery_finished: i === 0 ? 0 : 1 + (i % 3),
   // Day 0 has no finished-discovery run, like a real "no data" bucket.
   acceptance_rate: i === 0 ? null : (1 + (i % 3)) / (10 + i),
 }))

@@ -414,7 +414,7 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 			return nil, fmt.Errorf("scan temporal row: %w", err)
 		}
 		if finished {
-			b.acceptedFinished = b.VideosAccepted
+			b.VideosAcceptedDiscoveryFinished = b.VideosAccepted
 		} else {
 			b.VideosDiscovered = 0
 		}
@@ -435,7 +435,7 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 			existing.VideosFailed += b.VideosFailed
 			existing.VideosNotYetEvaluated += b.VideosNotYetEvaluated
 			existing.VideosUnavailable += b.VideosUnavailable
-			existing.acceptedFinished += b.acceptedFinished
+			existing.VideosAcceptedDiscoveryFinished += b.VideosAcceptedDiscoveryFinished
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -445,7 +445,7 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 	out := make([]TemporalBucket, 0, len(groups))
 	for _, b := range groups {
 		if b.VideosDiscovered > 0 {
-			rate := float64(b.acceptedFinished) / float64(b.VideosDiscovered)
+			rate := float64(b.VideosAcceptedDiscoveryFinished) / float64(b.VideosDiscovered)
 			b.AcceptanceRate = &rate
 		}
 		out = append(out, *b)

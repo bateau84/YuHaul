@@ -83,14 +83,14 @@ type TemporalBucket struct {
 	VideosFailed          int    `json:"videos_failed"`
 	VideosNotYetEvaluated int    `json:"videos_not_yet_evaluated"`
 	VideosUnavailable     int    `json:"videos_unavailable"`
+	// VideosAcceptedDiscoveryFinished is the accepted count of the runs whose
+	// discovery finished: the numerator of AcceptanceRate (BR-023 AC13), over
+	// the same runs as VideosDiscovered. VideosAccepted covers every counted run.
+	VideosAcceptedDiscoveryFinished int `json:"videos_accepted_discovery_finished"`
 	// AcceptanceRate is accepted/discovered over the runs whose discovery
 	// finished, as a fraction in [0,1]. It is null when no such run exists or
 	// their discovered total is 0 ("no data", never 0%).
 	AcceptanceRate *float64 `json:"acceptance_rate"`
-
-	// acceptedFinished is the accepted count of discovery-finished runs only,
-	// the numerator that matches VideosDiscovered.
-	acceptedFinished int
 }
 
 // DuplicateProvenance describes one distinct-pair duplicate match anchored at

@@ -41,14 +41,19 @@ describe('AnalyticsView', () => {
       buckets: [
         {
           bucket: '2026-03-10', videos_discovered: 40, videos_accepted: 10, videos_rejected: 20,
-          videos_deferred: 6, videos_failed: 2, videos_not_yet_evaluated: 3, videos_unavailable: 4,
+          videos_deferred: 6, videos_failed: 2, videos_not_yet_evaluated: 3, videos_unavailable: 4, videos_accepted_discovery_finished: 10,
           acceptance_rate: 0.25,
         },
         {
           // A failed run whose discovery did not finish: outcomes count, rate has no data.
           bucket: '2026-03-11', videos_discovered: 0, videos_accepted: 7, videos_rejected: 0,
-          videos_deferred: 0, videos_failed: 1, videos_not_yet_evaluated: 0, videos_unavailable: 0,
+          videos_deferred: 0, videos_failed: 1, videos_not_yet_evaluated: 0, videos_unavailable: 0, videos_accepted_discovery_finished: 0,
           acceptance_rate: null,
+        },
+        {
+          bucket: '2026-03-12', videos_discovered: 3, videos_accepted: 1, videos_rejected: 2,
+          videos_deferred: 0, videos_failed: 0, videos_not_yet_evaluated: 0, videos_unavailable: 0,
+          videos_accepted_discovery_finished: 1, acceptance_rate: 1 / 3,
         },
       ],
     }
@@ -70,8 +75,17 @@ describe('AnalyticsView', () => {
     // Date, discovered, accepted, rate, rejected, deferred, failed, unavailable, not yet evaluated
     expect(rows[0].slice(1)).toEqual(['40', '10', '25%', '20', '6', '2', '4', '3'])
     expect(rows[1].slice(1)).toEqual(['0', '7', 'No data', '0', '0', '1', '0', '0'])
-    // 10 accepted of 40 discovered over the runs whose discovery finished.
-    expect(screen.getAllByText(/Average acceptance rate 25\.0%/).length).toBeGreaterThan(0)
+    expect(rows[2].slice(1)).toEqual(['3', '1', '33.3%', '2', '0', '0', '0', '0'])
+    // Exact counts: 11 accepted of 43 discovered (25.6%); 18 accepted over all
+    // runs is not part of the rate. Rounded bucket percentages are not used.
+    expect(screen.getByText(/Overall acceptance rate 25\.6%: 11 accepted of 43 discovered, counting only runs that finished discovery\./)).toBeInTheDocument()
+    expect(screen.getByText(/Across all ended production runs: 18 accepted, 22 rejected, 6 deferred, 3 failed\. 43 discovered in runs that finished discovery\./)).toBeInTheDocument()
+    // Persistent notes are visible text, tied to the charts and the table.
+    expect(screen.getByText(/Acceptance rate is accepted ÷ discovered, counting only runs that finished discovery/)).toBeVisible()
+    expect(screen.getAllByText(/so outcomes can add up to more than Discovered/)).toHaveLength(2)
+    expect(table).toHaveAccessibleDescription(/never counted\./)
+    expect(screen.getByRole('columnheader', { name: 'Acceptance rate (runs that finished discovery)' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Discovered (runs that finished discovery)' })).toBeInTheDocument()
   })
 
   it('renders trend charts and a data table toggle', async () => {
