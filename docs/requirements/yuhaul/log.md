@@ -3,10 +3,14 @@ type: Log
 title: YuHaul Requirements Change Log
 description: Chronological record of changes to the YuHaul behavioral requirement bundle.
 tags: [changelog, log, okf, requirements, yuhaul]
-timestamp: 2026-11-19T00:00:00Z
+timestamp: 2026-11-21T00:00:00Z
 ---
 
 # YuHaul Requirements Update Log
+
+## 2026-11-21
+
+**Which runs Analytics counts (BR-023 AC10–AC14).** Source: the user's decision of 2026-11-21, relayed in the specification assignment; the original human conversation was not independently inspected. Only manual and scheduled runs count; dry run, replay and backtest never do. Completed, failed and stopped runs count toward their recorded outcome numbers; running and interrupted runs wait until they reach one of those statuses. Only runs whose discovery finished count toward "discovered" and the acceptance rate, because failed runs re-discover the same videos (27 failed scheduled runs recorded 62,866 discovered and 0 accepted). Route match rates follow the run-type and status rule. Added [BR-023](br-023-historical-statistics-over-time.md) "When discovery finished": the saved channel-scan outcome (`completed`, from migration `030`) decides when present; an older run without one counts as finished when its recorded phase is after discovery. Specification choices, labeled in BR-023: other outcome counts follow the status rule; the acceptance rate uses the same runs for both counts and shows no data instead of 0%; "no channel could be scanned" is not finished; the route-match reading. One non-blocking user question (whether the older-run rule still counts the 27 example runs, and the route-match reading). **Conflict with current source** recorded in the [index](index.md): trends count only completed runs of every type, route match rates only completed production runs, and the view shows 0% with nothing discovered. Docs only; no field, query or design chosen.
 
 ## 2026-11-19
 
