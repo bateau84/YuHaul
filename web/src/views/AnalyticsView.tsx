@@ -60,6 +60,13 @@ const RATE_NOTE =
 const OUTCOME_NOTE =
   'Accepted, rejected, deferred, failed and the other outcomes count every production run that has ended. Discovered counts only runs that finished discovery, so outcomes can add up to more than Discovered. Dry runs, replays and backtests are never counted.'
 
+export function rateTooltipFormatter(value: unknown): [string, string] {
+  return [
+    value === null || value === undefined ? 'No data (no run finished discovery)' : `${value}% (runs that finished discovery)`,
+    'Acceptance rate',
+  ]
+}
+
 function sum(data: CombinedBucket[], pick: (b: CombinedBucket) => number): number {
   return data.reduce((total, b) => total + pick(b), 0)
 }
@@ -282,12 +289,9 @@ export function AnalyticsView() {
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="bucket" tickFormatter={formatDate} />
               <YAxis unit="%" />
-              <Tooltip
-                formatter={(value) => [
-                  value === null || value === undefined ? 'No data (no run finished discovery)' : `${value}% (runs that finished discovery)`,
-                  'Acceptance rate',
-                ]}
-              />
+              {/* filterNull={false}: Recharts drops a null value from the tooltip
+                  by default, so a no-data period would show only its date. */}
+              <Tooltip filterNull={false} formatter={rateTooltipFormatter} />
               <Legend />
               <Line
                 type="monotone"
@@ -389,7 +393,7 @@ export function AnalyticsView() {
                 {combined.map((b) => (
                   <tr key={b.bucket}>
                     <td data-label="Date">{formatDate(b.bucket)}</td>
-                    <td data-label="Discovered (runs that finished discovery)">{b.videos_discovered}</td>
+                    <td data-label="Discovered (runs that finished discovery)">{b.acceptance_rate === null ? 'No data' : b.videos_discovered}</td>
                     <td data-label="Accepted">{b.videos_accepted}</td>
                     <td data-label="Acceptance rate (runs that finished discovery)">{b.acceptance_rate === null ? 'No data' : `${b.acceptance_rate}%`}</td>
                     <td data-label="Rejected">{b.videos_rejected}</td>

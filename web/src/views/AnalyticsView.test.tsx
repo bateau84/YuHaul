@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { AnalyticsView } from './AnalyticsView'
+import { AnalyticsView, rateTooltipFormatter } from './AnalyticsView'
 import * as api from '../api/client'
+import { LineChart, Line, XAxis, Tooltip } from 'recharts'
 import type { RouteMatchRate } from '../types'
 
 // The global fetch mock from src/test/setup.ts serves canned analytics data
@@ -31,6 +32,23 @@ afterEach(() => {
 })
 
 describe('AnalyticsView', () => {
+  it('words the acceptance-rate tooltip for data and for no data', () => {
+    expect(rateTooltipFormatter(15.4)).toEqual(['15.4% (runs that finished discovery)', 'Acceptance rate'])
+    expect(rateTooltipFormatter(null)).toEqual(['No data (no run finished discovery)', 'Acceptance rate'])
+  })
+
+  it('keeps a no-data bucket in the rate tooltip (filterNull={false})', () => {
+    // Same Tooltip props as the view, on a fixed-size chart so jsdom can lay it out.
+    render(
+      <LineChart width={400} height={300} data={[{ bucket: '2026-03-11', acceptance_rate: null }]}>
+        <XAxis dataKey="bucket" />
+        <Tooltip active defaultIndex={0} filterNull={false} formatter={rateTooltipFormatter} />
+        <Line dataKey="acceptance_rate" name="Acceptance rate" />
+      </LineChart>
+    )
+    expect(screen.getByText(/No data \(no run finished discovery\)/)).toBeInTheDocument()
+  })
+
   it('shows non-zero values from the real videos_* trends JSON', async () => {
     // Shape produced by GET /api/analytics/trends (see the Go contract test
     // TestHandler_Trends_WebContract), not the web mock's shape.
@@ -74,7 +92,7 @@ describe('AnalyticsView', () => {
     )
     // Date, discovered, accepted, rate, rejected, deferred, failed, unavailable, not yet evaluated
     expect(rows[0].slice(1)).toEqual(['40', '10', '25%', '20', '6', '2', '4', '3'])
-    expect(rows[1].slice(1)).toEqual(['0', '7', 'No data', '0', '0', '1', '0', '0'])
+    expect(rows[1].slice(1)).toEqual(['No data', '7', 'No data', '0', '0', '1', '0', '0'])
     expect(rows[2].slice(1)).toEqual(['3', '1', '33.3%', '2', '0', '0', '0', '0'])
     // Exact counts: 11 accepted of 43 discovered (25.6%); 18 accepted over all
     // runs is not part of the rate. Rounded bucket percentages are not used.
