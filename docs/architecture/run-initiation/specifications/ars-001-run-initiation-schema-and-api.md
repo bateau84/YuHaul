@@ -3,7 +3,7 @@ type: specification
 title: ARS-001 — Run Initiation Schema and API — Run Now Resume and Published-Date Range
 description: Exact migration 024, pipeline interfaces, HTTP contracts, failure responses and conformance tests for resuming a time-limit-interrupted Run Now run and for filtering Backtest/Replay by YouTube published date.
 tags: [architecture, specification, runs, manual, recovery, backtest, replay, date-range, migration, api]
-timestamp: 2026-11-10T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
 **Status:** accepted — exact implementation contract. Implemented 2026-11-10; independent review pending. Deviations from the text below are listed in [§10](#10-implementation-record-and-deviations). It realizes [ADR-001](../decisions/adr-001-run-now-resumes-time-limit-interrupted-manual-run.md) and [ADR-002](../decisions/adr-002-backtest-replay-published-date-range.md).
@@ -336,7 +336,9 @@ Each test uses real migrated SQLite (`store.ApplyMigrations`) unless marked *uni
 
 ## 10. Implementation record and deviations
 
-Run Now: commit `2476375`. Date range: the commit that follows it on PR #4. Both are unreviewed; this section is the record of where the code differs from §1–§9.
+Run Now: commit `2476375`. Date range: the commit that follows it on PR #4. PR #4 merged to main as `eed90f1`. This section is the record of where the code differs from §1–§9.
+
+Review: assessment `c3cc2449` (2026-11-10, at `f1313bf`) reviewed both features over a real binary. It found no defect in either. Its one MAJOR finding was that the Run Now UI did not tell the user a press had resumed a run (BR-017 AC12). Main now passes `admission` to Run Detail (`web/src/views/Overview.tsx:230-231`); that fix was checked by source reading here, not by a new review.
 
 | # | Deviation | Owner | Effect |
 |---|---|---|---|
@@ -347,4 +349,13 @@ Run Now: commit `2476375`. Date range: the commit that follows it on PR #4. Both
 | 5 | **`date()` behavior.** SQLite `date()` rejects `2026-02-30`, so the range trigger aborts for it. Previously [unverified]. | Date range | None; recorded in the M4 test log. |
 | 6 | **Selector location.** The ranged read and filter are one method, `state.Store.ListRetainedVideosPublishedIn(ctx, rng, cutoff)`, instead of a separate read plus a pipeline-side filter. The pipeline reads the range from the run row. | Date range | Same behavior; the filter cannot be bypassed by a caller. |
 
-Tests not run as ARS-001 describes: E2 (real browser in a non-UTC zone), the `metadata.Manager` spy in D4 (the selector lives in `state` and cannot reach the manager), a real process restart in D7 (a new store over the same database stands in), and D8 through a real pipeline (handler-level with a fake, plus `Replay` directly). Live provider behavior and the real 30-minute limit were not exercised.
+Tests not run at implementation time as ARS-001 describes: E2 (real browser in a non-UTC zone), the `metadata.Manager` spy in D4 (the selector lives in `state` and cannot reach the manager), a real process restart in D7 (a new store over the same database stands in), and D8 through a real pipeline (handler-level with a fake, plus `Replay` directly). Live provider behavior and the real 30-minute limit were not exercised.
+
+Later evidence from assessment `c3cc2449`:
+
+- **E2:** headless Chromium with `timezoneId` `Pacific/Kiritimati` (UTC+14), on an SPA built with `VITE_USE_MOCK=false`, against the real binary. Input strings were sent unchanged. Counts matched the API (6/6, 3/3, 12/12). A reversed range showed the alert and created no run. Run Detail showed the saved range and the "no date filter" state.
+- **D7:** a real process restart left every `published_range` unchanged.
+- **D8:** Backtest and Replay over the real binary gave identical selections.
+- **Real 30-minute limit:** run 14 was interrupted with `interrupt_cause=time_limit` and was then resumed by Run Now.
+
+Still not run: the D4 `metadata.Manager` spy, and an undated video made by corpus import or by the manager sweep (the review deleted the metadata row instead). Live provider behavior remains unproven.

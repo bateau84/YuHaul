@@ -3,10 +3,10 @@ type: decision
 title: ADR-002 — Backtest and Replay Select by Locally Eligible YouTube Published Date
 description: Persist the requested UTC day range on the run row, validate it before any run or snapshot exists, and filter retained videos in Go by the published date of an eligible local metadata row, without calling YouTube.
 tags: [architecture, decision, backtest, replay, date-range, metadata, retention]
-timestamp: 2026-11-10T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
-**Status:** accepted — technical realization of BR-027 AC8–13. Implemented 2026-11-10 (date-range commit on PR #4); independent review pending. Two realization findings are recorded below and in [ARS-001 §10](../specifications/ars-001-run-initiation-schema-and-api.md#10-implementation-record-and-deviations). The exact contract is [ARS-001](../specifications/ars-001-run-initiation-schema-and-api.md).
+**Status:** accepted — technical realization of BR-027 AC8–13. Implemented 2026-11-10 (date-range commit on PR #4, merged to main as `eed90f1`). Reviewed independently in assessment `c3cc2449` (2026-11-10, at `f1313bf`), with no date-filter defect found. That review ran a real binary against temporary SQLite with zero YouTube calls, and headless Chromium in `Pacific/Kiritimati` (UTC+14) on a real-client SPA. It covered the boundaries, single bounds, `S=E`, invalid ranges, saved-range display and a real process restart. One gap remains: the undated case was made by deleting the metadata row, not by a corpus import or the manager sweep. Two realization findings are recorded below and in [ARS-001 §10](../specifications/ars-001-run-initiation-schema-and-api.md#10-implementation-record-and-deviations). The exact contract is [ARS-001](../specifications/ars-001-run-initiation-schema-and-api.md).
 
 ## Summary
 
@@ -78,7 +78,7 @@ Add one store read that returns, for every retained `video` row, its identity pl
 
 - **The stored timestamp has a fourth form.** For a value bound with a numeric-only zone (for example `+02:00`), the SQLite driver writes `2026-11-01 01:00:00 +0200 +0200`. None of the layouts in Decision 3 parses it, so such a video was silently dropped from every range. The decoder now also accepts `2006-01-02 15:04:05.999999999 -0700 -0700`. A value that still cannot be decoded remains "no date", never an error.
 - **SQLite `date()` rejects `2026-02-30`.** The insert trigger aborts with `invalid run published range`, so the secondary guard agrees with the Go parser for that day. The Go parser stays authoritative and the application does not rely on the trigger.
-- **Not proven:** a real browser in a non-UTC time zone against the running binary (ARS-001 test E2); the Replay HTTP path with a real pipeline (D8 covers the handler with a fake and the boundary set through `Replay` directly).
+- **Not proven at implementation time:** a real browser in a non-UTC time zone against the running binary (ARS-001 test E2), and the Replay HTTP path with a real pipeline (D8 covered the handler with a fake and the boundary set through `Replay` directly). Reviewer assessment `c3cc2449` later ran both: E2 in `Pacific/Kiritimati`, and Backtest and Replay over the real binary with identical results. Still not proven: an undated video made by import or by the metadata sweep.
 
 ## Revisit triggers
 
