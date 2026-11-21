@@ -17,7 +17,7 @@ Release check `6d65f7ef` (PASS, PR #4 at `2930a2d` over a `debad57` database) pr
 - the A/B/C production run with B's 404 recorded and shown in Errors and Run Detail;
 - Errors, Deferred, Runs, Run Detail, Videos and Settings in a browser at 1280 and 320 px, with no overflow and no new console errors;
 - the full Go, race, integration and web suites, and CI run `44648517615`.
-Still not run: screen-reader and 200% zoom checks. The designer still owes the `in_progress` copy. It builds on the channel-granular interim ([ADR-001](../decisions/adr-001-interim-channel-granular-uploads-isolation.md)), and the two ship together. It realizes the source-failure part of [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) and [ARS-001 §5](ars-001-durable-discovery-page-handoff.md#5-authorized-inspection-contract). The page handoff, sealed scope, assessment and floor rows remain with ARS-001 and its later migration.
+Reconciled 2026-11-22 with ARS-001 (prospective; §4.5 *Reuse* now points to ARS-001 §1.3). Still not run: screen-reader and 200% zoom checks. The designer still owes the `in_progress` copy. It builds on the channel-granular interim ([ADR-001](../decisions/adr-001-interim-channel-granular-uploads-isolation.md)), and the two ship together. It realizes the source-failure part of [ARD-001](../design/ard-001-isolate-uploads-source-failures.md) and [ARS-001 §5](ars-001-durable-discovery-page-handoff.md#5-authorized-inspection-contract). The page handoff, sealed scope, assessment and floor rows remain with ARS-001 and its later migration.
 
 Example: channels A and C list successfully, and B's uploads read returns `404 playlistNotFound`. Before discovery asks YouTube for anything else, it commits one row: run 54, channel `UC…B`, permanent, `playlist_items_list`, `404`, `playlistNotFound`, time. Run 54 continues and ends **Completed**. After a restart, Errors shows a read-only **Channel scan error** for B in run 54, with "YouTube reported that the uploads playlist was not found." Run Detail for run 54 says "Some channels could not be scanned. Results are incomplete." and lists B. Run 55 polls B again. If B still fails, run 55 adds its own row. If B succeeds, run 54's row stays as history; nothing removes or rewrites it.
 
@@ -222,16 +222,12 @@ An unrecognized stored value is reported as `null` with a server warning. It is 
 
 The **Run-wide cause, scan stage not established** variant otherwise has no reachable case on this build. It remains the design's rule for evidence that does not state the scan stage.
 
-**Reuse.** ARS-001's later assessment refines, but does not replace, this column. When it lands, its writers keep setting `discovery_scan_outcome` as a coarse projection:
+**Reuse.** *(Reconciled 2026-11-22, prospective; nothing built here changes.)* ARS-001 does not add a second assessment column. On the page path:
+- this column stays the only stored "scan finished" fact;
+- ARS-001 §1.3 moves write 1 into its seal transaction and write 2 into its last-row settlement transaction;
+- write 3 stays the AC8 `UPDATE`, now inside ARS-001 §2's all-local transaction.
 
-| ARS-001 assessment | `discovery_scan_outcome` |
-|---|---|
-| `blocked`, or an unsettled sealed scope at a terminal or interrupted end | `cut_short` |
-| `complete`, `mixed` or `no_attempts` | `completed` |
-| `all_local_failed` | `no_source_scanned` |
-| `eligibility_changed_no_coverage` | `completed` |
-
-Readers that understand `discovery_acquisition` prefer it. Runs from this build keep their coarse value.
+ARS-001 §1.3 derives the finer `discovery_acquisition` state from this column, the run status, the sealed scope and the run dispatch stop. Readers that understand `discovery_acquisition` prefer it. Runs from this build keep their value and read `discovery_acquisition: null`. The 2026-11-20 mapping table that stood here is replaced by ARS-001 §1.3.
 
 **D1 isolation flag.** `runWithClient` takes an explicit `isolateSources bool`, separate from `byID`. `RunBound` passes `true`; the legacy `Run` passes `false`. `fetchNewVideos` applies D1 and §2/§3 only when `isolateSources` is true. Neither flag is derived from the other (ADR-001 D1).
 
@@ -284,7 +280,7 @@ Unchanged:
    - receipt and Discovery precede live-status (`b42-migration`);
    - capacity's `deferred_item` rebuild and live-status's are combined, or the later one carries every earlier column and CHECK value.
 
-   Expected sequence if they integrate in plan order: `031` receipt provenance (with the §6.1.1 Store A clearing), `032` Discovery page/scope/assessment, `033` live-status. That is an expectation, not a reservation.
+   Expected sequence if they integrate in plan order: `031` receipt provenance (with the §6.1.1 Store A clearing), `032` Discovery page/scope/assessment, `033` live-status. That is an expectation, not a reservation. *(2026-11-22: `031` landed as expected. The later order is now the Plan's phase `migrations`; Discovery's content is ARS-001 §4.1.)*
 5. **No overlap with this table.** ARS-001's later migration adds its scope and assessment tables and widens `deferred_item`. It must not alter `discovery_source_failure` except by additive indexes. Extending reasons and categories needs no DDL (§1).
 
 [Run-initiation ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) §5.1.1 and §6.1.1 are amended to match. The receipt migration is "the first receipt migration after `030`", not "the first migration after Search `029`". Its Store A clearing still goes in the earliest migration that must be applied before any production `FetchForEvaluation` caller.

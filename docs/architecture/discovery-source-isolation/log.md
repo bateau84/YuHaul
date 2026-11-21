@@ -3,10 +3,27 @@ type: Log
 title: Discovery Source Isolation Change Log
 description: Changes to the discovery source isolation architecture bundle.
 tags: [changelog, architecture, discovery]
-timestamp: 2026-11-18T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
 # Discovery Source Isolation Change Log
+
+## 2026-11-22
+
+**ARD-001 and ARS-001 reconciled with `main` at `8d7e009` (Plan r30 `run52-arch-reconcile`; both still proposed).** They now build on what PR #4 and PR #5 built and no longer restate it:
+- [ARS-002](/docs/architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md)'s `030` incident table, its source Errors projection and `run.discovery_scan_outcome`;
+- `031`'s `retry_claim_provenance` and receipt functions.
+
+[ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) changes:
+- §1.1 names one owner per stored fact.
+- §1.2 defines the run dispatch stop: `run.dispatch_stop` with the values `authorization`, `quota` and `accounting_or_integrity`, a rank that writes can only raise, its writers, readers and `NULL` meaning, and a trigger. The DDL goes to PR-R's `rq-stop-schema`, or to `run52-schema` if PR-R ships without it.
+- §1.3 replaces the stored run assessment with a state derived from `discovery_scan_outcome`, the run status, the sealed scope (`run.discovery_scope_cutoff`, `discovery_source_scope`) and the dispatch stop. That removes the ARS-002 §4.5 overlap. ARS-002's writes 1 and 2 move into the seal and last-row transactions.
+- An attributable transient source failure now settles that source for the run, with a `transient` incident.
+- §4.1 gives the discovery migration content against the `031` baseline. The stale `028`/`029` sequencing text is removed.
+- §5 points to ARS-002 §4 for the source Errors endpoints instead of restating them.
+- §7 lists the open decisions.
+
+[ARD-001](/docs/architecture/discovery-source-isolation/design/ard-001-isolate-uploads-source-failures.md) maps BR-002 AC6–10 and points to these sections. ARS-002 §4.5 *Reuse* and §6 rule 4 are amended prospectively; nothing built changes. The accepted user decisions behind BR-002 AC7–10 are unchanged. No implementation or runtime proof.
 
 ## 2026-11-20
 
