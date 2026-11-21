@@ -11,6 +11,10 @@ timestamp: 2026-11-10T00:00:00Z
 - Updated the Analytics counting-basis status in the [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (PR #6): the two minors from recheck `b9eb9f9c` (Discovered cell showed `0` instead of `No data`; the no-data tooltip text never appeared) are fixed and covered by web tests. Status text only; no design change.
 - Specified the Analytics counting-basis copy in [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (PR #6): two persistent notes, revised Discovered and Acceptance rate headers, and rewritten summaries, so outcome counts from all ended runs are not read against the rate from runs that finished discovery. Copy fix; one optional data figure noted. Design only.
 
+## 2026-11-22
+
+- Amended [admin interface design](/docs/design/yuhaul-admin-ui-design.md), “Live and Upcoming Videos — Skipped Until Ended”, for [BR-042](/docs/requirements/yuhaul/br-042-skip-live-and-upcoming-videos-until-ended.md) AC7 (Loom Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`, node `b42-ac7-design`). Added the Settings “Live check limit” field (whole days, default 30, range 1–365, own Save, exact help, refusal and success copy, saved value kept on refusal) and the Deferred row once automatic checks have stopped (stopped-since time, `Not checked automatically`, `Retry now checks it again`, no Re-queue). Reconciled the earlier “no end to the wait” wording and the scope statement. Reused US-020 and the existing scenarios. Design only: no code, API choice, or browser/accessibility check; the API must supply the stopped state and time, and the UI never computes them.
+
 ## 2026-11-20
 
 - Section 3a of the [admin interface design](/docs/design/yuhaul-admin-ui-design.md) no longer says the `retry_work_removed` handling is unchecked in a browser: release check `df803f9f` checked it in a browser.
