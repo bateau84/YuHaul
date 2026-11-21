@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { AnalyticsView } from './AnalyticsView'
+import { AnalyticsView, rateTooltipFormatter } from './AnalyticsView'
 import * as api from '../api/client'
+import { LineChart, Line, XAxis, Tooltip } from 'recharts'
 import type { RouteMatchRate } from '../types'
 
 // The global fetch mock from src/test/setup.ts serves canned analytics data
@@ -31,6 +32,80 @@ afterEach(() => {
 })
 
 describe('AnalyticsView', () => {
+  it('words the acceptance-rate tooltip for data and for no data', () => {
+    expect(rateTooltipFormatter(15.4)).toEqual(['15.4% (runs that finished discovery)', 'Acceptance rate'])
+    expect(rateTooltipFormatter(null)).toEqual(['No data (no run finished discovery)', 'Acceptance rate'])
+  })
+
+  it('keeps a no-data bucket in the rate tooltip (filterNull={false})', () => {
+    // Same Tooltip props as the view, on a fixed-size chart so jsdom can lay it out.
+    render(
+      <LineChart width={400} height={300} data={[{ bucket: '2026-03-11', acceptance_rate: null }]}>
+        <XAxis dataKey="bucket" />
+        <Tooltip active defaultIndex={0} filterNull={false} formatter={rateTooltipFormatter} />
+        <Line dataKey="acceptance_rate" name="Acceptance rate" />
+      </LineChart>
+    )
+    expect(screen.getByText(/No data \(no run finished discovery\)/)).toBeInTheDocument()
+  })
+
+  it('shows non-zero values from the real videos_* trends JSON', async () => {
+    // Shape produced by GET /api/analytics/trends (see the Go contract test
+    // TestHandler_Trends_WebContract), not the web mock's shape.
+    const trendsJSON = {
+      from: '2026-03-01T00:00:00Z',
+      to: '2026-04-01T00:00:00Z',
+      granularity: 'day',
+      buckets: [
+        {
+          bucket: '2026-03-10', videos_discovered: 40, videos_accepted: 10, videos_rejected: 20,
+          videos_deferred: 6, videos_failed: 2, videos_not_yet_evaluated: 3, videos_unavailable: 4, videos_accepted_discovery_finished: 10,
+          acceptance_rate: 0.25,
+        },
+        {
+          // A failed run whose discovery did not finish: outcomes count, rate has no data.
+          bucket: '2026-03-11', videos_discovered: 0, videos_accepted: 7, videos_rejected: 0,
+          videos_deferred: 0, videos_failed: 1, videos_not_yet_evaluated: 0, videos_unavailable: 0, videos_accepted_discovery_finished: 0,
+          acceptance_rate: null,
+        },
+        {
+          bucket: '2026-03-12', videos_discovered: 3, videos_accepted: 1, videos_rejected: 2,
+          videos_deferred: 0, videos_failed: 0, videos_not_yet_evaluated: 0, videos_unavailable: 0,
+          videos_accepted_discovery_finished: 1, acceptance_rate: 1 / 3,
+        },
+      ],
+    }
+    globalThis.fetch = ((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.startsWith('/api/analytics/trends')) {
+        return Promise.resolve(new Response(JSON.stringify(trendsJSON), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return realFetch(input as RequestInfo)
+    }) as typeof fetch
+
+    render(<AnalyticsView />)
+    await waitFor(() => expect(screen.getByText('Acceptance rate')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /Show data table/i }))
+    const table = await screen.findByRole('table')
+    const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) =>
+      Array.from(tr.querySelectorAll('td')).map((td) => td.textContent)
+    )
+    // Date, discovered, accepted, rate, rejected, deferred, failed, unavailable, not yet evaluated
+    expect(rows[0].slice(1)).toEqual(['40', '10', '25%', '20', '6', '2', '4', '3'])
+    expect(rows[1].slice(1)).toEqual(['No data', '7', 'No data', '0', '0', '1', '0', '0'])
+    expect(rows[2].slice(1)).toEqual(['3', '1', '33.3%', '2', '0', '0', '0', '0'])
+    // Exact counts: 11 accepted of 43 discovered (25.6%); 18 accepted over all
+    // runs is not part of the rate. Rounded bucket percentages are not used.
+    expect(screen.getByText(/Overall acceptance rate 25\.6%: 11 accepted of 43 discovered, counting only runs that finished discovery\./)).toBeInTheDocument()
+    expect(screen.getByText(/Across all ended production runs: 18 accepted, 22 rejected, 6 deferred, 3 failed\. 43 discovered in runs that finished discovery\./)).toBeInTheDocument()
+    // Persistent notes are visible text, tied to the charts and the table.
+    expect(screen.getByText(/Acceptance rate is accepted ÷ discovered, counting only runs that finished discovery/)).toBeVisible()
+    expect(screen.getAllByText(/so outcomes can add up to more than Discovered/)).toHaveLength(2)
+    expect(table).toHaveAccessibleDescription(/never counted\./)
+    expect(screen.getByRole('columnheader', { name: 'Acceptance rate (runs that finished discovery)' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Discovered (runs that finished discovery)' })).toBeInTheDocument()
+  })
+
   it('renders trend charts and a data table toggle', async () => {
     render(<AnalyticsView />)
     await waitFor(() => expect(screen.getByText('Acceptance rate')).toBeInTheDocument())

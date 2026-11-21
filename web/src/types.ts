@@ -434,13 +434,22 @@ export interface Advisory {
   evidence_snapshot?: AdvisoryEvidence
 }
 
+// One /api/analytics/trends bucket. Names mirror the API (videos_*).
+// videos_discovered and acceptance_rate count only runs whose discovery
+// finished (BR-023 AC12–13); the other counts come from every counted run.
+// acceptance_rate is a fraction (0–1), or null when there is no data.
 export interface TrendBucket {
   bucket: string
-  discovered: number
-  accepted: number
-  rejected: number
-  deferred: number
-  failed: number
+  videos_discovered: number
+  videos_accepted: number
+  videos_rejected: number
+  videos_deferred: number
+  videos_failed: number
+  videos_not_yet_evaluated: number
+  videos_unavailable: number
+  // Accepted count of the runs behind videos_discovered and acceptance_rate.
+  videos_accepted_discovery_finished: number
+  acceptance_rate: number | null
 }
 
 export interface RouteMatchRate {

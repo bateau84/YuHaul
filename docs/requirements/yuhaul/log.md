@@ -3,10 +3,18 @@ type: Log
 title: YuHaul Requirements Change Log
 description: Chronological record of changes to the YuHaul behavioral requirement bundle.
 tags: [changelog, log, okf, requirements, yuhaul]
-timestamp: 2026-11-19T00:00:00Z
+timestamp: 2026-11-21T00:00:00Z
 ---
 
 # YuHaul Requirements Update Log
+
+## 2026-11-21
+
+**BR-023 AC10–AC14 implemented (PR #6); index conflict note replaced.** Source: the implementation on branch `fix/analytics-trends`, checked against the BR-023 text and its verification cases by Go tests over seeded runs of every type and status and by web tests, and checked in a browser by the review and recheck (record `b9eb9f9c`), whose two minors (the Discovered cell and the no-data tooltip) are fixed in the PR #6 follow-up. `GetTemporalStats` counts manual and scheduled runs that completed, failed or stopped; discovered and the rate use only runs whose discovery finished (saved scan outcome `completed`, or no saved outcome and status completed). `GetRouteMatchRates` applies the run-type and status rule only. The trends API keeps its `videos_*` names and adds `acceptance_rate` (null for no data) and `videos_accepted_discovery_finished`, so the overall rate is computed from summed counts. The earlier "Conflict with current source" note in the [index](index.md) is replaced. No requirement text changed.
+
+**Older runs: discovery finished only if completed; route-match reading confirmed (BR-023).** Source: the user's "yes" of 2026-11-21, relayed in the specification assignment; the original human conversation was not independently inspected. [BR-023](br-023-historical-statistics-over-time.md) rule 2 now counts a run with no saved channel-scan outcome as discovery finished only if its status is completed. It replaces the recorded-phase fallback. Failed and stopped older runs still add their accepted, rejected, deferred and failed counts, but nothing to discovered or the acceptance rate. Justification from the user's live data: old run 14, failed at action execution, recorded 62,866 discovered and 0 accepted; with the amended rule the rate is 197 of 1,281. AC14 (route match rates use the run-type and status rule only) is confirmed. The open question is closed in BR-023 and the [index](index.md), and the index example now names run 14. The current-source conflict is unchanged. Docs only.
+
+**Which runs Analytics counts (BR-023 AC10–AC14).** Source: the user's decision of 2026-11-21, relayed in the specification assignment; the original human conversation was not independently inspected. Only manual and scheduled runs count; dry run, replay and backtest never do. Completed, failed and stopped runs count toward their recorded outcome numbers; running and interrupted runs wait until they reach one of those statuses. Only runs whose discovery finished count toward "discovered" and the acceptance rate, because failed runs re-discover the same videos (27 failed scheduled runs recorded 62,866 discovered and 0 accepted). Route match rates follow the run-type and status rule. Added [BR-023](br-023-historical-statistics-over-time.md) "When discovery finished": the saved channel-scan outcome (`completed`, from migration `030`) decides when present; an older run without one counts as finished when its recorded phase is after discovery. Specification choices, labeled in BR-023: other outcome counts follow the status rule; the acceptance rate uses the same runs for both counts and shows no data instead of 0%; "no channel could be scanned" is not finished; the route-match reading. One non-blocking user question (whether the older-run rule still counts the 27 example runs, and the route-match reading). **Conflict with current source** recorded in the [index](index.md): trends count only completed runs of every type, route match rates only completed production runs, and the view shows 0% with nothing discovered. Docs only; no field, query or design chosen.
 
 ## 2026-11-19
 
