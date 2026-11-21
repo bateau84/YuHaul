@@ -381,12 +381,23 @@ func (s *Store) IncrementChannelRouted(ctx context.Context, channelIDText string
 // GetTemporalStats returns run outcomes grouped by bucket. Bucketing is done
 // in Go because run.started_at is stored as RFC3339Nano, which SQLite's
 // strftime cannot parse reliably.
+//
+// Inclusion follows BR-023 AC10–AC13: only manual and scheduled runs that
+// ended as completed, failed or stopped count. Every counted run contributes
+// its outcome counts; its discovered count (and accepted count for the
+// acceptance rate) counts only when its discovery finished. Discovery
+// finished when the saved channel-scan outcome is 'completed'; with no saved
+// outcome (legacy runs) it finished only if the run completed.
 func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granularity string) ([]TemporalBucket, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT started_at, videos_discovered, videos_accepted, videos_rejected,
-		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable
+		        videos_deferred, videos_failed, videos_not_yet_evaluated, videos_unavailable,
+		        CASE WHEN discovery_scan_outcome IS NOT NULL THEN discovery_scan_outcome = 'completed'
+		             ELSE status = 'completed' END
 		 FROM run
-		 WHERE started_at >= ? AND started_at < ? AND status = 'completed'
+		 WHERE started_at >= ? AND started_at < ?
+		   AND run_type IN ('manual','scheduled')
+		   AND status IN ('completed','failed','stopped')
 		 ORDER BY started_at;`, from.UTC().Format(state.RunTimestampLayout), to.UTC().Format(state.RunTimestampLayout))
 	if err != nil {
 		return nil, fmt.Errorf("temporal stats: %w", err)
@@ -397,9 +408,15 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 	for rows.Next() {
 		var startedAt string
 		var b TemporalBucket
+		var finished bool
 		if err := rows.Scan(&startedAt, &b.VideosDiscovered, &b.VideosAccepted,
-			&b.VideosRejected, &b.VideosDeferred, &b.VideosFailed, &b.VideosNotYetEvaluated, &b.VideosUnavailable); err != nil {
+			&b.VideosRejected, &b.VideosDeferred, &b.VideosFailed, &b.VideosNotYetEvaluated, &b.VideosUnavailable, &finished); err != nil {
 			return nil, fmt.Errorf("scan temporal row: %w", err)
+		}
+		if finished {
+			b.acceptedFinished = b.VideosAccepted
+		} else {
+			b.VideosDiscovered = 0
 		}
 		t, err := time.Parse(time.RFC3339Nano, startedAt)
 		if err != nil {
@@ -418,6 +435,7 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 			existing.VideosFailed += b.VideosFailed
 			existing.VideosNotYetEvaluated += b.VideosNotYetEvaluated
 			existing.VideosUnavailable += b.VideosUnavailable
+			existing.acceptedFinished += b.acceptedFinished
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -426,6 +444,10 @@ func (s *Store) GetTemporalStats(ctx context.Context, from, to time.Time, granul
 
 	out := make([]TemporalBucket, 0, len(groups))
 	for _, b := range groups {
+		if b.VideosDiscovered > 0 {
+			rate := float64(b.acceptedFinished) / float64(b.VideosDiscovered)
+			b.AcceptanceRate = &rate
+		}
 		out = append(out, *b)
 	}
 	// Buckets are ordered lexically because bucket keys use ISO 8601 prefixes.
@@ -1050,7 +1072,8 @@ func (s *Store) GetRouteMatchRates(ctx context.Context, from, to time.Time, gran
 		 FROM route_decision rd
 		 JOIN route r ON r.id = rd.route_id
 		 JOIN run ON run.id = rd.run_id
-		 WHERE run.started_at >= ? AND run.started_at < ? AND run.status = 'completed'
+		 WHERE run.started_at >= ? AND run.started_at < ?
+		   AND run.status IN ('completed','failed','stopped')
 		   AND run.run_type IN ('scheduled', 'manual')
 		 ORDER BY run.started_at, r.evaluation_order;`,
 		from.UTC().Format(state.RunTimestampLayout), to.UTC().Format(state.RunTimestampLayout))

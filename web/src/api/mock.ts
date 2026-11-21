@@ -296,11 +296,15 @@ const mockChannels: ChannelDetail[] = [
 
 const mockTrends: TrendBucket[] = Array.from({ length: 14 }).map((_, i) => ({
   bucket: `2026-08-${String(26 + i).padStart(2, '0')}T00:00:00Z`,
-  discovered: 10 + i,
-  accepted: 1 + (i % 3),
-  rejected: 6 + (i % 2),
-  deferred: 2 + (i % 2),
-  failed: i % 5 === 0 ? 1 : 0,
+  videos_discovered: 10 + i,
+  videos_accepted: 1 + (i % 3),
+  videos_rejected: 6 + (i % 2),
+  videos_deferred: 2 + (i % 2),
+  videos_failed: i % 5 === 0 ? 1 : 0,
+  videos_not_yet_evaluated: 0,
+  videos_unavailable: i % 7 === 0 ? 1 : 0,
+  // Day 0 has no finished-discovery run, like a real "no data" bucket.
+  acceptance_rate: i === 0 ? null : (1 + (i % 3)) / (10 + i),
 }))
 
 const mockRouteMatchRates: RouteMatchRate[] = Array.from({ length: 14 }).flatMap((_, i) => [

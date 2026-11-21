@@ -71,7 +71,9 @@ type ChannelStats struct {
 	Advisories       []AdvisorySummary `json:"advisories,omitempty"`
 }
 
-// TemporalBucket aggregates run outcomes over a calendar period.
+// TemporalBucket aggregates run outcomes over a calendar period (BR-023
+// AC10–AC13). Outcome counts come from every counted run; VideosDiscovered
+// and AcceptanceRate come only from runs whose discovery finished.
 type TemporalBucket struct {
 	Bucket                string `json:"bucket"`
 	VideosDiscovered      int    `json:"videos_discovered"`
@@ -81,6 +83,14 @@ type TemporalBucket struct {
 	VideosFailed          int    `json:"videos_failed"`
 	VideosNotYetEvaluated int    `json:"videos_not_yet_evaluated"`
 	VideosUnavailable     int    `json:"videos_unavailable"`
+	// AcceptanceRate is accepted/discovered over the runs whose discovery
+	// finished, as a fraction in [0,1]. It is null when no such run exists or
+	// their discovered total is 0 ("no data", never 0%).
+	AcceptanceRate *float64 `json:"acceptance_rate"`
+
+	// acceptedFinished is the accepted count of discovery-finished runs only,
+	// the numerator that matches VideosDiscovered.
+	acceptedFinished int
 }
 
 // DuplicateProvenance describes one distinct-pair duplicate match anchored at

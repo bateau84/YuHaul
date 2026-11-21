@@ -15,8 +15,9 @@ import * as api from '../api/client'
 import { routeLabel } from '../lib/route'
 import type { TrendBucket, RouteMatchRate } from '../types'
 
-interface CombinedBucket extends TrendBucket {
-  acceptance_rate: number
+// Chart row: acceptance_rate as a percentage, or null for "no data".
+interface CombinedBucket extends Omit<TrendBucket, 'acceptance_rate'> {
+  acceptance_rate: number | null
 }
 
 function formatDate(iso: string): string {
@@ -56,10 +57,16 @@ function computeRangeParams(range: string, customFrom: string, customTo: string)
 
 function summarizeTrends(data: CombinedBucket[]): string {
   if (data.length === 0) return 'No trend data available.'
-  const totalDiscovered = data.reduce((sum, b) => sum + b.discovered, 0)
-  const totalAccepted = data.reduce((sum, b) => sum + b.accepted, 0)
-  const avgRate = totalDiscovered > 0 ? (totalAccepted / totalDiscovered) * 100 : 0
-  return `${data.length} periods. ${totalDiscovered} discovered, ${totalAccepted} accepted. Average acceptance rate ${avgRate.toFixed(1)}%.`
+  const totalDiscovered = data.reduce((sum, b) => sum + b.videos_discovered, 0)
+  const totalAccepted = data.reduce((sum, b) => sum + b.videos_accepted, 0)
+  // Weighting each bucket's rate by its discovered count gives accepted /
+  // discovered over the runs whose discovery finished, the same basis as the
+  // per-bucket rate (accepted outcomes of other runs are not in the numerator).
+  const withRate = data.filter((b) => b.acceptance_rate !== null && b.videos_discovered > 0)
+  const rateDiscovered = withRate.reduce((sum, b) => sum + b.videos_discovered, 0)
+  const rateAccepted = withRate.reduce((sum, b) => sum + ((b.acceptance_rate as number) / 100) * b.videos_discovered, 0)
+  const rate = rateDiscovered > 0 ? `${((rateAccepted / rateDiscovered) * 100).toFixed(1)}%` : 'no data'
+  return `${data.length} periods. ${totalDiscovered} discovered, ${totalAccepted} accepted. Average acceptance rate ${rate}.`
 }
 
 // Aggregates per-bucket rates by route UUID, not display name: two routes may
@@ -137,7 +144,7 @@ export function AnalyticsView() {
   const combined = useMemo<CombinedBucket[]>(() => {
     return data.map((b) => ({
       ...b,
-      acceptance_rate: b.discovered > 0 ? Number(((b.accepted / b.discovered) * 100).toFixed(1)) : 0,
+      acceptance_rate: b.acceptance_rate === null ? null : Number((b.acceptance_rate * 100).toFixed(1)),
     }))
   }, [data])
 
@@ -254,7 +261,7 @@ export function AnalyticsView() {
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="bucket" tickFormatter={formatDate} />
               <YAxis unit="%" />
-              <Tooltip formatter={(value) => [`${value}%`, 'Acceptance rate']} />
+              <Tooltip formatter={(value) => [value === null || value === undefined ? 'No data' : `${value}%`, 'Acceptance rate']} />
               <Legend />
               <Line
                 type="monotone"
@@ -287,10 +294,12 @@ export function AnalyticsView() {
               <YAxis />
               <Tooltip />
               <Legend />
-              <Bar dataKey="accepted" stackId="a" fill="var(--color-status-accepted)" />
-              <Bar dataKey="rejected" stackId="a" fill="var(--color-status-rejected)" />
-              <Bar dataKey="deferred" stackId="a" fill="var(--color-status-deferred)" />
-              <Bar dataKey="failed" stackId="a" fill="var(--color-status-failed)" />
+              <Bar dataKey="videos_accepted" name="Accepted" stackId="a" fill="var(--color-status-accepted)" />
+              <Bar dataKey="videos_rejected" name="Rejected" stackId="a" fill="var(--color-status-rejected)" />
+              <Bar dataKey="videos_deferred" name="Deferred" stackId="a" fill="var(--color-status-deferred)" />
+              <Bar dataKey="videos_failed" name="Failed" stackId="a" fill="var(--color-status-failed)" />
+              <Bar dataKey="videos_unavailable" name="Unavailable on YouTube" stackId="a" fill="var(--color-status-excluded)" />
+              <Bar dataKey="videos_not_yet_evaluated" name="Not yet evaluated" stackId="a" fill="var(--color-status-not-evaluated)" />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -345,18 +354,22 @@ export function AnalyticsView() {
                   <th scope="col">Rejected</th>
                   <th scope="col">Deferred</th>
                   <th scope="col">Failed</th>
+                  <th scope="col">Unavailable on YouTube</th>
+                  <th scope="col">Not yet evaluated</th>
                 </tr>
               </thead>
               <tbody>
                 {combined.map((b) => (
                   <tr key={b.bucket}>
                     <td data-label="Date">{formatDate(b.bucket)}</td>
-                    <td data-label="Discovered">{b.discovered}</td>
-                    <td data-label="Accepted">{b.accepted}</td>
-                    <td data-label="Acceptance rate">{b.acceptance_rate}%</td>
-                    <td data-label="Rejected">{b.rejected}</td>
-                    <td data-label="Deferred">{b.deferred}</td>
-                    <td data-label="Failed">{b.failed}</td>
+                    <td data-label="Discovered">{b.videos_discovered}</td>
+                    <td data-label="Accepted">{b.videos_accepted}</td>
+                    <td data-label="Acceptance rate">{b.acceptance_rate === null ? 'No data' : `${b.acceptance_rate}%`}</td>
+                    <td data-label="Rejected">{b.videos_rejected}</td>
+                    <td data-label="Deferred">{b.videos_deferred}</td>
+                    <td data-label="Failed">{b.videos_failed}</td>
+                    <td data-label="Unavailable on YouTube">{b.videos_unavailable}</td>
+                    <td data-label="Not yet evaluated">{b.videos_not_yet_evaluated}</td>
                   </tr>
                 ))}
               </tbody>

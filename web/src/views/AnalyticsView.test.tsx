@@ -31,6 +31,49 @@ afterEach(() => {
 })
 
 describe('AnalyticsView', () => {
+  it('shows non-zero values from the real videos_* trends JSON', async () => {
+    // Shape produced by GET /api/analytics/trends (see the Go contract test
+    // TestHandler_Trends_WebContract), not the web mock's shape.
+    const trendsJSON = {
+      from: '2026-03-01T00:00:00Z',
+      to: '2026-04-01T00:00:00Z',
+      granularity: 'day',
+      buckets: [
+        {
+          bucket: '2026-03-10', videos_discovered: 40, videos_accepted: 10, videos_rejected: 20,
+          videos_deferred: 6, videos_failed: 2, videos_not_yet_evaluated: 3, videos_unavailable: 4,
+          acceptance_rate: 0.25,
+        },
+        {
+          // A failed run whose discovery did not finish: outcomes count, rate has no data.
+          bucket: '2026-03-11', videos_discovered: 0, videos_accepted: 7, videos_rejected: 0,
+          videos_deferred: 0, videos_failed: 1, videos_not_yet_evaluated: 0, videos_unavailable: 0,
+          acceptance_rate: null,
+        },
+      ],
+    }
+    globalThis.fetch = ((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.startsWith('/api/analytics/trends')) {
+        return Promise.resolve(new Response(JSON.stringify(trendsJSON), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return realFetch(input as RequestInfo)
+    }) as typeof fetch
+
+    render(<AnalyticsView />)
+    await waitFor(() => expect(screen.getByText('Acceptance rate')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /Show data table/i }))
+    const table = await screen.findByRole('table')
+    const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) =>
+      Array.from(tr.querySelectorAll('td')).map((td) => td.textContent)
+    )
+    // Date, discovered, accepted, rate, rejected, deferred, failed, unavailable, not yet evaluated
+    expect(rows[0].slice(1)).toEqual(['40', '10', '25%', '20', '6', '2', '4', '3'])
+    expect(rows[1].slice(1)).toEqual(['0', '7', 'No data', '0', '0', '1', '0', '0'])
+    // 10 accepted of 40 discovered over the runs whose discovery finished.
+    expect(screen.getAllByText(/Average acceptance rate 25\.0%/).length).toBeGreaterThan(0)
+  })
+
   it('renders trend charts and a data table toggle', async () => {
     render(<AnalyticsView />)
     await waitFor(() => expect(screen.getByText('Acceptance rate')).toBeInTheDocument())
