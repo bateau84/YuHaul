@@ -10,6 +10,8 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**Fetch suspension lasts the run (`rq-metadata-fetch`).** [Run-initiation ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.2 said a generic metadata failure suspends fetching "in the pass", while B7 (§11.6) requires zero further `videos.list` requests for the rest of the run. §6.2 now says the run, and §12 records the in-memory per-run seam in `metadata.Manager`. A dispatch stop still wins over it.
+
 **Quota stop hotfix implemented (run 58).** [Quota-stop ARS-001](/docs/architecture/quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) is implemented on `hotfix/quota-stop` and its §10 holds the implementation record. The Q1 pending count is corrected to 7. Q-1 (pre-scan terminal status) and Q-2 are still open.
 
 **Quota stop hotfix proposed (run 58).** [Quota-stop ARS-001](/docs/architecture/quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) is based on `origin/main` `8d7e009`. It realizes [ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.1's quota dispatch stop per run, as a ledger predicate. A `quota` attempt costs 1 unit, the documented minimum. The quota day defaults to midnight Pacific. A pre-scan quota refusal is typed and ends discovery as `cut_short`. The terminal status (Q-1) is pending the user. Not implemented.
