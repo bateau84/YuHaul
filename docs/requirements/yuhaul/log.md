@@ -3,10 +3,14 @@ type: Log
 title: YuHaul Requirements Change Log
 description: Chronological record of changes to the YuHaul behavioral requirement bundle.
 tags: [changelog, log, okf, requirements, yuhaul]
-timestamp: 2026-11-21T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
 # YuHaul Requirements Update Log
+
+## 2026-11-22
+
+**Playlist capacity: dismissed adds, trusting the count, and derived AC7 cases.** Source: the user's "as recommended" decisions of 2026-11-22, relayed in the specification assignment for Loom Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`; the original human conversation was not independently inspected. (1) [BR-041](br-041-bound-playlist-full-waiting-work.md) AC7: the user may Dismiss a playlist-full waiting add; it removes only that add and is then treated like an evicted add. When the other adds succeed, the video is deferred and not final, explained in words like "Added to B. The add to A was discarded and won't be retried."; nothing retries it. This answers capacity ARD-001 open question 1 with option (a). (2) [BR-040](br-040-respect-youtube-playlist-capacity.md) AC1: a count received after a recorded success's response covers that success; unresolved guards are never covered; YouTube's `403 playlistContainsMaximumNumberOfVideos` refusal is the backstop and defers the add as playlist-full. This answers capacity ARS-001 §4.2 (finding 4) with Option B. (3) BR-041 AC7 records the derived cases from capacity ARS-001 §12 item 2: no add succeeded, the other add succeeded in an earlier run, and eviction while no run holds the video (last committed outcome stays). [OC-002](oc-002-route-evaluation-outcome-semantics.md) Guarantees 1 and 5 name the dismissed add. §12 item 3 (R3, a definite refusal after eviction) is not settled by these decisions and is listed as an open, non-blocking user question in the [index](index.md). Capacity ARD-001, ARS-001 §4.2, §5.3, §6.1 and §12 are the architect's to update. Docs only.
 
 ## 2026-11-21
 

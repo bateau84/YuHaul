@@ -3,7 +3,7 @@ type: obligation-contract
 title: OC-002 — Route Evaluation Outcome Semantics
 description: Shared vocabulary and classification rules for routing outcomes, consumed by evaluation, persistence, statistics, and inspection
 tags: [obligation-contract, routes, outcomes, classification, semantics]
-timestamp: 2026-11-19T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
 **Status:** accepted
@@ -21,13 +21,13 @@ timestamp: 2026-11-19T00:00:00Z
 - The system uses the outcome vocabulary defined in this contract.
 
 ## Guarantees
-1. Every video processed through the evaluation pipeline receives exactly one primary outcome classification: **accepted**, **rejected**, **excluded**, **deferred**, or **failed**. A video whose decision is incomplete because a missing add was evicted, while its other adds succeeded, still receives exactly one: **deferred** ([BR-041](br-041-bound-playlist-full-waiting-work.md) AC7, amended 2026-11-19). Partial success is never a second outcome, and never accepted.
+1. Every video processed through the evaluation pipeline receives exactly one primary outcome classification: **accepted**, **rejected**, **excluded**, **deferred**, or **failed**. A video whose decision is incomplete because a missing add was evicted or dismissed by the user, while its other adds succeeded, still receives exactly one: **deferred** ([BR-041](br-041-bound-playlist-full-waiting-work.md) AC7, amended 2026-11-19 and 2026-11-22). Partial success is never a second outcome, and never accepted.
 2. **Accepted**: the video matched one or more route conditions and its playlist action was executed (or would have been in dry-run).
 3. **Rejected**: the video was evaluated against all applicable routes and matched no route conditions.
 4. **Excluded**: the video was prevented from evaluation by an exclusion rule (channel, video, title, word/phrase, or duration exclusion) before route evaluation.
 5. **Deferred**: the video was not evaluated due to an operational constraint (quota exhaustion, authorization pending, or other temporary inability to process).
    For the playlist-capacity case, deferral can occur after evaluation: when capacity alone prevents completion of a required addition, the run's video outcome is deferred, as [BR-040](br-040-respect-youtube-playlist-capacity.md) requires. Do not treat this as a route non-match, exclusion or final outcome. Eviction under [BR-041](br-041-bound-playlist-full-waiting-work.md) is a queue-history event, not another video outcome.
-   *Deferred does not promise a retry (2026-11-19).* Deferred means not final and not yet complete. It also covers a video whose decision is incomplete and has no active retry for the missing add: an evicted capacity add after the decision's other adds succeeded ([BR-041](br-041-bound-playlist-full-waiting-work.md) AC7), and a live-skipped item whose automatic check window has ended ([BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md) AC7). Consumers SHALL NOT read deferred as a promise of an automatic retry, and SHALL NOT turn it into rejected, excluded, failed or a final outcome.
+   *Deferred does not promise a retry (2026-11-19).* Deferred means not final and not yet complete. It also covers a video whose decision is incomplete and has no active retry for the missing add: an evicted or user-dismissed capacity add, including its derived cases ([BR-041](br-041-bound-playlist-full-waiting-work.md) AC7; dismissal added 2026-11-22), and a live-skipped item whose automatic check window has ended ([BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md) AC7). Consumers SHALL NOT read deferred as a promise of an automatic retry, and SHALL NOT turn it into rejected, excluded, failed or a final outcome.
    For the live case: a video whose fresh YouTube report does not confirm that it is neither live nor upcoming is deferred with the reason *live or upcoming on YouTube*, before exclusions, duplicate detection and routes, as [BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md) requires. Every consumer treats it as deferred, never as rejected, excluded, failed or final, and keeps its reason distinct from other deferral reasons.
 6. **Failed**: the video's evaluation or action execution attempted and encountered a failure that prevents completion (permanent API error, action execution failure after retry).
 7. **Not-yet-evaluated**: a video that has been discovered but has not yet reached evaluation in the current or any prior run. This is never classified as rejected or any other negative outcome.
@@ -53,6 +53,7 @@ timestamp: 2026-11-19T00:00:00Z
 
 ## Derived from
 - The 2026-11-19 extension of Guarantees 1 and 5 to an incomplete decision with no active retry: the user's "yes" (Loom answer `fb9c7283-2b75-49fa-99aa-f14f22e2ee84`) recorded in BR-041 AC7, and the user's live check limit in BR-042 AC7.
+- The 2026-11-22 extension of Guarantees 1 and 5 to a capacity add dismissed by the user, and to BR-041 AC7's derived cases: the user's "as recommended" decision of 2026-11-22 recorded in BR-041 AC7. A necessary consequence: without it, a run finishing such a video would have no permitted outcome. No outcome category was added.
 - The 2026-11-19 live case in Guarantee 5 follows the user decision recorded in [BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md); no outcome category was added.
 - The 2026-11-18 capacity case in Guarantee 5 follows the user direction recorded in [BR-040](br-040-respect-youtube-playlist-capacity.md) and [BR-041](br-041-bound-playlist-full-waiting-work.md); no outcome category was added.
 - Anchor: youtube-discovery-routing.md (AC32, AC15, AC20, AC28)
