@@ -6,9 +6,9 @@ tags: [architecture, specification, runs, deferred-queue, recovery, run-14, send
 timestamp: 2026-11-22T00:00:00Z
 ---
 
-**Status:** accepted — exact implementation contract, not implemented. Revised 2026-11-11 for the amended BR-037, BR-035 AC14 and BR-032 AC1, then corrected after critic review `ses_e33a11010ffe4XP0Rmw0ZVtQBs` (see §13). It realizes [ADR-006](../decisions/adr-006-requeue-stranded-videos.md). Reconciled 2026-11-11 (Plan revision 19): F3 is decided as **variant K** (user decision; BR-035 AC14 unchanged), so the body is the contract and Appendix A is kept only as a rejected alternative. F4 does not apply to production data. §7 gains page jumps, positions and a reason filter. **Amended 2026-11-12 for BR-039:** see §15.
+**Status:** accepted — exact implementation contract, partly implemented: the run dispatch stop (§6.1.3) and the receiving precondition (§6.2, without §6.3/§6.4) are built (§12); the rest is not. Revised 2026-11-11 for the amended BR-037, BR-035 AC14 and BR-032 AC1, then corrected after critic review `ses_e33a11010ffe4XP0Rmw0ZVtQBs` (see §13). It realizes [ADR-006](../decisions/adr-006-requeue-stranded-videos.md). Reconciled 2026-11-11 (Plan revision 19): F3 is decided as **variant K** (user decision; BR-035 AC14 unchanged), so the body is the contract and Appendix A is kept only as a rejected alternative. F4 does not apply to production data. §7 gains page jumps, positions and a reason filter. **Amended 2026-11-12 for BR-039:** see §15.
 
-**2026-11-22 dispatch stop (`rq-stop-arch`):** §6.1.3 pins the run dispatch stop. The `quota` level is derived from the run's `quota` ledger rows (PR #9, [quota-stop ARS-001](../../quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) §1) and is never stored. The `authorization` and `accounting_or_integrity` levels are stored in the raise-only column `run.dispatch_stop`, added by migration `032`. One read function and an admission choke point before token renewal enforce it. Not implemented. Independent critique is recommended before `rq-stop-schema` builds it.
+**2026-11-22 dispatch stop (`rq-stop-arch`):** §6.1.3 pins the run dispatch stop. The `quota` level is derived from the run's `quota` ledger rows (PR #9, [quota-stop ARS-001](../../quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) §1) and is never stored. The `authorization` and `accounting_or_integrity` levels are stored in the raise-only column `run.dispatch_stop`, added by migration `032`. One read function and an admission choke point before token renewal enforce it. Implemented (migration `032` by `rq-stop-schema`; the read function, choke point, writers and readers by `rq-receiving-readiness`, §12).
 
 **2026-11-18 receiving clarification:** §§5–6 also constrain the shared receiver used by [Discovery ARS-001](../../discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md). This does not specify new BR-037 admin controls or change the guarded send/result contract.
 
@@ -1177,7 +1177,28 @@ The run dispatch stop tests S1–S8 are listed in §6.1.3 *Required evidence*. S
 
 ## 12. Implementation record and deviations
 
-Not implemented.
+**Built (2026-11-22, `rq-stop-schema`, `rq-receiving-readiness`, branch `feat/requeue-stranded`):** §6.1.3 in full except R3 (unchanged) and R8 (Discovery, PR-D), and the §6.2 precondition for the shared receiving path.
+
+- **Stop mechanism.** `quota.DispatchStop`, `Ledger.RunDispatchStop` and `quota.LatchRunStop` (`internal/quota/quota.go`; the run scope is now a struct holding the latch, and a nested `WithRun` for the same run keeps it). `state.Store.RaiseRunDispatchStopTx` (`internal/state/playlist_guard.go`).
+- **Readers.** R0 in `auth.Service.dispatchScoped` before `Resolve`, with `auth.ErrRunAuthorizationStopped` accepted by `IsPreAdmissionAuthorizationRefusal`; R2 as `queue.ErrRunDispatchStopped` from the claim transaction; R4 and R5 (`prepareReceiving` and `FetchForEvaluation`, `FetchOutcome.Stop`); R6 (`Executor.dispatchStopDisposition`); R7 (`state.ErrPlaylistSendDispatchStopped` from `ClaimPlaylistSend`).
+- **Writers.** W1 (`settleAuthorizationPending`), W2 (the executor's authorization refusal) and W3 (`failClosed` in the pipeline and the executor).
+- **§6.2.** `prepareReceiving` makes one `FetchForEvaluation` call per pass for the pass's open videos; `applyReadiness` settles each status as the §6.2 table says; `deferForInputsTx` is `deferRetryForInputsTx`; the readiness backstop is `requireInputsKey` with `errInputsUnavailable` in the three evaluation readers.
+
+**Deviations and limits.**
+
+- **`absent` always takes the ordinary retry-failure transaction.** `commitUnavailableTx` (§6.3) and the `requeued(v)` column belong to `rq-processing`. Until then a requeued video that YouTube no longer returns is failed as `video_unavailable`, not `unavailable_on_youtube`.
+- **The readiness gate is active only when `Pipeline.meta` provides `FetchForEvaluation`.** `cmd/server` passes a `*metadata.Manager`, so production is gated. A test double without it keeps the old degraded behavior.
+- **`Title` is always a required input** when a pass is gated, because duplicate detection reads it. Other fields follow the enabled routes' conditions and duration exclusions.
+- **`RaiseRunDispatchStopTx` writes only for production runs** (`run_type IN ('manual','scheduled')`). The spec's statement did not have this guard; it makes "simulations never write" true at the persistence seam as well as at the call sites.
+- **`RunDispatchStop` treats a missing run row as no stored stop** (the derived quota level is independent of it). A read error, or a stored value outside the CHECK, is `accounting_or_integrity`.
+- **R0 latches `accounting_or_integrity` on a stop read error** (not on a cancelled context), so a later call in the same execution cannot pass on a lucky read.
+- **R1 and the §5.2 batch loop are not built.** `processDeferredItems` still receives its receipts from the creation-time claim; `rq-claim` owns the loop. R2 is enforced in the claim transaction it will call.
+- **No Live gate.** `liveGateClaimed` is not in the receiving path yet.
+- **Unguarded authorization paths.** `ActiveToken`, the ledger-less `Dispatch` and the legacy `discovery.Run` bypass R0. A test (`TestUnguardedAuthorizationPathsHaveNoProductionCaller`) pins the exact set of non-test callers, none of which a production run reaches: `cmd/server` wires an auth service, so `Pipeline.Execute` binds the run and uses `RunBound`, and the executor calls `ActiveToken` only without a binding or with a test factory.
+
+**Evidence.** S2 (`quota/dispatch_stop_test.go`), S3 (`auth/dispatch_stop_test.go`), R5 (`metadata/fetch_test.go`), S4–S8 and the §6.2 table (`pipeline/receiving_stop_test.go`, `pipeline/receiving_stop_integration_test.go`). Fixtures that relied on degraded empty metadata now seed a current Store A row (`seedCurrentMetadata`), which is the state production guarantees.
+
+**Not implemented:** everything else in this document.
 
 ## 13. Revision of 2026-11-11
 
