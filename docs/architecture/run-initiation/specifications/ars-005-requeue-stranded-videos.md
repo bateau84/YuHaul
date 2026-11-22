@@ -1,12 +1,14 @@
 ---
 type: specification
 title: ARS-005 — Re-queue Stranded Videos — Migration 026, Outcome Schema Step, Shared Predicates, Scan and Insert SQL, Ordered Batch Claiming, Metadata Precondition, Unavailable Outcome, Paged Deferred Queue, HTTP and Tests
-description: Exact contract for BR-037. Covers migration 026 and the final-outcome schema step; the shared send-veto, guard, active-item and removed-by-user predicates; the stranded scan and chunked insert; PreviewStranded and RequeueStranded with their locks and refusal codes; claiming in the existing created-at order while quota remains (with a ready alternative for provider failures); the metadata precondition and the unavailable_on_youtube outcome; the paged GET /api/deferred prerequisite; HTTP bodies; and the conformance tests.
-tags: [architecture, specification, runs, deferred-queue, recovery, run-14, send-guard, stranded, metadata, quota, outcomes, paging, migration, api, concurrency]
-timestamp: 2026-11-18T00:00:00Z
+description: Exact contract for BR-037. Covers migration 026 and the final-outcome schema step; the shared send-veto, guard, active-item and removed-by-user predicates; the stranded scan and chunked insert; PreviewStranded and RequeueStranded with their locks and refusal codes; claiming in the existing created-at order while quota remains (with a ready alternative for provider failures); the run dispatch stop (migration 032; quota derived from the ledger); the metadata precondition and the unavailable_on_youtube outcome; the paged GET /api/deferred prerequisite; HTTP bodies; and the conformance tests.
+tags: [architecture, specification, runs, deferred-queue, recovery, run-14, send-guard, stranded, metadata, quota, outcomes, paging, migration, api, concurrency, dispatch-stop]
+timestamp: 2026-11-22T00:00:00Z
 ---
 
 **Status:** accepted — exact implementation contract, not implemented. Revised 2026-11-11 for the amended BR-037, BR-035 AC14 and BR-032 AC1, then corrected after critic review `ses_e33a11010ffe4XP0Rmw0ZVtQBs` (see §13). It realizes [ADR-006](../decisions/adr-006-requeue-stranded-videos.md). Reconciled 2026-11-11 (Plan revision 19): F3 is decided as **variant K** (user decision; BR-035 AC14 unchanged), so the body is the contract and Appendix A is kept only as a rejected alternative. F4 does not apply to production data. §7 gains page jumps, positions and a reason filter. **Amended 2026-11-12 for BR-039:** see §15.
+
+**2026-11-22 dispatch stop (`rq-stop-arch`):** §6.1.3 pins the run dispatch stop. The `quota` level is derived from the run's `quota` ledger rows (PR #9, [quota-stop ARS-001](../../quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) §1) and is never stored. The `authorization` and `accounting_or_integrity` levels are stored in the raise-only column `run.dispatch_stop`, added by migration `032`. One read function and an admission choke point before token renewal enforce it. Not implemented. Independent critique is recommended before `rq-stop-schema` builds it.
 
 **2026-11-18 receiving clarification:** §§5–6 also constrain the shared receiver used by [Discovery ARS-001](../../discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md). This does not specify new BR-037 admin controls or change the guarded send/result contract.
 
@@ -456,18 +458,18 @@ A claim of Deferred row 1 still names only row 1 after restart, even if row 2 no
   2. Leave the loop if any of these holds:
      - the run's `initiated_by` is not `run_now` or `schedule`;
      - `ctx.Err() != nil`;
-     - the minimum-unit preflight returns a known refusal, or the run's dispatch stop records quota (refused locally or proved by an admitted provider response);
-     - an integrity/accounting fault blocks reliable admission or settlement (propagate it, do not treat it as quota).
+     - the run's effective dispatch stop (§6.1.3) is `quota` or `accounting_or_integrity`, or the minimum-unit preflight `CanAfford(ctx, 1)` under the run scope returns a known refusal (reader R1);
+     - an integrity/accounting fault blocks reliable admission or settlement, including a `RunDispatchStop` or `CanAfford` read error (propagate it as writer W3, do not treat it as quota).
 
      A non-quota provider failure does not otherwise leave the loop. In particular, fetch suspension and unrecovered authorization do not prohibit **local-only claim and settlement** while AC14's conditions hold. Section 6 governs what may run for those claims; claiming does not authorize a provider call.
   3. `items := ListDeferredRetryCandidates(ctx, now, runID, retryClaimBatch)`. If it is empty, leave.
-  4. In `qs.WithRetryTx`, recheck the run row (`running`, `stop_requested_at` NULL); if it fails, claim nothing and leave. Otherwise call `ClaimDeferredGroupTx` per item in list order. A lost claim (`claimed=false`) is skipped: the item was taken by a live owner at that moment.
+  4. In `qs.WithRetryTx`, recheck the run row (`running`, `stop_requested_at` NULL, `dispatch_stop` not `accounting_or_integrity`; reader R2 in §6.1.3); if it fails, claim nothing and leave. Otherwise call `ClaimDeferredGroupTx` per item in list order. A lost claim (`claimed=false`) is skipped: the item was taken by a live owner at that moment.
   5. Go to 1.
 - `RetryQueueEntry` uses the same `processDeferredItems`. Its `initiated_by` is `queue_retry`, so it never claims more.
 
 Variant S, which would have changed step 2 and test B7, was rejected (Appendix A).
 
-*(2026-11-22 hotfix: [quota-stop ARS-001](../../quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) §1 realizes the **quota** part of the run dispatch stop in step 2 and in §6.1. It is a ledger predicate over the run's `quota` rows in the current bucket. Until this batch loop is built, a run claims only at creation, and §1.4 there applies the minimum-unit preflight to that claim. The authorization stop and §6.2 are unchanged and still not built.)*
+*(2026-11-22 hotfix: [quota-stop ARS-001](../../quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) §1 realizes the **quota** part of the run dispatch stop in step 2 and in §6.1. It is a ledger predicate over the run's `quota` rows in the current bucket. Until this batch loop is built, a run claims only at creation, and §1.4 there applies the minimum-unit preflight to that claim. The authorization stop and §6.2 are unchanged and still not built.)* *(2026-11-22, `rq-stop-arch`: §6.1.3 keeps that ledger predicate as the only source of the `quota` level and stores only the `authorization` and `accounting_or_integrity` levels, in `run.dispatch_stop`, migration `032`.)*
 
 ### 5.3 AC14 conformance argument
 
@@ -534,7 +536,7 @@ Per-ID fetch statuses describe inputs, not permission to dispatch. The boundary 
 | Definitive quota refusal | Typed pre-admission refusal costs zero. A proved admitted quota rejection (`quotaExceeded` or `dailyLimitExceeded`, or equivalent registered classifier evidence) has one `quota` ledger attempt even with positive local headroom. Close the dispatch scope and stop further claims under AC14. Defer remaining API-dependent work under existing quota semantics; no immediate retry. |
 | Other bounded provider transport/5xx/rate/invalid-response failures with usable authority and known accounting | Preserve existing fetch-chunk suspension and local variant K. A rate limit does not imply quota exhaustion; no call contrary to applicable pacing. An independently ready video may continue only if the actual operation can pass the same authorization, pacing and quota guards; local claiming itself does not grant dispatch. |
 
-Attribute each admitted send to its actual operation under the bound ledger owner. Persist the run-level known stop before proceeding beyond the boundary; on compatible same-run recovery reuse it or reconstruct an already-accounted provider quota stop from the run's typed ledger evidence if the process died before persisting the stop. Check the stop before any run-owned provider work, including metadata lifecycle refresh and renewal for a new protected request, not just at the next batch. Retain any already-known accounting fault and separately known quota/auth facts; if the local store cannot record or reconcile them, fail closed in the current process using existing retention/recovery. Do not treat unknown accounting as a positive bank of quota or successful result. These rules do not claim crash-complete accounting for a request whose send and result were never durably captured (authorization ADR-004). A fresh eligible run performs ordinary authorized admission again.
+Attribute each admitted send to its actual operation under the bound ledger owner. Persist the run-level known stop before proceeding beyond the boundary; on compatible same-run recovery reuse it. A provider quota stop is persisted by its own `quota` ledger row and is read back from it; there is no separate copy to reconstruct (§6.1.3). Check the stop before any run-owned provider work, including metadata lifecycle refresh and renewal for a new protected request, not just at the next batch. Retain any already-known accounting fault and separately known quota/auth facts; if the local store cannot record or reconcile them, fail closed in the current process using existing retention/recovery. Do not treat unknown accounting as a positive bank of quota or successful result. These rules do not claim crash-complete accounting for a request whose send and result were never durably captured (authorization ADR-004). A fresh eligible run performs ordinary authorized admission again.
 
 ### 6.1.1 Legacy Store A defaults (decided 2026-11-19, review `516b34d2` F1; clarified after critic `ses_e0cc26e27ffeKGNU9EOMRb4itV`)
 
@@ -587,10 +589,161 @@ UPDATE transient_metadata SET duration_seconds = NULL WHERE duration_seconds = 0
   Per-ID statuses keep the meanings above. The Store A schema and its writers are unchanged. The caller records the result on the run's own row (Live ARS-001 §4).
 - Cost: a claimed open or partly-done item is read on every run that claims it, even when its route inputs are current ([Live ARD-001](../../live-status/design/ard-001-fresh-live-status-gate.md) *Consequences*).
 
+### 6.1.3 Run dispatch stop: storage, writers and readers (decided 2026-11-22, Plan node `rq-stop-arch`)
+
+**What it decides.** §5.2 step 2, §6.1 and §6.2 need a run-scoped stop with three levels: `authorization` < `quota` < `accounting_or_integrity`. This section says where each level is stored, who writes it and who reads it. The `quota` level already exists on `main`: [quota-stop ARS-001](../../quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) §1 (PR #9) derives it from the run's own `quota` ledger rows. The other two levels have no storage today. So:
+
+- **`quota` is derived from the ledger and never stored.** The ledger is the only source of truth for "this run is quota stopped".
+- **`authorization` and `accounting_or_integrity` are stored** in a new nullable column, `run.dispatch_stop`. They can only be raised.
+- **The effective stop** is the higher-ranked of the stored value and the derived quota level.
+
+**Example.**
+- Run 70 claims 500 videos. Renewal fails during a metadata chunk, and the permitted same-identity retry does not recover. The pipeline raises `run.dispatch_stop` to `authorization` in the transaction of the first `authorization_pending` settlement. Run 70 keeps claiming and settling locally (variant K) but makes no further YouTube request. The stored value stays for the rest of run 70's life, including after a restart.
+- Run 71 has no authorization problem. An insert is answered `403 quotaExceeded`. `Hold.Finalize` commits the `quota` ledger row (PR #9), and from that commit run 71's effective stop is `quota`. Nothing is written to `run.dispatch_stop`. After the next Pacific midnight, a same-run resume of run 71 can dispatch again, as PR #9 already allows.
+
+**Why quota is not stored (alternatives).**
+
+| Option | Result |
+|---|---|
+| **A. Derive quota from the ledger; store only the other two levels (chosen)** | One source of truth. It reuses PR #9's tested predicate, its restart behavior and its Pacific bucket unchanged. There is no copy that can disagree with admission and no recovery writer that rebuilds the copy after a crash. |
+| B. Write `quota` to the column alongside the ledger row | Two facts for one meaning. The column is raise-only for the run's life, but the ledger stop ends at the reset. After a reset, the claim loop (reading the column) and admission (reading the ledger) would disagree. It also needs the recovery writer that Discovery ARS-001 had to add for the crash between the ledger row and the column write. It loses. |
+| C. Make PR #9's predicate lifetime-wide to match a sticky column | It changes shipped behavior: a same-run resume after the reset could no longer dispatch. No requirement asks for that, and Discovery's reason for a sticky value ("no clearing writer, no reset-time evidence") does not apply to a derived value, which has neither. It loses. |
+| D. Store nothing; derive every level | Not possible. An authorization stop depends on OC-006's retry outcome, and an accounting fault means the ledger itself may be unreliable. Neither can be read back from the ledger. §6.2 needs both to survive a restart ("restored authorization stop"). |
+
+A **known local-budget refusal** (the minimum-unit preflight, with no ledger row) is not a run stop and is not stored. `CanAfford` evaluates it fresh at every check, so it holds for as long as it is true and ends when the budget allows again. This is PR #9's existing behavior.
+
+#### Schema: migration `032_run_dispatch_stop.up.sql` (Plan node `rq-stop-schema`)
+
+`032` is the next free number on `main` (latest `031`; PR #9 added none). Under the central allocation rule the number is final when PR-R rebases for merge: if another migration lands first, this file takes `max + 1` and keeps the same content. It is one forward file with no down file, like `029`–`031`.
+
+```sql
+-- Run dispatch stop (run-initiation ARS-005 section 6.1.3). The run has proved
+-- it must not start another run-owned YouTube request. Only the two levels that
+-- cannot be read from the quota ledger are stored; the quota level is derived
+-- from the run's own quota_ledger rows (quota-stop ARS-001 section 1) and is
+-- never written here. NULL means no stored stop; old runs stay NULL.
+ALTER TABLE run ADD COLUMN dispatch_stop TEXT
+    CHECK (dispatch_stop IS NULL OR dispatch_stop IN ('authorization', 'accounting_or_integrity'));
+
+-- Raise-only: authorization (rank 1) may become accounting_or_integrity
+-- (rank 3); nothing lowers or clears a stored value.
+CREATE TRIGGER run_dispatch_stop_raise_only
+BEFORE UPDATE OF dispatch_stop ON run
+WHEN OLD.dispatch_stop IS NOT NULL AND (
+    NEW.dispatch_stop IS NULL OR
+    (CASE NEW.dispatch_stop WHEN 'authorization' THEN 1 ELSE 3 END) <
+    (CASE OLD.dispatch_stop WHEN 'authorization' THEN 1 ELSE 3 END))
+BEGIN
+    SELECT RAISE(ABORT, 'run dispatch_stop cannot be lowered or cleared');
+END;
+```
+
+- **No backfill.** Every existing run reads `NULL`. No `quota` value is ever valid in the column. The CHECK refuses it, so a writer cannot create a second quota fact by mistake.
+- **Schema steps.** `widenRunStatusCheck` edits the `run` definition in place by replacing the status CHECK substring. An added column does not touch that substring, so the step still applies on a fresh install (where it runs after `032`) and is skipped on an upgraded database. The rq-stop-schema test checks both.
+- **Revisit trigger.** If a requirement later needs a quota stop that outlives the reset, or a stored "stopped on the local budget" fact, add it as its own fact. Do not add `quota` to this CHECK: a CHECK change on `run` needs another `writable_schema` step.
+
+#### Ranks and the effective stop
+
+| Level | Source | Rank | Claims afterwards (§5.2) | Provider requests afterwards |
+|---|---|---|---|---|
+| none | — | 0 | allowed | allowed under ordinary admission |
+| `authorization` | `run.dispatch_stop` | 1 | allowed: local-only claiming and settlement (variant K) | none |
+| `quota` | `EXISTS (SELECT 1 FROM quota_ledger WHERE run_id = ?R AND date = ?D AND outcome_category = 'quota')`, D = current bucket | 2 | none | none in bucket D |
+| `accounting_or_integrity` | `run.dispatch_stop`, or the in-memory latch below | 3 | none | none |
+
+**Effective stop** = the highest rank among the stored value, the in-memory latch and the derived quota level. A compound error raises to its highest level. A settlement already committed under a lower level (for example `authorization_pending`) stays as it is.
+
+**One read function (package `quota`).**
+
+```go
+type DispatchStop int // StopNone, StopAuthorization, StopQuota, StopAccountingOrIntegrity (rank order)
+
+// RunDispatchStop returns the effective stop of the run in ctx's run scope
+// (quota.WithRun). Without a run scope it returns StopNone. Any read error is
+// returned as an error; the caller treats it as accounting_or_integrity.
+func (l *Ledger) RunDispatchStop(ctx context.Context) (DispatchStop, error)
+
+// LatchRunStop raises the in-memory stop of ctx's run scope. It never lowers it.
+func LatchRunStop(ctx context.Context, s DispatchStop)
+```
+
+- It reads `run.dispatch_stop` by primary key and PR #9's `runStopped` predicate for the current bucket (the same `bucketCalculator` as `CanAfford`), and combines them with the latch.
+- **The latch** is a raise-only value in the run scope that `quota.WithRun` already creates (it becomes a small struct instead of a bare run ID). It survives `context.WithoutCancel`. A new execution (resume, restart) starts with a fresh latch and reads the stored value again. The latch exists only for a stored write that failed.
+- PR #9's checks inside `Acquire` and `CanAfford` stay unchanged. `Acquire` remains the atomic quota check under `l.mu`.
+
+#### Writers
+
+Only the run's own production execution writes, under the SQLite writer, in a transaction with no provider I/O. Simulations (dry run, Replay, Backtest) never write and always read `NULL`. The statement is:
+
+```sql
+UPDATE run SET dispatch_stop = :v
+WHERE id = :run
+  AND (dispatch_stop IS NULL OR
+       (CASE dispatch_stop WHEN 'authorization' THEN 1 ELSE 3 END) <
+       (CASE :v WHEN 'authorization' THEN 1 ELSE 3 END));
+```
+
+Zero affected rows is not an error: an equal or higher stop is already stored. It is `state.Store.RaiseRunDispatchStopTx(ctx, tx, runID, level)`. Passing `StopNone` or `StopQuota` is a programming error and returns an error without writing.
+
+**Order of every write:** first `quota.LatchRunStop(ctx, level)`, then the stored write. The stored write commits before the execution starts another run-owned provider request. If it fails, the latch still holds the stop, the execution makes no further provider request, and the classified SQLite error propagates under existing retention (fail closed).
+
+| # | Writer | Level | Transaction |
+|---|---|---|---|
+| W1 | §6.2 precondition, when `FetchForEvaluation` returns a typed authorization disposition (OC-006: no safe authorized continuation) | `authorization` | The `WithRetryTx` of the first `authorization_pending` settlement it causes; its own `WithRetryTx` if it causes none |
+| W2 | Executor, when an action result is `MutationNotIssued` with `DispatchRefusalAuthorization` (a mutation is never retried, so there is no safe authorized continuation). Raising is idempotent, so a refusal that R0 produced from an existing stored stop writes zero rows | `authorization` | The transaction that defers the action as `authorization_pending` (`executor.go` handoff) |
+| W3 | Any run-owned path that sees an outer `ReadError.Accounting`, `auth.ErrQuotaAccounting`, a `CanAfford` or `RunDispatchStop` error, or another fault that prevents reliable admission or settlement | `accounting_or_integrity` | Its own `WithRetryTx`, best effort (the store may be what failed); the latch is authoritative for this execution |
+| W4 | Discovery reads (PR-D, [Discovery ARS-001](../../discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) §1.2) | as W1 and W3 | as W1 and W3 |
+| — | Provider quota refusal | `quota` | **No write.** The `quota` ledger row committed by `Hold.Finalize` or `RecordAttempt` (PR #9) is the stop. If that row cannot be written, the result is an accounting fault, which is W3. |
+
+There is **no recovery writer.** A same-run resume reads the stored levels and derives quota from the ledger. The crash window between a provider quota response and its ledger row is the one PR #9 already accepts (authorization ADR-004): at most one more request, which is refused and then stops the run.
+
+#### Readers
+
+| # | Point | Reads | Effect |
+|---|---|---|---|
+| R0 | **Admission choke point.** `auth.Service.dispatchScoped`, at the top of each loop iteration, **before `Resolve`**, when `ledger != nil` | `ledger.RunDispatchStop(ctx)` | `StopQuota` → `ErrQuotaRefused` (zero cost, as PR #9's `Acquire` refusal). `StopAuthorization` → new `auth.ErrRunAuthorizationStopped`, which `auth.IsPreAdmissionAuthorizationRefusal` accepts, so existing callers map it to `DispatchRefusalAuthorization` and `authorization_pending`. `StopAccountingOrIntegrity` or a read error → joined with `ErrQuotaAccounting` (fail closed). No renewal, no hold, no request. |
+| R1 | §5.2 step 2, before each batch | `RunDispatchStop(ctx)`, then `CanAfford(ctx, 1)` with the run scope | Leave the loop for `quota` or `accounting_or_integrity`, or when `CanAfford` refuses (the local budget, which also includes PR #9's run stop). A read error leaves the loop and propagates as W3. `authorization` does not leave the loop. |
+| R2 | §5.2 step 4, the claim's `WithRetryTx` | The run row recheck also reads `dispatch_stop` | Claim nothing and leave if it is `accounting_or_integrity`. `authorization` still claims. The quota level is not re-read here. R1 evaluated it from the ledger just before, with no provider I/O in between, and only this run's own sequential execution writes this run's `quota` rows. |
+| R3 | `createClaimedRunLocked` (initial claim) | Unchanged: PR #9's unscoped `CanAfford(ctx, 1)` | A fresh run has no stop. A supported resume is not a claim. |
+| R4 | §6.2 precondition, at the start of each claimed pass and before each `FetchForEvaluation` call | `RunDispatchStop(ctx)` | Classify with the effective stop before fetch suspension, a nil binding or the readiness backstop (§6.2). `authorization` → no fetch; inputs that need one are `authorization_pending`. `quota` → `quota_refused`. `accounting_or_integrity` → propagate. |
+| R5 | `FetchForEvaluation`, before each chunk's minimum-unit preflight | `m.ledger.RunDispatchStop(ctx)` | Return the typed run disposition with zero attempts for this and every later chunk. The manager never writes the stop; its caller does (W1, W3). |
+| R6 | Executor, before guard preparation for each action, next to the existing `CanAfford` pre-checks (`executor.go:344`, `:370`) | `e.ledger.RunDispatchStop(ctx)` | No guard preparation. `authorization` → `authorization_pending` deferral. `quota` → existing `deferActions` with `quota_exhausted`. `accounting_or_integrity` → fail closed. |
+| R7 | `state.Store.ClaimPlaylistSend`, in its writer transaction | Its existing `SELECT … FROM run` also reads `dispatch_stop` | Any non-`NULL` stored value → new `state.ErrPlaylistSendDispatchStopped`, before any guard write. The executor then reads the effective stop (R6) to choose the disposition. The quota level is enforced by R0 and by `Acquire`. |
+| R8 | Discovery engine and prefetch (PR-D) | `RunDispatchStop(ctx)` | Discovery ARS-001 §1.2. |
+
+R0 is the backstop that makes a missed call site safe: every guarded run-scoped request, including metadata lifecycle refresh, live-status and capacity reads, and the token renewal that `Resolve` would start, passes it. R1–R8 are still required, because they choose the correct disposition (for example `authorization_pending` rather than a generic release) and avoid local work that would only be refused. Run 58 is the evidence for a choke point: a stop that depended on each call site let 199 requests through.
+
+**Cost.** One primary-key read of `run` and PR #9's indexed `EXISTS` per check. Both are local SQLite reads, small beside a YouTube request.
+
+**Not readers:** floors and eligibility, fresh runs, Errors, analytics and simulations. Run Detail reads the stop only through Discovery ARS-001's derived acquisition state.
+
+#### `NULL`, legacy and lifetime
+
+- `NULL` means no stored stop. It does not grant dispatch: admission still applies the derived quota level, `CanAfford` and authorization.
+- Runs from before `032` read `NULL`, with no backfill. A run that a `031` build stopped for authorization, then resumed on a `032` build, has no stored stop. It meets the authorization boundary again, and OC-006 decides again.
+- A stored level lasts for the run's life. Run Now resume, startup recovery, Stop, Discard and terminal writes never lower or clear it (the trigger refuses).
+- The derived `quota` level lasts for the bucket in which its ledger row was written, as PR #9 specifies.
+- A fresh run starts with no stop and performs ordinary authorized admission.
+
+#### Required evidence (added to §11.7 as S1–S8)
+
+- **S1 schema:** clean install and upgrade from `031` with rows. Old runs read `NULL`. `'quota'` and any unknown value are refused by the CHECK. Lowering or clearing is refused by the trigger; `authorization` → `accounting_or_integrity` is allowed. `028` triggers, the `029` search index and `031` receipts are intact. `widenRunStatusCheck` is idempotent on both paths.
+- **S2 effective stop:** for each combination of stored value, latch and a `quota` row in the current bucket, `RunDispatchStop` returns the highest rank. A `quota` row from the previous bucket gives `StopNone` after the reset. An unscoped context gives `StopNone`.
+- **S3 choke point:** with each level set, a guarded read and an insert through the real `dispatchScoped` make zero requests, zero renewals and zero ledger rows, and return the mapped error (`ErrQuotaRefused`, `ErrRunAuthorizationStopped`, `ErrQuotaAccounting`). Another run and an unscoped call in the same bucket are admitted.
+- **S4 authorization, variant K:** the receiving proof of §6.2, plus: `dispatch_stop='authorization'` is committed with the first `authorization_pending` settlement; later batches are still claimed and settled locally; zero further provider requests. Reopen the database and resume: the stop is read back, and live receipts settle `authorization_pending` with no request.
+- **S5 quota without a stored write:** an admitted `quota` attempt during a metadata chunk. The column stays `NULL`. R1 leaves the claim loop, unsent inputs are `quota_refused`, and no second request is made. On a same-run resume in the same bucket there is still no request; after the reset the run is admitted again.
+- **S6 accounting:** inject a ledger read error and, separately, a failure of the stored write itself. In both cases there are zero further provider requests in that execution and the error propagates. With the stored write working, a later resume reads `accounting_or_integrity` and makes no request.
+- **S7 per-call readers:** with a stale in-process view, R2 refuses a claim under a stored `accounting_or_integrity` and R7 refuses `ClaimPlaylistSend` under any stored value, each inside its writer transaction with no guard or membership write.
+- **S8 simulations:** a dry run, Replay and Backtest never write the column and read `StopNone`.
+
+#### Write boundary for `rq-receiving-readiness`
+
+This section adds two files to that node's write surface: `internal/quota/quota.go` (`DispatchStop`, `RunDispatchStop`, `LatchRunStop`, the run-scope struct) and `internal/auth/service.go` (R0 and `ErrRunAuthorizationStopped`), with their tests. The persistence (`RaiseRunDispatchStopTx`, R7) stays in `internal/state`. The migration and its test are `rq-stop-schema`'s.
+
 ### 6.2 Pipeline precondition (per claimed pass)
 
 - **BR-039 first (§15):** classify each video of `ids` with `state.ClassifyVideoTx`. Only `open` videos enter this precondition and its dispositions. `final` videos are closed and `partly_done` videos are continued, as ARS-006 §5 and §7 say.
-- Before handling open or partly-done receipts, resolve any current or restored run dispatch stop as in §6.1. Classify incomplete work with that fact **before** consulting generic fetch suspension, a nil binding or a readiness-backstop result. In particular an authorization stop wins over `failed` or unchanged release for missing inputs, even if a prior batch had already suspended fetching. If there is no recorded stop and the binding is absent, obtain the typed authorization disposition at the existing admission boundary; a malformed per-call setup is a local fault, not proof that the user must reconnect.
+- Before handling open or partly-done receipts, resolve any current or restored run dispatch stop as in §6.1, with `RunDispatchStop` (§6.1.3 reader R4; writers W1 and W3). Classify incomplete work with that fact **before** consulting generic fetch suspension, a nil binding or a readiness-backstop result. In particular an authorization stop wins over `failed` or unchanged release for missing inputs, even if a prior batch had already suspended fetching. If there is no recorded stop and the binding is absent, obtain the typed authorization disposition at the existing admission boundary; a malformed per-call setup is a local fault, not proof that the user must reconnect.
 - Without an effective run-wide stop, check current inputs and fetch the rest for `open` videos. A non-quota `rate_limited` or `failed` metadata result suspends further metadata fetches in the pass according to §6.1; `unusable` alone does not. This generic fallback assigns `failed` only to otherwise unclassified inputs. Quota and accounting faults follow §5.2; a pure authorization stop permits further local claims under variant K but no further provider work.
 - Under an authorization stop, apply the same `authorization_pending` settlement below to receipts for the unsent suffix, to later locally claimed receipts, and to unfinished exact live receipts restored after restart. Already committed final results reconcile or acknowledge under BR-039; do not rewrite settled receipt history as authorization deferral. An otherwise-ready video may settle only under existing local rules that require no provider work. If an open video still needs metadata or an otherwise authorized network operation cannot start, defer the real unfinished work. For a partly-done video retain only its outstanding work with the original decision and existing exact target/guard authority; do not hydrate it, reroute it or issue a new send. A previously issued or uncertain mutation keeps its established disposition and guard; this table is not a means of reopening, releasing or reinterpreting it. A concurrent accounting/integrity fault still closes dispatch and further claims; preserve established authorization deferral facts without forcing unsafe settlement or swallowing the auxiliary fault.
 - `requeued(v)` := `EXISTS (SELECT 1 FROM deferred_item WHERE id IN <receipt.Deferred ids> AND deferral_reason = 'requeued_by_user')`.
@@ -965,6 +1118,8 @@ Real migrated SQLite unless marked *unit*. "Controlled provider" is the counting
 25. **B8 ARS-003 regression:** ARS-003 Q2 (handoffs smaller than one batch) and H1 pass unchanged, including H1(b)'s `retry_after` NULL.
 
 ### 11.7 Metadata and the unavailable outcome (AC13, AC18; BR-032 AC1, AC4–5)
+
+The run dispatch stop tests S1–S8 are listed in §6.1.3 *Required evidence*. S1 belongs to `rq-stop-schema`; S2–S8 belong to `rq-receiving-readiness`.
 
 26. **D1 fetched:** 120 retried videos with expired metadata and title routes → 3 `videos.list` requests (50, 50, 20), with one ledger row each. Videos are evaluated on the fetched titles.
 27. **D2 refusals:** quota refusal → `deferred`/`quota_exhausted`. Rate limit (`rateLimitExceeded`) → `deferred`/`api_rate_limited`. Authorization unavailable → `deferred`/`authorization_pending`. 5xx, a network error, or a body that does not decode → released unchanged. None is committed `unavailable_on_youtube`, `rejected` or `excluded`, and none gets an Errors entry.
