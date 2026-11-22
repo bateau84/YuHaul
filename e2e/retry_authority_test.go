@@ -31,17 +31,20 @@ func TestRetryAuthority_QuotaProposalChangedRouteAndSiblings(t *testing.T) {
 			// Legacy siblings are aliases, including an unowned retrying row.
 			_, err = env.db.ExecContext(ctx, `INSERT INTO deferred_item(video_id,run_id,deferral_reason,status,created_at) VALUES(?,?,'quota_exhausted','retrying',?)`, items[0].VideoID, old.ID, time.Now().UTC())
 			require.NoError(t, err)
+			// One unit of headroom: the run is created and claims the rows (quota is
+			// not known to be used up), but cannot afford the 50-unit insert, so it
+			// requeues them. With none left it would claim nothing (quota-stop
+			// ARS-001 §1.4).
+			require.NoError(t, env.ledger.SetDailyLimit(ctx, 5))
 			stillLimited, err := env.pipeline.StartRun(ctx, state.RunTypeManual)
 			require.NoError(t, err)
 			env.pipeline.Execute(ctx, stillLimited.ID)
 			requeued, err := qs.ListDeferredItems(ctx, "")
 			require.NoError(t, err)
-			// Quota is known to be used up at creation, so the run claims nothing
-			// and the rows stay exactly as they were (quota-stop ARS-001 §1.4).
-			require.Len(t, requeued, 2, "a limited run must not append siblings")
+			require.Len(t, requeued, 2, "quota retry must reuse, not append, siblings")
 			for _, d := range requeued {
-				require.Zero(t, d.RetryCount, "no attempt in a run that claimed nothing")
-				require.Nil(t, d.RetryRunID)
+				require.Equal(t, queue.DeferredStatusPending, d.Status)
+				require.Equal(t, 1, d.RetryCount, "no second attempt in the same run")
 			}
 			var proposal config.ProposalSnapshot
 			require.NoError(t, json.Unmarshal([]byte(`{"duplicate_threshold":0.9,"routes":[{"id":"11111111-1111-4111-8111-111111111111","name":"Forbidden","evaluation_order":1,"is_enabled":true,"is_final":false,"condition_composition":"AND","conditions":[{"field":"title","operator":"contains","value":"jazz","condition_index":0}],"actions":[{"action_type":"add_to_playlist","target_playlist_id":"PLforbidden","action_index":0}],"exclusions":[]}]}`), &proposal))
@@ -89,7 +92,7 @@ func TestRetryAuthority_QuotaProposalChangedRouteAndSiblings(t *testing.T) {
 				require.Equal(t, queue.DeferredStatusCompleted, d.Status)
 				require.Equal(t, old.ID, d.RunID)
 				require.Equal(t, retry.ID, *d.RetryRunID)
-				require.Equal(t, 1, d.RetryCount, "the first claim is the only attempt")
+				require.Equal(t, 2, d.RetryCount)
 			}
 			ins := env.server.Insertions()
 			if match {
