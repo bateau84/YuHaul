@@ -10,6 +10,11 @@ timestamp: 2026-11-22T18:00:00Z
 
 ## 2026-11-22
 
+**Critique `ses_dfc1e6147ffeI1A5dhsvpYrek0` accepted `fd73783`; two MINOR wording fixes applied.**
+- **R-1.** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) §2 *Terminal cause* 2 now covers a quota stop observed by any path, including a `RunDispatchStop` reader and admission. §6 adds the same-bucket resume (PR #9 Q2) as a contrast.
+- **R-2.** §1.2 *Scope* and the §6 dispatch-stop row use ARS-005 S8's simulation wording.
+- The attempt date is read through the exported `Ledger.Budget(ctx).Date`.
+
 **Critique `ses_dfc1e6147ffeI1A5dhsvpYrek0` on the dispatch-stop amendment fixed; branch rebased onto `main` (PRs #4–#9).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) changes:
 - **F-1.** The derived state's quota evidence now counts only `quota` ledger rows with `date >= run.discovery_attempt_quota_date`. The page-path engine writes that new column (in the discovery migration) at each discovery attempt's start, so legacy, `030`/`031` and PR #9-build runs, whose value is `NULL`, never read `blocked`/`quota`. The no-scope `blocked` row keys on that column instead of `initiated_by` and a `NULL` scan outcome, so PR #9's `preScanOutcome` (`cut_short`, completed) reads `blocked` on the page path.
 - **F-2.** The new §2 *Terminal cause* picks the run-wide deferral from current-execution facts and the stored level, never from the display rule or a commit-time bucket check. The display is stable after the run ends. §6 adds a reset → resume → 429 case.
