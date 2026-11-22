@@ -568,7 +568,7 @@ func TestGuardedFinalQuotaRefusalAndProviderQuota(t *testing.T) {
 			}
 			if tc.provider {
 				require.Equal(t, 1, rows)
-				require.Equal(t, 50, units)
+				require.Equal(t, 1, units, "a provider quota refusal costs the documented minimum, not the insert cost")
 			} else {
 				require.Zero(t, rows)
 				require.Zero(t, units)

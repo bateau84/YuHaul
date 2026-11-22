@@ -3,10 +3,16 @@ type: Log
 title: Architecture Change Log
 description: Chronological record of changes to the docs/architecture/ bundle.
 tags: [changelog, log, okf, architecture]
-timestamp: 2026-11-19T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
 # Architecture Update Log
+
+## 2026-11-22
+
+**Quota stop hotfix implemented (run 58).** [Quota-stop ARS-001](/docs/architecture/quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) is implemented on `hotfix/quota-stop` and its §10 holds the implementation record. The Q1 pending count is corrected to 7. Q-1 (pre-scan terminal status) and Q-2 are still open.
+
+**Quota stop hotfix proposed (run 58).** [Quota-stop ARS-001](/docs/architecture/quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) is based on `origin/main` `8d7e009`. It realizes [ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.1's quota dispatch stop per run, as a ledger predicate. A `quota` attempt costs 1 unit, the documented minimum. The quota day defaults to midnight Pacific. A pre-scan quota refusal is typed and ends discovery as `cut_short`. The terminal status (Q-1) is pending the user. Not implemented.
 
 ## 2026-11-20
 

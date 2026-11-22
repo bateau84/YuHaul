@@ -340,6 +340,35 @@ describe('RunDetailView outcome filter (BR-032 AC5)', () => {
     expect(screen.queryByText('No videos match the current filters.')).not.toBeInTheDocument()
   })
 
+  describe('quota stop before or during discovery (quota-stop ARS-001 section 5.2)', () => {
+    afterEach(() => vi.restoreAllMocks())
+    const COPY = 'Discovery stopped early because the daily YouTube quota was used up. It continues after the quota resets.'
+
+    it('shows the sentence for a completed run whose scan was cut short', async () => {
+      vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue({ items: [], next_before_id: null })
+      mockGetRun.mockResolvedValue({ ...runFixture, status: 'completed', discovery_scan: 'cut_short' })
+      serveVideos([])
+      renderView()
+
+      expect(await screen.findByText(COPY)).toBeInTheDocument()
+      expect(screen.getByText('Run completed')).toBeInTheDocument()
+    })
+
+    it.each([
+      ['a completed run with a finished scan', 'Run completed', { status: 'completed' as const, discovery_scan: 'completed' as const }],
+      ['a completed run with no recorded scan outcome', 'Run completed', { status: 'completed' as const, discovery_scan: null }],
+      ['a failed run with a cut-short scan', 'Run failed', { status: 'failed' as const, discovery_scan: 'cut_short' as const, interrupt_reason: 'diag:v1 phase=discovery operation=discover code=unknown_error' }],
+    ])('does not show the sentence for %s', async (_name, statusLine, overrides) => {
+      vi.spyOn(sourceApi, 'getRunSourceFailures').mockResolvedValue({ items: [], next_before_id: null })
+      mockGetRun.mockResolvedValue({ ...runFixture, ...overrides })
+      serveVideos([])
+      renderView()
+
+      await screen.findByText(statusLine)
+      expect(screen.queryByText(COPY)).not.toBeInTheDocument()
+    })
+  })
+
   describe('channel scan coverage (discovery ARS-002)', () => {
     afterEach(() => vi.restoreAllMocks())
     const CH_B = `UC${'B'.repeat(22)}`

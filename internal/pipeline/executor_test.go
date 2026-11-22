@@ -398,7 +398,9 @@ func TestExecutor_GuardedQuotaTailEvidenceFailureRollsBackHandoff(t *testing.T) 
 	assert.Zero(t, actions, "current and remaining action dispositions commit together")
 	consumed, err := f.ledger.ConsumedByRun(ctx, f.runID)
 	require.NoError(t, err)
-	assert.Equal(t, quota.OpPlaylistItemsInsert.UnitCost(), consumed,
+	// A provider quota refusal is charged the documented minimum, 1 unit, not
+	// the insert's 50 (quota-stop ARS-001 section 2).
+	assert.Equal(t, 1, consumed,
 		"the one provider request remains counted despite the rolled-back disposition transaction")
 }
 

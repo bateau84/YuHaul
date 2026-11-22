@@ -467,6 +467,8 @@ A claim of Deferred row 1 still names only row 1 after restart, even if row 2 no
 
 Variant S, which would have changed step 2 and test B7, was rejected (Appendix A).
 
+*(2026-11-22 hotfix: [quota-stop ARS-001](../../quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) §1 realizes the **quota** part of the run dispatch stop in step 2 and in §6.1. It is a ledger predicate over the run's `quota` rows in the current bucket. Until this batch loop is built, a run claims only at creation, and §1.4 there applies the minimum-unit preflight to that claim. The authorization stop and §6.2 are unchanged and still not built.)*
+
 ### 5.3 AC14 conformance argument
 
 The run's claimed set is always a prefix of the created-at order, which equals the eligibility order (§5.1), less only these videos:

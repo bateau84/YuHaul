@@ -172,12 +172,12 @@ func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube
 
 	subChannelIDs, err := e.fetchSubscriptions(ctx, client, result)
 	if err != nil {
-		return nil, err
+		return e.preScanOutcome(ctx, runID, result, quota.OpSubscriptionsList, err)
 	}
 
 	channels, err := e.fetchChannels(ctx, client, subChannelIDs, result)
 	if err != nil {
-		return nil, err
+		return e.preScanOutcome(ctx, runID, result, quota.OpChannelsList, err)
 	}
 
 	newVideos, err := e.fetchNewVideos(ctx, runID, client, channels, result, isolateSources)
@@ -202,14 +202,74 @@ func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube
 	}
 	result.VideosDiscovered = len(newVideos)
 
+	e.logDiscoveryComplete(ctx, runID, result)
+
+	return result, nil
+}
+
+func (e *Engine) logDiscoveryComplete(ctx context.Context, runID int64, result *Result) {
 	e.logger.InfoContext(ctx, "discovery complete",
 		"run_id", runID,
 		"subscriptions", result.SubscriptionsFetched,
 		"channels", result.ChannelsFetched,
 		"videos", result.VideosDiscovered,
+		"scan_outcome", scanOutcomeName(result),
 	)
+}
 
+func scanOutcomeName(r *Result) string {
+	if r.ScanStopped {
+		return string(state.ScanOutcomeCutShort)
+	}
+	return string(state.ScanOutcomeCompleted)
+}
+
+// preScanQuotaDeferredReason is the fixed text for a quota stop before the
+// channel scan. It carries no provider data.
+const preScanQuotaDeferredReason = "discovery stopped: the daily YouTube quota was used up"
+
+// preScanOutcome decides how discovery ends when subscriptions or channels
+// could not be listed. A quota stop is not an error: the scan outcome is
+// cut_short and discovery returns no videos (ARS-001 section 4.2). Any other
+// error is returned unchanged.
+//
+// The terminal status for this case (completed + cut_short) is the dispatcher's
+// assumption, pending the user's decision (ARS-001 Q-1). To change it, change
+// only this function's return value and the Run Detail condition.
+func (e *Engine) preScanOutcome(ctx context.Context, runID int64, result *Result, op quota.Operation, err error) (*Result, error) {
+	if !quotaStop(err) {
+		return nil, err
+	}
+	if serr := e.machine.SetDiscoveryScanOutcome(ctx, runID, state.ScanOutcomeCutShort); serr != nil {
+		return nil, fmt.Errorf("discovery: %w", serr)
+	}
+	result.ScanStopped = true
+	result.Deferred = true
+	result.DeferredReason = preScanQuotaDeferredReason
+	refusal := "provider"
+	if errors.Is(err, auth.ErrQuotaRefused) {
+		refusal = "admission"
+	}
+	e.logger.WarnContext(ctx, "discovery skipped: daily quota used up",
+		"run_id", runID, "operation", string(op), "refusal", refusal)
+	e.logDiscoveryComplete(ctx, runID, result)
 	return result, nil
+}
+
+// quotaStop reports whether err means the daily quota is used up: a local
+// admission or budget refusal, or an admitted provider error whose reason is
+// quotaExceeded or dailyLimitExceeded (the single reasons youtube maps to the
+// quota category). It uses typed fields only, never error text. A budget-check
+// storage fault is not a quota stop.
+func quotaStop(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, auth.ErrQuotaRefused) {
+		return true
+	}
+	var api *youtube.APIError
+	return errors.As(err, &api) && (api.Reason == "quotaExceeded" || api.Reason == "dailyLimitExceeded")
 }
 
 // RunBound performs production discovery using the caller's invocation binding.
@@ -269,9 +329,6 @@ func (e *Engine) fetchSubscriptions(ctx context.Context, client *youtube.Client,
 	for {
 		resp, err := client.ListSubscriptions(ctx, pageToken)
 		if err != nil {
-			if pageToken != "" && errors.Is(err, auth.ErrQuotaRefused) {
-				break
-			}
 			return nil, fmt.Errorf("discovery: list subscriptions: %w", err)
 		}
 		for _, s := range resp.Items {
@@ -283,9 +340,10 @@ func (e *Engine) fetchSubscriptions(ctx context.Context, client *youtube.Client,
 		if pageToken == "" {
 			break
 		}
+		// A refusal on any page ends discovery: the next call would be
+		// refused too, and a partial subscription list is not a scan.
 		if err := e.requireBudget(ctx, quota.OpSubscriptionsList, 1); err != nil {
-			e.logger.WarnContext(ctx, "discovery: insufficient quota for next subscriptions page", "diagnostic", diag.Encode(err, "discovery", "subscriptions_list"))
-			break
+			return nil, err
 		}
 	}
 	return all, nil
@@ -439,6 +497,9 @@ func (e *Engine) fetchNewVideos(ctx context.Context, runID int64, client *youtub
 		complete, attempted, skipped, pages := false, false, false, 0
 		for {
 			if err := e.requireBudget(ctx, quota.OpPlaylistItemsList, 1); err != nil {
+				if !quotaStop(err) {
+					return nil, err
+				}
 				e.logger.WarnContext(ctx, "discovery: insufficient quota for playlist items",
 					"diagnostic", diag.Encode(err, "discovery", "playlist_items_list"))
 				result.ScanStopped = true
@@ -450,7 +511,7 @@ func (e *Engine) fetchNewVideos(ctx context.Context, runID int64, client *youtub
 			}
 			items, next, err := client.ListPlaylistItems(ctx, ch.UploadsPlaylistID, pageToken)
 			if err != nil {
-				if errors.Is(err, auth.ErrQuotaRefused) {
+				if quotaStop(err) {
 					result.ScanStopped = true
 					break
 				}
@@ -665,7 +726,7 @@ func (e *Engine) requireBudget(ctx context.Context, op quota.Operation, calls in
 		return fmt.Errorf("discovery: budget check failed: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("discovery: insufficient quota for %s x%d", op, calls)
+		return fmt.Errorf("discovery: insufficient quota for %s x%d: %w", op, calls, auth.ErrQuotaRefused)
 	}
 	return nil
 }
