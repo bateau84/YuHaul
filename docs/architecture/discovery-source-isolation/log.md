@@ -10,6 +10,13 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**Critique on `723d418` (one MAJOR, two MINOR) fixed.**
+- **M1.** The new immutable `video.discovery_source_channel_id`, written by the page transaction with the marker in the same migration, keys both the routing gate and the terminal handoff. The provider snippet's `video.channel_id` is no longer used for either. The terminal handoff now gives every unfinished marked observation a pending row at any terminal result other than Stop or Discard, with a reason order. §6 adds a mismatched or empty `channelId` case.
+- **m2.** §2's mixed/complete row now excepts ineligible-after-page sources.
+- **m3.** The AC11 case 1 proof row adds a locally failed source B with a saved page.
+
+§5 has a designer note on Run Detail counts: an ineligible-after-page source is in no count.
+
 **AC11 realized (user decision `b2f00946`, BR-002 AC11 in `44f3ba4`).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) changes:
 - §1.3: a source that saved a page and is ineligible on recovery settles `no_longer_eligible`. It counts as neither completed nor failed, and its observations are never routed in the origin. The routing gate admits only observations of `complete` or `local_failure` sources. The `eligibility_changed_no_coverage` derivation now covers every row being `no_longer_eligible`.
 - §2: the AC10 row now covers AC11's three cases: mixed `completed`, AC8 `failed`, and all-ineligible `completed`. The all-local recheck accepts ineligible-after-page sources.
