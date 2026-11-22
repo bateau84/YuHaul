@@ -256,7 +256,7 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 	if afford, err := p.canAffordMinimum(ctx); err != nil {
 		return fmt.Errorf("pipeline: check quota before claiming: %w", err)
 	} else if afford {
-		items, err = qs.ListDeferredRetryCandidates(ctx, time.Now())
+		items, err = qs.ListDeferredRetryCandidatesForRun(ctx, time.Now(), 0, retryClaimBatch)
 		if err != nil {
 			return err
 		}
@@ -268,18 +268,9 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 			return err
 		}
 		run.ID = id
-		for _, item := range items {
-			receipt, _, result, err := qs.ClaimDeferredGroupResultTx(ctx, tx, item.ID, id, time.Now())
-			if err != nil {
-				return err
-			}
-			if result == queue.ClaimTaken {
-				receipt.Deferred = append([]queue.RetryRowRef(nil), receipt.Deferred...)
-				receipt.Errors = append([]queue.RetryRowRef(nil), receipt.Errors...)
-				receipts = append(receipts, receipt)
-			}
-		}
-		return nil
+		claim, err := qs.ClaimDeferredBatchTx(ctx, tx, id, items, time.Now())
+		receipts = append(receipts, claim.Receipts...)
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("pipeline: create and claim run: %w", err)
@@ -444,7 +435,7 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 
 	// Owned retries precede dispatch even when a crash left an actions checkpoint
 	// before the receiving run's first decision.
-	if err := p.processDeferredItems(ctx, runID, freshRetries, isResume); err != nil {
+	if err := p.processRetryBatches(ctx, runID, freshRetries, isResume); err != nil {
 		p.failRun(ctx, runID, "retry processing failed", err)
 		return
 	}
@@ -1331,6 +1322,88 @@ func (p *Pipeline) videosWithMatchedDecisions(ctx context.Context, runID int64, 
 		}
 	}
 	return routed, nil
+}
+
+// retryClaimBatch is the most deferred groups one claim transaction takes
+// (ARS-005 section 5.2).
+const retryClaimBatch = 500
+
+// processRetryBatches settles the pass the run already owns, then claims and
+// settles further batches in created-at order while the run may still claim
+// (ARS-005 section 5.2, variant K). It leaves quietly when the run is not a
+// Run Now or scheduled run, the context is done, the run's dispatch stop is
+// quota or accounting/integrity, the minimum-unit preflight refuses, the claim
+// finds the run stopped, or no candidate remains. A non-quota provider failure
+// does not end it: claiming and settling are local. A stop or preflight read
+// error is an accounting fault and is returned (writer W3).
+func (p *Pipeline) processRetryBatches(ctx context.Context, runID int64, receipts []queue.RetryGroupReceipt, recovery bool) error {
+	if err := p.processDeferredItems(ctx, runID, receipts, recovery); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	run, err := p.stateStore.GetRun(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("load run %d for batch claiming: %w", runID, err)
+	}
+	if run.InitiatedBy == nil || (*run.InitiatedBy != state.InitiatedByRunNow && *run.InitiatedBy != state.InitiatedBySchedule) {
+		return nil
+	}
+	qs, err := p.retryStore()
+	if err != nil {
+		return err
+	}
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		// R1: the effective stop, then the local minimum-unit budget.
+		stop, err := p.runStop(ctx, qs, runID)
+		if err != nil {
+			return err
+		}
+		if stop == quota.StopQuota || stop == quota.StopAccountingOrIntegrity {
+			return nil
+		}
+		afford, err := p.canAffordMinimum(ctx)
+		if err != nil {
+			return p.failClosed(ctx, qs, runID, fmt.Errorf("check quota before claiming: %w", err))
+		}
+		if !afford {
+			return nil
+		}
+		items, err := qs.ListDeferredRetryCandidatesForRun(ctx, time.Now(), runID, retryClaimBatch)
+		if err != nil {
+			return fmt.Errorf("list deferred retry candidates: %w", err)
+		}
+		if len(items) == 0 {
+			return nil
+		}
+		var claim queue.BatchClaim
+		err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+			var err error
+			claim, err = qs.ClaimDeferredBatchTx(ctx, tx, runID, items, time.Now())
+			return err
+		})
+		if errors.Is(err, queue.ErrRunNotClaiming) || errors.Is(err, queue.ErrRunDispatchStopped) {
+			return nil // R2: nothing was claimed; the stop settles elsewhere.
+		}
+		if err != nil {
+			return fmt.Errorf("claim deferred batch: %w", err)
+		}
+		if len(claim.Receipts) == 0 {
+			if claim.ClosedFinal == 0 {
+				// Every candidate was lost to a live owner: claiming again
+				// would list the same items.
+				return nil
+			}
+			continue // closed rows left the candidate list; try the next batch
+		}
+		if err := p.processDeferredItems(ctx, runID, claim.Receipts, false); err != nil {
+			return err
+		}
+	}
 }
 
 // processDeferredItems retries pending deferred videos before new discoveries.
