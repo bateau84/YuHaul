@@ -10,6 +10,8 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**Corrected after release assessment `6bcb6c7f`.** The optional relabel (§3.3.1) now handles the real stored `recorded_at` form (`2026-11-22 11:44:38.664736063 +0000 UTC`) as well as `…Z`, and its format check covers every row labeled L. It was tested on a scratch database holding rows written by the real ledger code and rows in the `T…Z` form, on both sides of 08:00Z. The reset field is `quota.reset_at` in `GET /api/overview`. The pre-scan stop logs `discovery complete`. The e2e test gives the limited run one unit of headroom, so the claim-then-requeue coverage is back.
+
 **Implemented** on `hotfix/quota-stop` (commits `111d244`, `2aa0506`, `f02a69e`, `0eb154a`, `6827e05`). [ARS-001 §10](specifications/ars-001-provider-quota-stop-pacific-reset.md) records the evidence and the deviations: the Q1 pending count is 7, not 6; Q2, Q5 and Q12 are proved at the boundary the tests can reach; one e2e test outside the write boundary changed its expectation. Q-1 and Q-2 are still open.
 
 **Revised after critic `ses_dfd2e7bdeffeRof29fhoIoWn65`.**

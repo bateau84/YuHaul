@@ -118,7 +118,7 @@ Now that §1 stops the run, the charge no longer acts as the brake. It only need
 
 - `bucketDateFor` already handles daylight saving: midnight Los Angeles is 08:00Z in winter and 07:00Z in summer.
 - The package imports `_ "time/tzdata"`, so `LoadLocation` cannot fail in the image or in tests. If it does fail, `Acquire` and `CanAfford` error and admission fails closed.
-- `Budget.ResetKnown` becomes true and `reset_at` appears in `/api/quota`. This is the documented reset, not a guess.
+- `Budget.ResetKnown` becomes true and `quota.reset_at` appears in `GET /api/overview`. This is the documented reset, not a guess.
 - `AdmitIf` and `AdmitScoped` already refuse a hold whose bucket changed before admission. A request that spans the reset is not relabeled into the new day.
 
 ### 3.2 Labels
@@ -140,19 +140,25 @@ The too-high count fails safe: work is deferred, not sent. The §1 stop limits t
 
 This moves pre-deployment rows to their Pacific label. It is not part of the code change.
 
-**Format.** `recorded_at` is UTC RFC 3339 text in every writer. Go writes `2026-11-22T00:00:44.000000123Z`, and the SQL default writes `2026-11-22T00:00:44Z`. Both were checked on a scratch database at this branch. Compare against `'<L>T<HH>:00:00'` with no trailing `Z`. With the `Z`, a row at `…T08:00:00.5Z` would sort before the boundary, because `.` sorts before `Z`.
+**Format.** `recorded_at` is UTC text, but it has two forms. The Go writers (`Hold.Finalize`, `RecordAttempt`, `RecordCalls`) store the driver's text form of a UTC time, for example `2026-11-22 11:44:38.664736063 +0000 UTC`. The SQL column default writes `2026-11-22T00:00:44Z`, and a fraction can follow the seconds in either form. Every statement below therefore reads the first 19 characters, turns the space into `T`, and compares that with `'<L>T<HH>:00:00'`. The fraction and the suffix never take part in the comparison, so a row at `08:00:00.5` is on the same side as `08:00:00`. The format check stops the procedure if any row labeled L is in neither form, for example a local-time stamp such as `+0100 CET`.
 
 **Labels to relabel.** L = D always. Also L = D−1 when T was before D 08:00Z. `<HH>` is `08` when L's Pacific midnight is in standard time and `07` when it is in daylight time. Rows written after deployment are never matched: a post-deployment row labeled L has `recorded_at` at or after L's reset.
 
 1. **Back up first.** With no run in progress, copy the database with WAL-safe `sqlite3 /data/yuhaul.db ".backup '/data/yuhaul-pre-relabel.db'"`. Or stop the pod and copy `/data/yuhaul.db*`. The image has no `sqlite3`, so run the client somewhere that can reach the volume.
-2. **Preview (read-only).** For each L:
+2. **Check the format, then preview (read-only).** For each L:
    ```sql
-   -- rows that would move; non_utc_text must be 0, or stop
+   -- every row labeled L, not only the ones to move; bad_format must be 0, or stop
+   SELECT COUNT(*) AS rows_labeled, COALESCE(SUM(NOT (
+            recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ T][0-9][0-9]:[0-9][0-9]:[0-9][0-9]*'
+            AND (recorded_at GLOB '*Z' OR recorded_at GLOB '* +0000 UTC'))), 0) AS bad_format
+   FROM quota_ledger WHERE date = '<L>';
+
+   -- rows that would move
    SELECT date, COUNT(*) AS rows_to_move, SUM(units_consumed) AS units_to_move,
-          MIN(recorded_at), MAX(recorded_at),
-          SUM(recorded_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z') AS non_utc_text
+          MIN(replace(substr(recorded_at,1,19),' ','T')) AS first_at,
+          MAX(replace(substr(recorded_at,1,19),' ','T')) AS last_at
    FROM quota_ledger
-   WHERE date = '<L>' AND recorded_at < '<L>T<HH>:00:00'
+   WHERE date = '<L>' AND replace(substr(recorded_at,1,19),' ','T') < '<L>T<HH>:00:00'
    GROUP BY date;
 
    -- bucket totals before the change
@@ -160,21 +166,22 @@ This moves pre-deployment rows to their Pacific label. It is not part of the cod
    WHERE date IN ('<L-1>', '<L>') GROUP BY date;
 
    -- keep this id list to undo the change without the backup
-   SELECT id FROM quota_ledger WHERE date = '<L>' AND recorded_at < '<L>T<HH>:00:00' ORDER BY id;
+   SELECT id FROM quota_ledger
+   WHERE date = '<L>' AND replace(substr(recorded_at,1,19),' ','T') < '<L>T<HH>:00:00' ORDER BY id;
    ```
 3. **Apply,** one transaction for each L:
    ```sql
    BEGIN IMMEDIATE;
    UPDATE quota_ledger SET date = '<L-1>'
-   WHERE date = '<L>' AND recorded_at < '<L>T<HH>:00:00';
+   WHERE date = '<L>' AND replace(substr(recorded_at,1,19),' ','T') < '<L>T<HH>:00:00';
    -- changes() must equal rows_to_move from step 2; otherwise ROLLBACK
    SELECT changes();
    COMMIT;
    ```
-   Example, deployment at 2026-11-22T12:00Z, with L = `2026-11-22` and HH = `08`: `UPDATE quota_ledger SET date='2026-11-21' WHERE date='2026-11-22' AND recorded_at < '2026-11-22T08:00:00';`.
+   Example, deployment at 2026-11-22T12:00Z, with L = `2026-11-22` and HH = `08`: `UPDATE quota_ledger SET date='2026-11-21' WHERE date='2026-11-22' AND replace(substr(recorded_at,1,19),' ','T') < '2026-11-22T08:00:00';`.
 4. **Check:** run the preview again; it returns no rows. The bucket totals moved by `units_to_move`.
 
-The preview, update and boundary were run on a scratch SQLite database with rows at `00:00:44.000000123Z`, `07:59:59Z`, `08:00:00Z`, `08:00:00.5Z` and `12:00:01.1Z`. Only the first two moved.
+The format check, preview, update and boundary were run on a scratch SQLite database. It held rows written by the real ledger code (`RecordAttempt`) in the Go form at `00:00:44.000000123`, `07:59:59.999999999`, `08:00:00`, `08:00:00.5` and `12:00:01.1`, plus rows in the `T…Z` form at `00:00:44`, `07:59:59`, `08:00:00` and `08:00:00.5`, all labeled `2026-11-22`. The format check returned 0. The update moved exactly the four rows before 08:00 (both forms) and left the five at or after it. A second preview then returned no rows. Rows stamped `2026-11-22 01:00:00 +0100 CET` and `garbage` made `bad_format` return 2.
 
 Effect on reporting: per-day statistics for the moved rows show their Pacific day. To undo, restore the backup, or set `date='<L>'` back for the saved ids.
 
@@ -236,7 +243,7 @@ All are JSON on stdout. All carry `"run_id"` when a run scope exists. Payloads a
 | WARN | `quota pre-flight check failed` (existing) | add `run_id`, `cause` = `local_budget` or `run_dispatch_stop` | `CanAfford` refuses |
 | DEBUG | `quota admission refused` | `run_id`, `operation`, `cause` | `Acquire` refuses |
 | WARN | `discovery skipped: daily quota used up` | `run_id`, `operation` (`subscriptions_list`/`channels_list`), `refusal` = `admission` or `provider` | §4.2 |
-| INFO | `discovery complete` (existing) | add `scan_outcome` | end of discovery |
+| INFO | `discovery complete` (existing) | add `scan_outcome` | end of discovery, including the pre-scan quota stop |
 
 The diag vocabulary does not change.
 
@@ -304,6 +311,11 @@ Implemented on `hotfix/quota-stop` from `c1c1977`. Commits: `111d244` (quota), `
 2. **Q2** is proved at the executor boundary: a new ledger and executor over the same database send nothing for the run. A resumed `Execute` on a terminal run is rejected before any send, so it cannot show this.
 3. **Q5** proves the refusal row carries the run ID and that the run's next read and its next insert admission are refused. It does not drive an executor insert through `cmd/server`.
 4. **Q12** proves the "empty ledger, provider refuses everything" half. The clock half (00:00:44Z gives the previous Pacific day) is Q6, because the ledger clock is not reachable from the pipeline tests.
-5. **Outside the write boundary:** `e2e/retry_authority_test.go` asserted that a quota-limited run claims and requeues deferred rows (retry count 1, then 2). §1.4 and Q11 require it to claim nothing, so the test now expects retry count 0 for the limited run and 1 after the final retry. It is its own commit (`6827e05`) so it can be replaced.
+5. **Outside the write boundary:** `e2e/retry_authority_test.go` asserted that a quota-limited run claims and requeues deferred rows (pending, retry count 1, then 2). With quota fully used up, §1.4 and Q11 make the run claim nothing, so the test now gives the limited run one unit of headroom (limit 5 after the first run used 4). The run then claims the rows, cannot afford the 50-unit insert and requeues them, and the original assertions hold again. Q11 covers the no-headroom case. The change is its own commit so it can be replaced.
 6. **Existing tests changed:** `TestGuardedFinalQuotaRefusalAndProviderQuota` (1 unit), `TestExecutor_GuardedQuotaTailEvidenceFailureRollsBackHandoff` (1 unit, not named in §7), `TestDiscoveryRespectsQuotaBudget` (completed `cut_short`), the provider-403 cases in `source_isolation_test.go` (a provider `quotaExceeded` in the channel loop now stops the scan, as §4.3 says), and `TestReservationRetainsBucketAfterRollover` (pinned to a UTC schedule, because the default day is now Pacific).
 7. **Not demonstrated against the old code:** the new tests use the new API, so they do not compile at `c1c1977`. The debugger's reproduction of run 58 (200 inserts sent) is the evidence for the old behavior.
+
+**Corrections after release assessment `6bcb6c7f`:**
+- §3.3.1 now matches the stored `recorded_at` text. The first version assumed an RFC 3339 `…Z` form only, and a real database holds `2026-11-22 11:44:38.664736063 +0000 UTC` for every Go-written row. The statements compare the first 19 characters with the space turned into `T`, and the format check covers every row labeled L and accepts both forms.
+- The reset is reported as `quota.reset_at` in `GET /api/overview`, not in an `/api/quota` endpoint.
+- The pre-scan stop now logs `discovery complete` with `scan_outcome`, as §6 requires.
