@@ -10,6 +10,8 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**BR-042 *Check window* example corrected (no obligation change).** The example lowered X to 2 and then said Retry now on day 12 starts "a new 10-day window". AC7, *Changing the setting*, measures every window with the current X, so the new window is 2 days. Only the example text changed. Found by critic `ses_dff71050fffeg7LIm7w3HonCUr` during review of Live ARS-001 §8.3; edited by the architect on branch `feat/live-skip` as authorized by the dispatcher (Loom Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`). Still open for the requirements owner: whether a Retry now that makes no check (for example quota refused) starts a fresh window. Live ARD-001 open question 5 assumes it does not. Docs only.
+
 **BR-042 AC5 clarified: "exactly one active deferred item" counts only the video's own item.** Question raised by plan node `b42-q-ac5` (Loom Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`): do playlist-full waiting entries count? Settled as a necessary consequence of existing requirements, not a new decision: [BR-041](br-041-bound-playlist-full-waiting-work.md) AC1 and AC3 make each waiting entry one missing add for one playlist, evictable on its own, and [BR-042](br-042-skip-live-and-upcoming-videos-until-ended.md) AC13 leaves such entries unchanged; counting them would break "exactly one" for a video waiting on two playlists and let an eviction strand a live-skipped video. The accepted Live ARS-001 §6.1 step 5 and capacity ARD-001 "Video-scoped uniqueness" already agree. BR-042 AC5, Derived from and the AC11/AC13 verification case updated; [index](index.md) records the question as settled. No other obligation changed. Docs only.
 
 ## 2026-11-21

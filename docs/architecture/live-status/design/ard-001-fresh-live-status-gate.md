@@ -6,7 +6,7 @@ tags: [architecture, design, live, upcoming, deferral, deferred-queue, metadata,
 timestamp: 2026-11-22T00:00:00Z
 ---
 
-**Status:** proposed technical realization of accepted BR-042 and the amended OC-002 Guarantee 5. Revised 2026-11-19 after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH` (CHANGES REQUIRED; see *Review disposition*). **Amended 2026-11-22 for BR-042 AC7 as amended on 2026-11-19** (the user-set live check limit, default 30 days, 1–365; Plan r30 `b42-ac7-arch`): see *Live check limit (AC7)* and ARS-001 §8.3. The AC7 amendment awaits critique (`b42-ac7-critique`). The rest was accepted by the critic after the focused recheck, with the ARS-001 precision fixes for §4, §5.1 and §6.2 applied. Not implemented. The ARS-001 §10 amendments were applied on 2026-11-19 (Plan r29 node `b42-amend`). Those to ARS-005, ARS-006, authorization ARS-001 and safe-diagnostic ARS-001 are committed. Those to capacity ARD-001 and Discovery ARS-001 sit in their still-untracked documents, for those documents' owners to commit.
+**Status:** proposed technical realization of accepted BR-042 and the amended OC-002 Guarantee 5. Revised 2026-11-19 after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH` (CHANGES REQUIRED; see *Review disposition*). **Amended 2026-11-22 for BR-042 AC7 as amended on 2026-11-19** (the user-set live check limit, default 30 days, 1–365; Plan r30 `b42-ac7-arch`): see *Live check limit (AC7)* and ARS-001 §8.3. Revised the same day after critic `ses_dff71050fffeg7LIm7w3HonCUr` (CHANGES REQUIRED; see *Review disposition*); awaiting recheck. The rest was accepted by the critic after the focused recheck, with the ARS-001 precision fixes for §4, §5.1 and §6.2 applied. Not implemented. The ARS-001 §10 amendments were applied on 2026-11-19 (Plan r29 node `b42-amend`). Those to ARS-005, ARS-006, authorization ARS-001 and safe-diagnostic ARS-001 are committed. Those to capacity ARD-001 and Discovery ARS-001 sit in their still-untracked documents, for those documents' owners to commit.
 
 ## Summary
 
@@ -123,7 +123,8 @@ BR-042 needs a status that comes from the routing run itself. It must be obtaine
 | I5 | After a live skip, the video has exactly one active **video-scoped** deferred item, unless the user removed it while it was claimed. Capacity rows keep their identity and age. | The reuse-or-create writer, with a video-scoped uniqueness guard. | L7, L11 |
 | I6 | Without a current report, the video keeps its existing AC3 disposition, or for a new discovery the native retention. In every case the result is a deferred outcome plus an active item, never "no outcome" and never `failed`. | Gate precedence (ARS-001 §5). | L4, L17 |
 | I7 | Every pass of a production run, fresh or resumed, applies the gate to its unfinished member videos before the work of its start phase. | `liveGatePass` at pass entry (ARS-001 §5.1). | L16 |
-| I8 | A held video's window start changes only at the first live skip of a hold, at a still-held check in a user queue retry run, and (to `NULL`) at confirmation. | The only writers of `live_window_started_at` (ARS-001 §8.3.2); the table CHECK ties it to `live_hold`. | W3, W5, W6, W8 |
+| I8 | A held video's window start changes only at the first live skip of a hold (its check time, or the transaction time for a refusal with no recorded check), at a recorded non-`none` check in a user queue retry run, and (to `NULL`) at confirmation. A hold never exists without a start. | The only writers of `live_window_started_at` (ARS-001 §8.3.2); the table CHECK ties it to `live_hold`. | W3, W5, W6, W8, L14 |
+| I10 | A held video released by its claiming run without an outcome (Stop/Discard handoff, failure sweep, closed-window release) reads `deferred` again, and a closed-window release counts as settled for every later sweep and handoff. | `RestorePriorDeferralTx` on each such path; `claim_released_reason` excluded by `unfinishedRunMembersTx` (ARS-001 §8.3.5). | W5, W6 |
 | I9 | Once a held video's window has closed under the current X, no automatic claim takes any of its rows and no run reads its live status, except a user queue retry run. | The per-video predicate in the candidate list, in the claim writer's recheck, and before the claimed gate's read (ARS-001 §8.3.3, §5.3). | W4–W7, W11 |
 
 ## Options considered
@@ -314,18 +315,31 @@ ARS-001 §9 (L1–L17). The decisive proofs use the real server path, migrated S
 | Gate inputs for new discoveries | **Accepted.** Live only before Discovery lands (P2). |
 | Version-0 continuation | **Accepted.** Recorded as unreachable, with the evidence above. |
 
+### AC7 review (critic `ses_dff71050fffeg7LIm7w3HonCUr`, 2026-11-22, CHANGES REQUIRED)
+
+| Finding | Disposition |
+|---|---|
+| 1. A fence or backstop refusal with no recorded check writes a hold with a `NULL` start; a retry-run refusal could refresh the window without a check | **Accepted.** The start is `COALESCE(live_checked_at, transaction time)`. `:fresh` needs a recorded non-`none` check in a user queue retry run. L14 and W9 are extended (ARS-001 §6.1 step 4, §8.3.2). |
+| 2. Held videos left `not_yet_evaluated` after a Stop/Discard handoff or the failure sweep | **Accepted.** `RestorePriorDeferralTx` sets `processing_state = 'deferred'` explicitly and is called on every outcome-less release of a held video. Amendments for ARS-003 §2 and ARS-005 §5.1.1 are listed in ARS-001 §10. W5 and W6 are fixed (ARS-001 §8.3.5). |
+| 3. A closed-window-released member still looks unfinished to `unfinishedRunMembersTx` and the handoff | **Accepted.** New `run_video_outcome.claim_released_reason = 'live_window_closed'`; `unfinishedRunMembersTx` excludes it, so the handoff and sweep treat it as settled (ARS-001 §8.2, §8.3.5; W6). |
+| 4. An unreadable limit: inspection said "open" while claims treated the row as closed, and the claimed gate still read it | **Accepted.** Inspection returns `checks_stopped: true` with no time, and the gate releases (ARS-001 §8.3.1, §5.3, §8.3.6; W2). |
+| 5. W11 cannot run before quota-bounded claiming exists | **Accepted.** The dependency on ARS-005 §5.2 is recorded in §8.3.4 and on W11. |
+| 6. The BR-042 example's "new 10-day window"; the Retry-now-without-check choice | **Accepted / routed.** The example is corrected in BR-042 (the window uses the current X). The no-check choice stays a specification choice, asked of the requirements owner through the specifier (open question 5). |
+
 ## Open questions
 
 1. **AC5 counting: resolved 2026-11-22.** BR-042 AC5 now says the count covers only the video's own item; playlist-full waiting entries are neither counted nor a substitute (requirements commit 33bea6f, node `b42-q-ac5`). This design already realizes that reading.
 2. **Ended broadcast without `actualEndTime` (accepted provider risk).** The video is skipped as `live_unconfirmed` until the live check limit stops automatic checks. It then stays visible as "checks stopped", and the user can use Retry now or Dismiss. Revisit with provider evidence.
 3. **Queue label after confirmation (Designer).** Once a hold clears, an item created by a live skip still carries the origin reason `live_or_upcoming`, for example if a later quota deferral reuses it. How that is shown is a design decision. The `reason=live_or_upcoming` filter selects active held rows only.
 4. **Cross-document amendments (integration).** The 2026-11-19 ones are applied. The AC7 ones (ARS-005 §5.1, §5.2, §6.2 and §7.2; video-search ARS-001 §6.6; capacity ARD-001; safe-diagnostic registrations) are listed in ARS-001 §10 for their owners. None blocks this design.
-5. **BR-042 *Check window* example, day 12 (requirements owner; not blocking).** The example lowers X to 2 and then says Retry now on day 12 starts "a new 10-day window". By AC7, *Changing the setting*, the window length is always the current X, so it is 2 days unless X is raised to 10 again. ARS-001 follows AC7, and test W12 asserts the current-X length. Please correct the example or say which X it assumes.
+5. **Retry now that makes no check (requirements owner; not blocking; asked through the specifier).** ARS-001 restarts the window only when the Retry now run records a non-`none` check. A retry that cannot check (quota, authorization, rate limit, a failed read, a Stop before the read, a refusal with no recorded check) leaves the window and any stopped state unchanged, and answers `not_checked`. AC7 says the retry "starts a fresh window at the time of that retry" and, for a still-unconfirmed video, "stays, with a fresh window from that retry". This reading takes the second sentence as the condition. Please confirm, or say that any Retry now restarts the window. If it does, only the `:fresh` condition in ARS-001 §6.1 step 4 changes.
+   *Resolved:* the earlier question about the example's "new 10-day window" after X was lowered to 2. The example now says the new window uses the current X (BR-042, corrected 2026-11-22).
 6. **Run membership after a closed-window release (accepted).** A run that claimed an item and then reached it after its window closed keeps a membership row with no outcome (ARS-001 §8.3.5). This is the same shape as ARS-005's `unusable` release. Test W10 proves that no reader counts it.
 
 **Specification choices for AC7 (recorded, not escalated).** These stay within AC7's text.
 - The window start is the first skip's **check time** (`live_checked_at`), not the time the skip committed. They differ by at most one run's processing.
 - "X days" is exact elapsed time (X × 24 h in UTC), not calendar days.
-- Retry now restarts the window only when its run actually checks the video and finds it still held. A retry that cannot check (quota, a Stop before the read) leaves the window, and a stopped state, unchanged. The result says `not_checked`. This keeps "a stop or discard handoff does not move the window" and "stopped" truthful.
+- Retry now restarts the window only when its run records a check that finds the video still held. A retry that cannot check leaves the window, and a stopped state, unchanged, and the result says `not_checked`. This keeps "a stop or discard handoff does not move the window" and "stopped" truthful. It awaits confirmation (open question 5).
+- A refusal with no recorded check (a fence or backstop path) still writes the hold, with the transaction time as the start, so no hold lacks a start.
+- An unreadable stored limit is treated as "closed" by every reader: claims, the claimed gate and inspection (`checks_stopped: true` with no time).
 - A claim made while the window was open does not license a check after it closes (resume, or a lowered X mid-run). The claimed gate releases it unread.
-- An unreadable stored limit stops automatic checks of held items rather than falling back to 30.

@@ -25,6 +25,16 @@ timestamp: 2026-11-22T00:00:00Z
 
 Awaiting critique (`b42-ac7-critique`). Docs only.
 
+**AC7 revised after critic `ses_dff71050fffeg7LIm7w3HonCUr` (CHANGES REQUIRED, six findings, all accepted or routed).**
+1. A hold is never written without a start: `COALESCE(live_checked_at, transaction time)`. `:fresh` needs a recorded non-`none` check in a `queue_retry` run. L14 and W9 are extended.
+2. `state.RestorePriorDeferralTx` sets `processing_state = 'deferred'` explicitly. It runs on every outcome-less release of a held video: the claimed-gate release, the Stop/Discard handoff and the run-failure sweep. Amendments for ARS-003 §2 and ARS-005 §5.1.1 are listed in ARS-001 §10. W5 and W6 are fixed.
+3. New `run_video_outcome.claim_released_reason = 'live_window_closed'`. `unfinishedRunMembersTx` treats such a member as settled, so the handoff and sweep leave it alone.
+4. An unreadable limit reads as "checks stopped" (no time) in inspection, and the claimed gate releases.
+5. W11 depends on ARS-005 §5.2 (quota-bounded claiming, not built).
+6. The BR-042 *Check window* example is corrected (the new window uses the current X). The Retry-now-without-check choice is open for the requirements owner (ARD-001 open question 5).
+
+Awaiting the critic's recheck. Docs only.
+
 ## 2026-11-19
 
 **Architecture proposed:** [ARD-001](/docs/architecture/live-status/design/ard-001-fresh-live-status-gate.md) and [ARS-001](/docs/architecture/live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) realize BR-042. The gate is on the reused `FetchForEvaluation` read, with a same-run Store A stamp and a fail-closed classifier. Queue items carry a `live_hold` overlay. Backstops guard evaluation and the send guard. The migration follows the receipt and Discovery migrations, with no number. AC7 is designed for its default of no limit, with a single cap seam. No implementation and no critique yet.

@@ -6,7 +6,7 @@ tags: [architecture, specification, live, upcoming, metadata, deferred-queue, mi
 timestamp: 2026-11-22T00:00:00Z
 ---
 
-**Status:** proposed exact contract for [ARD-001](../design/ard-001-fresh-live-status-gate.md). Revised 2026-11-19 after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH`, which accepted it. Its precision fixes are applied in §4, §5.1 and §6.2. **Amended 2026-11-22 for BR-042 AC7** (the live check limit; Plan r30 node `b42-ac7-arch`): §1, §5.3, §6, §8.1–8.3 and §9 W1–W12. The AC7 amendment is not yet critiqued (node `b42-ac7-critique`). Not implemented.
+**Status:** proposed exact contract for [ARD-001](../design/ard-001-fresh-live-status-gate.md). Revised 2026-11-19 after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH`, which accepted it. Its precision fixes are applied in §4, §5.1 and §6.2. **Amended 2026-11-22 for BR-042 AC7** (the live check limit; Plan r30 node `b42-ac7-arch`): §1, §5.3, §6, §8.1–8.3 and §9 W1–W12. Revised the same day after critic `ses_dff71050fffeg7LIm7w3HonCUr` (CHANGES REQUIRED, six findings; see ARD-001 *Review disposition*): §6.1 step 4, §5.3, §8.2, §8.3.1–8.3.6 and the tests. Awaiting the critic's recheck. Not implemented.
 
 **Prerequisite state on `origin/main` 8d7e009 (rechecked 2026-11-22).** Claimed paths still require [ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.1–6.2 (ARD-001 P1). Of that contract, only the §5.1.1 claim provenance is built (migration `031`, `internal/queue/retry_provenance.go`). Not built: the §6.2 precondition (`FetchForEvaluation`, `internal/metadata/manager.go:406`, still has no production caller, and no `deferRetryForInputsTx` exists), and the §5.2 batched claim loop (`createClaimedRunLocked` lists every candidate unbounded, `internal/pipeline/pipeline.go:252`). The §5.3 claimed gate below is an addition to §6.2 and ships with or after it.
 
@@ -27,6 +27,7 @@ timestamp: 2026-11-22T00:00:00Z
 | Live check limit `X` | Whole days, 1–365, default 30 | `settings` row `live_check_limit_days` (§8.3.1) |
 | Window start | UTC timestamp | `deferred_item.live_window_started_at`, set exactly when `live_hold` is set (§8.3.2) |
 | Window closed | `now − window start ≥ X × 24 h` on an active held video-scoped row | `queue.LiveWindowClosed` (§8.3.3) |
+| Claim released | `live_window_closed` | `run_video_outcome.claim_released_reason`: a member the run released without an outcome (§8.3.5) |
 
 **Terms.** A *held row* is a `deferred_item` row with `status IN ('pending','retrying')`, `live_hold IS NOT NULL`, and that is video-scoped (not a capacity row, as capacity ARD-001 defines one). The *current hold* of a video starts when a live skip sets `live_hold` on a row whose `live_hold` is `NULL`, and ends when §6.3 clears it on confirmation. A *user queue retry run* is a production run with `initiated_by = 'queue_retry'` (`internal/pipeline/retry.go:47–48`).
 
@@ -123,7 +124,7 @@ It never writes "no outcome". A video evaluated in this run whose add was blocke
 
 ### 5.3 `liveGateClaimed`: within the ARS-005 §6.2 precondition (prerequisite P1)
 
-- **Window check first (AC7).** Before any read, for each claimed `open` or `partly_done` receipt whose receiving-run row has no `live_status`: if the receiving run is not a user queue retry run and `LiveWindowClosedTx(video, now, X)` (§8.3.3) is true, make no read and run `releaseClosedWindowTx` (§8.3.5): the receipt is released unchanged, the video row gets back its deferred state, the receiving run records no outcome for it, and the hold and window are untouched. This covers a run that claimed the item while its window was open and reaches the gate after it closed, such as a resume days later or a limit lowered mid-run. A receipt whose row already has `live_status` uses it, as below; no second read is made.
+- **Window check first (AC7).** Before any read, for each claimed `open` or `partly_done` receipt whose receiving-run row has no `live_status`: if the receiving run is not a user queue retry run and either `LiveWindowClosedTx(video, now, X)` (§8.3.3) is true or X is unreadable (§8.3.1) while the video has a held row, make no read and run `releaseClosedWindowTx` (§8.3.5): the receipt is released unchanged, the video row gets back its deferred state, the receiving run records no outcome for it, and the hold and window are untouched. This covers a run that claimed the item while its window was open and reaches the gate after it closed, such as a resume days later or a limit lowered mid-run. A receipt whose row already has `live_status` uses it, as below; no second read is made.
 - For each other claimed `open` or `partly_done` receipt whose receiving-run row has no `live_status`, add `Live` to the receipt's requirement. Partly-done, capacity-only and continuation receipts request `Live` only.
 - Record the result with `RecordLiveStatusTx` for the receiving run.
 - Then apply the §6.2 status table, with one row inserted ahead of the `current`/`fetched` and `unusable` rows: a recorded `live ≠ none` goes to `liveSkip` with the receipt. `absent`, `quota_refused`, `authorization_pending`, `rate_limited`, `failed`, and `unusable` without `Live` keep their existing §6.2 rows unchanged.
@@ -137,9 +138,12 @@ It never writes "no outcome". A video evaluated in this run whose add was blocke
 2. `ClassifyVideoTx`. A final video is a no-op.
 3. Transition `not_yet_evaluated → evaluating → deferred`, with `FinalOutcomeDeferred` and the reason from §1. A same-owner resumed receipt uses its current state on an allowed edge.
 4. Set `live_hold = :hold` and `retry_after = NULL` on every owned (or, without a receipt, active) **video-scoped** row. Keep `id`, `deferral_reason`, `run_id`, `created_at`, `retry_count` and the owner history. In the same statement set the window start (AC7, §8.3.2):
-   `live_window_started_at = CASE WHEN live_hold IS NULL OR :fresh THEN :checked_at ELSE live_window_started_at END`,
-   where `:checked_at` is this run row's `live_checked_at` and `:fresh` is true exactly when `runID` is a user queue retry run. SQLite evaluates the `CASE` against the row's values before the update, so `live_hold IS NULL` means "this skip starts the current hold".
-5. If there is no such row, create exactly one with `deferral_reason = 'live_or_upcoming'`, `live_hold = :hold`, `live_window_started_at = :checked_at`, `status = 'pending'`, `retry_after = NULL` and `run_id = runID`. Create it even when the receipt owns only capacity rows. The uniqueness guard is `NOT EXISTS (… video_id = ? AND status IN ('pending','retrying') AND <video-scoped>)`, so capacity rows never suppress it. `<video-scoped>` means not a capacity row, as capacity ARD-001 defines one; before capacity ships, every row is video-scoped.
+   `live_window_started_at = CASE WHEN live_hold IS NULL OR :fresh THEN :start ELSE live_window_started_at END`, where:
+   - `:start` is `COALESCE(<this run row's live_checked_at>, <this transaction's time>)`. A fence or backstop refusal (§7) can reach this writer with no recorded check (`live_status` and `live_checked_at` are `NULL`, mapped to `unconfirmed`). The hold is still written, so the window start must never be `NULL` there; the table CHECK (§8.2) refuses a hold without a start.
+   - `:fresh` is true exactly when `runID` is a user queue retry run **and** this run row has a recorded check with `live_status IN ('live','upcoming','unconfirmed')`. A refusal with no recorded check in a retry run is not a check, so it never restarts the window.
+
+   SQLite evaluates the `CASE` against the row's values before the update, so `live_hold IS NULL` means "this skip starts the current hold".
+5. If there is no such row, create exactly one with `deferral_reason = 'live_or_upcoming'`, `live_hold = :hold`, `live_window_started_at = :start`, `status = 'pending'`, `retry_after = NULL` and `run_id = runID`. Create it even when the receipt owns only capacity rows. The uniqueness guard is `NOT EXISTS (… video_id = ? AND status IN ('pending','retrying') AND <video-scoped>)`, so capacity rows never suppress it. `<video-scoped>` means not a capacity row, as capacity ARD-001 defines one; before capacity ships, every row is video-scoped.
 6. With a receipt, run `AcknowledgeRetryDeferralReceiptTx`. Owned video-scoped Deferred rows return to `pending`. Owned Error rows become `resolved` with their history kept (BR-035 AC11). Owned capacity rows are released to `pending` unchanged: same ID, enrollment, age and cap count.
 
 It never writes a route decision, condition audit, duplicate evidence, action success, guard, Errors entry, `failed` or a final outcome. It never reads the live check limit: whether the window is open matters only to claiming (§8.3.3) and to the claimed gate (§5.3), never to the skip itself.
@@ -205,7 +209,7 @@ One forward migration, owned by Plan node `b42-migration`.
 
 - **Number.** `origin/main` ends at `031` (`internal/store/migrations/031_retry_claim_provenance.up.sql`). The migration takes the next free number on `main` (max + 1) when PR-L rebases for merge, under the central allocation (Plan phase `migrations`): contiguous, no reservation or placeholder, no edit to `001`–`031`, and no renumbering once a deployed or shared database has the number. The expected order puts it after the last-retry-run migration (PR-E), the run dispatch-stop migration only if PR-R needs one, and the Discovery page/handoff migration (PR-D), and before capacity (PR-C). The file name and version are therefore decided at merge, not here.
 - **Combining with capacity.** If capacity's `deferred_item` rebuild is in the same release, the two are combined into one rebuild, or the later rebuild carries every column, CHECK value and index defined here.
-- **`run_video_outcome`.** `ALTER TABLE … ADD COLUMN live_status …` and `ADD COLUMN live_checked_at TIMESTAMP`. This is not a table rebuild, and the `028` final-outcome triggers remain. There is no backfill: rows in flight read as `NULL`, and the resume gate reads them once (§5.1).
+- **`run_video_outcome`.** `ALTER TABLE … ADD COLUMN live_status …`, `ADD COLUMN live_checked_at TIMESTAMP`, and `ADD COLUMN claim_released_reason TEXT CHECK (claim_released_reason IS NULL OR claim_released_reason = 'live_window_closed')` (§8.3.5). This is not a table rebuild, and the `028` final-outcome triggers remain. There is no backfill: rows in flight read as `NULL`, and the resume gate reads them once (§5.1).
 - **`deferred_item` rebuild** (like `026`), because the `deferral_reason` CHECK widens to add `live_or_upcoming` (and `discovery_processing_pending` if an earlier migration has not added it). New columns:
   - `live_hold TEXT CHECK (live_hold IS NULL OR live_hold IN ('live_now','upcoming','unconfirmed'))`;
   - `live_window_started_at TIMESTAMP` (AC7, §8.3.2);
@@ -214,7 +218,7 @@ One forward migration, owned by Plan node `b42-migration`.
   The rebuild preserves IDs and the `sqlite_sequence` high-water mark, `closed_reason` (`027`) and any capacity columns, every index (`idx_deferred_item_status`, `deferred_item_retry_owner`, `deferred_item_video_status`) and foreign key, and every existing CHECK value. All existing rows get `NULL` in both new columns, so no existing item is held or has a window. No new index: the window predicate runs per video through `deferred_item_video_status`.
 - **`settings` seed.** `INSERT OR IGNORE INTO settings (key, value) VALUES ('live_check_limit_days', '30');` (the `006` key/value table). `OR IGNORE` keeps a value that is already there.
 - **Store A** is unchanged.
-- **Down migration.** It refuses while any row has a live hold, a window start or a `live_or_upcoming` reason. Otherwise it rebuilds `deferred_item` without the new columns and CHECK values, drops the two `run_video_outcome` columns, and deletes the `live_check_limit_days` setting. Older writers stop before the migration.
+- **Down migration.** It refuses while any row has a live hold, a window start, a `claim_released_reason` or a `live_or_upcoming` reason. Otherwise it rebuilds `deferred_item` without the new columns and CHECK values, drops the three `run_video_outcome` columns, and deletes the `live_check_limit_days` setting. Older writers stop before the migration.
 - **Upgrade evidence** (release check, Plan phase `conventions`): upgrade a copy of a production-shaped database at the then-production schema (`030` or `031`; record which) through every new migration. `PRAGMA integrity_check` is `ok`; reopen; old rows, IDs, the AUTOINCREMENT high-water mark, `closed_reason`, indexes, the `028` triggers, the `029` title-search rows and the `031` receipts are unchanged; the new columns are `NULL`; the setting reads 30.
 - **Release.** The parser, recorder, gate, writers, fences, readers, the live check limit (§8.3) and SPA ship together. On claimed paths they ship only together with or after ARS-005 §6.1–6.2.
 
@@ -228,7 +232,12 @@ One forward migration, owned by Plan node `b42-migration`.
 
 - **Storage.** `settings` row `live_check_limit_days`, value in canonical decimal form (`"1"`–`"365"`, no sign, no leading zero), seeded `"30"` by the migration (§8.2). It survives a restart because it is a SQLite row. It is not part of `config_version` or any run snapshot. Saving it creates no configuration version, because it must apply to every item at the next claim, not to runs created under a given version.
 - **Reader.** `queue.LiveCheckLimitDaysTx(ctx, q) (int, error)` reads the row in the caller's transaction. A missing row, or a value that is not canonical decimal in 1–365, returns `ErrLiveCheckLimitUnreadable`. The only writer is the PUT handler below, so this happens only after outside edits to the database.
-- **Unreadable value, fail safe.** Automatic claiming treats every held row as window-closed for that transaction and logs `diag:v1 phase=routing operation=check_live_status code=live_check_limit_unreadable` once per claim transaction. Non-held items are claimed as usual, so a run start never fails because of it (BR-035 AC15). Retry now is unaffected. `GET` answers `500 live_check_limit_unreadable`, and saving a valid value repairs it. Rejected alternative: falling back to 30, which would silently change the user's setting.
+- **Unreadable value, fail safe, applied the same way everywhere.** Every reader treats every held row as window-closed:
+  - automatic claiming excludes held videos and logs `diag:v1 phase=routing operation=check_live_status code=live_check_limit_unreadable` once per claim transaction;
+  - the claimed gate (§5.3) releases an unread held receipt with `releaseClosedWindowTx`;
+  - Deferred inspection reports `checks_stopped: true` with no `checks_stopped_at` (§8.3.6), so the UI shows "Automatic checks have stopped." without a date, matching what claims actually do.
+
+  Non-held items are claimed as usual, so a run start never fails because of it (BR-035 AC15). Retry now is unaffected. `GET` answers `500 live_check_limit_unreadable`, and saving a valid value repairs it. Rejected alternative: falling back to 30, which would silently change the user's setting.
 - **No YouTube call.** Reading or saving the setting never calls the provider and changes no `deferred_item` or run row (AC7, *Changing the setting*).
 
 #### 8.3.2 The window start
@@ -237,17 +246,18 @@ One forward migration, owned by Plan node `b42-migration`.
 
 | Event | Effect on `live_window_started_at` |
 |---|---|
-| Live skip, row not held (`live_hold IS NULL`) or new row (§6.1 steps 4–5, §6.2) | Set to this run row's `live_checked_at`: the first skip of the current hold. |
-| Live skip, row already held, run is not a user queue retry run | Unchanged. |
-| Live skip in a user queue retry run (Retry now, still not confirmed) | Set to this run row's `live_checked_at`: a fresh window. |
+| Live skip, row not held (`live_hold IS NULL`) or new row (§6.1 steps 4–5, §6.2) | Set to `:start` = `COALESCE(live_checked_at, transaction time)`: the first skip of the current hold. The transaction time applies only to a fence or backstop refusal with no recorded check. |
+| Live skip, row already held, no recorded non-`none` check by a user queue retry run | Unchanged. This includes every fence or backstop refusal of an already-held row. |
+| Live skip in a user queue retry run whose row records `live`, `upcoming` or `unconfirmed` (Retry now checked it and it is still not confirmed) | Set to that `live_checked_at`: a fresh window. |
 | Confirmation `none` (§6.3) | `NULL`, together with `live_hold`. |
 | Claim, release, closed-window release (§8.3.5), Stop/Discard handoff, quota, auth or rate deferral (AC3), startup recovery, resume, restart, Dismiss, final close, settings change | Unchanged. No such writer lists the column. |
 
+- **Never a hold without a start.** Every writer that sets `live_hold` also sets the start in the same statement, with `COALESCE`, so the table CHECK `(live_hold IS NULL) = (live_window_started_at IS NULL)` holds on every path, including refusals with no recorded check.
 - **Why the check time.** The first skip's run row already holds the check time (`live_checked_at`, written once, §4). Using it makes the start the moment YouTube last said "live or upcoming", and a crash between the read and the skip cannot move it: on resume the stored `live_checked_at` is reused (§5.1).
 - **One start per video.** Every writer sets the same value on all of the video's held rows in one statement, so the video has one window start. Readers still use `MIN(live_window_started_at)` over the video's held rows, which can only make the window end earlier, never later.
 - **Format.** Written as UTC RFC 3339 text, the format `retry_after` already uses with `julianday()` (`internal/queue/retry.go:466`).
 - **Errors-queue retry.** It also creates a user queue retry run, so a still-held result there also starts a fresh window. In practice this does not arise: a live skip resolves the video's owned Errors rows (§6.1 step 6, BR-042 AC5), and a later Errors entry for the video comes only from paths that complete its Deferred rows, so a held video has no active Errors entry to retry.
-- **Retry now and "fresh".** The skip in a user queue retry run is the "check again" of AC7's last bullet, so it restarts the window. If the retry run makes no check (quota, authorization, rate limit, a failed read, or a Stop before the read), the window is unchanged. A stopped item stays stopped and the response says `not_checked` (§8.3.7).
+- **Retry now and "fresh".** A recorded non-`none` check in a user queue retry run is the "check again" of AC7's last bullet, so it restarts the window. If the retry run records no check (quota, authorization, rate limit, a failed read, a Stop before the read, or a fence or backstop refusal with no recorded check), the window is unchanged. A stopped item stays stopped and the response says `not_checked` (§8.3.7). That no-check case is a specification choice awaiting the requirements owner's confirmation (ARD-001 open question 5).
 
 #### 8.3.3 Claim exclusion (the claim filter)
 
@@ -281,7 +291,7 @@ The exclusion is per **video**: when any held row of the video is window-closed,
 
 Only `claimAutomatic` reads X. The kind is not stored; the run's `initiated_by` records the user retry durably for §8.3.2.
 
-**Stop and recovery.** Stop/Discard handoff puts claimed rows back to `pending` without touching the hold or window (§6.3), so an item whose window has closed stays excluded (AC7: a handoff does not make it eligible). Startup recovery and resume reuse their own receipts; they make no new claim, and §5.3 refuses a check after the window has closed.
+**Stop and recovery.** Stop/Discard handoff and the run-failure sweep put claimed rows back to `pending` without touching the hold or window (§6.3). For a held video they also restore its deferred state (§8.3.5). An item whose window has closed therefore stays excluded and deferred (AC7: a handoff does not make it eligible). Startup recovery and resume reuse their own receipts; they make no new claim, and §5.3 refuses a check after the window has closed.
 
 #### 8.3.4 Fit with BR-035 AC14
 
@@ -292,16 +302,42 @@ BR-035 AC14 says a run keeps claiming eligible items while it has quota, never p
 - **Re-entry.** An item comes back into the set when X is raised above its window age, or after Retry now restarts its window. It comes back in its old place, ahead of items created after it. This is the rule ARS-005 §5.1 already applies to a claimed and released item ("keeps its `created_at`, and so its place"). It is consistent with AC14: the item first became eligible when it was created, before every item it now precedes. While it was out of the set it was not "passed over", because AC7 says so. AC14's guarantee that every eligible item is eventually claimed still holds, because the order is a fixed total order over creation.
 - **ARS-005 text.** ARS-005 §5.1 states that "creation order is therefore eligibility order" because no row becomes eligible after it is created. That premise no longer holds for window-closed items, so ARS-005 §5.1 needs the amendment listed in §10 (owner: run-initiation). The claiming algorithm does not change.
 - **Quota.** A window-closed item costs no quota and takes no claim slot, so it cannot delay newer items.
+- **Dependency.** The pass-over property only becomes observable once claiming is bounded by quota, which is the ARS-005 §5.2 batch loop ("claim while quota remains"). That loop is **not built**: `createClaimedRunLocked` (`internal/pipeline/pipeline.go:252`) claims every eligible candidate at run creation. Until §5.2 ships, the exclusion and order still hold, but no run passes anything over. Test W11 therefore depends on ARS-005 §5.2 and runs once it lands. Before then, W4 and W7 cover exclusion and re-entry.
 
-#### 8.3.5 `releaseClosedWindowTx(ctx, runID, receipt)`: one `WithRetryTx`
+#### 8.3.5 Releasing a claimed held video without an outcome
 
-This runs only from §5.3 when a receipt reaches the claimed gate unread, after its window has closed, in a run that is not a user queue retry run.
+A claim resets the video row (`internal/queue/retry.go`, the `resetSQL` after the claim): `processing_state = 'not_yet_evaluated'` (or `'evaluated'` for a partly done video) and `final_outcome = 'not_yet_evaluated'`, with `deferred_reason = NULL`. Any path that returns the claimed rows of a **held** video to its queue without committing an outcome in the receiving run must undo that reset. Otherwise the video reads `not_yet_evaluated`, which the Videos page latest-outcome join (`internal/videosearch/service.go:719`) shows, and AC7 ("the video SHALL stay deferred") fails. A video is held here when any of its claimed Deferred rows has `live_hold IS NOT NULL`.
+
+**`state.RestorePriorDeferralTx(ctx, tx, receivingRunID, videoID)`** writes only the `video` row, never a run row:
+
+- **Precondition:** `video.final_outcome = 'not_yet_evaluated'` (the claim reset is still in place) and the receiving run has no outcome for the video. Otherwise it is a no-op.
+- **Effect:** `processing_state = 'deferred'`, `final_outcome = 'deferred'`, `error_message = NULL`, and `deferred_reason` = the `deferred_reason` of the video's most recent `run_video_outcome` row from another production run with `final_outcome = 'deferred'`, ordered by run start, then run ID. `processing_state` is always set to `'deferred'` explicitly, including for a partly done video, because the last committed state of a held video is a live deferral. BR-039 partly-done classification comes from recorded successes, not from `processing_state`, so it is unchanged (W6).
+- **No prior deferred row:** an integrity fault. A held row exists only after a live deferral, which always writes such a run row. Roll back and use the caller's existing integrity handling: `retryAdmissionRefusal` for the gate, and a failed Stop settlement for the handoff, as ARS-005 §5.1.1 already requires for a handoff that cannot be proved.
+
+It is called in the same transaction by every such path:
+
+| Path | Where today | Change |
+|---|---|---|
+| Closed-window release at the claimed gate | `releaseClosedWindowTx` (below) | New |
+| Stop/Discard handoff | `queue.HandOffUnfinishedExceptTx` (`internal/queue/handoff.go`); [ARS-003](../../run-initiation/specifications/ars-003-stop-run-and-deferred-handoff.md) §2 | For each held unfinished video whose owned rows it returned to `pending`, call `RestorePriorDeferralTx`. Today it does not touch `video`. |
+| Run-failure sweep | `sweepStrandedWorkExcept` → `RequeueRetryGroupTx` (`internal/pipeline/authority.go:365`); [ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) §5.1.1 *failure sweep* | Same, for each held `retryOwned` member it requeues |
+
+The 2026-11-19 live writers (`liveSkip`, `liveDeferAfterEvaluation`, native retention) need no restore, because they commit `deferred` themselves. Non-held videos keep today's behavior; this amendment does not change them.
+
+**`releaseClosedWindowTx(ctx, runID, receipt)`: one `WithRetryTx`.** This runs only from §5.3 when a receipt reaches the claimed gate unread, in a run that is not a user queue retry run, after its window has closed (or while X is unreadable).
 
 1. `RequeueRetryReceiptTx(receipt)` (`internal/queue/retry.go:618`): owned Deferred rows go to `pending`, owned Error rows to `active`, `retry_run_id = NULL`, with identity, reason, hold and window unchanged.
-2. Restore the video row from the claim reset (`retry.go`, the `resetSQL` after the claim): `state.RestorePriorDeferralTx(ctx, tx, runID, videoID)` sets `video.processing_state`, `final_outcome` and `deferred_reason` to the values of the video's most recent `run_video_outcome` row from another production run with `final_outcome = 'deferred'`, ordered by run start, then run ID. It writes only `video`, never a run row. A held row exists only after a live deferral, which always wrote such a run row. If none is found, that is an integrity fault: roll back, keep the receipt, and use the existing integrity refusal (`retryAdmissionRefusal`).
-3. Write nothing on the receiving run's row: it stays a membership row with `final_outcome` and `live_status` `NULL`. The membership row stays as the same-run claim fence (ARS-005 §5.1).
+2. `RestorePriorDeferralTx(runID, videoID)`.
+3. Set `run_video_outcome.claim_released_reason = 'live_window_closed'` on the receiving run's row (§8.2). Leave `final_outcome` and `live_status` `NULL`. The row stays as the same-run claim fence (ARS-005 §5.1).
 
-**Why.** AC7 says the video stays deferred and appears in no later run's outcomes or counts unless it is checked again. Releasing without step 2 would leave the video `not_yet_evaluated`, which the Videos page latest-outcome join (`internal/videosearch/service.go:719`) would show. Recording a deferred outcome in this run would add it to the run's outcomes without a check.
+**A released member is settled.** After step 3 the run has nothing left to do for the video. Every "unfinished member" reader must treat it as settled:
+
+- `unfinishedRunMembersTx` (`internal/pipeline/authority.go:423`) gains `AND NOT EXISTS (SELECT 1 FROM run_video_outcome r WHERE r.run_id = ?1 AND r.video_id = v.id AND r.claim_released_reason IS NOT NULL)`. Without it, the row's stored provenance and missing outcome select the video, so a later Stop/Discard handoff (`listUnfinishedRunVideosTx`) would create a second `stopped_by_user` item next to the held one, or the failure sweep would try to requeue rows the run no longer owns.
+- `HandOffUnfinishedExceptTx` therefore gets no such video in `unfinished`. Its stored-receipt loop changes no row for it, because none is still `retrying` for this run, and its final ownership check still passes.
+- Startup recovery lists work from owned rows (`ListRetryVideoIDs`), and none remain, so it does not resume the video.
+- `claim_released_reason` is written only by step 3 and never cleared. It is not an outcome, and no count or inspection view lists it.
+
+**Why not record an outcome.** Recording a deferred outcome in this run would add the video to the run's outcomes and counts without a check, which AC7 forbids.
 
 **Readers.** Run inspection, statistics and `ActionsExecuted` already exclude a membership row with no outcome, as for ARS-005's `unusable` release *[unverified for every reader; test W10 proves it]*.
 
@@ -320,7 +356,7 @@ Every deferred item view (`deferredItemView`, `internal/queue/handlers.go`) that
 - `window_started_at`: the video's window start (`MIN` over its held rows).
 - `checks_stopped`: `LiveWindowClosed(video, request time, X)`.
 - `checks_stopped_at`: `window_started_at + X × 24 h`, present only when `checks_stopped` is true. It is when automatic checks stopped under the current X. After X changes, it is recomputed and is not a stored event.
-- If X is unreadable, `checks_stopped` and `checks_stopped_at` are omitted and `window_started_at` stays. The design then shows an open-window row.
+- If X is unreadable, `checks_stopped` is `true` and `checks_stopped_at` is omitted, because claims and the claimed gate then treat the row as closed (§8.3.1). The design shows "Automatic checks have stopped." with no date.
 - `live_check` is omitted on rows that are not held, including a completed or discarded row with a stale hold.
 - All values are computed in the list's read-only transaction. They are no new stored state.
 
@@ -370,15 +406,15 @@ The "refusal versus failure" distinction the design needs is the pair `400 inval
 |---|---|---|
 | Setting: whole days, default 30, 1–365, refused with a visible reason, saved value unchanged | §8.3.1 seed and reader; §8.3.8 validation and codes | W1, W2 |
 | Saved value survives a restart | `settings` row | W2 |
-| Window starts at the first live skip of the current hold | §8.3.2 `CASE` on `live_hold IS NULL`; cleared only on confirmation | W3, W8 |
+| Window starts at the first live skip of the current hold | §8.3.2 `CASE` on `live_hold IS NULL` with a `COALESCE` start; cleared only on confirmation | W3, W8, L14 |
 | A further skip, claim, Stop/Discard handoff, restart, startup recovery do not move the start | No writer except §8.3.2's lists the column | W3, W5, W6 |
 | Open window: checked automatically under AC5 | Unchanged claim path while the predicate is false | W3 |
 | After X days: no automatic claim or check; not counted as passed over | §8.3.3 candidate and writer clause; §5.3 gate refusal; §8.3.4 | W4, W6, W11 |
-| Stays active, deferred, non-final, with identity, history and reason; in no later run's outcomes or counts | Nothing writes the item; §8.3.5 restores the video's deferred state | W4, W10 |
+| Stays active, deferred, non-final, with identity, history and reason; in no later run's outcomes or counts | Nothing writes the item; §8.3.5 restores the video's deferred state on every outcome-less release (gate, Stop/Discard, failure sweep) | W4, W5, W6, W10 |
 | Inspection shows checks stopped and when | §8.3.6 `live_check` | W4, W7 |
-| Handoff does not make it eligible | Handoff leaves the hold and window alone; per-video predicate | W5 |
+| Handoff does not make it eligible | Handoff and the failure sweep leave the hold and window alone and restore the deferred state; per-video predicate; a released member is settled | W5, W6 |
 | Changing X applies to every item from its own start; raise resumes, lower stops at the next run; no start, reason, history or outcome change; no YouTube call | X read per claim transaction; the predicate uses each row's start; §8.3.1 | W7 |
-| Retry now checks whether or not the window has ended; fresh window if still held | `claimUserDeferred` skips the clause; §8.3.2 fresh rule; §8.3.7 result | W8, W9 |
+| Retry now checks whether or not the window has ended; fresh window if still held | `claimUserDeferred` skips the clause; §8.3.2 fresh rule (only a recorded non-`none` check); §8.3.7 result | W9, L14 |
 | Re-queue does not apply; Dismiss removes and it stays removed | BR-037 predicates unchanged (a held item is active); Dismiss discards the row, and nothing recreates it | W9, L8 |
 | Example: X = 3, days 0–2 checked, day 3 not, restart, raise to 10, lower to 2, Retry now on day 12, Dismiss, refusals 0, 366, 2.5 and text | W12 runs the whole example in order | W12 |
 
@@ -397,7 +433,7 @@ The "refusal versus failure" distinction the design needs is the pair `400 inval
 - **L11. Capacity.** A live video that matches a full playlist: no count GET, no waiting row, and the cap count is unchanged. A capacity-only receipt for a video that is not confirmed: no GET or POST, the capacity row keeps its ID and age, and a video-scoped live item exists. Evict that capacity row: the video still has an active item.
 - **L12. Stop and re-queue.** Stop with a live-held claim: the item is `pending` and keeps its hold. The BR-037 preview does not count the video.
 - **L13. Registration.** API and SPA show the reasons and `live_status`. The filter returns active held rows only, and a completed row with a stale hold is excluded. Statistics count the video as deferred. An unknown value is withheld.
-- **L14. Fences.** Call `routeVideos` and `ClaimPlaylistSend` directly with no row value, with `live`, and with another run's `none`. Each ends deferred with `live_unconfirmed` and an active item, with no `ActionOutcomeFailed`, Errors entry or failed run, plus the fixed diagnostic.
+- **L14. Fences.** Call `routeVideos` and `ClaimPlaylistSend` directly with no row value, with `live`, and with another run's `none`. Each ends deferred with `live_unconfirmed` and an active item, with no `ActionOutcomeFailed`, Errors entry or failed run, plus the fixed diagnostic. AC7 window (§6.1 step 4): with no row value, the hold is written with `live_window_started_at` = the refusal transaction's time, never `NULL`, and the table CHECK holds; on an already-held row the start is unchanged. Repeat both refusals inside a user queue retry run whose row has no recorded check: the start is unchanged (no fresh window), and `live_retry.result` is `not_checked`.
 - **L15. Simulations.** Dry run, Replay and Backtest over the latest production values `live`, `upcoming`, `unconfirmed`, `none` and none at all give the §8.1 labels. They make zero requests and write nothing.
 - **L16. Resume after expiry.** A Run Now run stops at its time limit after routing, then expire every Store A row. Resume it at the action phase: zero live reads, adds are sent, no `failed`. Repeat with a migration-era run whose rows are `NULL` and whose provider now reports `upcoming` for one routed video: one live-only read, then `liveDeferAfterEvaluation`, no send, and the decision kept. Repeat at the duplicate-detection and routing phases.
 - **L17. New discovery without a report.** The prefetch and the gate read are quota-refused, failed or returned an invalid envelope. The video ends `deferred` with an existing reason or `metadata_unavailable`, with exactly one pending item, and a later run claims it. It is never `not_yet_evaluated` without an item.
@@ -406,17 +442,17 @@ The "refusal versus failure" distinction the design needs is the pair `400 inval
 **AC7 tests (W1–W12).** Real server path, migrated SQLite, request-counting controlled provider, and an injected clock. Day *n* means the day-0 run's check time plus *n* × 24 h.
 
 - **W1. Setting validation.** On a fresh install `GET` gives 30. `PUT` with `1`, `365` and `7` saves each and reads it back. `0`, `366`, `2.5`, `3.0`, `-4`, `1e2`, `"30"`, `"abc"`, `null`, `{}`, `{"days":5,"x":1}`, a duplicate `days` member and a non-JSON body each give `400 invalid_live_check_limit` with the unchanged `saved_days`, and the row is unchanged. A forced write failure gives `500 live_check_limit_save_failed`. No request reaches the provider, no configuration version is created, and no `deferred_item` row changes.
-- **W2. Restart.** Save 12, restart the binary, `GET` gives 12. Corrupt the row by hand (`"abc"`), then: `GET` gives `500 live_check_limit_unreadable`; a run start succeeds; non-held items are claimed; held items are not, and the diagnostic is logged once per claim transaction; Retry now on a held item still checks it; a valid `PUT` repairs it.
+- **W2. Restart.** Save 12, restart the binary, `GET` gives 12. Corrupt the row by hand (`"abc"`), then: `GET` gives `500 live_check_limit_unreadable`; a run start succeeds; non-held items are claimed; held items are not, and the diagnostic is logged once per claim transaction; Retry now on a held item still checks it; `GET /api/deferred` shows every held row with `checks_stopped: true` and no `checks_stopped_at`; a run holding an unread claim of a held video releases it at the claimed gate with zero reads (§5.3, §8.3.5); a valid `PUT` repairs it.
 - **W3. Start fixed by the first skip.** X = 3. Day 0: P is skipped, `live_window_started_at` = that run's `live_checked_at`. Days 1 and 2: each run claims and reads P once, and the start is unchanged. A quota-refused claim on day 2 (no report) also leaves it unchanged.
 - **W4. Window closed.** Day 3: the run neither claims nor reads P, has no row for P, and its counts and outcomes omit it. P stays `pending` with the same ID, reason, `created_at` and hold. The video reads deferred with no final outcome. `GET /api/deferred` shows `checks_stopped: true` and `checks_stopped_at` = day 3. The re-queue preview does not count P.
-- **W5. Handoff and restart.** On day 2, a run claims P and is stopped before its read: P is `pending`, its start is unchanged. Restart the process; on day 3 a new run does not claim P. Repeat with Discard.
-- **W6. Resume across the boundary.** A run claims P on day 2.9 and is interrupted before the read. It is resumed (Run Now resume, and separately startup recovery) on day 3.1: zero reads for P. `releaseClosedWindowTx` returns P to `pending` with its hold and window. The video row reads exactly as before the claim (`ClassifyVideoTx` and the Videos page latest outcome are unchanged). The resumed run's outcomes and counts omit P. Repeat with a partly done P.
+- **W5. Handoff, sweep and restart.** On day 2, a run claims P and is stopped before its read: P is `pending` with its hold and start unchanged, no second item exists, and the video row reads `processing_state = 'deferred'`, `final_outcome = 'deferred'` and the prior run's live `deferred_reason`, exactly as before the claim (Videos page latest outcome unchanged). Restart the process; on day 3 a new run does not claim P. Repeat with Discard, and with a run that fails after claiming P (the run-failure sweep): the same video state and one item. Contrast a non-held claimed video under Stop: its behavior is unchanged from today.
+- **W6. Resume across the boundary.** A run claims P on day 2.9 and is interrupted before the read. It is resumed (Run Now resume, and separately startup recovery) on day 3.1: zero reads for P. `releaseClosedWindowTx` returns P to `pending` with its hold and window. The video row reads `processing_state = 'deferred'`, `final_outcome = 'deferred'` and the prior live `deferred_reason`, as before the claim; `ClassifyVideoTx` and the Videos page latest outcome are unchanged. The receiving row has `claim_released_reason = 'live_window_closed'` and no outcome. The resumed run's outcomes and counts omit P. Then Stop the resumed run, and separately let it fail: `unfinishedRunMembersTx` does not select P, the handoff creates no `stopped_by_user` item and the sweep requeues nothing, and Stop settlement succeeds. Repeat with a partly done P: its recorded successes and BR-039 classification are unchanged, and `processing_state` reads `'deferred'`.
 - **W7. Changing X.** With P closed on day 4: raise X to 10, then the next run claims and reads P, and the start is unchanged. Lower X to 2: the next run does not claim P, and `checks_stopped_at` reads day 2. Saving X calls no provider and changes no row's start, reason, history or outcome. Lower X while a run holds an unread claim of P: that run's gate releases P (§5.3).
 - **W8. A new hold after confirmation.** P reports `none` on day 5 under X = 10: hold and window are `NULL`. On day 6 a later skip (the video became live again) starts a new window at day 6.
-- **W9. Retry now.** On a closed P: Retry now claims P whatever the window, reads it once, and on still-upcoming answers `200` with `live_retry.result = live_or_upcoming`, `live_check.checks_stopped = false` and `window_started_at` = the retry run's check time. With the provider reporting `none`: `result = not_live`, and P is processed normally. With quota refused: `result = not_checked`, and the start and the stopped state are unchanged. Dismiss P: no later run claims it, Retry now gives the existing not-found or removed answer, and re-queue does not restore it.
+- **W9. Retry now.** On a closed P: Retry now claims P whatever the window, reads it once, and on still-upcoming answers `200` with `live_retry.result = live_or_upcoming`, `live_check.checks_stopped = false` and `window_started_at` = the retry run's check time. With the provider reporting `none`: `result = not_live`, and P is processed normally. With quota refused: `result = not_checked`, and the start and the stopped state are unchanged. With a fence or backstop refusal in the retry run and no recorded check: the same `not_checked`, an unchanged start, and no `NULL` start. Dismiss P: no later run claims it, Retry now gives the existing not-found or removed answer, and re-queue does not restore it.
 - **W10. Readers.** After W4 and W6, run inspection, Run List counts, statistics, `ActionsExecuted` and `ActionsFailed` contain no entry for P in any run after the window closed, including the resumed membership row with a `NULL` outcome.
-- **W11. AC14 order.** Seed items A (oldest, held, closed), B and C (newer, ordinary), with quota for one claim: the run claims B, not A, and A is not "passed over". Raise X so A reopens: the next run with quota for one claims A before C.
-- **W12. The BR-042 *Check window* example end to end**, in order on one database, through the HTTP API and the SPA: X = 3; days 0, 1, 2 checked; day 3 not; Stop and restart; raise to 10; lower to 2; Retry now on day 12 checks P and, still upcoming, starts a new window whose length is the X then saved (the example's "new 10-day window" holds once X is 10 again; with X still 2 it is 2 days; see ARD-001 open question 5); Dismiss; refusals of 0, 366, 2.5 and text; the saved X survives a restart.
+- **W11. AC14 order** (depends on ARS-005 §5.2, the quota-bounded claim loop, which is not built; run it when §5.2 lands, §8.3.4). Seed items A (oldest, held, closed), B and C (newer, ordinary), with quota for one claim: the run claims B, not A, and A is not "passed over". Raise X so A reopens: the next run with quota for one claims A before C.
+- **W12. The BR-042 *Check window* example end to end**, in order on one database, through the HTTP API and the SPA: X = 3; days 0, 1, 2 checked; day 3 not; Stop and restart; raise to 10; lower to 2; Retry now on day 12 checks P and, still upcoming, starts a new window under the current X, here 2 days (BR-042 example corrected 2026-11-22); Dismiss; refusals of 0, 366, 2.5 and text; the saved X survives a restart.
 
 ## 10. Amendments to other contracts (applied 2026-11-19)
 
@@ -438,7 +474,9 @@ Each target section now states its amendment and links back here. The capacity A
 
 **AC7 amendments (2026-11-22), not yet applied.** This task may write only `docs/architecture/live-status/**`, so these go to their owners. Until they land, this section and §8.3 are the authority for the AC7 behavior.
 
+- [ARS-003](../../run-initiation/specifications/ars-003-stop-run-and-deferred-handoff.md) §2 (run-initiation): the Stop/Discard handoff calls `RestorePriorDeferralTx` for each held unfinished video it returns to `pending` (`processing_state = 'deferred'` set explicitly), and its unfinished set excludes members with `claim_released_reason` (§8.3.5).
 - [ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) (run-initiation):
+  - §5.1.1 *failure sweep*: the run-failure sweep does the same restore for each held member it requeues, and `unfinishedRunMembersTx` treats a member with `claim_released_reason` as settled (§8.3.5);
   - §5.1: the candidate list gains the window clause, and the sentence "creation order is therefore eligibility order" gains the window-closed exception and the re-entry rule of §8.3.4;
   - §5.2: the batch loop reads X once per claim transaction, and "eligible items remain" excludes window-closed videos;
   - §6.2 *Live gate*: the window check before the read and `releaseClosedWindowTx` (§5.3, §8.3.5);
