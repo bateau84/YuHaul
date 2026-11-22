@@ -734,7 +734,7 @@ R0 is the backstop that makes a missed call site safe: every guarded run-scoped 
 - **S5 quota without a stored write:** an admitted `quota` attempt during a metadata chunk. The column stays `NULL`. R1 leaves the claim loop, unsent inputs are `quota_refused`, and no second request is made. On a same-run resume in the same bucket there is still no request; after the reset the run is admitted again.
 - **S6 accounting:** inject a ledger read error and, separately, a failure of the stored write itself. In both cases there are zero further provider requests in that execution and the error propagates. With the stored write working, a later resume reads `accounting_or_integrity` and makes no request.
 - **S7 per-call readers:** with a stale in-process view, R2 refuses a claim under a stored `accounting_or_integrity` and R7 refuses `ClaimPlaylistSend` under any stored value, each inside its writer transaction with no guard or membership write.
-- **S8 simulations:** a dry run, Replay and Backtest never write the column and read `StopNone`.
+- **S8 simulations:** a dry run, Replay and Backtest never write the column; no stored level. A dry run can still derive a quota stop from the ledger.
 
 #### Write boundary for `rq-receiving-readiness`
 
