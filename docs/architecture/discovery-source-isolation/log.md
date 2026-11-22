@@ -10,6 +10,8 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**Recheck R1 fixed (critique `ses_dff73847effengFMSzBkXiCHwF`).** In [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md), a rate limit on any uploads read now suspends uploads reads for the rest of that execution (§1.3). There is no in-place wait and retry, and no write. The scan stays `cut_short` with rows `unsettled`. If the run then reaches a terminal result other than Stop or Discard, §2's global row treats it as a run-wide deferral under the existing `api_rate_limited` reason. The terminal transaction gives every unfinished marked observation an origin `deferred` outcome and one pending `api_rate_limited` row before it publishes the status, so nothing is stranded. A crash before then remains an interruption, and resume rescans. A §6 "Rate limit then terminal" proof row is added.
+
 **Revised after critique `ses_dff73847effengFMSzBkXiCHwF` (CHANGES REQUIRED; approach kept).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md):
 - **F1.** `blocked` without a sealed scope applies only to `run_now`/`schedule` runs whose `discovery_scan_outcome` is `NULL`. `queue_retry` runs and runs from `030`/`031` builds read `null`.
 - **F2.** The marked-observation authority applies only to the marked routing gate. Unmarked native rows keep ARS-005 §5.1.1.
