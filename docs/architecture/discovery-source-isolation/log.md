@@ -10,6 +10,21 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**Revised after critique `ses_dff73847effengFMSzBkXiCHwF` (CHANGES REQUIRED; approach kept).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md):
+- **F1.** `blocked` without a sealed scope applies only to `run_now`/`schedule` runs whose `discovery_scan_outcome` is `NULL`. `queue_retry` runs and runs from `030`/`031` builds read `null`.
+- **F2.** The marked-observation authority applies only to the marked routing gate. Unmarked native rows keep ARS-005 §5.1.1.
+- **F3.** An attributable transient failure is exactly a 5xx or a per-request timeout while the context is live. Rate limits follow ARS-005 pacing: the row stays unsettled and `cut_short` stands. ARD-001's Satisfies row records this as an AC6/AC7 interpretation.
+- **F4.** ARS-002 §1's same-run re-scan rationale is amended.
+- **F5.** `completed_cutoff` equals `run.discovery_scope_cutoff`, enforced by a trigger.
+- **F6.** A budget break is writer 4 and always stores `quota`, so the derived state is `blocked`. A preflight store error writes `accounting_or_integrity`.
+
+Advisories:
+- The claim and `ClaimPlaylistSend` re-read the stop per call in their writer transactions; other readers read it per execution.
+- The trade-off is recorded: a same-run resume cannot dispatch after a quota reset.
+- New `CHECK (settlement <> 'complete' OR has_committed_page = 1)`.
+
+§7 decision 1 still awaits user decision `b2f00946`.
+
 **ARD-001 and ARS-001 reconciled with `main` at `8d7e009` (Plan r30 `run52-arch-reconcile`; both still proposed).** They now build on what PR #4 and PR #5 built and no longer restate it:
 - [ARS-002](/docs/architecture/discovery-source-isolation/specifications/ars-002-durable-source-failure-record.md)'s `030` incident table, its source Errors projection and `run.discovery_scan_outcome`;
 - `031`'s `retry_claim_provenance` and receipt functions.
