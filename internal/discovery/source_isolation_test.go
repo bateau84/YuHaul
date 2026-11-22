@@ -63,7 +63,18 @@ type isoHarness struct {
 	// videosFail makes videos.list answer 500 (a later prefetch failure).
 	videosFail bool
 	state      *state.Store
+	// subsFail makes subscriptions.list answer 403 quotaExceeded.
+	subsFail bool
+	// channelsFailCall is the 1-based channels.list call that answers 403
+	// quotaExceeded (0: none). channelCalls counts the calls received.
+	channelsFailCall int
+	channelCalls     int
+	// breakLedgerAfterChannels drops the quota settings table once channels.list
+	// answered, so the next budget check hits a storage error.
+	breakLedgerAfterChannels bool
 }
+
+const quotaExceededBody = `{"error":{"errors":[{"reason":"quotaExceeded"}]}}`
 
 func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
 	t.Helper()
@@ -85,6 +96,11 @@ func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+		if h.subsFail {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(quotaExceededBody))
+			return
+		}
 		var items []map[string]any
 		for _, s := range specs {
 			items = append(items, map[string]any{"snippet": map[string]any{"resourceId": map[string]any{"channelId": s.id}}})
@@ -92,6 +108,18 @@ func newIsoHarness(t *testing.T, specs []srcSpec, limit int) *isoHarness {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 	})
 	mux.HandleFunc("/channels", func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		h.channelCalls++
+		call := h.channelCalls
+		h.mu.Unlock()
+		if h.channelsFailCall == call {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(quotaExceededBody))
+			return
+		}
+		if h.breakLedgerAfterChannels {
+			defer func() { _, _ = h.db.Exec(`DROP TABLE quota_settings`) }()
+		}
 		var items []map[string]any
 		for _, s := range specs {
 			uploads := s.playlist()
@@ -332,7 +360,6 @@ func TestNonLocalErrorsStillFailDiscovery(t *testing.T) {
 		"404 unregistered reason":     {failStatus: 404, failBody: `{"error":{"errors":[{"reason":"somethingElse"}]}}`},
 		"404 no body":                 {failStatus: 404, failBody: `{}`},
 		"500 backendError":            {failStatus: 500, failBody: `{"error":{"errors":[{"reason":"backendError"}]}}`},
-		"403 quotaExceeded":           {failStatus: 403, failBody: `{"error":{"errors":[{"reason":"quotaExceeded"}]}}`},
 		"401 authError":               {failStatus: 401, failBody: `{"error":{"errors":[{"reason":"authError"}]}}`},
 	}
 	for name, bad := range cases {
@@ -659,9 +686,8 @@ func TestScanOutcomeCutShortWhenABudgetStopFollowsLocalFailures(t *testing.T) {
 
 func TestScanOutcomeStaysCutShortOnARunWideProviderError(t *testing.T) {
 	for name, bad := range map[string]srcSpec{
-		"quotaExceeded": {failStatus: 403, failBody: `{"error":{"errors":[{"reason":"quotaExceeded"}]}}`},
-		"authError":     {failStatus: 401, failBody: `{"error":{"errors":[{"reason":"authError"}]}}`},
-		"backendError":  {failStatus: 500, failBody: `{"error":{"errors":[{"reason":"backendError"}]}}`},
+		"authError":    {failStatus: 401, failBody: `{"error":{"errors":[{"reason":"authError"}]}}`},
+		"backendError": {failStatus: 500, failBody: `{"error":{"errors":[{"reason":"backendError"}]}}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad.id, bad.pages, bad.failAt = chID('B'), [][]string{{"vB1"}}, 1
