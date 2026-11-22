@@ -1,10 +1,9 @@
 // Package quota implements YuHaul's QuotaLedger: per-operation/day cost tracking,
 // pre-flight budget checks, and remaining-capacity reporting.
 //
-// The ledger does not assume a fixed provider reset time. When a reset schedule
-// is configured (or an explicit next-reset time is reported by the API), the
-// ledger uses it to compute bucket dates and the next reset. Until then, reset
-// timing is reported as unknown.
+// The quota day follows YouTube's documented reset: midnight America/Los_Angeles.
+// A stored reset schedule overrides that default, and an explicit next-reset
+// time reported by the API takes precedence while it is in the future.
 package quota
 
 import (
@@ -16,7 +15,59 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata" // LoadLocation must not depend on the image's zoneinfo.
 )
+
+// defaultResetSchedule is the provider's documented reset, used when no
+// schedule is stored. YouTube Data API quotas reset at midnight Pacific Time.
+var defaultResetSchedule = ResetSchedule{Timezone: "America/Los_Angeles", TimeOfDay: "00:00"}
+
+type runScopeKey struct{}
+
+// WithRun scopes ctx to run runID so the ledger can apply the run's quota stop
+// and attribute holds to the run. A runID <= 0 returns ctx unchanged.
+func WithRun(ctx context.Context, runID int64) context.Context {
+	if runID <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, runScopeKey{}, runID)
+}
+
+// RunFromContext returns the run scope set by WithRun.
+func RunFromContext(ctx context.Context) (int64, bool) {
+	id, ok := ctx.Value(runScopeKey{}).(int64)
+	return id, ok && id > 0
+}
+
+const (
+	causeLocalBudget     = "local_budget"
+	causeRunDispatchStop = "run_dispatch_stop"
+)
+
+// quotaRefusedUnits is what a provider quota refusal is charged: YouTube's
+// documented minimum cost for any request, not the operation's write cost.
+const quotaRefusedUnits = 1
+
+func attemptUnits(op Operation, category OutcomeCategory) int {
+	if category == OutcomeQuota {
+		return quotaRefusedUnits
+	}
+	return op.UnitCost()
+}
+
+// runStopped reports whether run runID has a provider quota refusal recorded in
+// quota bucket date. It is read from the ledger so it survives a restart.
+func (l *Ledger) runStopped(ctx context.Context, runID int64, date string) (bool, error) {
+	var found int
+	err := l.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM quota_ledger WHERE run_id = ? AND date = ? AND outcome_category = 'quota')`,
+		runID, date,
+	).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("quota: read run stop for run %d: %w", runID, err)
+	}
+	return found == 1, nil
+}
 
 // DefaultDailyLimit is the default YouTube Data API v3 daily unit budget.
 const DefaultDailyLimit = 10_000
@@ -104,6 +155,7 @@ type Hold struct {
 	op     Operation
 	date   string
 	at     time.Time
+	runID  int64 // run scope at Acquire, 0 if none
 	state  uint8 // 0 provisional, 1 admitted, 2 finished, 3 accounting uncertain, 4 cancelled
 }
 
@@ -139,6 +191,19 @@ func (l *Ledger) Acquire(ctx context.Context, op Operation) (*Hold, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// The run's quota stop applies at any daily limit, including unlimited.
+		runID, scoped := RunFromContext(ctx)
+		if scoped {
+			stopped, err := l.runStopped(ctx, runID, date)
+			if err != nil {
+				return nil, err
+			}
+			if stopped {
+				l.logger.DebugContext(ctx, "quota admission refused",
+					"run_id", runID, "operation", string(op), "cause", causeRunDispatchStop)
+				return nil, nil
+			}
+		}
 		held := 0
 		for h := range l.holds {
 			if h.date == date {
@@ -146,9 +211,11 @@ func (l *Ledger) Acquire(ctx context.Context, op Operation) (*Hold, error) {
 			}
 		}
 		if limit > 0 && (consumed+held > limit || op.UnitCost() > limit-consumed-held) {
+			l.logger.DebugContext(ctx, "quota admission refused",
+				"run_id", runID, "operation", string(op), "cause", causeLocalBudget)
 			return nil, nil
 		}
-		h := &Hold{ledger: l, op: op, date: date, at: now}
+		h := &Hold{ledger: l, op: op, date: date, at: now, runID: runID}
 		if l.holds == nil {
 			l.holds = make(map[*Hold]struct{})
 		}
@@ -289,11 +356,17 @@ func (h *Hold) Finalize(ctx context.Context, runID sql.NullInt64, category Outco
 	default:
 		return fmt.Errorf("quota: invalid outcome category")
 	}
-	_, err := l.db.ExecContext(ctx, `INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, run_id, recorded_at, outcome_category, http_status) VALUES (?, ?, ?, 1, ?, ?, ?, ?)`, h.date, string(h.op), h.op.UnitCost(), runID, h.at, string(category), status)
+	// An explicit run wins. Callers that pass none get the run the hold was
+	// acquired under, so a bound read's quota refusal still stops its run.
+	if !runID.Valid && h.runID > 0 {
+		runID = sql.NullInt64{Int64: h.runID, Valid: true}
+	}
+	_, err := l.db.ExecContext(ctx, `INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, run_id, recorded_at, outcome_category, http_status) VALUES (?, ?, ?, 1, ?, ?, ?, ?)`, h.date, string(h.op), attemptUnits(h.op, category), runID, h.at, string(category), status)
 	if err != nil {
 		h.state = 3
 		return fmt.Errorf("quota: record attempt: %w", err)
 	}
+	l.logQuotaStop(ctx, runID, h.op, status, h.date, category)
 	h.state = 2
 	delete(l.holds, h)
 	return nil
@@ -390,12 +463,22 @@ func (l *Ledger) RecordAttempt(ctx context.Context, runID sql.NullInt64, op Oper
 	_, err = l.db.ExecContext(ctx,
 		`INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, run_id, recorded_at, outcome_category, http_status)
 		 VALUES (?, ?, ?, 1, ?, ?, ?, ?)`,
-		date, string(op), op.UnitCost(), runID, admittedAt.UTC(), string(category), httpStatus,
+		date, string(op), attemptUnits(op, category), runID, admittedAt.UTC(), string(category), httpStatus,
 	)
 	if err != nil {
 		return fmt.Errorf("quota: record attempt: %w", err)
 	}
+	l.logQuotaStop(ctx, runID, op, httpStatus, date, category)
 	return nil
+}
+
+// logQuotaStop announces that a committed quota row closed dispatch for its run.
+func (l *Ledger) logQuotaStop(ctx context.Context, runID sql.NullInt64, op Operation, status sql.NullInt64, date string, category OutcomeCategory) {
+	if category != OutcomeQuota || !runID.Valid {
+		return
+	}
+	l.logger.WarnContext(ctx, "youtube quota refused; run dispatch stopped",
+		"run_id", runID.Int64, "operation", string(op), "http_status", status.Int64, "bucket", date)
 }
 
 // ConsumedOn returns the total units consumed for the given bucket date.
@@ -480,6 +563,21 @@ func (l *Ledger) CanAfford(ctx context.Context, estimate int) (bool, int, error)
 		return false, 0, err
 	}
 
+	// The run's quota stop applies before any daily-limit logic, so it holds
+	// for an unlimited local budget too.
+	if runID, scoped := RunFromContext(ctx); scoped {
+		stopped, err := l.runStopped(ctx, runID, budget.Date)
+		if err != nil {
+			return false, 0, err
+		}
+		if stopped {
+			l.logger.WarnContext(ctx, "quota pre-flight check failed",
+				"run_id", runID, "cause", causeRunDispatchStop,
+				"estimate", estimate, "date", budget.Date)
+			return false, 0, nil
+		}
+	}
+
 	if budget.DailyLimit <= 0 {
 		return true, budget.Remaining, nil
 	}
@@ -503,11 +601,15 @@ func (l *Ledger) CanAfford(ctx context.Context, estimate int) (bool, int, error)
 	}
 
 	if !ok {
-		l.logger.WarnContext(ctx, "quota pre-flight check failed",
+		attrs := []any{"cause", causeLocalBudget}
+		if runID, scoped := RunFromContext(ctx); scoped {
+			attrs = append(attrs, "run_id", runID)
+		}
+		l.logger.WarnContext(ctx, "quota pre-flight check failed", append(attrs,
 			"estimate", estimate,
 			"consumed", budget.Consumed,
 			"daily_limit", budget.DailyLimit,
-			"date", budget.Date,
+			"date", budget.Date)...,
 		)
 	}
 	return ok, remaining, nil
@@ -639,6 +741,19 @@ func (l *Ledger) setSettingTx(ctx context.Context, tx *sql.Tx, key, value string
 	return nil
 }
 
+// effectiveSchedule is the stored schedule, or the provider's documented reset.
+func (l *Ledger) effectiveSchedule(ctx context.Context) (*ResetSchedule, error) {
+	sch, ok, err := l.ResetSchedule(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		d := defaultResetSchedule
+		return &d, nil
+	}
+	return sch, nil
+}
+
 // bucketDate returns the ISO date of the quota bucket containing now.
 func (l *Ledger) bucketDate(ctx context.Context, now time.Time) (string, error) {
 	bucket, err := l.bucketCalculator(ctx)
@@ -650,13 +765,9 @@ func (l *Ledger) bucketDate(ctx context.Context, now time.Time) (string, error) 
 
 // bucketCalculator loads the schedule before the caller samples its clock.
 func (l *Ledger) bucketCalculator(ctx context.Context) (func(time.Time) string, error) {
-	sch, ok, err := l.ResetSchedule(ctx)
+	sch, err := l.effectiveSchedule(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		// Without a configured schedule, fall back to UTC calendar day.
-		return func(now time.Time) string { return now.UTC().Format("2006-01-02") }, nil
 	}
 
 	loc, err := time.LoadLocation(sch.Timezone)
@@ -693,12 +804,9 @@ func (l *Ledger) nextReset(ctx context.Context, now time.Time) (time.Time, bool,
 		}
 	}
 
-	sch, ok, err := l.ResetSchedule(ctx)
+	sch, err := l.effectiveSchedule(ctx)
 	if err != nil {
 		return time.Time{}, false, err
-	}
-	if !ok {
-		return time.Time{}, false, nil
 	}
 
 	loc, err := time.LoadLocation(sch.Timezone)

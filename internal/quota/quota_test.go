@@ -802,6 +802,10 @@ func TestReservationRetainsBucketAfterRollover(t *testing.T) {
 	if err := l.SetDailyLimit(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
+	// Roll over at UTC midnight; the default schedule is Pacific.
+	if err := l.SetResetSchedule(ctx, "UTC", "00:00"); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 1, 1, 23, 59, 0, 0, time.UTC)
 	l.now = func() time.Time { return now }
 	h, err := l.Acquire(ctx, OpVideosList)
