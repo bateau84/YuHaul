@@ -36,10 +36,12 @@ func TestRetryAuthority_QuotaProposalChangedRouteAndSiblings(t *testing.T) {
 			env.pipeline.Execute(ctx, stillLimited.ID)
 			requeued, err := qs.ListDeferredItems(ctx, "")
 			require.NoError(t, err)
-			require.Len(t, requeued, 2, "quota retry must reuse, not append, siblings")
+			// Quota is known to be used up at creation, so the run claims nothing
+			// and the rows stay exactly as they were (quota-stop ARS-001 §1.4).
+			require.Len(t, requeued, 2, "a limited run must not append siblings")
 			for _, d := range requeued {
-				require.Equal(t, queue.DeferredStatusPending, d.Status)
-				require.Equal(t, 1, d.RetryCount, "no second attempt in the same run")
+				require.Zero(t, d.RetryCount, "no attempt in a run that claimed nothing")
+				require.Nil(t, d.RetryRunID)
 			}
 			var proposal config.ProposalSnapshot
 			require.NoError(t, json.Unmarshal([]byte(`{"duplicate_threshold":0.9,"routes":[{"id":"11111111-1111-4111-8111-111111111111","name":"Forbidden","evaluation_order":1,"is_enabled":true,"is_final":false,"condition_composition":"AND","conditions":[{"field":"title","operator":"contains","value":"jazz","condition_index":0}],"actions":[{"action_type":"add_to_playlist","target_playlist_id":"PLforbidden","action_index":0}],"exclusions":[]}]}`), &proposal))
@@ -87,7 +89,7 @@ func TestRetryAuthority_QuotaProposalChangedRouteAndSiblings(t *testing.T) {
 				require.Equal(t, queue.DeferredStatusCompleted, d.Status)
 				require.Equal(t, old.ID, d.RunID)
 				require.Equal(t, retry.ID, *d.RetryRunID)
-				require.Equal(t, 2, d.RetryCount)
+				require.Equal(t, 1, d.RetryCount, "the first claim is the only attempt")
 			}
 			ins := env.server.Insertions()
 			if match {
