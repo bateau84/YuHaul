@@ -250,7 +250,7 @@ func (p *Pipeline) applyReadiness(ctx context.Context, qs *queue.Store, runID in
 	case metadata.FetchAuthorizationPending:
 		return true, p.settleAuthorizationPending(ctx, qs, runID, receipt)
 	case metadata.FetchAbsent:
-		return true, p.failUnavailable(ctx, qs, runID, receipt)
+		return true, p.settleAbsent(ctx, qs, runID, receipt)
 	case metadata.FetchFailed, metadata.FetchUnusable:
 		return true, p.releaseUnchanged(ctx, qs, receipt)
 	default:
@@ -262,20 +262,98 @@ func (p *Pipeline) releaseUnchanged(ctx context.Context, qs *queue.Store, receip
 	return qs.WithRetryTx(ctx, func(tx *sql.Tx) error { return qs.RequeueRetryReceiptTx(ctx, tx, receipt) })
 }
 
-// failUnavailable is the ordinary video-unavailable retry failure. The special
-// unavailable_on_youtube outcome belongs to §6.3, which this precondition does
-// not use.
-func (p *Pipeline) failUnavailable(ctx context.Context, qs *queue.Store, runID int64, receipt queue.RetryGroupReceipt) error {
-	message := diag.Facts{Phase: "routing", Operation: "load_metadata", Code: "video_unavailable"}.String()
-	return qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
-		if _, err := qs.ValidateRetryReceiptTx(ctx, tx, receipt); err != nil {
+// settleAbsent disposes of an open video whose id YouTube omitted from a
+// successful response (ARS-005 §6.2, `absent` row). A video whose claim receipt
+// holds a requeued_by_user row ends as unavailable_on_youtube (§6.3); any other
+// retried video takes the ordinary video-unavailable retry failure. Both run in
+// one WithRetryTx, so the receipt is revalidated before either writes.
+func (p *Pipeline) settleAbsent(ctx context.Context, qs *queue.Store, runID int64, receipt queue.RetryGroupReceipt) error {
+	var unavailable bool
+	err := qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+		unavailable = false
+		requeued, err := receiptRequeuedTx(ctx, tx, receipt)
+		if err != nil {
 			return err
 		}
-		if _, err := qs.FinishRetryFailureTx(ctx, tx, receipt, queue.RetryFailureFacts{Message: message, Detail: message}); err != nil {
-			return fmt.Errorf("finish retry failure: %w", err)
+		if requeued {
+			unavailable = true
+			return p.commitUnavailableTx(ctx, tx, qs, runID, receipt)
 		}
-		return p.recordRetryVideoFailureTx(ctx, tx, runID, receipt.VideoID, message)
+		return p.failUnavailableTx(ctx, tx, qs, runID, receipt)
 	})
+	if err == nil && unavailable {
+		p.broadcastReceiptOutcome(runID, receipt.VideoID, state.FinalOutcomeUnavailableOnYouTube)
+	}
+	return err
+}
+
+// receiptRequeuedTx is requeued(v) of §6.2: one of the receipt's deferred rows
+// was created by the user's re-queue. The item keeps that reason for its whole
+// life, however many runs have claimed it.
+func receiptRequeuedTx(ctx context.Context, tx *sql.Tx, receipt queue.RetryGroupReceipt) (bool, error) {
+	if len(receipt.Deferred) == 0 {
+		return false, nil
+	}
+	args := make([]any, 0, len(receipt.Deferred)+1)
+	args = append(args, string(queue.DeferredReasonRequeuedByUser))
+	placeholders := make([]byte, 0, 2*len(receipt.Deferred))
+	for i, ref := range receipt.Deferred {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args = append(args, ref.ID)
+	}
+	var requeued bool
+	err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM deferred_item WHERE deferral_reason = ? AND id IN (`+string(placeholders)+`))`,
+		args...).Scan(&requeued)
+	if err != nil {
+		return false, fmt.Errorf("read requeued state of video %d: %w", receipt.VideoID, err)
+	}
+	return requeued, nil
+}
+
+// failUnavailableTx is the ordinary video-unavailable retry failure. The
+// special unavailable_on_youtube outcome belongs to commitUnavailableTx.
+func (p *Pipeline) failUnavailableTx(ctx context.Context, tx *sql.Tx, qs *queue.Store, runID int64, receipt queue.RetryGroupReceipt) error {
+	message := diag.Facts{Phase: "routing", Operation: "load_metadata", Code: "video_unavailable"}.String()
+	if _, err := qs.ValidateRetryReceiptTx(ctx, tx, receipt); err != nil {
+		return err
+	}
+	if _, err := qs.FinishRetryFailureTx(ctx, tx, receipt, queue.RetryFailureFacts{Message: message, Detail: message}); err != nil {
+		return fmt.Errorf("finish retry failure: %w", err)
+	}
+	return p.recordRetryVideoFailureTx(ctx, tx, runID, receipt.VideoID, message)
+}
+
+// commitUnavailableTx is ARS-005 §6.3, in the caller's single writer
+// transaction: the re-queued video YouTube no longer returns ends the run as
+// unavailable_on_youtube and its claimed rows are acknowledged. It writes no
+// route decision, condition audit, action, send guard, Errors entry or new
+// deferred row, and makes no provider call.
+func (p *Pipeline) commitUnavailableTx(ctx context.Context, tx *sql.Tx, qs *queue.Store, runID int64, receipt queue.RetryGroupReceipt) error {
+	owned, err := qs.ValidateRetryReceiptTx(ctx, tx, receipt)
+	if err != nil {
+		return err
+	}
+	video, err := p.stateStore.GetVideoTx(ctx, tx, receipt.VideoID)
+	if err != nil {
+		return err
+	}
+	// A same-owner resumed claim may already be past not_yet_evaluated.
+	if video.ProcessingState == state.VideoStateNotYetEvaluated {
+		if _, err := p.machine.TransitionRunVideoStateTx(ctx, tx, runID, receipt.VideoID,
+			state.VideoStateNotYetEvaluated, state.VideoStateEvaluating, state.FinalOutcomeNotYetEvaluated, nil, nil); err != nil {
+			return err
+		}
+		video.ProcessingState = state.VideoStateEvaluating
+	}
+	if _, err := p.machine.TransitionRunVideoStateTx(ctx, tx, runID, receipt.VideoID,
+		video.ProcessingState, state.VideoStateEvaluated, state.FinalOutcomeUnavailableOnYouTube, nil, nil); err != nil {
+		return err
+	}
+	return acknowledgeRetryReceiptTx(ctx, tx, receipt, owned)
 }
 
 // settleAuthorizationPending settles an open receipt under an authorization
@@ -315,8 +393,12 @@ func (p *Pipeline) deferForInputs(ctx context.Context, qs *queue.Store, runID in
 }
 
 func (p *Pipeline) broadcastReceiptDeferred(runID, videoID int64) {
+	p.broadcastReceiptOutcome(runID, videoID, state.FinalOutcomeDeferred)
+}
+
+func (p *Pipeline) broadcastReceiptOutcome(runID, videoID int64, outcome state.VideoFinalOutcome) {
 	if v, err := p.stateStore.GetVideo(context.Background(), videoID); err == nil {
-		p.broadcastVideo(runID, v, state.FinalOutcomeDeferred, false)
+		p.broadcastVideo(runID, v, outcome, false)
 	}
 }
 
