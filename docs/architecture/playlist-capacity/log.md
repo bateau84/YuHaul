@@ -10,6 +10,13 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**ARS-001 accepted; advisories folded in (revision 5).** Critic `ses_dfc19d9d9ffej0S5rESOBhhIkf` accepted `7d8db71`. Two advisories are applied in [ARS-001](/docs/architecture/playlist-capacity/specifications/ars-001-capacity-schema-queue-and-send-path.md):
+
+- The replay check counts a capacity member `retrying` under a different receiving run as consistent. Another owner implies this run already released it.
+- New test W12 covers a receipt with only capacity members.
+
+No design change.
+
 **ARS-001 revision 4 after critique `ses_dfc19d9d9ffej0S5rESOBhhIkf` (CHANGES REQUIRED on `a3333cb`).** Checked against `origin/main` at `50c4f59`, and the branch is rebased onto it. [ARS-001](/docs/architecture/playlist-capacity/specifications/ars-001-capacity-schema-queue-and-send-path.md) now:
 
 - **Replay check.** `committedRetryFailureTx` accepts capacity members that are `pending`, `evicted`, `discarded` or `completed`, and still requires a completed or resolved video-scoped member. It runs before the `ErrWorkSuppressed` and `ErrWorkNotOwned` handling at `retry.go:358`, so a resumed run neither refuses nor commits the failure twice (§3.5, §3.6; tests W9–W11).
