@@ -3,10 +3,27 @@ type: Log
 title: Live Status Change Log
 description: Changes to the live-status architecture bundle.
 tags: [changelog, architecture, live, upcoming]
-timestamp: 2026-11-19T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
 # Live Status Change Log
+
+## 2026-11-22
+
+**AC7 live check limit added (Plan r30 `b42-ac7-arch`).** [ARS-001](/docs/architecture/live-status/specifications/ars-001-live-status-read-classification-and-deferral.md) §8.3 and [ARD-001](/docs/architecture/live-status/design/ard-001-fresh-live-status-gate.md) *Live check limit (AC7)* realize BR-042 AC7 as amended on 2026-11-19.
+- **Setting.** `settings.live_check_limit_days`, seeded 30. `GET`/`PUT /api/settings/live-check-limit` accept only a JSON integer token in 1–365. A refusal is `400 invalid_live_check_limit`; a storage failure is `500 live_check_limit_save_failed`. Saving makes no configuration version and no YouTube call.
+- **Window start.** `deferred_item.live_window_started_at` is set at the first live skip of a hold (the run's `live_checked_at`), reset by a still-held check in a `queue_retry` run, and cleared with the hold on confirmation. Nothing else writes it. A table CHECK ties it to `live_hold`.
+- **Claim filter.** A per-video `LiveWindowClosed` predicate runs in the candidate list and in the claim writer's recheck, for automatic claims only. Claim kinds now separate automatic claims, Deferred Retry now and Errors retry. The claimed gate releases an unread claim whose window has closed, restoring the video's deferred state (`releaseClosedWindowTx`).
+- **BR-035 AC14.** Window-closed videos are outside the eligible set. Creation order is unchanged, and a re-entering item keeps its place.
+- **Read models.** `live_check` (`window_started_at`, `checks_stopped`, `checks_stopped_at`) on Deferred items. `live_retry.result` (`not_checked`, `not_live`, `live_or_upcoming`) on the Retry now response. These meet design `4703faa` capabilities (f)–(h).
+- **Migration.** §8.2 replaces the stale "after 029 / no number" text: one migration takes the next free number on `main` (now ending at `031`) at merge, under Plan phase `migrations`. It adds the window column, the CHECK and the setting seed. Upgrade evidence starts from the then-production `030` or `031`.
+- **Prerequisite recheck.** ARS-005 §5.1.1 provenance is built (`031`). §5.2 and §6.1–6.2 are not.
+- **AC5** is marked resolved (requirements 33bea6f).
+- Tests W1–W12 added; ARS-001 §8.3.9 maps every AC7 clause and the *Check window* example to a mechanism and a test.
+- **Not yet applied.** The amendments to ARS-005, video-search ARS-001, capacity ARD-001 and safe-diagnostic ARS-001 are listed in ARS-001 §10 for their owners.
+- **Open question for requirements.** The example's "new 10-day window" after X was lowered to 2 (ARD-001 open question 5).
+
+Awaiting critique (`b42-ac7-critique`). Docs only.
 
 ## 2026-11-19
 

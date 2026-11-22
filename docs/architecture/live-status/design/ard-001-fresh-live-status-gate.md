@@ -1,12 +1,12 @@
 ---
 type: design
 title: ARD-001 — Fresh Live-Status Gate Before Exclusions, Routing and Sends
-description: Every production video gets a live-status check from the run's own videos.list answer before exclusions, duplicate detection, routing, capacity checks and playlist adds. The run records the result on its own run-video row, so resumes and sends never depend on expiring metadata. Anything not confirmed as neither live nor upcoming is deferred on one active queue item and checked again on the next run.
+description: Every production video gets a live-status check from the run's own videos.list answer before exclusions, duplicate detection, routing, capacity checks and playlist adds. The run records the result on its own run-video row, so resumes and sends never depend on expiring metadata. Anything not confirmed as neither live nor upcoming is deferred on one active queue item and checked again on later runs, until the user-set live check limit stops automatic checks; Retry now checks again and starts a fresh window.
 tags: [architecture, design, live, upcoming, deferral, deferred-queue, metadata, routing, send-guard]
-timestamp: 2026-11-19T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
-**Status:** proposed technical realization of accepted BR-042 and the amended OC-002 Guarantee 5. Revised 2026-11-19 after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH` (CHANGES REQUIRED; see *Review disposition*). AC7 (time limit) is designed for its default (no limit) and leaves room for a later cap. Accepted by the critic after the focused recheck, with the ARS-001 precision fixes for §4, §5.1 and §6.2 applied. Not implemented. The ARS-001 §10 amendments were applied on 2026-11-19 (Plan r29 node `b42-amend`). Those to ARS-005, ARS-006, authorization ARS-001 and safe-diagnostic ARS-001 are committed. Those to capacity ARD-001 and Discovery ARS-001 sit in their still-untracked documents, for those documents' owners to commit.
+**Status:** proposed technical realization of accepted BR-042 and the amended OC-002 Guarantee 5. Revised 2026-11-19 after critic `ses_e0ca5c4cdffeU13eZuktRfYwvH` (CHANGES REQUIRED; see *Review disposition*). **Amended 2026-11-22 for BR-042 AC7 as amended on 2026-11-19** (the user-set live check limit, default 30 days, 1–365; Plan r30 `b42-ac7-arch`): see *Live check limit (AC7)* and ARS-001 §8.3. The AC7 amendment awaits critique (`b42-ac7-critique`). The rest was accepted by the critic after the focused recheck, with the ARS-001 precision fixes for §4, §5.1 and §6.2 applied. Not implemented. The ARS-001 §10 amendments were applied on 2026-11-19 (Plan r29 node `b42-amend`). Those to ARS-005, ARS-006, authorization ARS-001 and safe-diagnostic ARS-001 are committed. Those to capacity ARD-001 and Discovery ARS-001 sit in their still-untracked documents, for those documents' owners to commit.
 
 ## Summary
 
@@ -25,9 +25,10 @@ Run 61 claims both items. Its rows for L and P are empty, so the gate makes one 
 If run 61 is interrupted after routing and resumed five weeks later, its rows still say `none` for L. The resume needs no read, and the send fence passes.
 
 **Important limits.**
-- YouTube does not document what premieres report, what ended streams report, or the duration while a video is live. The classification fails closed, so an undocumented shape causes a skip, never a route. If YouTube ever omits `actualEndTime` for a finished broadcast, that video is skipped on every run until the user dismisses it. Under AC7's default, nothing ends that automatically.
+- YouTube does not document what premieres report, what ended streams report, or the duration while a video is live. The classification fails closed, so an undocumented shape causes a skip, never a route. If YouTube ever omits `actualEndTime` for a finished broadcast, that video is skipped on every run until the live check limit (AC7) stops automatic checks. It then stays deferred and visible until the user uses Retry now or Dismiss.
+- **Live check limit (AC7).** Automatic checks of a held video stop X days (default 30, 1–365, set in Settings) after the first live skip of its current hold. The video stays deferred, non-final and visible, with "checks stopped" in Deferred inspection. Only Retry now checks it again, and if it is still held that check starts a fresh window.
 - Simulations make no new provider call. They use the most recent production live status.
-- The claimed-work paths require [run-initiation ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.1–6.2, which is **not built** (see *Prerequisites*).
+- The claimed-work paths require [run-initiation ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.1–6.2, which is **not built** on `origin/main` 8d7e009 (rechecked 2026-11-22; only the §5.1.1 claim provenance, migration `031`, is built; see *Prerequisites*).
 - Earlier adds are never undone (AC12).
 
 ## Derived from
@@ -52,6 +53,13 @@ If run 61 is interrupted after routing and resumed five weeks later, its rows st
   - `internal/pipeline/pipeline.go` (≈ 405–533): resume starts at the stored phase, and `RunLifecycle`/`ExpireStale` runs first;
   - `internal/pipeline/executor.go` (≈ 511–561, 749–757): guarded post-evaluation deferral exists, and a `ClaimPlaylistSend` error becomes `ActionOutcomeFailed`.
 - Critic `ses_e0ca5c4cdffeU13eZuktRfYwvH`, evidence cited below.
+- For AC7, code on `origin/main` 8d7e009, read 2026-11-22:
+  - `internal/pipeline/pipeline.go:247–284` (`createClaimedRunLocked` claims every candidate in the run-creation transaction) and `internal/pipeline/retry.go:37–131` (`RetryQueueEntry` creates a `queue_retry` run, claims the pressed group and processes it synchronously);
+  - `internal/queue/retry.go:381–520` (`claimRetryGroupTx`: its `manual` flag means "Errors queue", and its eligibility recheck at 463–470 also applies to Deferred Retry now) and `:805–818` (`ListDeferredRetryCandidatesForRun`);
+  - `internal/queue/retry.go:618` (`RequeueRetryReceiptTx`) and the claim's video reset, which sets the video to `not_yet_evaluated`;
+  - `internal/store/migrations/006_settings.up.sql` (the `settings` key/value table) and `internal/config/handlers.go:77–82, 305–365` (`/api/settings` routes; `PUT /api/settings` applies fields one by one);
+  - `internal/videosearch/service.go:719` (the latest outcome joins on `video.final_outcome`).
+- Design `4703faa` (*When automatic checks stop*), which lists the capabilities (f)–(h) that ARS-001 §8.3.6–8.3.8 supply.
 
 ## Satisfies
 
@@ -62,9 +70,9 @@ If run 61 is interrupted after routing and resumed five weeks later, its rows st
 | AC2: skip unless confirmed; three sub-kinds | The fail-closed classifier; `liveSkip`; run reasons `live_now`, `live_upcoming`, `live_unconfirmed`. | L2, L3 |
 | AC3: no current report | Each non-returned read status keeps its existing disposition. For new discoveries before Discovery ARS-001, the gate's native retention commits an atomic deferral with a pending item. | L4, L17 |
 | AC4: confirmed is normal | After clearance the existing path runs unchanged. | L1 |
-| AC5: one item; next run; at most once per run | `liveSkip` reuses or creates exactly one active video-scoped item, due immediately. `live_status` is written once per run row and never re-read. | L1, L7, L11 |
+| AC5: one item (video-scoped only, clarified 2026-11-22); next run while the window is open; at most once per run | `liveSkip` reuses or creates exactly one active video-scoped item, due immediately. `live_status` is written once per run row and never re-read. | L1, L7, L11 |
 | AC6: never final; not a failure | Only `deferred` is written, including on fence and backstop refusals. | L2, L14, L16 |
-| AC7: no time limit (default) | No age check. A single cap seam in `liveSkip`. | L8 |
+| AC7: live check limit (amended 2026-11-19) | The `settings` row `live_check_limit_days` and its API; `deferred_item.live_window_started_at`, set only at the first skip of a hold or by a still-held Retry now check; the per-video window predicate on automatic claims and at the claimed gate; `live_check` on Deferred items; `live_retry` on the Retry now result. ARS-001 §8.3, mapped clause by clause in §8.3.9. | W1–W12, L8 |
 | AC8: not returned | `absent` keeps its existing disposition and is checked before the live check. | L9 |
 | AC9: before exclusions and duplicates | The gate precedes the start phase of every pass; backstops in `videoContextForExclusion`, `detectVideos`, `routeVideos`. | L5 |
 | AC10: routes of the processing run | Unchanged existing behavior. | L1 |
@@ -102,7 +110,7 @@ BR-042 needs a status that comes from the routing run itself. It must be obtaine
 - **Fail closed. Unknown is never negative** (AC2, AC3, AC6).
 - **Existing queue meaning.** ARS-005 §6.2 keeps an item's original `deferral_reason`. `requeued_by_user` changes the `absent` disposition (BR-037).
 - **Retention.** Store A holds provider content for at most 30 days. Run rows hold permanent decision facts (deferred reasons, outcomes).
-- **Migrations.** Search `029` is committed. The receipt-provenance and Discovery migrations follow it. Capacity has an unnumbered `deferred_item` rebuild. No number is assigned here.
+- **Migrations.** `main` ends at `031`. This design needs one migration, which takes the next free number on `main` when PR-L rebases for merge, under the central allocation (Plan phase `migrations`). Capacity's `deferred_item` rebuild is combined with it or carries its columns (ARS-001 §8.2).
 
 ## Invariants and guarantees
 
@@ -115,6 +123,8 @@ BR-042 needs a status that comes from the routing run itself. It must be obtaine
 | I5 | After a live skip, the video has exactly one active **video-scoped** deferred item, unless the user removed it while it was claimed. Capacity rows keep their identity and age. | The reuse-or-create writer, with a video-scoped uniqueness guard. | L7, L11 |
 | I6 | Without a current report, the video keeps its existing AC3 disposition, or for a new discovery the native retention. In every case the result is a deferred outcome plus an active item, never "no outcome" and never `failed`. | Gate precedence (ARS-001 §5). | L4, L17 |
 | I7 | Every pass of a production run, fresh or resumed, applies the gate to its unfinished member videos before the work of its start phase. | `liveGatePass` at pass entry (ARS-001 §5.1). | L16 |
+| I8 | A held video's window start changes only at the first live skip of a hold, at a still-held check in a user queue retry run, and (to `NULL`) at confirmation. | The only writers of `live_window_started_at` (ARS-001 §8.3.2); the table CHECK ties it to `live_hold`. | W3, W5, W6, W8 |
+| I9 | Once a held video's window has closed under the current X, no automatic claim takes any of its rows and no run reads its live status, except a user queue retry run. | The per-video predicate in the candidate list, in the claim writer's recheck, and before the claimed gate's read (ARS-001 §8.3.3, §5.3). | W4–W7, W11 |
 
 ## Options considered
 
@@ -164,6 +174,8 @@ Option **B** with **R1** and **N2**, with prerequisite P1.
 | `pipeline.liveSkip` / `liveDeferAfterEvaluation` | The only writers of live reasons. | AC2, AC5, AC6; the cap seam. |
 | Backstops; `ClaimPlaylistSend`; the admission fence | Check the clearance. Return the typed `ErrLiveNotCleared`, which callers map to a live deferral. | I1, I2, I4. |
 | `queue` | `live_hold`; the `live_or_upcoming` reason; a video-scoped uniqueness guard; the active-only filter. | AC5, AC14, AC15. |
+| `queue` claim and window (AC7) | `live_window_started_at`; the window predicate on automatic claims; three claim kinds (automatic, Deferred Retry now, Errors retry); `releaseClosedWindowTx` with `state.RestorePriorDeferralTx`; `live_check` and `live_retry` in the Deferred API. | AC7 window, exclusion, inspection and Retry now. |
+| `config` settings (AC7) | `GET`/`PUT /api/settings/live-check-limit` over the existing `settings` key/value table. | AC7 setting. |
 | Inspection, statistics, SPA, diagnostic registry | New registered values. | AC6, AC15. |
 
 ### Gate order for one video in a pass
@@ -213,7 +225,25 @@ So BR-042 needs no version-0 disposition. The backstops still refuse evaluation 
 
 - **`run_video_outcome.live_status` and `live_checked_at`** belong to the run. They are written once, by the gate or by discovery persist, and are never cleared. They are the only clearance.
 - **`deferred_item.live_hold`** belongs to the queue. A live skip sets it. The receiving run clears it on confirmation, in the transaction that moves the video to `evaluating` or starts continuation. No other transition changes it.
+- **`deferred_item.live_window_started_at`** belongs to the queue and travels with `live_hold`: set when a hold starts, reset by a still-held user retry, cleared with the hold on confirmation.
+- **`settings.live_check_limit_days`** belongs to the user's settings. It is read in each automatic claim transaction and by Deferred inspection. It is not versioned with the route configuration.
 - **Store A** is unchanged.
+
+## Live check limit (AC7)
+
+**What it does.** Each held item has a window start: the check time of the first live skip of its current hold. Automatic claims skip a video once X days have passed since that start, and the claimed gate refuses to read it if the window closed after it was claimed. Retry now ignores the window. If its check finds the video still held, that check becomes the new window start.
+
+**Options for where the window start lives.**
+
+- **W-A. A column on the held `deferred_item` row (chosen).** It sits next to `live_hold`, which already marks exactly the "current hold". The writers already exist (the live skip sets the hold; confirmation clears it). The claim filter becomes one indexed `EXISTS` per video. A table CHECK keeps hold and window together. *Cost:* one column, carried by the same rebuild that `live_hold` already needs.
+- **W-B. Derive it from run rows**, as the earlier *Consequences* suggested: the earliest run of the video's current unbroken series of live reasons. *Rejected.* Every claim would need a per-video scan of run history, across a backlog of up to about 70,000 items (BR-035 AC14 note). A Retry now restart is not visible in run rows without also joining `initiated_by`. A quota-deferred run inside a hold (AC3) breaks the "unbroken series" unless further special-cased. That is more logic and slower claims for the same fact.
+- **W-C. A separate `live_window` table.** *Rejected.* Same identity as the held row, with an extra join and no benefit.
+
+**Options for where the exclusion applies.** The claim writer's recheck is the authority, because the candidate list is advisory (`ListDeferredRetryCandidatesForRun`'s own contract). Applying it only in the list would let a stale list claim a closed item. Applying it only in the writer would fill each claim batch with items that are then lost, which delays newer items under BR-035 AC14. So it goes in both, from one SQL fragment. The claimed gate adds a third check for a claim that outlives the window. That check is needed for "no check after X days" when a run resumes later.
+
+**Options for the Retry now result.** The retry already runs synchronously and answers with the item. The item alone cannot tell "checked and still held" from "not checked because of quota". `live_retry.result` is read from the retry run's own row (`not_checked`, `not_live`, `live_or_upcoming`), so the UI can say which happened. A response wrapper that replaced the item body was rejected as a breaking change.
+
+**Fit with BR-035 AC14.** A window-closed video is outside AC14's eligible set. The claim order stays creation order. A video that re-enters (X raised, or Retry now) keeps its old place, as a released claim already does under ARS-005 §5.1. ARS-001 §8.3.4 gives the argument, and §10 lists the ARS-005 text that has to follow.
 
 ## Input / operation coverage
 
@@ -263,13 +293,14 @@ ARS-001 §9 (L1–L17). The decisive proofs use the real server path, migrated S
 
 - **Quota.**
   - Each **claimed** open or partly-done item now costs a by-ID read on every run that claims it: ⌈N/50⌉ units for N claimed videos, shared with any other by-ID read in that pass. This applies even when its route inputs are already current in Store A. Before this change, ARS-005 §6.1 step 1 made such an item free.
-  - A live-held video therefore costs one read per run for as long as it is held.
+  - A live-held video therefore costs one read per run while its window is open, so at most about X days of runs per hold, plus one read for each Retry now. A window-closed video costs nothing.
   - New discoveries cost nothing extra when the discovery prefetch succeeded.
   - Runs in flight at migration cost one live-only read per unfinished video, once.
-- **AC7 cap later.** Every live deferral goes through `liveSkip` or `liveDeferAfterEvaluation`. A cap would be one check there, computed from this video's existing production run rows (the earliest run of the current unbroken series of live reasons). No column is needed now. What a capped video becomes is a product decision. **Revisit trigger:** the user chooses a cap.
+- **AC7 (2026-11-22).** The earlier "cap later, no column" note is superseded: the user chose a limit, and *Live check limit (AC7)* explains why the window start is a column, not derived from run rows. The live skip writers only stamp the window; they never read X.
+- **Claim kinds.** `claimRetryGroupTx`'s boolean becomes a three-value kind, so Deferred Retry now and automatic claims can differ in the window clause only.
 - **Discovery convergence.** When Discovery ARS-001 readiness ships, the native retention writer becomes its writer (same reasons). The gate then also requests route inputs there.
 - **Coupling.** Capacity, BR-039 continuation and ARS-005 §6.2 each call the same gate. Their rules are otherwise unchanged.
-- **Migration** (ARS-001 §8): `run_video_outcome` gains two columns. `deferred_item` is rebuilt once. Store A is untouched.
+- **Migration** (ARS-001 §8.2): `run_video_outcome` gains two columns. `deferred_item` is rebuilt once, gaining `live_hold`, `live_window_started_at` and a CHECK tying them together. `settings` gains the seeded `live_check_limit_days = 30`. Store A is untouched.
 
 ## Review disposition (critic `ses_e0ca5c4cdffeU13eZuktRfYwvH`)
 
@@ -285,7 +316,16 @@ ARS-001 §9 (L1–L17). The decisive proofs use the real server path, migrated S
 
 ## Open questions
 
-1. **AC5 counting (requirements owner; not blocking).** The design guarantees exactly one active **video-scoped** item. A video with BR-041 capacity rows also keeps those target-scoped rows (AC13), so it can have more than one active row. This arises only for capacity rows created before BR-042. Please confirm that AC5 counts video-scoped items.
-2. **Ended broadcast without `actualEndTime` (accepted provider risk).** The video would be skipped indefinitely as `live_unconfirmed` under AC7's default. It remains visible, and the user can dismiss it. Revisit with provider evidence or the AC7 choice.
+1. **AC5 counting: resolved 2026-11-22.** BR-042 AC5 now says the count covers only the video's own item; playlist-full waiting entries are neither counted nor a substitute (requirements commit 33bea6f, node `b42-q-ac5`). This design already realizes that reading.
+2. **Ended broadcast without `actualEndTime` (accepted provider risk).** The video is skipped as `live_unconfirmed` until the live check limit stops automatic checks. It then stays visible as "checks stopped", and the user can use Retry now or Dismiss. Revisit with provider evidence.
 3. **Queue label after confirmation (Designer).** Once a hold clears, an item created by a live skip still carries the origin reason `live_or_upcoming`, for example if a later quota deferral reuses it. How that is shown is a design decision. The `reason=live_or_upcoming` filter selects active held rows only.
-4. **Cross-document amendments (integration).** These are applied on acceptance; ARS-001 §10 lists them.
+4. **Cross-document amendments (integration).** The 2026-11-19 ones are applied. The AC7 ones (ARS-005 §5.1, §5.2, §6.2 and §7.2; video-search ARS-001 §6.6; capacity ARD-001; safe-diagnostic registrations) are listed in ARS-001 §10 for their owners. None blocks this design.
+5. **BR-042 *Check window* example, day 12 (requirements owner; not blocking).** The example lowers X to 2 and then says Retry now on day 12 starts "a new 10-day window". By AC7, *Changing the setting*, the window length is always the current X, so it is 2 days unless X is raised to 10 again. ARS-001 follows AC7, and test W12 asserts the current-X length. Please correct the example or say which X it assumes.
+6. **Run membership after a closed-window release (accepted).** A run that claimed an item and then reached it after its window closed keeps a membership row with no outcome (ARS-001 §8.3.5). This is the same shape as ARS-005's `unusable` release. Test W10 proves that no reader counts it.
+
+**Specification choices for AC7 (recorded, not escalated).** These stay within AC7's text.
+- The window start is the first skip's **check time** (`live_checked_at`), not the time the skip committed. They differ by at most one run's processing.
+- "X days" is exact elapsed time (X × 24 h in UTC), not calendar days.
+- Retry now restarts the window only when its run actually checks the video and finds it still held. A retry that cannot check (quota, a Stop before the read) leaves the window, and a stopped state, unchanged. The result says `not_checked`. This keeps "a stop or discard handoff does not move the window" and "stopped" truthful.
+- A claim made while the window was open does not license a check after it closes (resume, or a lowered X mid-run). The claimed gate releases it unread.
+- An unreadable stored limit stops automatic checks of held items rather than falling back to 30.
