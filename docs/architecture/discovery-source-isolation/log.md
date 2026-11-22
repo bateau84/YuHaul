@@ -10,6 +10,12 @@ timestamp: 2026-11-22T18:00:00Z
 
 ## 2026-11-22
 
+**Critique `ses_dfc1e6147ffeI1A5dhsvpYrek0` on the dispatch-stop amendment fixed; branch rebased onto `main` (PRs #4–#9).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) changes:
+- **F-1.** The derived state's quota evidence now counts only `quota` ledger rows with `date >= run.discovery_attempt_quota_date`. The page-path engine writes that new column (in the discovery migration) at each discovery attempt's start, so legacy, `030`/`031` and PR #9-build runs, whose value is `NULL`, never read `blocked`/`quota`. The no-scope `blocked` row keys on that column instead of `initiated_by` and a `NULL` scan outcome, so PR #9's `preScanOutcome` (`cut_short`, completed) reads `blocked` on the page path.
+- **F-2.** The new §2 *Terminal cause* picks the run-wide deferral from current-execution facts and the stored level, never from the display rule or a commit-time bucket check. The display is stable after the run ends. §6 adds a reset → resume → 429 case.
+- **m-1.** §6 now reads "budget break → `scope_ready`".
+- **Wording.** The AC8 row's pending rows are the handoff rule's rows. The rate-limit row says `discovery_processing_pending` is not used for the remaining observations.
+
 **Dispatch stop pinned (`rq-stop-arch`, receiving [ARS-005 §6.1.3](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md)).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) §1.2 now derives the `quota` level from the run's `quota` ledger rows, as PR #9 does on `main`, instead of storing it. `run.dispatch_stop` holds only `authorization` and `accounting_or_integrity`, is raise-only, and ships in PR-R's migration `032`. Writer 4 no longer writes `quota` for a local-budget refusal, writer 5 (ledger reconstruction on recovery) is removed, and readers use one `RunDispatchStop` read instead of a per-execution copy. A same-run resume after the quota reset can dispatch again when its only stop was `quota`; the old "accepted trade-off" is withdrawn. §1.3 and §5: `blocked` uses the *recorded stop* (stored value or any `quota` ledger row of the run); a local-budget break alone reads `scope_ready`. §4.1 no longer carries the DDL unless PR-R is dropped. §6's dispatch-stop row and §7 decision 2 follow.
 
 **Critique on `723d418` (one MAJOR, two MINOR) fixed.**
