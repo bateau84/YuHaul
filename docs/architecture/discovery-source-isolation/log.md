@@ -3,12 +3,14 @@ type: Log
 title: Discovery Source Isolation Change Log
 description: Changes to the discovery source isolation architecture bundle.
 tags: [changelog, architecture, discovery]
-timestamp: 2026-11-22T00:00:00Z
+timestamp: 2026-11-22T18:00:00Z
 ---
 
 # Discovery Source Isolation Change Log
 
 ## 2026-11-22
+
+**Dispatch stop pinned (`rq-stop-arch`, receiving [ARS-005 §6.1.3](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md)).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) §1.2 now derives the `quota` level from the run's `quota` ledger rows, as PR #9 does on `main`, instead of storing it. `run.dispatch_stop` holds only `authorization` and `accounting_or_integrity`, is raise-only, and ships in PR-R's migration `032`. Writer 4 no longer writes `quota` for a local-budget refusal, writer 5 (ledger reconstruction on recovery) is removed, and readers use one `RunDispatchStop` read instead of a per-execution copy. A same-run resume after the quota reset can dispatch again when its only stop was `quota`; the old "accepted trade-off" is withdrawn. §1.3 and §5: `blocked` uses the *recorded stop* (stored value or any `quota` ledger row of the run); a local-budget break alone reads `scope_ready`. §4.1 no longer carries the DDL unless PR-R is dropped. §6's dispatch-stop row and §7 decision 2 follow.
 
 **Critique on `723d418` (one MAJOR, two MINOR) fixed.**
 - **M1.** The new immutable `video.discovery_source_channel_id`, written by the page transaction with the marker in the same migration, keys both the routing gate and the terminal handoff. The provider snippet's `video.channel_id` is no longer used for either. The terminal handoff now gives every unfinished marked observation a pending row at any terminal result other than Stop or Discard, with a reason order. §6 adds a mismatched or empty `channelId` case.
