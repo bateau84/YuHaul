@@ -10,6 +10,8 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**Unavailable outcome built (`rq-processing`).** [Run-initiation ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.3 is implemented: an `absent` open video whose receipt holds a `requeued_by_user` row ends `unavailable_on_youtube` in one transaction, and any other retried video keeps the ordinary `video_unavailable` failure. The §6.4 readers already existed; §12 records the built seam and the tests that now cover them.
+
 **Fetch suspension lasts the run (`rq-metadata-fetch`).** [Run-initiation ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.2 said a generic metadata failure suspends fetching "in the pass", while B7 (§11.6) requires zero further `videos.list` requests for the rest of the run. §6.2 now says the run, and §12 records the in-memory per-run seam in `metadata.Manager`. A dispatch stop still wins over it.
 
 **Quota stop hotfix implemented (run 58).** [Quota-stop ARS-001](/docs/architecture/quota-stop/specifications/ars-001-provider-quota-stop-pacific-reset.md) is implemented on `hotfix/quota-stop` and its §10 holds the implementation record. The Q1 pending count is corrected to 7. Q-1 (pre-scan terminal status) and Q-2 are still open.
