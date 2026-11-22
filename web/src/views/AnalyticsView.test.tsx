@@ -117,6 +117,18 @@ describe('AnalyticsView', () => {
     await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument())
   })
 
+  it('lets every chart container shrink below 300px so 320px viewports do not scroll', async () => {
+    render(<AnalyticsView />)
+    await waitFor(() => expect(screen.getByText('Acceptance rate')).toBeInTheDocument())
+
+    const charts = screen.getAllByRole('img')
+    expect(charts).toHaveLength(3)
+    for (const chart of charts) {
+      expect(chart.style.minWidth).toBe('0px')
+      expect(chart.style.width).toBe('100%')
+    }
+  })
+
   it('requests both endpoints with the default 30d range', async () => {
     render(<AnalyticsView />)
     await waitFor(() => expect(screen.getByText('Acceptance rate')).toBeInTheDocument())

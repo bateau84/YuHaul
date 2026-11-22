@@ -282,7 +282,7 @@ export function AnalyticsView() {
           role="img"
           aria-labelledby={`${trendsId} ${trendsId}-summary`}
           aria-describedby={rateNoteId}
-          style={{ minWidth: 300, height: 300 }}
+          style={{ width: '100%', minWidth: 0, height: 300 }}
         >
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={combined}>
@@ -315,7 +315,7 @@ export function AnalyticsView() {
           role="img"
           aria-labelledby={`${volumesId} ${volumesId}-summary`}
           aria-describedby={outcomeNoteId}
-          style={{ minWidth: 300, height: 300 }}
+          style={{ width: '100%', minWidth: 0, height: 300 }}
         >
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={combined}>
@@ -341,7 +341,7 @@ export function AnalyticsView() {
         <div
           role="img"
           aria-labelledby={`${routesId} ${routesId}-summary`}
-          style={{ minWidth: 300, height: 300 }}
+          style={{ width: '100%', minWidth: 0, height: 300 }}
         >
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={routeRatePivot}>
