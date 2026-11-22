@@ -18,6 +18,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/diag"
+	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
@@ -255,6 +256,7 @@ func newGuardedProductionFixtureWithOAuth(t *testing.T, db *sql.DB, targets []st
 	require.NoError(t, tx.Commit())
 	video, err := state.NewMachine(ss).DiscoverVideo(ctx, runID, "guarded-external-video", "fixture-channel")
 	require.NoError(t, err)
+	seedCurrentMetadata(t, db, "guarded-external-video")
 	decision := createRouteDecision(t, ctx, ss, video.ID, runID, routeID, 1, state.RouteDecisionMatched)
 	return &guardedProductionFixture{db: db, state: ss, ledger: quota.New(db, quota.WithDefaultLimit(10_000)), auth: svc, binding: binding, runID: runID, videoID: video.ID, decisionID: decision, routeID: routeID, target: target}
 }
@@ -653,4 +655,16 @@ func TestGuardedFinalQuotaRefusalRetryReceipt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// seedCurrentMetadata stores one current Store A row that supplies every route
+// input, the state production guarantees before a claimed video is evaluated
+// (ARS-005 section 6.2). A test of the readiness gate itself seeds nothing.
+func seedCurrentMetadata(t *testing.T, db *sql.DB, videoID string) {
+	t.Helper()
+	title, channel, description, duration := "Fixture title", "Fixture channel", "Fixture description", 120
+	_, err := metadata.NewStore(db).UpsertFetched(context.Background(), []metadata.TransientMetadata{{
+		VideoID: videoID, Title: &title, ChannelName: &channel, Description: &description, DurationSeconds: &duration,
+	}}, 24*time.Hour, time.Now())
+	require.NoError(t, err)
 }

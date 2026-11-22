@@ -282,6 +282,16 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	if err != nil {
 		return err
 	}
+	// The readiness backstop (§6.2): with a readiness seam, an open video's
+	// evaluation readers return errInputsUnavailable instead of substituting
+	// an empty value for an input that expired or is missing.
+	if _, ok := p.meta.(evaluationFetcher); ok && class != state.VideoClassPartlyDone && v.FinalOutcome == state.FinalOutcomeNotYetEvaluated {
+		routes, err := p.productionRoutes(ctx, runID)
+		if err != nil {
+			return err
+		}
+		ctx = context.WithValue(ctx, requireInputsKey{}, inputRequirement(routes, v.VideoID))
+	}
 	var workErr error
 	switch class {
 	case state.VideoClassPartlyDone:
@@ -315,6 +325,11 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	}
 	// The retained message carries the vetted bounded summary, not the raw
 	// chain (ARD-001); only bounded auxiliary facts reach the log below.
+	if errors.Is(workErr, errInputsUnavailable) {
+		// A late input loss: the effective stop decides the disposition, then
+		// the receipt is released unchanged.
+		return p.settleInputsLost(ctx, qs, runID, receipt)
+	}
 	message := diag.Reason(workErr, "retry failed")
 	var accountingErr *postCommitAccountingError
 	if isRetryAdmissionRefusal(workErr) {

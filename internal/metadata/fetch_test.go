@@ -2,6 +2,7 @@ package metadata_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -360,4 +361,87 @@ func TestFetchForEvaluationCountsOnlyAdmittedSends(t *testing.T) {
 			assert.Equal(t, tc.attempts, out.Attempts)
 		})
 	}
+}
+
+// R5 (run-initiation ARS-005 section 6.1.3): the run's effective dispatch stop
+// is read before every chunk's preflight. Each level keeps the unsent inputs
+// unsent with zero attempts, and the manager never writes the stop.
+func TestFetchForEvaluationHonoursRunDispatchStop(t *testing.T) {
+	ids := make([]string, 120) // three chunks
+	for i := range ids {
+		ids[i] = fmt.Sprintf("v%03d", i)
+	}
+	cases := []struct {
+		name    string
+		stored  string
+		quota   bool
+		want    metadata.FetchStatus
+		wantErr bool
+		stop    quota.DispatchStop
+	}{
+		{name: "authorization", stored: "authorization", want: metadata.FetchAuthorizationPending, stop: quota.StopAuthorization},
+		{name: "quota", quota: true, want: metadata.FetchQuotaRefused, stop: quota.StopQuota},
+		{name: "accounting", stored: "accounting_or_integrity", want: metadata.FetchFailed, wantErr: true, stop: quota.StopAccountingOrIntegrity},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) {
+				t.Fatal("a stopped run made a provider call")
+				return metadata.FetchResult{}, nil
+			}}
+			m, ms, ledger := newFetchManager(t, bound, 1000)
+			db := ms.DB()
+			res, err := db.Exec(`INSERT INTO run (started_at, run_type, status) VALUES (?, 'manual', 'running')`, evalNow)
+			require.NoError(t, err)
+			runID, err := res.LastInsertId()
+			require.NoError(t, err)
+			ctx := quota.WithRun(context.Background(), runID)
+			if c.stored != "" {
+				_, err = db.Exec(`UPDATE run SET dispatch_stop=? WHERE id=?`, c.stored, runID)
+				require.NoError(t, err)
+			}
+			if c.quota {
+				h, err := ledger.Acquire(ctx, quota.OpVideosList)
+				require.NoError(t, err)
+				require.NotNil(t, h)
+				require.NoError(t, h.Admit(ctx))
+				require.NoError(t, h.Finalize(ctx, sqlNullInt(runID), quota.OutcomeQuota, sqlNullInt(403)))
+			}
+			rowsBefore := ledgerRowCount(t, ms)
+
+			out, err := m.FetchForEvaluation(ctx, auth.AuthorizationBinding{}, allInputs(ids...))
+			if c.wantErr {
+				require.ErrorIs(t, err, auth.ErrQuotaAccounting)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Zero(t, out.Attempts)
+			assert.Empty(t, bound.calls)
+			assert.Equal(t, c.stop, out.Stop)
+			for _, id := range ids[:50] {
+				assert.Equal(t, c.want, out.Statuses[id], id)
+			}
+			if !c.wantErr {
+				assert.Len(t, out.Statuses, len(ids), "every unsent input has a status")
+				for _, id := range ids {
+					assert.Equal(t, c.want, out.Statuses[id], id)
+				}
+			}
+			assert.Equal(t, rowsBefore, ledgerRowCount(t, ms), "no ledger row, no debit")
+			var stored *string
+			require.NoError(t, db.QueryRow(`SELECT dispatch_stop FROM run WHERE id=?`, runID).Scan(&stored))
+			if c.stored == "" {
+				assert.Nil(t, stored, "the manager never writes the stop")
+			}
+		})
+	}
+}
+
+func sqlNullInt(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+
+func ledgerRowCount(t *testing.T, ms *metadata.Store) int {
+	t.Helper()
+	var n int
+	require.NoError(t, ms.DB().QueryRow(`SELECT count(*) FROM quota_ledger`).Scan(&n))
+	return n
 }

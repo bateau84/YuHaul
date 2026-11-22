@@ -474,6 +474,23 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 			}
 			continue
 		}
+		// R5: the run's effective dispatch stop precedes the minimum-unit
+		// preflight and every provider call, for this and every later chunk.
+		if stop, err := m.ledger.RunDispatchStop(ctx); err != nil {
+			failAll(missing[i:])
+			return out, fmt.Errorf("metadata: run dispatch stop for evaluation fetch: %w", errors.Join(auth.ErrQuotaAccounting, err))
+		} else if stop != quota.StopNone {
+			out.Stop = max(out.Stop, stop)
+			status := stopStatus(stop)
+			for _, id := range chunk {
+				out.Statuses[id] = status
+			}
+			if stop == quota.StopAccountingOrIntegrity {
+				failAll(missing[i:])
+				return out, fmt.Errorf("metadata: run dispatch stopped for integrity: %w", auth.ErrQuotaAccounting)
+			}
+			continue
+		}
 		// Known insufficiency refuses with zero attempts. A preflight error is a
 		// local fault, not a refusal. The positive answer never replaces the
 		// admission inside the read.
@@ -601,6 +618,18 @@ func detailSupplies(d TransientMetadata, r InputRequirement) bool {
 		(!r.Duration || d.DurationSeconds != nil)
 }
 
+// stopStatus is the status of an input that a run dispatch stop kept unsent.
+func stopStatus(stop quota.DispatchStop) FetchStatus {
+	switch stop {
+	case quota.StopAuthorization:
+		return FetchAuthorizationPending
+	case quota.StopQuota:
+		return FetchQuotaRefused
+	default:
+		return FetchFailed
+	}
+}
+
 // readStatus is the status unsent inputs take after a suspending read failure.
 func readStatus(f *ReadFacts) FetchStatus {
 	_, status, _ := classifyRead(f.Err)
@@ -644,6 +673,7 @@ func classifyRead(err error) (facts ReadFacts, status FetchStatus, suspend bool)
 	case facts.Renewal != nil || facts.HTTPStatus == http.StatusUnauthorized ||
 		(api != nil && api.Reason == "authError") ||
 		errors.Is(err, auth.ErrAuthorizationChanged) || errors.Is(err, auth.ErrNotConfigured) ||
+		errors.Is(err, auth.ErrRunAuthorizationStopped) ||
 		errors.Is(err, auth.ErrAccessExpiredBeforeAdmission):
 		return facts, FetchAuthorizationPending, true
 	case facts.HTTPStatus == http.StatusTooManyRequests ||

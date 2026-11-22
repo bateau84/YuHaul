@@ -99,6 +99,7 @@ func newQuotaStopPipeline(t *testing.T, provider *quotaProvider, items int) *quo
 	for i := 1; i < items; i++ {
 		v, err := state.NewMachine(f.state).DiscoverVideo(ctx, f.runID, fmt.Sprintf("extra-%d", i), "fixture-channel")
 		require.NoError(t, err)
+		seedCurrentMetadata(t, f.db, v.VideoID)
 		ids = append(ids, v.ID)
 	}
 	for _, id := range ids {

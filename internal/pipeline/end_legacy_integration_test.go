@@ -61,6 +61,7 @@ func (e *runNowEnv) endPair(t *testing.T) (l14, l2 int64) {
 	require.NoError(t, err)
 	v4ID, err := res.LastInsertId()
 	require.NoError(t, err)
+	seedCurrentMetadata(t, e.db(), "V4")
 	for _, ext := range []string{"V1", "V4"} {
 		vid := v4ID
 		if ext != "V4" {

@@ -193,6 +193,11 @@ func (p *Pipeline) markVideoExcluded(ctx context.Context, runID int64, v *state.
 func intPointer(v int) *int { return &v }
 
 func (p *Pipeline) videoContextForExclusion(ctx context.Context, v *state.Video) (router.VideoContext, error) {
+	if m, err := p.evaluationMetadata(ctx, v); err != nil {
+		return router.VideoContext{}, err
+	} else if m != nil {
+		return videoContextFromMetadata(v.VideoID, v.ChannelID, m), nil
+	}
 	meta := &metadata.TransientMetadata{VideoID: v.VideoID}
 	if p.meta != nil {
 		fetched, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)

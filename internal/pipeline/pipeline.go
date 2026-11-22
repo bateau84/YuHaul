@@ -752,10 +752,16 @@ func (p *Pipeline) detectVideos(ctx context.Context, runID int64, videos []*stat
 			continue
 		}
 
-		meta, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
+		meta, err := p.evaluationMetadata(ctx, v)
 		if err != nil {
-			p.logger.DebugContext(ctx, "duplicate detection using degraded metadata", "diagnostic", diag.Encode(err, "duplicate_detection", "load_metadata"))
-			meta = &metadata.TransientMetadata{VideoID: v.VideoID}
+			return err
+		}
+		if meta == nil {
+			meta, err = p.meta.GetDisplayMetadata(ctx, v.VideoID)
+			if err != nil {
+				p.logger.DebugContext(ctx, "duplicate detection using degraded metadata", "diagnostic", diag.Encode(err, "duplicate_detection", "load_metadata"))
+				meta = &metadata.TransientMetadata{VideoID: v.VideoID}
+			}
 		}
 		title := ""
 		if meta.Title != nil {
@@ -808,6 +814,12 @@ func (p *Pipeline) routeVideos(ctx context.Context, runID int64, videos []*state
 			continue
 		}
 
+		// The readiness backstop runs before the video moves to evaluating, so
+		// a late input loss leaves its state untouched.
+		backstopMeta, err := p.evaluationMetadata(ctx, v)
+		if err != nil {
+			return nil, err
+		}
 		// Move into evaluating before route conditions are checked.
 		if v.ProcessingState == state.VideoStateNotYetEvaluated {
 			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
@@ -816,10 +828,13 @@ func (p *Pipeline) routeVideos(ctx context.Context, runID int64, videos []*state
 			}
 		}
 
-		meta, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
-		if err != nil {
-			p.logger.DebugContext(ctx, "routing using degraded metadata", "diagnostic", diag.Encode(err, "routing", "load_metadata"))
-			meta = &metadata.TransientMetadata{VideoID: v.VideoID}
+		meta := backstopMeta
+		if meta == nil {
+			meta, err = p.meta.GetDisplayMetadata(ctx, v.VideoID)
+			if err != nil {
+				p.logger.DebugContext(ctx, "routing using degraded metadata", "diagnostic", diag.Encode(err, "routing", "load_metadata"))
+				meta = &metadata.TransientMetadata{VideoID: v.VideoID}
+			}
 		}
 
 		vc := videoContextFromMetadata(v.VideoID, v.ChannelID, meta)
@@ -1360,6 +1375,12 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 			return fmt.Errorf("retry video %d missing exact receipt: %w", ids[0], queue.ErrWorkNotOwned)
 		}
 	}
+	// §6.2: make the inputs of the pass's open videos current under the run's
+	// dispatch stop before any of them is evaluated.
+	ready, err := p.prepareReceiving(ctx, qs, runID, receipts)
+	if err != nil {
+		return err
+	}
 	for _, receipt := range receipts {
 		id := receipt.VideoID
 		if receipt.ReceivingRunID != runID || id == 0 {
@@ -1374,6 +1395,18 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 				return &retryAdmissionRefusal{receipt: receipt, cause: err}
 			}
 			return fmt.Errorf("validate retry video %d: %w", id, err)
+		}
+		if status, ok := ready[id]; ok {
+			handled, err := p.applyReadiness(ctx, qs, runID, receipt, status)
+			if err != nil {
+				if isRetryAdmissionRefusal(err) {
+					return &retryAdmissionRefusal{receipt: receipt, cause: err}
+				}
+				return fmt.Errorf("settle retry video %d inputs: %w", id, err)
+			}
+			if handled {
+				continue
+			}
 		}
 		retryCtx := context.WithValue(ctx, guardedRetryGroupKey{}, receipt)
 		if err := p.processRetryVideo(retryCtx, runID, id); err != nil {

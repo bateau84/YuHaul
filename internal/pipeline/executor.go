@@ -341,6 +341,10 @@ func (e *Executor) execute(ctx context.Context, runID, decisionRunID, videoID in
 	if len(actions) == 0 {
 		return state.FinalOutcomeAccepted, nil
 	}
+	// R6: the run's effective dispatch stop, before guard preparation.
+	if handled, outcome, err := e.dispatchStopDisposition(ctx, runID, videoID, actions); handled {
+		return outcome, err
+	}
 	ok, remaining, err := e.ledger.CanAfford(ctx, e.insertCost*len(actions))
 	if err != nil {
 		return state.FinalOutcomeFailed, fmt.Errorf("quota check: %w", err)
@@ -367,6 +371,9 @@ func (e *Executor) execute(ctx context.Context, runID, decisionRunID, videoID in
 			}
 			continue
 		}
+		if handled, outcome, err := e.dispatchStopDisposition(ctx, runID, videoID, actions[i:]); handled {
+			return outcome, err
+		}
 		ok, _, err := e.ledger.CanAfford(ctx, e.insertCost)
 		if err != nil {
 			return state.FinalOutcomeFailed, fmt.Errorf("quota check: %w", err)
@@ -377,6 +384,14 @@ func (e *Executor) execute(ctx context.Context, runID, decisionRunID, videoID in
 
 		actionCtx := context.WithValue(ctx, guardedDeferredActionsKey{}, actions[i+1:])
 		outcome, err := e.executeAction(actionCtx, runID, videoID, videoIDText, action, binding)
+		if errors.Is(err, state.ErrPlaylistSendDispatchStopped) {
+			// R7: a stop was stored after R6 read it. The claim wrote nothing;
+			// the effective stop chooses the disposition.
+			if handled, stopOutcome, stopErr := e.dispatchStopDisposition(ctx, runID, videoID, actions[i:]); handled {
+				return stopOutcome, stopErr
+			}
+			return state.FinalOutcomeFailed, &runStoppingError{cause: err}
+		}
 		if err != nil {
 			if isRetryAdmissionRefusal(err) {
 				return state.FinalOutcomeFailed, err
@@ -490,6 +505,13 @@ func (e *Executor) recordActionEvidenceBatch(ctx context.Context, runID, videoID
 // rows carry outcome_reason=quota_exhausted and no executed_at (ARD-001). The
 // queue disposition itself stays owned by the pipeline.
 func (e *Executor) deferActions(ctx context.Context, runID, videoID int64, actions []action) (state.VideoFinalOutcome, error) {
+	return e.deferActionsFor(ctx, runID, videoID, actions, queue.DeferredReasonQuotaExhausted)
+}
+
+// deferActionsFor is deferActions for any deferral reason. The action rows
+// carry the same reason text (quota_exhausted or authorization_pending), both
+// of which are in the registered action_reason vocabulary.
+func (e *Executor) deferActionsFor(ctx context.Context, runID, videoID int64, actions []action, reason queue.DeferredReason) (state.VideoFinalOutcome, error) {
 	handoff, _ := ctx.Value(guardedDeferralKey{}).(func(*sql.Tx, queue.DeferredReason) error)
 	qs, err := queue.NewStore(e.db)
 	if err != nil {
@@ -535,12 +557,12 @@ func (e *Executor) deferActions(ctx context.Context, runID, videoID int64, actio
 			return nil
 		}
 		if handoff != nil {
-			if err := retainGuardedDeferralTx(ctx, tx, qs, runID, videoID, queue.DeferredReasonQuotaExhausted, handoff); err != nil {
+			if err := retainGuardedDeferralTx(ctx, tx, qs, runID, videoID, reason, handoff); err != nil {
 				return err
 			}
 		}
 		for _, a := range actions {
-			if err := recordActionEvidenceTx(ctx, tx, runID, videoID, a, state.ActionOutcomeDeferred, reasonPtr(outcomeReasonQuotaExhausted), nil); err != nil {
+			if err := recordActionEvidenceTx(ctx, tx, runID, videoID, a, state.ActionOutcomeDeferred, reasonPtr(string(reason)), nil); err != nil {
 				return err
 			}
 		}
@@ -887,7 +909,18 @@ func (e *Executor) executeGuardedAction(ctx context.Context, runID, videoID int6
 				return state.ActionOutcomeFailed, errors.New("guarded quota deferral requires pipeline transaction owner")
 			}
 		}
+		raiseAuthorization := result.Application == youtube.MutationNotIssued && result.Refusal == youtube.DispatchRefusalAuthorization
+		if raiseAuthorization {
+			// W2: a mutation is never retried, so there is no safe authorized
+			// continuation. Latch first, then store in the deferral's transaction.
+			quota.LatchRunStop(ctx, quota.StopAuthorization)
+		}
 		err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+			if raiseAuthorization {
+				if err := guardStore.RaiseRunDispatchStopTx(ctx, tx, runID, quota.StopAuthorization); err != nil {
+					return err
+				}
+			}
 			if outcome == state.ActionOutcomeNotAttempted {
 				// A queue removal racing the authorization request is authoritative.
 				var id, origin int64
@@ -1239,4 +1272,53 @@ func (e *Executor) youtubeClient(ctx context.Context, runID int64, binding *auth
 		return e.ledger.RecordCalls(ctx, sql.NullInt64{Int64: runID, Valid: true}, quota.Operation(op), calls)
 	}
 	return e.factory(ctx, token, recorder), nil
+}
+
+// dispatchStopDisposition is reader R6 (run-initiation ARS-005 section 6.1.3).
+// Before any guard preparation it reads the run's effective dispatch stop.
+// handled is true when the stop decided the outcome: authorization defers the
+// actions as authorization_pending, quota defers them as quota_exhausted, and
+// an accounting or integrity stop (or a stop read error, writer W3) fails
+// closed with a run-stopping error. No guard is prepared and nothing is sent.
+func (e *Executor) dispatchStopDisposition(ctx context.Context, runID, videoID int64, pending []action) (handled bool, outcome state.VideoFinalOutcome, err error) {
+	if e.ledger == nil {
+		return false, "", nil
+	}
+	stop, readErr := e.ledger.RunDispatchStop(ctx)
+	if readErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return true, state.FinalOutcomeFailed, ctxErr
+		}
+		return true, state.FinalOutcomeFailed, e.failClosed(ctx, runID, readErr)
+	}
+	switch stop {
+	case quota.StopAuthorization:
+		outcome, err = e.deferActionsFor(ctx, runID, videoID, pending, queue.DeferredReasonAuthorizationPending)
+		return true, outcome, err
+	case quota.StopQuota:
+		outcome, err = e.deferActions(ctx, runID, videoID, pending)
+		return true, outcome, err
+	case quota.StopAccountingOrIntegrity:
+		return true, state.FinalOutcomeFailed, e.failClosed(ctx, runID, auth.ErrQuotaAccounting)
+	}
+	return false, "", nil
+}
+
+// failClosed is writer W3 for the executor: latch, then a best-effort stored
+// write, then a run-stopping error that carries auth.ErrQuotaAccounting.
+func (e *Executor) failClosed(ctx context.Context, runID int64, cause error) error {
+	quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
+	if guardStore, err := state.NewStore(e.db); err == nil {
+		werr := e.withWriterTx(context.WithoutCancel(ctx), func(tx *sql.Tx) error {
+			return guardStore.RaiseRunDispatchStopTx(ctx, tx, runID, quota.StopAccountingOrIntegrity)
+		})
+		if werr != nil {
+			e.logger.ErrorContext(ctx, "run dispatch stop not stored; latched for this execution", "run_id", runID,
+				"diagnostic", diag.Encode(werr, "action_execution", "account_quota"))
+		}
+	}
+	if !errors.Is(cause, auth.ErrQuotaAccounting) {
+		cause = errors.Join(auth.ErrQuotaAccounting, cause)
+	}
+	return &runStoppingError{cause: cause}
 }

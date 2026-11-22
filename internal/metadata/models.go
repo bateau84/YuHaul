@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
+	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/youtube"
 )
 
@@ -153,6 +154,11 @@ type FetchOutcome struct {
 	Attempts int
 	// Saved is the number of rows written to Store A.
 	Saved int
+	// Stop is the run's effective dispatch stop seen before a chunk (reader R5,
+	// run-initiation ARS-005 section 6.1.3), or StopNone. The manager never
+	// writes it; the run owner does (writers W1 and W3). It is separate from
+	// Read: a stop is not a read failure and costs zero attempts.
+	Stop quota.DispatchStop
 }
 
 // MetadataExpiredError indicates that Store A metadata has expired and the
