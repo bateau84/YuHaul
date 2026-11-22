@@ -381,9 +381,17 @@ func (s *Store) RefuseFinalRetryTx(ctx context.Context, tx *sql.Tx, entryID int6
 func (s *Store) claimRetryGroupTx(ctx context.Context, tx *sql.Tx, entryID, runID int64, now time.Time, manual bool) (RetryGroupReceipt, int64, ClaimResult, error) {
 	var receipt RetryGroupReceipt
 	var runType, status string
-	err := tx.QueryRowContext(ctx, `SELECT r.run_type, r.status FROM run r JOIN config_version c ON c.id = r.config_version_id WHERE r.id = ?`, runID).Scan(&runType, &status)
+	var dispatchStop sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT r.run_type, r.status, r.dispatch_stop FROM run r JOIN config_version c ON c.id = r.config_version_id WHERE r.id = ?`, runID).Scan(&runType, &status, &dispatchStop)
 	if err != nil {
 		return receipt, 0, ClaimLost, fmt.Errorf("retry receiving run %d: %w", runID, err)
+	}
+	// R2 (run-initiation ARS-005 section 6.1.3): an accounting or integrity
+	// stop claims nothing. An authorization stop still claims, because the
+	// claim and its settlement are local (variant K). The quota level is not
+	// read here: the claim loop evaluates it from the ledger just before.
+	if dispatchStop.Valid && dispatchStop.String == "accounting_or_integrity" {
+		return receipt, 0, ClaimLost, fmt.Errorf("retry receiving run %d: %w", runID, ErrRunDispatchStopped)
 	}
 	if (runType != "manual" && runType != "scheduled") || (status != "running" && status != "interrupted") || (manual && runType != "manual") {
 		return receipt, 0, ClaimLost, fmt.Errorf("retry receiving run %d: %w", runID, ErrInvalidState)
@@ -946,6 +954,10 @@ func (s *Store) RetainDeferredForRetryTx(ctx context.Context, tx *sql.Tx, itemID
 
 var ErrWorkRemoved = errors.New("queue: work explicitly removed")
 var ErrWorkNotOwned = errors.New("queue: retained work is not owned by retry run")
+
+// ErrRunDispatchStopped means the receiving run has a stored accounting or
+// integrity dispatch stop and may not claim more work.
+var ErrRunDispatchStopped = errors.New("queue: receiving run dispatch stopped")
 
 func (s *Store) retainOwnedErrorTx(ctx context.Context, tx *sql.Tx, videoID, originRunID, retryRunID int64, category ErrorCategory, message, detail string) (int64, error) {
 	if tx == nil {

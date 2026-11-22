@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bateau84/YuHaul/internal/quota"
 )
 
 const playlistInsert = "playlist_insert"
@@ -14,6 +16,12 @@ const playlistInsert = "playlist_insert"
 // ErrPlaylistSendStopped identifies a durable Stop marker observed before a
 // playlist guard can be prepared, even before execution context cancellation.
 var ErrPlaylistSendStopped = errors.New("state: playlist send stopped")
+
+// ErrPlaylistSendDispatchStopped means the run has a stored dispatch stop
+// (run.dispatch_stop is not NULL). ClaimPlaylistSend returns it before any
+// guard write. The caller reads the effective stop to choose the disposition
+// (run-initiation ARS-005 section 6.1.3, reader R7).
+var ErrPlaylistSendDispatchStopped = errors.New("state: playlist send dispatch stopped")
 
 type PlaylistSendOrigin uint8
 
@@ -135,8 +143,8 @@ func (s *Store) ClaimPlaylistSend(ctx context.Context, c PlaylistSendClaim, now 
 	}
 	var runType, status string
 	var authVersion, mutationSafetyVersion int
-	var stopRequested sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT run_type, status, action_authority_version, mutation_safety_version, stop_requested_at FROM run WHERE id = ?`, c.RunID).Scan(&runType, &status, &authVersion, &mutationSafetyVersion, &stopRequested)
+	var stopRequested, dispatchStop sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT run_type, status, action_authority_version, mutation_safety_version, stop_requested_at, dispatch_stop FROM run WHERE id = ?`, c.RunID).Scan(&runType, &status, &authVersion, &mutationSafetyVersion, &stopRequested, &dispatchStop)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, ErrNotFound
 	}
@@ -145,6 +153,9 @@ func (s *Store) ClaimPlaylistSend(ctx context.Context, c PlaylistSendClaim, now 
 	}
 	if stopRequested.Valid {
 		return "", nil, ErrPlaylistSendStopped
+	}
+	if dispatchStop.Valid {
+		return "", nil, ErrPlaylistSendDispatchStopped
 	}
 	if (runType != string(RunTypeManual) && runType != string(RunTypeScheduled)) || status != string(RunStatusRunning) || authVersion != 1 || mutationSafetyVersion != 1 {
 		return "", nil, errors.New("state: run is not eligible for playlist mutation")
@@ -349,4 +360,63 @@ func nullableRunTime(t *time.Time) any {
 		return nil
 	}
 	return formatRunTime(*t)
+}
+
+// RaiseRunDispatchStopTx raises run.dispatch_stop to level inside the caller's
+// transaction. Only the stored levels exist: quota is derived from the ledger
+// and StopNone is not a stop, so both are programming errors. The statement is
+// raise-only; zero affected rows means an equal or higher stop is already
+// stored, or the run is a simulation (dry run, Replay, Backtest never write a
+// stop), and is not an error.
+// Callers latch first (quota.LatchRunStop), then write (ARS-005 section 6.1.3).
+func (s *Store) RaiseRunDispatchStopTx(ctx context.Context, tx *sql.Tx, runID int64, level quota.DispatchStop) error {
+	if tx == nil {
+		return errors.New("state: raising a run dispatch stop requires a transaction")
+	}
+	var v string
+	switch level {
+	case quota.StopAuthorization:
+		v = "authorization"
+	case quota.StopAccountingOrIntegrity:
+		v = "accounting_or_integrity"
+	default:
+		return fmt.Errorf("state: %s is not a storable run dispatch stop", level)
+	}
+	if runID <= 0 {
+		return errors.New("state: invalid run for dispatch stop")
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE run SET dispatch_stop = :v
+WHERE id = :run AND run_type IN ('manual','scheduled')
+  AND (dispatch_stop IS NULL OR
+       (CASE dispatch_stop WHEN 'authorization' THEN 1 ELSE 3 END) <
+       (CASE :v WHEN 'authorization' THEN 1 ELSE 3 END))`, sql.Named("v", v), sql.Named("run", runID))
+	if err != nil {
+		return fmt.Errorf("raising run %d dispatch stop: %w", runID, err)
+	}
+	// Zero affected rows: an equal or higher stop is already stored.
+	return nil
+}
+
+// RunDispatchStopTx reads the stored dispatch stop of runID inside tx. It
+// returns quota.StopNone for NULL. The derived quota level is not included
+// (use quota.Ledger.RunDispatchStop for the effective stop).
+func (s *Store) RunDispatchStopTx(ctx context.Context, tx *sql.Tx, runID int64) (quota.DispatchStop, error) {
+	var v sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT dispatch_stop FROM run WHERE id = ?`, runID).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return quota.StopNone, ErrNotFound
+	}
+	if err != nil {
+		return quota.StopNone, fmt.Errorf("reading run %d dispatch stop: %w", runID, err)
+	}
+	switch v.String {
+	case "":
+		return quota.StopNone, nil
+	case "authorization":
+		return quota.StopAuthorization, nil
+	case "accounting_or_integrity":
+		return quota.StopAccountingOrIntegrity, nil
+	default:
+		return quota.StopAccountingOrIntegrity, fmt.Errorf("state: run %d has unknown dispatch_stop %q", runID, v.String)
+	}
 }

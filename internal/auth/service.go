@@ -335,6 +335,40 @@ var ErrQuotaRefused = errors.New("auth: quota admission refused")
 var ErrAccessExpiredBeforeAdmission = errors.New("auth: access expired before admission")
 var ErrQuotaAccounting = errors.New("auth: quota admission accounting failed")
 
+// ErrRunAuthorizationStopped means the run has a stored authorization dispatch
+// stop. It is a pre-admission authorization refusal: nothing was renewed,
+// held or sent.
+var ErrRunAuthorizationStopped = errors.New("auth: run authorization stop")
+
+// runDispatchStopRefusal maps the run's effective dispatch stop to the
+// pre-admission error dispatch returns. Without a ledger or a run scope there
+// is no stop to read. A stop read error fails closed: it is latched for this
+// execution so a later call cannot pass on a lucky read, and it is joined
+// with ErrQuotaAccounting.
+func runDispatchStopRefusal(ctx context.Context, ledger *quota.Ledger) error {
+	if ledger == nil {
+		return nil
+	}
+	stop, err := ledger.RunDispatchStop(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr // cancellation is not an integrity fault
+		}
+		quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
+		return errors.Join(ErrQuotaAccounting, err)
+	}
+	switch stop {
+	case quota.StopNone:
+		return nil
+	case quota.StopAuthorization:
+		return ErrRunAuthorizationStopped
+	case quota.StopQuota:
+		return ErrQuotaRefused
+	default:
+		return fmt.Errorf("%w: run dispatch stopped (%s)", ErrQuotaAccounting, stop)
+	}
+}
+
 // DispatchWithQuotaScoped is DispatchWithQuota with a local scope held across
 // the provisional to admitted transition, in the order auth, quota, scope. The
 // scope is released before RoundTrip. A refusal from the scope should be
@@ -360,6 +394,12 @@ func (s *Service) dispatchScoped(ctx context.Context, b AuthorizationBinding, re
 		return nil, AdmissionReceipt{}, nil, err
 	}
 	for {
+		// R0 (run-initiation ARS-005 section 6.1.3): the run's effective
+		// dispatch stop is checked before Resolve, so a stopped run starts no
+		// renewal, hold or request.
+		if err := runDispatchStopRefusal(ctx, ledger); err != nil {
+			return nil, AdmissionReceipt{}, nil, err
+		}
 		_, err := s.Resolve(ctx, b)
 		if err != nil {
 			return nil, AdmissionReceipt{}, nil, err
@@ -763,6 +803,7 @@ func IsPreAdmissionAuthorizationRefusal(err error) bool {
 		return false
 	}
 	return errors.Is(err, ErrAuthorizationChanged) ||
+		errors.Is(err, ErrRunAuthorizationStopped) ||
 		errors.Is(err, ErrAccessExpiredBeforeAdmission) ||
 		errors.Is(err, errRefreshRejected) ||
 		errors.Is(err, errTemporaryNetwork) ||

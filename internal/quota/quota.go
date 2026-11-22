@@ -9,11 +9,13 @@ package quota
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	_ "time/tzdata" // LoadLocation must not depend on the image's zoneinfo.
 )
@@ -24,19 +26,134 @@ var defaultResetSchedule = ResetSchedule{Timezone: "America/Los_Angeles", TimeOf
 
 type runScopeKey struct{}
 
+// DispatchStop is the effective run-scoped stop on run-owned provider
+// requests (run-initiation ARS-005 section 6.1.3). The values are in rank
+// order; a higher value includes the restrictions of a lower one.
+type DispatchStop int
+
+const (
+	// StopNone: no stop. Ordinary admission still applies.
+	StopNone DispatchStop = iota
+	// StopAuthorization: no provider request; local claiming and settlement continue.
+	StopAuthorization
+	// StopQuota: derived from the run's quota ledger rows in the current bucket.
+	// It is never stored.
+	StopQuota
+	// StopAccountingOrIntegrity: no provider request and no further claims.
+	StopAccountingOrIntegrity
+)
+
+func (s DispatchStop) String() string {
+	switch s {
+	case StopNone:
+		return "none"
+	case StopAuthorization:
+		return "authorization"
+	case StopQuota:
+		return "quota"
+	case StopAccountingOrIntegrity:
+		return "accounting_or_integrity"
+	default:
+		return "unknown"
+	}
+}
+
+// runScope is the value WithRun stores. The latch is the in-memory,
+// raise-only stop of this execution. Only the two stored levels can be latched.
+type runScope struct {
+	id    int64
+	latch atomic.Int32
+}
+
 // WithRun scopes ctx to run runID so the ledger can apply the run's quota stop
-// and attribute holds to the run. A runID <= 0 returns ctx unchanged.
+// and attribute holds to the run. A runID <= 0 returns ctx unchanged. If ctx is
+// already scoped to the same run, the existing scope (and its latch) is kept.
 func WithRun(ctx context.Context, runID int64) context.Context {
 	if runID <= 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, runScopeKey{}, runID)
+	if sc, ok := ctx.Value(runScopeKey{}).(*runScope); ok && sc.id == runID {
+		return ctx
+	}
+	return context.WithValue(ctx, runScopeKey{}, &runScope{id: runID})
 }
 
 // RunFromContext returns the run scope set by WithRun.
 func RunFromContext(ctx context.Context) (int64, bool) {
-	id, ok := ctx.Value(runScopeKey{}).(int64)
-	return id, ok && id > 0
+	sc, ok := ctx.Value(runScopeKey{}).(*runScope)
+	if !ok || sc.id <= 0 {
+		return 0, false
+	}
+	return sc.id, true
+}
+
+// LatchRunStop raises the in-memory stop of ctx's run scope. It never lowers
+// it. Only StopAuthorization and StopAccountingOrIntegrity can be latched:
+// the quota level is derived from the ledger and a latched copy would be a
+// second fact. An unscoped ctx is a no-op.
+func LatchRunStop(ctx context.Context, s DispatchStop) {
+	if s != StopAuthorization && s != StopAccountingOrIntegrity {
+		return
+	}
+	sc, ok := ctx.Value(runScopeKey{}).(*runScope)
+	if !ok {
+		return
+	}
+	for {
+		cur := sc.latch.Load()
+		if cur >= int32(s) || sc.latch.CompareAndSwap(cur, int32(s)) {
+			return
+		}
+	}
+}
+
+// RunDispatchStop returns the effective stop of the run in ctx's run scope:
+// the highest of the stored run.dispatch_stop, the in-memory latch and the
+// quota level derived from the run's quota ledger rows in the current bucket.
+// Without a run scope it returns StopNone. A read error is returned; the caller
+// treats it as StopAccountingOrIntegrity. A latched stop is still reported
+// with the error, so a failed read never lowers it.
+func (l *Ledger) RunDispatchStop(ctx context.Context) (DispatchStop, error) {
+	sc, ok := ctx.Value(runScopeKey{}).(*runScope)
+	if !ok || sc.id <= 0 {
+		return StopNone, nil
+	}
+	stop := DispatchStop(sc.latch.Load())
+	if stop == StopAccountingOrIntegrity {
+		return stop, nil
+	}
+
+	var stored sql.NullString
+	err := l.db.QueryRowContext(ctx, `SELECT dispatch_stop FROM run WHERE id = ?`, sc.id).Scan(&stored)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// A run row that does not exist has no stored stop. The derived
+		// quota level below is independent of it.
+	case err != nil:
+		return stop, fmt.Errorf("quota: read dispatch stop of run %d: %w", sc.id, err)
+	case stored.Valid:
+		switch stored.String {
+		case "authorization":
+			stop = max(stop, StopAuthorization)
+		case "accounting_or_integrity":
+			return StopAccountingOrIntegrity, nil
+		default:
+			return StopAccountingOrIntegrity, fmt.Errorf("quota: run %d has unknown dispatch_stop %q", sc.id, stored.String)
+		}
+	}
+
+	bucket, err := l.bucketCalculator(ctx)
+	if err != nil {
+		return stop, err
+	}
+	stopped, err := l.runStopped(ctx, sc.id, bucket(l.now().UTC()))
+	if err != nil {
+		return stop, err
+	}
+	if stopped {
+		stop = max(stop, StopQuota)
+	}
+	return stop, nil
 }
 
 const (
