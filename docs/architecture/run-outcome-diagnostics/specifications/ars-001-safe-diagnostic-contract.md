@@ -3,10 +3,10 @@ type: specification
 title: ARS-001 — Safe Diagnostic Facts Across Producers, Storage, API and Logs
 description: Closed diagnostic vocabulary, typed error classification, legacy admission and sink rules for run, video, action and queue failures without releasing arbitrary error text.
 tags: [architecture, specification, diagnostics, safety, run-history, compatibility]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
-**Status:** decided technical contract; implementation and conformance verification outstanding. This realizes the accepted diagnostic boundary; it does not certify the current implementation.
+**Status:** decided technical contract; implemented and shipped in PR #4 (`eed90f1`). Bounded conformance passed in reviewer assessment `b1d9ab8d` (2026-11-06), after the earlier failures `f20f9060`, `fb4018f8` and `97955bc1`. That review does not prove there are no leaks at all. The confidentiality of historical free text already stored, real-browser SSE framing, and the auth initiate/status/disconnect logs outside the fix are not proven.
 
 Every layer must agree on which error facts may leave process memory. Keep the known operation, phase, HTTP status, registered provider reason and registered database code. Never publish an error's prose merely because it is short or printable. The same rule applies before the first log call, before a database write, and when reading old records.
 
