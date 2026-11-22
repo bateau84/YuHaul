@@ -200,7 +200,7 @@ func TestBatchLoopQuotaRefusalLeavesTheRestUntouchedThenNextDayContinuesB2(t *te
 }
 
 // B7 (variant K): a provider 5xx on the first metadata chunk suspends
-// fetching for the pass, and the run keeps claiming until no candidate remains.
+// fetching for the rest of the run, and the run keeps claiming until no candidate remains.
 func TestBatchLoopKeepsClaimingAfterAProviderFailureB7(t *testing.T) {
 	rf := newReceivingFixture(t)
 	rf.initiatedBy(state.InitiatedByRunNow)
@@ -210,10 +210,7 @@ func TestBatchLoopKeepsClaimingAfterAProviderFailureB7(t *testing.T) {
 	first := rf.claimFirstBatch(rf.recvRun)
 	require.NoError(t, rf.p.processRetryBatches(rf.ctx(), rf.recvRun, first, false))
 
-	// Suspension is per pass (ARS-005 section 6.2): each of the three batches
-	// makes one request. B7's "zero further requests" across batches needs a
-	// cross-pass seam in internal/metadata, outside this node's write surface.
-	require.Equal(t, int32(3), rf.listCalls.Load(), "one failed request per pass, none after it within the pass")
+	require.Equal(t, int32(1), rf.listCalls.Load(), "one failed request, none after it for the rest of the run")
 	require.Equal(t, 1100, rf.memberCount(rf.recvRun), "every video claimed once")
 	require.Equal(t, 1100, rf.untouched(ids), "each video without current metadata is released unchanged")
 }

@@ -445,3 +445,81 @@ func ledgerRowCount(t *testing.T, ms *metadata.Store) int {
 	require.NoError(t, ms.DB().QueryRow(`SELECT count(*) FROM quota_ledger`).Scan(&n))
 	return n
 }
+
+// B7 at the manager: a generic provider failure suspends fetching for the rest
+// of the run, across calls, and only for that run.
+func TestFetchForEvaluationGenericFailureSuspendsTheRun(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want metadata.FetchStatus
+	}{
+		"server":     {&youtube.APIError{Status: 500}, metadata.FetchFailed},
+		"rate limit": {&youtube.APIError{Status: 429}, metadata.FetchRateLimited},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) { return metadata.FetchResult{}, tc.err }}
+			m, ms, _ := newFetchManager(t, bound, 1000)
+			run7 := quota.WithRun(context.Background(), 7)
+
+			out, err := m.FetchForEvaluation(run7, auth.AuthorizationBinding{}, allInputs("a1", "a2"))
+			require.NoError(t, err)
+			require.NotNil(t, out.Read)
+			require.Len(t, bound.calls, 1)
+
+			// A later call of the same run, with new IDs, sends nothing.
+			out, err = m.FetchForEvaluation(run7, auth.AuthorizationBinding{}, allInputs("b1", "b2"))
+			require.NoError(t, err)
+			assert.Len(t, bound.calls, 1, "no request after the failure, for the rest of the run")
+			assert.Zero(t, out.Attempts)
+			assert.Equal(t, tc.want, out.Statuses["b1"])
+			assert.Equal(t, tc.want, out.Statuses["b2"])
+			assert.Zero(t, countRows(t, ms))
+
+			// Another run, and a call with no run scope, still fetch.
+			_, err = m.FetchForEvaluation(quota.WithRun(context.Background(), 8), auth.AuthorizationBinding{}, allInputs("c1"))
+			require.NoError(t, err)
+			assert.Len(t, bound.calls, 2)
+			_, err = m.FetchForEvaluation(context.Background(), auth.AuthorizationBinding{}, allInputs("d1"))
+			require.NoError(t, err)
+			assert.Len(t, bound.calls, 3)
+		})
+	}
+}
+
+// Only a generic failure outlives the call. The stop and the ledger carry the
+// others, and an unusable response never suspends.
+func TestFetchForEvaluationOtherFailuresDoNotSuspendTheRun(t *testing.T) {
+	for name, err := range map[string]error{
+		"unusable":     fmt.Errorf("get videos: %w", &youtube.InvalidResponseError{}),
+		"quota":        &youtube.APIError{Status: 403, Reason: "quotaExceeded"},
+		"unauthorized": &youtube.APIError{Status: 401},
+		"interruption": &youtube.ReadError{Primary: context.Canceled, Interruption: context.Canceled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) { return metadata.FetchResult{}, err }}
+			m, _, _ := newFetchManager(t, bound, 1000)
+			run := quota.WithRun(context.Background(), 7)
+			_, _ = m.FetchForEvaluation(run, auth.AuthorizationBinding{}, allInputs("a1"))
+			_, _ = m.FetchForEvaluation(run, auth.AuthorizationBinding{}, allInputs("b1"))
+			assert.Len(t, bound.calls, 2, "the next call of the run is not suspended")
+		})
+	}
+}
+
+// A run dispatch stop wins over the suspension (ARS-005 section 6.2).
+func TestFetchForEvaluationStopWinsOverRunSuspension(t *testing.T) {
+	bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) {
+		return metadata.FetchResult{}, &youtube.APIError{Status: 500}
+	}}
+	m, _, _ := newFetchManager(t, bound, 1000)
+	run := quota.WithRun(context.Background(), 7)
+	_, err := m.FetchForEvaluation(run, auth.AuthorizationBinding{}, allInputs("a1"))
+	require.NoError(t, err)
+
+	quota.LatchRunStop(run, quota.StopAuthorization)
+	out, err := m.FetchForEvaluation(run, auth.AuthorizationBinding{}, allInputs("b1"))
+	require.NoError(t, err)
+	assert.Equal(t, quota.StopAuthorization, out.Stop)
+	assert.Equal(t, metadata.FetchAuthorizationPending, out.Statuses["b1"])
+	assert.Len(t, bound.calls, 1)
+}

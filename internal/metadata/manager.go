@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
@@ -29,7 +30,16 @@ type Manager struct {
 	ttl       time.Duration
 	batchSize int
 	now       func() time.Time
+
+	// suspended is the run-long fetch suspension (ARS-005 section 6.2, B7),
+	// keyed by the run in the context's quota scope.
+	suspendMu sync.Mutex
+	suspended map[int64]ReadFacts
 }
+
+// maxSuspendedRuns bounds suspended. Run IDs only grow, so the lowest is the
+// oldest run and the first to go.
+const maxSuspendedRuns = 32
 
 // Option configures a Manager.
 type Option func(*Manager)
@@ -491,6 +501,15 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 			}
 			continue
 		}
+		// A generic provider failure earlier in this run still suspends
+		// fetching here. It comes after the stop, so a stop always wins.
+		if facts, ok := m.runSuspension(ctx); ok {
+			status := readStatus(&facts)
+			for _, id := range chunk {
+				out.Statuses[id] = status
+			}
+			continue
+		}
 		// Known insufficiency refuses with zero attempts. A preflight error is a
 		// local fault, not a refusal. The positive answer never replaces the
 		// admission inside the read.
@@ -518,6 +537,7 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 			}
 			if suspend {
 				out.Read = &facts
+				m.suspendRun(ctx, facts, status)
 			} else {
 				m.logger.WarnContext(ctx, "metadata fetch response unusable", "ids", len(chunk))
 			}
@@ -586,6 +606,48 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 		return out, &ReadFaultError{Facts: *out.Read}
 	}
 	return out, nil
+}
+
+// suspendRun makes a generic provider failure (a 5xx, a transport failure or a
+// non-quota rate limit) suspend fetching for the rest of the run, not only the
+// current call. Quota, authorization, accounting and interruption outcomes are
+// not kept: the run dispatch stop and the ledger already carry them and are
+// read before every chunk. A call without a run scope keeps the suspension to
+// the call.
+func (m *Manager) suspendRun(ctx context.Context, f ReadFacts, status FetchStatus) {
+	runID, ok := quota.RunFromContext(ctx)
+	if !ok || f.QuotaRefused || f.Accounting != nil || f.Interruption != nil ||
+		(status != FetchFailed && status != FetchRateLimited) {
+		return
+	}
+	m.suspendMu.Lock()
+	defer m.suspendMu.Unlock()
+	if m.suspended == nil {
+		m.suspended = make(map[int64]ReadFacts)
+	}
+	if _, held := m.suspended[runID]; held {
+		return
+	}
+	if len(m.suspended) >= maxSuspendedRuns {
+		oldest := runID
+		for id := range m.suspended {
+			oldest = min(oldest, id)
+		}
+		delete(m.suspended, oldest)
+	}
+	m.suspended[runID] = f
+}
+
+// runSuspension returns the suspension recorded for ctx's run.
+func (m *Manager) runSuspension(ctx context.Context) (ReadFacts, bool) {
+	runID, ok := quota.RunFromContext(ctx)
+	if !ok {
+		return ReadFacts{}, false
+	}
+	m.suspendMu.Lock()
+	defer m.suspendMu.Unlock()
+	f, ok := m.suspended[runID]
+	return f, ok
 }
 
 // ReadFaultError reports a metadata read whose local quota accounting failed.
