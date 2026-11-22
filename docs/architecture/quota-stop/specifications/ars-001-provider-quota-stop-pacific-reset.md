@@ -6,7 +6,7 @@ tags: [architecture, specification, quota, hotfix, run-58, dispatch-stop, discov
 timestamp: 2026-11-22T00:00:00Z
 ---
 
-**Status:** proposed hotfix contract on `origin/main` at `8d7e009` (includes PR #5's admission fence). Not implemented. §5's terminal status is the dispatcher's recommendation and is **pending the user's decision** (Q-1). Independent critique is recommended before release.
+**Status:** proposed hotfix contract on `origin/main` at `8d7e009` (includes PR #5's admission fence). Revised 2026-11-22 after critic `ses_dfd2e7bdeffeRof29fhoIoWn65` (CHANGES REQUIRED): §1.2 now orders the stop before any daily-limit logic, with new test Q1b; §3.3 corrects how long the deployment-day overcount lasts and adds the optional relabel (§3.3.1, Q-4). Not implemented. §5's terminal status is the dispatcher's recommendation and is **pending the user's decision** (Q-1). Independent critique is recommended before release.
 
 ## Summary
 
@@ -23,7 +23,7 @@ This hotfix changes four things:
 
 **Limits.**
 - The stop is per run, as [ARS-005](../../run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.1 specifies ("a fresh eligible run performs ordinary authorized admission again"). A later run in the same Pacific day may send one request, which will be refused, and then stops.
-- For a few hours on the day of deployment, the local count can be wrong (§3.3).
+- Ledger rows written before deployment keep their UTC-day labels. Until the next Pacific midnight after the deployment's UTC day, up to about 24 hours, the local count can be too high (§3.3). A deployment after 08:00Z can therefore block runs until 08:00Z the next day. An optional one-off relabel fixes this (Q-4).
 - Run Detail cannot truthfully say "skipped" from the stored facts (§5.3, Q-2).
 
 ## Satisfies
@@ -66,6 +66,8 @@ EXISTS (SELECT 1 FROM quota_ledger WHERE run_id = ?R AND date = ?D AND outcome_c
 ```
 
 Here D is the bucket of the current time (§3). `idx_quota_ledger_run_id` covers the lookup. There is no in-memory latch. The row that `Finalize` commits is the stop, so it holds after a restart or resume. A run that crosses the reset is no longer stopped in the new bucket, because YouTube has reset too.
+
+**Order and the limit.** The stop applies whatever the daily limit is, including `daily_limit=0` (unlimited). Both methods evaluate it before any daily-limit logic: before `Acquire`'s `limit > 0 && …` refusal, and before `CanAfford`'s early `DailyLimit <= 0` success. An unlimited local budget says nothing about YouTube's quota.
 
 - `Ledger.Acquire(ctx, op)`: when the context carries R, evaluate the predicate under `l.mu`, using the same `date` as the capacity check. If it holds, return `(nil, nil)`. `auth.dispatchScoped` already turns this into `ErrQuotaRefused`, a typed pre-admission refusal that costs nothing. A query error is returned as an error, which `auth` already joins with `ErrQuotaAccounting` (fail closed).
 - `Ledger.CanAfford(ctx, estimate)`: same predicate. If it holds, return `(false, 0, nil)`.
@@ -121,17 +123,60 @@ Now that §1 stops the run, the charge no longer acts as the brake. It only need
 
 ### 3.2 Labels
 
-The `quota_ledger.date` label means the Pacific day from now on. Statistics that group by `date` show UTC days before the deployment and Pacific days after it. No relabeling migration: `recorded_at` comes from mixed writers and is not a safe key for a rewrite.
+The `quota_ledger.date` label means the Pacific day from now on. Statistics that group by `date` show UTC days before the deployment and Pacific days after it. There is no automatic relabeling migration. Only the deployment day matters, and the optional operator step in §3.3 covers it.
 
 ### 3.3 Day of deployment
 
-`ConsumedOn` sums rows by label. For up to 8 hours after deployment, the Pacific bucket D:
-- includes rows labeled D in UTC that belong to Pacific D−1 (an overcount, which is conservative);
-- omits rows labeled D+1 that were written after 00:00Z but before deployment (an undercount).
+`ConsumedOn` sums rows by label. Pacific day P runs from P 08:00Z to P+1 08:00Z (07:00Z while daylight saving is in effect). Rows written before deployment carry the UTC day as their label. Let T be the deployment time and D its UTC day.
 
-The §1 stop limits the effect of the undercount to one refused request per run. Accepted, not engineered around.
+- **T at or after D 08:00Z.** The current bucket is D. It includes the pre-deployment rows labeled D that were recorded before D 08:00Z. Those rows belong to Pacific D−1, so the count is too high. This lasts until D+1 08:00Z, up to about 24 hours. Example: on run 58's day, suppose 10,000 units were recorded between 00:00Z and 00:07Z and the deployment is at 12:00Z. Bucket `2026-11-22` starts full, so every run is refused locally until 2026-11-23T08:00Z, although YouTube reset at 2026-11-22T08:00Z.
+- **T before D 08:00Z.** Until D 08:00Z, the current bucket is D−1. It counts D−1's rows from before D−1 08:00Z, which is too high, and leaves out D's rows from 00:00Z to T, which is too low. From D 08:00Z the first case applies.
+
+The too-high count fails safe: work is deferred, not sent. The §1 stop limits the effect of the too-low count to one refused request per run. The optional relabel in Q-4 removes both.
 
 **Revisit trigger:** a refused request soon after deployment that is not followed by a stop.
+
+#### 3.3.1 Optional one-off relabel (operator; the user decides; Q-4)
+
+This moves pre-deployment rows to their Pacific label. It is not part of the code change.
+
+**Format.** `recorded_at` is UTC RFC 3339 text in every writer. Go writes `2026-11-22T00:00:44.000000123Z`, and the SQL default writes `2026-11-22T00:00:44Z`. Both were checked on a scratch database at this branch. Compare against `'<L>T<HH>:00:00'` with no trailing `Z`. With the `Z`, a row at `…T08:00:00.5Z` would sort before the boundary, because `.` sorts before `Z`.
+
+**Labels to relabel.** L = D always. Also L = D−1 when T was before D 08:00Z. `<HH>` is `08` when L's Pacific midnight is in standard time and `07` when it is in daylight time. Rows written after deployment are never matched: a post-deployment row labeled L has `recorded_at` at or after L's reset.
+
+1. **Back up first.** With no run in progress, copy the database with WAL-safe `sqlite3 /data/yuhaul.db ".backup '/data/yuhaul-pre-relabel.db'"`. Or stop the pod and copy `/data/yuhaul.db*`. The image has no `sqlite3`, so run the client somewhere that can reach the volume.
+2. **Preview (read-only).** For each L:
+   ```sql
+   -- rows that would move; non_utc_text must be 0, or stop
+   SELECT date, COUNT(*) AS rows_to_move, SUM(units_consumed) AS units_to_move,
+          MIN(recorded_at), MAX(recorded_at),
+          SUM(recorded_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z') AS non_utc_text
+   FROM quota_ledger
+   WHERE date = '<L>' AND recorded_at < '<L>T<HH>:00:00'
+   GROUP BY date;
+
+   -- bucket totals before the change
+   SELECT date, SUM(units_consumed) FROM quota_ledger
+   WHERE date IN ('<L-1>', '<L>') GROUP BY date;
+
+   -- keep this id list to undo the change without the backup
+   SELECT id FROM quota_ledger WHERE date = '<L>' AND recorded_at < '<L>T<HH>:00:00' ORDER BY id;
+   ```
+3. **Apply,** one transaction for each L:
+   ```sql
+   BEGIN IMMEDIATE;
+   UPDATE quota_ledger SET date = '<L-1>'
+   WHERE date = '<L>' AND recorded_at < '<L>T<HH>:00:00';
+   -- changes() must equal rows_to_move from step 2; otherwise ROLLBACK
+   SELECT changes();
+   COMMIT;
+   ```
+   Example, deployment at 2026-11-22T12:00Z, with L = `2026-11-22` and HH = `08`: `UPDATE quota_ledger SET date='2026-11-21' WHERE date='2026-11-22' AND recorded_at < '2026-11-22T08:00:00';`.
+4. **Check:** run the preview again; it returns no rows. The bucket totals moved by `units_to_move`.
+
+The preview, update and boundary were run on a scratch SQLite database with rows at `00:00:44.000000123Z`, `07:59:59Z`, `08:00:00Z`, `08:00:00.5Z` and `12:00:01.1Z`. Only the first two moved.
+
+Effect on reporting: per-day statistics for the moved rows show their Pacific day. To undo, restore the backup, or set `date='<L>'` back for the saved ids.
 
 ## 4. Typed pre-scan quota outcome (package `discovery`)
 
@@ -220,6 +265,7 @@ Use a fake YouTube and a scratch SQLite database, with the fake clock set as not
 | # | Test | Expected |
 |---|---|---|
 | Q1 | 8 claimed videos, limit 10,000. The fake returns 200, then 403 `quotaExceeded`. | The provider receives exactly 2 inserts and no discovery calls. Ledger: `success` 50, `quota` 1. 6 videos pending `quota_exhausted`. Run `completed`, `cut_short`. |
+| Q1b | Q1 with `daily_limit=0` (unlimited) | Exactly 2 inserts reach the provider. The same ledger rows and deferrals as Q1. Also at ledger level: with `daily_limit=0` and a `quota` row for R, `Acquire` returns `(nil, nil)` and `CanAfford` returns `false` for R. |
 | Q2 | Q1, then stop the process after the `quota` row and resume R | R sends nothing. Work is deferred as in Q1. |
 | Q3 | A `quota` row for R | Run S and an unscoped call in the same bucket are admitted. R is admitted after the next reset. |
 | Q4 | Charging | `quota` → 1 unit and 403 recorded. `permanent` insert → 50. Reads → 1. |
@@ -238,4 +284,5 @@ Use a fake YouTube and a scratch SQLite database, with the fake clock set as not
 - **Q-1 (user, blocks release of §5 only):** the terminal status when quota runs out before discovery. Assumed: `completed` + `cut_short`.
 - **Q-2 (user or designer, does not block):** accept the §5.3 wording that is true in both cases, or ask for a new durable "skipped" fact later.
 - **Q-3 (requirements owner, does not block):** record the pre-scan behavior in BR-013 or OC-001, and decide whether a provider quota refusal should also block *later runs* until the reset. That would be a bucket-wide stop. It is rejected here because ARS-005 §6.1 makes the stop per run, and because YouTube now has separate pools (`search.list` has its own 100-call allowance), so one pool's refusal must not stop the others.
-- **Q-4 (operator):** the run 58 ledger, settings and log queries from the debugger session. They confirm the reset mismatch as the first trigger.
+- **Q-4 (user decides, operator runs; does not block the code):** whether to run the §3.3.1 relabel once after deployment. Without it, local refusals can continue until the next Pacific midnight after the deployment's UTC day ends, up to about 24 hours.
+- **Q-5 (operator):** the run 58 ledger, settings and log queries from the debugger session. They confirm the reset mismatch as the first trigger.
