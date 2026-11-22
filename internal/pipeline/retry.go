@@ -10,6 +10,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/queue"
+	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/router"
 	"github.com/bateau84/YuHaul/internal/state"
 )
@@ -116,6 +117,7 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 	if stopped {
 		return nil // settled by finishRun
 	}
+	ctx = quota.WithRun(ctx, run.ID)
 	// Authorization is bound only now: a refused retry above made no
 	// authorization or provider call.
 	binding, err := p.auth.Bind(ctx)

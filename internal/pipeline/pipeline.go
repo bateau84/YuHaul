@@ -249,9 +249,17 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 	if err != nil {
 		return err
 	}
-	items, err := qs.ListDeferredRetryCandidates(ctx, time.Now())
-	if err != nil {
-		return err
+	// When quota is known to be used up, create the run and claim nothing, so
+	// the deferred rows stay exactly as they were (ARS-001 section 1.4). The
+	// check carries no run scope: this run does not exist yet.
+	var items []queue.DeferredItem
+	if afford, err := p.canAffordMinimum(ctx); err != nil {
+		return fmt.Errorf("pipeline: check quota before claiming: %w", err)
+	} else if afford {
+		items, err = qs.ListDeferredRetryCandidates(ctx, time.Now())
+		if err != nil {
+			return err
+		}
 	}
 	receipts := make([]queue.RetryGroupReceipt, 0)
 	err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
@@ -282,6 +290,16 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 	ctl.mu.Unlock()
 	p.broadcastEvent(run.ID, EventRunStarted, nil)
 	return nil
+}
+
+// canAffordMinimum reports whether one provider unit can be spent now. Without
+// a ledger there is no local quota knowledge, so work is claimed as before.
+func (p *Pipeline) canAffordMinimum(ctx context.Context) (bool, error) {
+	if p.ledger == nil {
+		return true, nil
+	}
+	ok, _, err := p.ledger.CanAfford(ctx, 1)
+	return ok, err
 }
 
 // Capture is deliberately outside the execution gate: waiting cannot change
@@ -365,6 +383,9 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 		logger.InfoContext(ctx, "pipeline execute skipped: run stopped before it started")
 		return
 	}
+	// Scope every later call to this run so the ledger can apply the run's
+	// quota stop after a provider quota refusal (ARS-001 section 1).
+	ctx = quota.WithRun(ctx, runID)
 	freshRetries := ctl.takeFreshRetries()
 	if p.isProductionRun(run.RunType) && p.auth != nil {
 		binding, bindErr := p.auth.Bind(ctx)
