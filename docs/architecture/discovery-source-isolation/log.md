@@ -10,6 +10,15 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**AC11 realized (user decision `b2f00946`, BR-002 AC11 in `44f3ba4`).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md) changes:
+- §1.3: a source that saved a page and is ineligible on recovery settles `no_longer_eligible`. It counts as neither completed nor failed, and its observations are never routed in the origin. The routing gate admits only observations of `complete` or `local_failure` sources. The `eligibility_changed_no_coverage` derivation now covers every row being `no_longer_eligible`.
+- §2: the AC10 row now covers AC11's three cases: mixed `completed`, AC8 `failed`, and all-ineligible `completed`. The all-local recheck accepts ineligible-after-page sources.
+- §2 adds a *Terminal handoff rule*, derived from AC3 and AC10–11: every terminal transaction other than Stop or Discard writes the `discovery_processing_pending` rows first, including Failed and run-wide deferrals.
+- §6 adds three AC11 proof rows.
+- §7 decision 1 is resolved.
+
+[ARD-001](/docs/architecture/discovery-source-isolation/design/ard-001-isolate-uploads-source-failures.md) maps AC6–11.
+
 **Recheck R1 fixed (critique `ses_dff73847effengFMSzBkXiCHwF`).** In [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md), a rate limit on any uploads read now suspends uploads reads for the rest of that execution (§1.3). There is no in-place wait and retry, and no write. The scan stays `cut_short` with rows `unsettled`. If the run then reaches a terminal result other than Stop or Discard, §2's global row treats it as a run-wide deferral under the existing `api_rate_limited` reason. The terminal transaction gives every unfinished marked observation an origin `deferred` outcome and one pending `api_rate_limited` row before it publishes the status, so nothing is stranded. A crash before then remains an interruption, and resume rescans. A §6 "Rate limit then terminal" proof row is added.
 
 **Revised after critique `ses_dff73847effengFMSzBkXiCHwF` (CHANGES REQUIRED; approach kept).** [ARS-001](/docs/architecture/discovery-source-isolation/specifications/ars-001-durable-discovery-page-handoff.md):
