@@ -10,6 +10,8 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**Implemented** on `hotfix/quota-stop` (commits `111d244`, `2aa0506`, `f02a69e`, `0eb154a`, `6827e05`). [ARS-001 §10](specifications/ars-001-provider-quota-stop-pacific-reset.md) records the evidence and the deviations: the Q1 pending count is 7, not 6; Q2, Q5 and Q12 are proved at the boundary the tests can reach; one e2e test outside the write boundary changed its expectation. Q-1 and Q-2 are still open.
+
 **Revised after critic `ses_dfd2e7bdeffeRof29fhoIoWn65`.**
 
 - The per-run stop is checked before any daily-limit logic, including `daily_limit=0`. New test Q1b.

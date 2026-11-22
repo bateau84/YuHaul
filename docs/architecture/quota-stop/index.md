@@ -1,6 +1,6 @@
 # Quota stop
 
-Proposed 2026-11-22 hotfix for run 58, which kept sending playlist inserts after YouTube refused them for quota. Not implemented.
+2026-11-22 hotfix for run 58, which kept sending playlist inserts after YouTube refused them for quota. Implemented on branch `hotfix/quota-stop`; the pre-scan terminal status is still pending the user (Q-1).
 
 - After a provider quota refusal in a run, the ledger refuses the rest of that run's calls in the same quota day. The stop is read from the run's own ledger rows.
 - A refused call costs 1 unit, not 50.
@@ -9,5 +9,5 @@ Proposed 2026-11-22 hotfix for run 58, which kept sending playlist inserts after
 
 Contents:
 
-- [ARS-001 — Run Quota Stop, Refused-Call Charging, Pacific Reset and Pre-Scan Quota Outcome](specifications/ars-001-provider-quota-stop-pacific-reset.md) — the exact contract, log lines, write boundary and tests Q1–Q13.
+- [ARS-001 — Run Quota Stop, Refused-Call Charging, Pacific Reset and Pre-Scan Quota Outcome](specifications/ars-001-provider-quota-stop-pacific-reset.md) — the exact contract, log lines, write boundary and tests Q1–Q13, and the implementation record.
 - [Change log](log.md)

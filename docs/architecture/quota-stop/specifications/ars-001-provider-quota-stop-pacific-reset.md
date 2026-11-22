@@ -6,7 +6,7 @@ tags: [architecture, specification, quota, hotfix, run-58, dispatch-stop, discov
 timestamp: 2026-11-22T00:00:00Z
 ---
 
-**Status:** proposed hotfix contract on `origin/main` at `8d7e009` (includes PR #5's admission fence). Revised 2026-11-22 after critic `ses_dfd2e7bdeffeRof29fhoIoWn65` (CHANGES REQUIRED): §1.2 now orders the stop before any daily-limit logic, with new test Q1b; §3.3 corrects how long the deployment-day overcount lasts and adds the optional relabel (§3.3.1, Q-4). Not implemented. §5's terminal status is the dispatcher's recommendation and is **pending the user's decision** (Q-1). Independent critique is recommended before release.
+**Status:** proposed hotfix contract on `origin/main` at `8d7e009` (includes PR #5's admission fence). Revised 2026-11-22 after critic `ses_dfd2e7bdeffeRof29fhoIoWn65` (CHANGES REQUIRED): §1.2 now orders the stop before any daily-limit logic, with new test Q1b; §3.3 corrects how long the deployment-day overcount lasts and adds the optional relabel (§3.3.1, Q-4). Implemented on branch `hotfix/quota-stop` (see the implementation record at the end). §5's terminal status is the dispatcher's recommendation and is **pending the user's decision** (Q-1). Independent critique is recommended before release.
 
 ## Summary
 
@@ -264,7 +264,7 @@ Use a fake YouTube and a scratch SQLite database, with the fake clock set as not
 
 | # | Test | Expected |
 |---|---|---|
-| Q1 | 8 claimed videos, limit 10,000. The fake returns 200, then 403 `quotaExceeded`. | The provider receives exactly 2 inserts and no discovery calls. Ledger: `success` 50, `quota` 1. 6 videos pending `quota_exhausted`. Run `completed`, `cut_short`. |
+| Q1 | 8 claimed videos, limit 10,000. The fake returns 200, then 403 `quotaExceeded`. | The provider receives exactly 2 inserts and no discovery calls. Ledger: `success` 50, `quota` 1. 7 videos pending `quota_exhausted` (8 claimed, 1 sent). Run `completed`, `cut_short`. |
 | Q1b | Q1 with `daily_limit=0` (unlimited) | Exactly 2 inserts reach the provider. The same ledger rows and deferrals as Q1. Also at ledger level: with `daily_limit=0` and a `quota` row for R, `Acquire` returns `(nil, nil)` and `CanAfford` returns `false` for R. |
 | Q2 | Q1, then stop the process after the `quota` row and resume R | R sends nothing. Work is deferred as in Q1. |
 | Q3 | A `quota` row for R | Run S and an unscoped call in the same bucket are admitted. R is admitted after the next reset. |
@@ -286,3 +286,24 @@ Use a fake YouTube and a scratch SQLite database, with the fake clock set as not
 - **Q-3 (requirements owner, does not block):** record the pre-scan behavior in BR-013 or OC-001, and decide whether a provider quota refusal should also block *later runs* until the reset. That would be a bucket-wide stop. It is rejected here because ARS-005 §6.1 makes the stop per run, and because YouTube now has separate pools (`search.list` has its own 100-call allowance), so one pool's refusal must not stop the others.
 - **Q-4 (user decides, operator runs; does not block the code):** whether to run the §3.3.1 relabel once after deployment. Without it, local refusals can continue until the next Pacific midnight after the deployment's UTC day ends, up to about 24 hours.
 - **Q-5 (operator):** the run 58 ledger, settings and log queries from the debugger session. They confirm the reset mismatch as the first trigger.
+
+## 10. Implementation record
+
+Implemented on `hotfix/quota-stop` from `c1c1977`. Commits: `111d244` (quota), `2aa0506` (discovery), `f02a69e` (pipeline and `cmd/server` test), `0eb154a` (Run Detail), `6827e05` (e2e test expectation).
+
+**Where the assumptions live.** Q-1's terminal status (`completed` + `cut_short`) is `Engine.preScanOutcome` in `internal/discovery/engine.go` (return value) and `stoppedEarlyForQuota` in `web/src/views/RunDetailView.tsx` (condition). The Run Detail copy is the constant `QUOTA_STOPPED_EARLY_COPY` in the same file. It is the §5.3 sentence and is a placeholder pending the designer.
+
+**Evidence** (run on the branch head, Go with `-race` where stated):
+- `go build ./...`, `go vet ./...` and `go vet -tags=integration ./...` pass.
+- `go test -race` passes for `internal/quota`, `internal/discovery` and `internal/pipeline` (`-timeout 40m`). The pipeline run had one failure, fixed below, and the affected and new tests were re-run under `-race`.
+- `go test -tags=integration ./e2e/... ./cmd/server/... ./internal/pipeline/...`, `go test ./...` and the web suite (`vitest`, 901 tests, `tsc -b`) pass.
+- Q6 maps to `TestDefaultResetIsPacific`; Q3 to `TestRunStopIsScopedToRunAndBucket`; Q4 to `TestQuotaRefusalChargedOneUnit`; Q1, Q1b, Q11 and Q12 to `internal/pipeline/quota_stop_test.go`; Q7–Q10 to `internal/discovery/quota_stop_test.go`; Q5 to `cmd/server/quota_stop_bound_read_test.go`; Q13 to `RunDetailView.test.tsx`.
+
+**Deviations and gaps, for the architect.**
+1. **Q1 count.** The table said 6 pending videos. Eight claimed videos with one sent leave 7, so the row now says 7.
+2. **Q2** is proved at the executor boundary: a new ledger and executor over the same database send nothing for the run. A resumed `Execute` on a terminal run is rejected before any send, so it cannot show this.
+3. **Q5** proves the refusal row carries the run ID and that the run's next read and its next insert admission are refused. It does not drive an executor insert through `cmd/server`.
+4. **Q12** proves the "empty ledger, provider refuses everything" half. The clock half (00:00:44Z gives the previous Pacific day) is Q6, because the ledger clock is not reachable from the pipeline tests.
+5. **Outside the write boundary:** `e2e/retry_authority_test.go` asserted that a quota-limited run claims and requeues deferred rows (retry count 1, then 2). §1.4 and Q11 require it to claim nothing, so the test now expects retry count 0 for the limited run and 1 after the final retry. It is its own commit (`6827e05`) so it can be replaced.
+6. **Existing tests changed:** `TestGuardedFinalQuotaRefusalAndProviderQuota` (1 unit), `TestExecutor_GuardedQuotaTailEvidenceFailureRollsBackHandoff` (1 unit, not named in §7), `TestDiscoveryRespectsQuotaBudget` (completed `cut_short`), the provider-403 cases in `source_isolation_test.go` (a provider `quotaExceeded` in the channel loop now stops the scan, as §4.3 says), and `TestReservationRetainsBucketAfterRollover` (pinned to a UTC schedule, because the default day is now Pacific).
+7. **Not demonstrated against the old code:** the new tests use the new API, so they do not compile at `c1c1977`. The debugger's reproduction of run 58 (200 inserts sent) is the evidence for the old behavior.
