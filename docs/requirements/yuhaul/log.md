@@ -3,10 +3,14 @@ type: Log
 title: YuHaul Requirements Change Log
 description: Chronological record of changes to the YuHaul behavioral requirement bundle.
 tags: [changelog, log, okf, requirements, yuhaul]
-timestamp: 2026-11-21T00:00:00Z
+timestamp: 2026-11-22T00:00:00Z
 ---
 
 # YuHaul Requirements Update Log
+
+## 2026-11-22
+
+**Multi-source recovery with a now-ineligible source (BR-002 AC11).** Source: the user's "as recommended" decision of 2026-11-22, relayed in dispatcher answer `2b70486b-974e-4c00-b550-0b736809f87b` to Loom question `b2f00946-9df9-4192-801f-b33ca5e7d371` (Action `b820f6ca-88c9-4f0f-a28a-a58a88060612`); the original human conversation was not independently inspected. A source that saved a page, did not complete or fail, and is ineligible on recovery is treated as in AC10: its observations are handed off durably and never routed by the recovering run. The run ends by its other sources: at least one completed scan gives Completed with incomplete coverage; no completed scan and at least one local failure gives Failed under AC8; only such sources gives Completed with incomplete coverage. Derived: the handoff is durable before any terminal outcome is saved. [BR-002](br-002-subscription-discovery-without-live-monitoring.md) AC10 points to AC11; the [index](index.md) summary has an example. Discovery ARS-001 §7 decision 1 and rule 5 are the architect's to update. Docs only; restart verification is specified, not executed.
 
 ## 2026-11-21
 
