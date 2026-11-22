@@ -565,7 +565,7 @@ func TestDiscoveryRespectsQuotaBudget(t *testing.T) {
 	}))
 	defer server.Close()
 
-	eng, st, ledger, _ := newTestEngine(t, server.URL, 1)
+	eng, st, ledger, db := newTestEngine(t, server.URL, 1)
 	ctx := context.Background()
 
 	runID, err := st.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
@@ -574,9 +574,15 @@ func TestDiscoveryRespectsQuotaBudget(t *testing.T) {
 	// Consume the only available unit so the pre-flight check fails.
 	require.NoError(t, ledger.Record(ctx, sql.NullInt64{Int64: runID, Valid: true}, quota.OpSubscriptionsList))
 
-	_, err = eng.Run(ctx, runID)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "insufficient quota")
+	// Quota used up before the scan is not an error: discovery ends cut_short.
+	res, err := eng.Run(ctx, runID)
+	require.NoError(t, err)
+	require.True(t, res.ScanStopped)
+	require.Zero(t, res.VideosDiscovered)
+	var outcome, reason sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT discovery_scan_outcome, interrupt_reason FROM run WHERE id = ?`, runID).Scan(&outcome, &reason))
+	require.Equal(t, "cut_short", outcome.String)
+	require.False(t, reason.Valid)
 }
 
 func TestRunBoundAdmittedNoResponseRecordsAttempt(t *testing.T) {

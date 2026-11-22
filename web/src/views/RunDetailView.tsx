@@ -79,6 +79,18 @@ function failureExplanation(run: Run): ReactNode {
     : 'No interruption reason was recorded for this run.'
 }
 
+// Shown when a run completed with its channel scan cut short. A completed run
+// is cut short only by the daily quota (ARS-001 section 5), so the sentence is
+// true whether the scan never began or stopped part-way. The terminal status for
+// this case is pending the user's decision (ARS-001 Q-1) and the copy is a
+// placeholder pending the designer; change both here only.
+const QUOTA_STOPPED_EARLY_COPY =
+  'Discovery stopped early because the daily YouTube quota was used up. It continues after the quota resets.'
+
+function stoppedEarlyForQuota(run: Run): boolean {
+  return run.status === 'completed' && run.discovery_scan === 'cut_short'
+}
+
 function terminalStatusLine(status: RunStatus): string {
   switch (status) {
     case 'stopped':
@@ -589,6 +601,10 @@ function RunDetailContent({ id }: { id?: string }) {
             </p>
           )}
         </div>
+      )}
+
+      {!mode && stoppedEarlyForQuota(run) && (
+        <p role="status" data-testid="quota-stopped-early" style={{ margin: '0 0 16px' }}>{QUOTA_STOPPED_EARLY_COPY}</p>
       )}
 
       {/* Channel scan coverage reads its own request; it renders nothing for a

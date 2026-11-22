@@ -31,6 +31,11 @@ func TestRetryAuthority_QuotaProposalChangedRouteAndSiblings(t *testing.T) {
 			// Legacy siblings are aliases, including an unowned retrying row.
 			_, err = env.db.ExecContext(ctx, `INSERT INTO deferred_item(video_id,run_id,deferral_reason,status,created_at) VALUES(?,?,'quota_exhausted','retrying',?)`, items[0].VideoID, old.ID, time.Now().UTC())
 			require.NoError(t, err)
+			// One unit of headroom: the run is created and claims the rows (quota is
+			// not known to be used up), but cannot afford the 50-unit insert, so it
+			// requeues them. With none left it would claim nothing (quota-stop
+			// ARS-001 §1.4).
+			require.NoError(t, env.ledger.SetDailyLimit(ctx, 5))
 			stillLimited, err := env.pipeline.StartRun(ctx, state.RunTypeManual)
 			require.NoError(t, err)
 			env.pipeline.Execute(ctx, stillLimited.ID)
