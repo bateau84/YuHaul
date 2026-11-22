@@ -37,6 +37,7 @@ func requirePreScanQuotaStop(t *testing.T, h *isoHarness, res *Result, err error
 	require.False(t, h.interruptReason(t).Valid, "a quota stop is not an interruption")
 	require.Zero(t, h.requests('A')+h.requests('B'), "no uploads request after the stop")
 	require.Contains(t, h.logs.String(), "discovery skipped: daily quota used up")
+	require.Regexp(t, `discovery complete.*scan_outcome=cut_short`, h.logs.String())
 }
 
 // Q7: the local budget is used up before discovery.

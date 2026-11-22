@@ -202,6 +202,12 @@ func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube
 	}
 	result.VideosDiscovered = len(newVideos)
 
+	e.logDiscoveryComplete(ctx, runID, result)
+
+	return result, nil
+}
+
+func (e *Engine) logDiscoveryComplete(ctx context.Context, runID int64, result *Result) {
 	e.logger.InfoContext(ctx, "discovery complete",
 		"run_id", runID,
 		"subscriptions", result.SubscriptionsFetched,
@@ -209,8 +215,6 @@ func (e *Engine) runWithClient(ctx context.Context, runID int64, client *youtube
 		"videos", result.VideosDiscovered,
 		"scan_outcome", scanOutcomeName(result),
 	)
-
-	return result, nil
 }
 
 func scanOutcomeName(r *Result) string {
@@ -248,6 +252,7 @@ func (e *Engine) preScanOutcome(ctx context.Context, runID int64, result *Result
 	}
 	e.logger.WarnContext(ctx, "discovery skipped: daily quota used up",
 		"run_id", runID, "operation", string(op), "refusal", refusal)
+	e.logDiscoveryComplete(ctx, runID, result)
 	return result, nil
 }
 
