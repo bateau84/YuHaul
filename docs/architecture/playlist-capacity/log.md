@@ -10,6 +10,16 @@ timestamp: 2026-11-22T00:00:00Z
 
 ## 2026-11-22
 
+**ARS-001 revision 4 after critique `ses_dfc19d9d9ffej0S5rESOBhhIkf` (CHANGES REQUIRED on `a3333cb`).** Checked against `origin/main` at `50c4f59`, and the branch is rebased onto it. [ARS-001](/docs/architecture/playlist-capacity/specifications/ars-001-capacity-schema-queue-and-send-path.md) now:
+
+- **Replay check.** `committedRetryFailureTx` accepts capacity members that are `pending`, `evicted`, `discarded` or `completed`, and still requires a completed or resolved video-scoped member. It runs before the `ErrWorkSuppressed` and `ErrWorkNotOwned` handling at `retry.go:358`, so a resumed run neither refuses nor commits the failure twice (§3.5, §3.6; tests W9–W11).
+- **Removed targets, including R3,** are left out of the existing classification. If A got R3 and B is full, the video is `deferred / playlist_full` with no Errors entry (§4.6; test D7).
+- **SPA reader.** `actionOutcomeLabel` is added to the R3 readers. The designer owns the label (§4.6).
+- **`RemovedByUser`.** The change is narrower: it keeps the recency ordering and clears only the capacity row's `removed` flag. Video search is named as a consumer (§6.4).
+- **Quota rule.** §4.5 names it exactly: only a complete single-reason `quotaExceeded` is non-application, and `dailyLimitExceeded` stays uncertain.
+
+[ARD-001](/docs/architecture/playlist-capacity/design/ard-001-exact-target-capacity-and-waiting-work.md) matches. The quota-stop links now resolve.
+
 **User decisions realized; aligned with PR #9 (ARS-001 revision 3).** The requirements on this branch record the user's decisions (`5f5e717` for BR-040 and BR-041, `9e24dac` for OC-007 G2 and the BR-040 AC3 exception). [ARD-001](/docs/architecture/playlist-capacity/design/ard-001-exact-target-capacity-and-waiting-work.md) and [ARS-001](/docs/architecture/playlist-capacity/specifications/ars-001-capacity-schema-queue-and-send-path.md) now realize them:
 
 - **Trust the count.** It is the room-bound contract (ARS-001 §4.2). The never-covered alternative is removed.
