@@ -16,6 +16,7 @@ import (
 
 	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
+	"github.com/bateau84/YuHaul/internal/diag"
 	"github.com/bateau84/YuHaul/internal/duplicate"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/queue"
@@ -536,6 +537,52 @@ func TestRetryVideoPropagatesARunStoppingError(t *testing.T) {
 	require.NoError(t, rf.db.QueryRow(`SELECT status FROM deferred_item WHERE id=?`, receipts[0].Deferred[0].ID).Scan(&status))
 	require.Equal(t, "retrying", status, "the claim stays live for the run-level retention sweep")
 	require.Zero(t, rf.posts.Load())
+}
+
+// The stored diagnostic of a lifecycle accounting stop is classified from the
+// accounting cause: the registered SQLite code of the failed ledger write is
+// kept, a provider result of the same read is not reported for the stop, and
+// no storage text is released.
+func TestLifecycleAccountingFaultDiagnostic(t *testing.T) {
+	rf := newReceivingFixture(t)
+	_, err := rf.db.Exec(`CREATE TRIGGER refuse_row BEFORE INSERT ON quota_ledger BEGIN SELECT RAISE(ABORT, 'secret storage text'); END`)
+	require.NoError(t, err)
+	// A real driver error from the real ledger write.
+	storeErr := rf.ledger.RecordCalls(context.Background(), sql.NullInt64{}, quota.OpVideosList, 1)
+	require.Error(t, storeErr)
+
+	quotaRefusal := &youtube.APIError{Status: 403, Reason: "quotaExceeded"}
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"sqlite fact is kept": {
+			&youtube.ReadError{Accounting: storeErr},
+			"diag:v1 phase=unknown operation=account_quota code=sqlite_error sqlite=SQLITE_CONSTRAINT",
+		},
+		"provider result of the same read does not replace it": {
+			&youtube.ReadError{Primary: quotaRefusal, Status: 403, Accounting: storeErr},
+			"diag:v1 phase=unknown operation=account_quota code=sqlite_error sqlite=SQLITE_CONSTRAINT",
+		},
+		"provider result is not reported for an untyped accounting fault": {
+			&youtube.ReadError{Primary: quotaRefusal, Status: 403, Accounting: auth.ErrQuotaAccounting},
+			"diag:v1 phase=unknown operation=account_quota code=unknown_error",
+		},
+		"preflight storage error in the chain is kept": {
+			errors.Join(auth.ErrQuotaAccounting, storeErr),
+			"diag:v1 phase=unknown operation=account_quota code=sqlite_error sqlite=SQLITE_CONSTRAINT",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := rf.p.failClosedAtLifecycle(rf.ctx(), rf.recvRun, fmt.Errorf("metadata: fetch refresh batch: %w", tc.err))
+			var stopping *runStoppingError
+			require.ErrorAs(t, err, &stopping)
+			require.ErrorIs(t, err, auth.ErrQuotaAccounting)
+			got := diag.Reason(err, "metadata lifecycle accounting failed")
+			require.Equal(t, tc.want, got)
+			require.NotContains(t, got, "secret")
+		})
+	}
 }
 
 // S7: with a stale in-process view, R2 refuses a claim under a stored

@@ -668,6 +668,25 @@ func IsAccountingFault(err error) bool {
 		(errors.As(err, &read) && read.Accounting != nil)
 }
 
+// AccountingCause returns the accounting part of an error for which
+// IsAccountingFault is true, so a classifier sees the typed storage fact the
+// read wrapper keeps beside its primary cause. youtube.ReadError unwraps only
+// its Primary, which would hide an accounting SQLite error and let a provider
+// or generic result be reported for an accounting stop. A fault that is not
+// carried in a read wrapper (a failed preflight, an accounting error already
+// in the chain) is returned unchanged.
+func AccountingCause(err error) error {
+	var fault *ReadFaultError
+	if errors.As(err, &fault) && fault.Facts.Accounting != nil {
+		return fault.Facts.Accounting
+	}
+	var read *youtube.ReadError
+	if errors.As(err, &read) && read.Accounting != nil {
+		return read.Accounting
+	}
+	return err
+}
+
 // ReadFaultError reports a metadata read whose local quota accounting failed.
 // It carries the typed facts and unwraps to the original read error. Its text
 // is fixed so no provider or store detail reaches a log through it.

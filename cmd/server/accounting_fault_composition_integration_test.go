@@ -11,6 +11,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -21,8 +22,8 @@ import (
 
 // The first quota-accounting fault of a run stops every later run-owned
 // provider request, including the discovery requests a run makes after its
-// metadata lifecycle. The run ends failed, the stop is stored, and nothing
-// reads the injected fault text.
+// metadata lifecycle. The run ends failed, the stop is stored, and the safe
+// diagnostic keeps the SQLite code without the injected fault text.
 func TestS6_LifecycleAccountingFaultSendsNoFurtherRequest(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "yuhaul.db")
 	seedBase(t, dbPath)
@@ -74,8 +75,20 @@ func TestS6_LifecycleAccountingFaultSendsNoFurtherRequest(t *testing.T) {
 	require.Equal(t, "accounting_or_integrity", scalar[string](t, db, `SELECT dispatch_stop FROM run WHERE id=?`, second))
 	require.Zero(t, scalar[int](t, db, `SELECT count(*) FROM quota_ledger WHERE run_id=?`, second), "the refused attempt row was never written")
 	require.Zero(t, yt.postCount("V2"))
-	require.Contains(t, scalar[string](t, db, `SELECT interrupt_reason FROM run WHERE id=?`, second), "operation=account_quota")
+
+	// The stored, logged and served diagnostic keeps the registered SQLite code
+	// of the failed ledger write and nothing of the store's own text.
+	const diagnostic = "diag:v1 phase=unknown operation=account_quota code=sqlite_error sqlite=SQLITE_CONSTRAINT"
+	require.Equal(t, diagnostic, scalar[string](t, db, `SELECT interrupt_reason FROM run WHERE id=?`, second))
+	require.Contains(t, srv.out.String(), diagnostic)
 	require.NotContains(t, srv.out.String(), "injected ledger fault", "no store text reaches the log")
-	require.NotContains(t, scalar[string](t, db, `SELECT interrupt_reason FROM run WHERE id=?`, second), "injected")
+	code, apiBody := srv.do(http.MethodGet, "/api/runs/"+itoa(second))
+	require.Equal(t, 200, code, apiBody)
+	var detail map[string]any
+	require.NoError(t, json.Unmarshal([]byte(apiBody), &detail))
+	require.Equal(t, diagnostic, detail["interrupt_reason"])
+	require.NotContains(t, detail, "failure_reason_unavailable", "the cause is known, not withheld")
+	require.NotContains(t, apiBody, "injected")
+	require.NotContains(t, apiBody, "quota_ledger", "no SQL or table text is served")
 	srv.sigterm()
 }

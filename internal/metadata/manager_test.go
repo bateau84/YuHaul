@@ -585,3 +585,27 @@ func TestIsAccountingFault(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountingCause(t *testing.T) {
+	store := errors.New("quota: record attempt")
+	provider := &youtube.APIError{Status: 503}
+	for name, tc := range map[string]struct {
+		err  error
+		want error
+	}{
+		"read error keeps its accounting part":   {fmt.Errorf("sweep: %w", &youtube.ReadError{Primary: provider, Accounting: store}), store},
+		"read fault keeps its accounting part":   {fmt.Errorf("x: %w", &metadata.ReadFaultError{Facts: metadata.ReadFacts{Err: provider, Accounting: store}}), store},
+		"preflight fault is returned unchanged":  {fmt.Errorf("preflight: %w", errors.Join(auth.ErrQuotaAccounting, store)), nil},
+		"read error without accounting fact":     {&youtube.ReadError{Primary: provider}, nil},
+		"joined sweep picks the read error part": {errors.Join(errors.New("optimize"), &youtube.ReadError{Primary: provider, Accounting: store}), store},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := metadata.AccountingCause(tc.err)
+			if tc.want == nil {
+				require.Equal(t, tc.err, got)
+				return
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

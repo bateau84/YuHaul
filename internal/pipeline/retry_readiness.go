@@ -133,11 +133,14 @@ func (p *Pipeline) failClosed(ctx context.Context, qs *queue.Store, runID int64,
 }
 
 // failClosedAtLifecycle is writer W3 for a metadata lifecycle fault. The
-// cause carries its own phase and operation, so the stored reason stays inside
-// the closed diagnostic vocabulary. When the retry store itself cannot be
-// built the latch still holds the stop for this execution.
+// diagnostic is classified from the accounting cause, so a registered SQLite
+// code of a failed ledger write is kept and a provider result of the same read
+// is not reported for an accounting stop. The cause carries its own phase and
+// operation, so the stored reason stays inside the closed diagnostic
+// vocabulary. When the retry store itself cannot be built the latch still
+// holds the stop for this execution.
 func (p *Pipeline) failClosedAtLifecycle(ctx context.Context, runID int64, cause error) error {
-	cause = diag.At(cause, "unknown", "account_quota")
+	cause = diag.At(metadata.AccountingCause(cause), "unknown", "account_quota")
 	qs, err := p.retryStore()
 	if err != nil {
 		quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
