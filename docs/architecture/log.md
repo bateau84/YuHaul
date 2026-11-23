@@ -3,10 +3,14 @@ type: Log
 title: Architecture Change Log
 description: Chronological record of changes to the docs/architecture/ bundle.
 tags: [changelog, log, okf, architecture]
-timestamp: 2026-11-23T00:00:00Z
+timestamp: 2026-11-24T00:00:00Z
 ---
 
 # Architecture Update Log
+
+## 2026-11-24
+
+**Saved receiving decision is not hydrated (assessment `771112e4` F4, Action `b820f6ca`).** [Run-initiation ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.2 now says what the plan already required: an open receipt whose receiving run finished its evaluation keeps its decision and settles its outstanding action without a metadata read, so no omission, failure or late expiry can release, fail or re-decide it. An unfinished evaluation still follows readiness, and a run dispatch stop still takes its own disposition. §12 records the built seam and the evidence. No requirement or contract changed.
 
 ## 2026-11-23
 
