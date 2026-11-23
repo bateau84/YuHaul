@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
@@ -67,6 +68,35 @@ func inputRequirement(routes []router.Route, videoID string) metadata.InputRequi
 func requiredInputs(ctx context.Context) (metadata.InputRequirement, bool) {
 	req, ok := ctx.Value(requireInputsKey{}).(metadata.InputRequirement)
 	return req, ok
+}
+
+// evaluationFinished reports whether run's evaluation of v has completed. A
+// version-1 run moves v out of not_yet_evaluated/evaluating only after every
+// route of the ordered list is decided, so a persisted prefix of decisions is
+// never mistaken for a completed one.
+func evaluationFinished(run *state.Run, v *state.Video) bool {
+	return run.ActionAuthorityVersion == 1 &&
+		v.ProcessingState != state.VideoStateNotYetEvaluated &&
+		v.ProcessingState != state.VideoStateEvaluating
+}
+
+// receivingDecisionSaved reports whether the receiving run already holds a
+// complete decision for the open video: the claim reset it to not_yet_evaluated,
+// so a finished evaluation is this run's own. Such a receipt is not hydrated,
+// rerouted or re-detected (ARS-005 section 6.2). Its saved decision and
+// outstanding action are continued from local state, so no metadata answer,
+// however it turns out, may reopen, release, fail or re-decide it. An
+// unfinished evaluation is not saved and still needs real inputs.
+func (p *Pipeline) receivingDecisionSaved(ctx context.Context, runID, videoID int64) (bool, error) {
+	run, err := p.stateStore.GetRun(ctx, runID)
+	if err != nil {
+		return false, fmt.Errorf("read receiving run %d: %w", runID, err)
+	}
+	v, err := p.stateStore.GetVideo(ctx, videoID)
+	if err != nil {
+		return false, fmt.Errorf("read video %d: %w", videoID, err)
+	}
+	return evaluationFinished(run, v), nil
 }
 
 // inputsSupplied reports whether m supplies every input req needs.
@@ -181,6 +211,7 @@ func (p *Pipeline) prepareReceiving(ctx context.Context, qs *queue.Store, runID 
 	var routes []router.Route
 	var reqs []metadata.InputRequirement
 	byText := map[string]int64{}
+	saved := map[string]bool{} // open videos whose receiving run holds a complete decision
 	for _, receipt := range receipts {
 		// A receipt that is no longer valid (removed, lost, wrong owner) is
 		// reported by the per-receipt loop, in order, as an admission refusal.
@@ -207,6 +238,11 @@ func (p *Pipeline) prepareReceiving(ctx context.Context, qs *queue.Store, runID 
 		if err := p.db.QueryRowContext(ctx, `SELECT video_id FROM video WHERE id = ?`, receipt.VideoID).Scan(&text); err != nil {
 			return nil, fmt.Errorf("read video %d: %w", receipt.VideoID, err)
 		}
+		isSaved, err := p.receivingDecisionSaved(ctx, runID, receipt.VideoID)
+		if err != nil {
+			return nil, err
+		}
+		saved[text] = isSaved
 		reqs = append(reqs, inputRequirement(routes, text))
 		byText[text] = receipt.VideoID
 	}
@@ -217,6 +253,14 @@ func (p *Pipeline) prepareReceiving(ctx context.Context, qs *queue.Store, runID 
 	stop, err := p.runStop(ctx, qs, runID)
 	if err != nil {
 		return nil, err
+	}
+	if stop == quota.StopNone {
+		// A saved decision needs no input read. With a stop in force it still
+		// takes the stop's disposition below, which makes no provider request.
+		reqs = slices.DeleteFunc(reqs, func(r metadata.InputRequirement) bool { return saved[r.VideoID] })
+		if len(reqs) == 0 {
+			return nil, nil
+		}
 	}
 	if stop == quota.StopAccountingOrIntegrity {
 		return nil, p.failClosed(ctx, qs, runID, auth.ErrQuotaAccounting)

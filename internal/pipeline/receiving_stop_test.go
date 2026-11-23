@@ -124,8 +124,12 @@ func newReceivingFixtureOn(t *testing.T, db *sql.DB) *receivingFixture {
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
 		default:
 			rf.posts.Add(1)
+			// A valid playlistItems resource: the posted snippet, with an id.
+			item := map[string]any{}
+			_ = json.NewDecoder(r.Body).Decode(&item)
+			item["id"] = "inserted"
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "inserted"})
+			_ = json.NewEncoder(w).Encode(item)
 		}
 	}))
 	t.Cleanup(rf.server.Close)

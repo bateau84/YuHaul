@@ -806,7 +806,7 @@ func (p *Pipeline) routeVideos(ctx context.Context, runID int64, videos []*state
 		}
 		// Decisions alone are not a completion marker: an interruption can
 		// leave only a prefix of the ordered routes persisted.
-		if run.ActionAuthorityVersion == 1 && v.ProcessingState != state.VideoStateNotYetEvaluated && v.ProcessingState != state.VideoStateEvaluating {
+		if evaluationFinished(run, v) {
 			for _, d := range decisions {
 				if d.Decision == state.RouteDecisionMatched {
 					routed = append(routed, v)

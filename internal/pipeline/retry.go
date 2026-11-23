@@ -292,6 +292,14 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 		}
 		ctx = context.WithValue(ctx, requireInputsKey{}, inputRequirement(routes, v.VideoID))
 	}
+	// A saved decision is neither hydrated nor rerouted (§6.2): the evaluation
+	// below is skipped and only its outstanding action runs.
+	saved := false
+	if class == state.VideoClassOpen {
+		if saved, err = p.receivingDecisionSaved(ctx, runID, videoID); err != nil {
+			return err
+		}
+	}
 	var workErr error
 	switch class {
 	case state.VideoClassPartlyDone:
@@ -299,7 +307,7 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 		// are sent, under the original run's decision.
 		workErr = p.continueOriginalDecision(ctx, runID, v)
 	default:
-		if v.FinalOutcome == state.FinalOutcomeNotYetEvaluated {
+		if v.FinalOutcome == state.FinalOutcomeNotYetEvaluated && !saved {
 			var survivors []*state.Video
 			routes, err := p.productionRoutes(ctx, runID)
 			if err != nil {
