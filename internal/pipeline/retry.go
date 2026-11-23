@@ -342,6 +342,13 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	if errors.As(workErr, &accountingErr) {
 		return workErr
 	}
+	var stopping *runStoppingError
+	if errors.As(workErr, &stopping) {
+		// A fail-closed accounting or integrity stop (writer W3) ends the run.
+		// The receipt stays live until the run-level retention sweep; this
+		// video takes neither FinishRetryFailureTx nor an Errors entry.
+		return workErr
+	}
 	var writerFault *admissionWriterFault
 	if errors.As(workErr, &writerFault) {
 		// A local storage fault at final admission stops the run. The original

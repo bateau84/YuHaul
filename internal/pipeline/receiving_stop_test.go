@@ -410,6 +410,108 @@ func TestReceivingAccountingFaultFailsClosed(t *testing.T) {
 	})
 }
 
+// A quota preflight that cannot be read (here an unreadable daily limit, while
+// the stop read still works) is writer W3 as well, not an ordinary failure:
+// no request, the stop is latched and stored, and the error stops the run.
+func TestReceivingPreflightReadErrorFailsClosed(t *testing.T) {
+	rf := newReceivingFixture(t)
+	receipts := rf.claimNew(2)
+	_, err := rf.db.Exec(`INSERT OR REPLACE INTO quota_settings (key, value) VALUES ('daily_limit', 'not-a-number')`)
+	require.NoError(t, err)
+	ctx := rf.ctx()
+
+	err = rf.p.processDeferredItems(ctx, rf.recvRun, receipts, false)
+
+	require.ErrorIs(t, err, auth.ErrQuotaAccounting)
+	var stopping *runStoppingError
+	require.ErrorAs(t, err, &stopping)
+	require.Zero(t, rf.listCalls.Load())
+	require.Zero(t, rf.renewals.Load())
+	require.Equal(t, "accounting_or_integrity", rf.storedStop())
+	got, _ := rf.ledger.RunDispatchStop(ctx)
+	require.Equal(t, quota.StopAccountingOrIntegrity, got)
+}
+
+// lifecycleStub keeps the real metadata manager and replaces only the sweep
+// result, so the run owner's handling of that result is what is under test.
+type lifecycleStub struct {
+	*metadata.Manager
+	err error
+}
+
+func (s lifecycleStub) RunLifecycle(context.Context) error { return s.err }
+
+// The metadata lifecycle runs inside the run. When it reports an accounting
+// fault, the run makes no further provider request, stores the stop, ends
+// failed through the retention path with a closed diagnostic, and never
+// reaches discovery. Any other lifecycle error stays a warning.
+func TestRunLifecycleAccountingFaultFailsTheRunClosed(t *testing.T) {
+	sweepFault := fmt.Errorf("metadata: fetch refresh batch: %w", &youtube.ReadError{Accounting: errors.New("quota: record attempt: SQL text must not leak")})
+	run := func(t *testing.T, lifecycleErr error) (*receivingFixture, state.Run) {
+		rf := newReceivingFixture(t)
+		rf.p.meta = lifecycleStub{Manager: rf.p.meta.(*metadata.Manager), err: lifecycleErr}
+		rf.p.Execute(context.Background(), rf.recvRun)
+		got, err := rf.state.GetRun(context.Background(), rf.recvRun)
+		require.NoError(t, err)
+		return rf, *got
+	}
+
+	t.Run("accounting fault", func(t *testing.T) {
+		rf, got := run(t, sweepFault)
+		require.Equal(t, state.RunStatusFailed, got.Status)
+		require.NotNil(t, got.InterruptReason)
+		require.Equal(t, "diag:v1 phase=unknown operation=account_quota code=unknown_error", *got.InterruptReason)
+		require.Equal(t, "accounting_or_integrity", rf.storedStop())
+		require.Zero(t, rf.listCalls.Load())
+		require.Zero(t, rf.posts.Load())
+		require.Zero(t, rf.renewals.Load())
+	})
+
+	t.Run("other lifecycle error", func(t *testing.T) {
+		rf, got := run(t, errors.New("metadata: optimize search index"))
+		if got.InterruptReason != nil {
+			require.NotContains(t, *got.InterruptReason, "account_quota")
+		}
+		require.Empty(t, rf.storedStop(), "a non-accounting sweep error raises no stop")
+	})
+}
+
+// execStub stands in for the executor at its own seam and returns a fixed
+// result, so the retry path's handling of that result is what is under test.
+type execStub struct{ err error }
+
+func (e execStub) Execute(context.Context, int64, int64, []RouteMatch) (state.VideoFinalOutcome, error) {
+	return state.FinalOutcomeFailed, e.err
+}
+
+// A run-stopping error from the executor (writer W3) ends the retry run
+// through its retention sweep. It is not one video's failure: the claimed row
+// is not finished as failed and no Errors entry is written for it.
+func TestRetryVideoPropagatesARunStoppingError(t *testing.T) {
+	rf := newReceivingFixture(t)
+	receipts := rf.claimNew(1)
+	var text string
+	require.NoError(t, rf.db.QueryRow(`SELECT video_id FROM video WHERE id=?`, receipts[0].VideoID).Scan(&text))
+	rf.p.meta = &stubReadiness{
+		statuses: map[string]metadata.FetchStatus{text: metadata.FetchCurrent},
+		rows:     map[string]*metadata.TransientMetadata{text: {VideoID: text, Title: new("t"), ChannelName: new("c"), Description: new("d"), DurationSeconds: new(60)}},
+	}
+	rf.p.executor = execStub{err: &runStoppingError{cause: auth.ErrQuotaAccounting}}
+
+	err := rf.p.processDeferredItems(rf.ctx(), rf.recvRun, receipts, false)
+
+	var stopping *runStoppingError
+	require.ErrorAs(t, err, &stopping)
+	require.ErrorIs(t, err, auth.ErrQuotaAccounting)
+	var sinks int
+	require.NoError(t, rf.db.QueryRow(`SELECT COUNT(*) FROM error_entry WHERE video_id=?`, receipts[0].VideoID).Scan(&sinks))
+	require.Zero(t, sinks, "no Errors entry for a run-level stop")
+	var status string
+	require.NoError(t, rf.db.QueryRow(`SELECT status FROM deferred_item WHERE id=?`, receipts[0].Deferred[0].ID).Scan(&status))
+	require.Equal(t, "retrying", status, "the claim stays live for the run-level retention sweep")
+	require.Zero(t, rf.posts.Load())
+}
+
 // S7: with a stale in-process view, R2 refuses a claim under a stored
 // accounting stop and R7 refuses ClaimPlaylistSend under any stored value, each
 // inside its writer transaction with no guard or membership write.

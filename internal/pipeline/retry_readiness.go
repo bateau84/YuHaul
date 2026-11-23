@@ -132,6 +132,20 @@ func (p *Pipeline) failClosed(ctx context.Context, qs *queue.Store, runID int64,
 	return &runStoppingError{cause: cause}
 }
 
+// failClosedAtLifecycle is writer W3 for a metadata lifecycle fault. The
+// cause carries its own phase and operation, so the stored reason stays inside
+// the closed diagnostic vocabulary. When the retry store itself cannot be
+// built the latch still holds the stop for this execution.
+func (p *Pipeline) failClosedAtLifecycle(ctx context.Context, runID int64, cause error) error {
+	cause = diag.At(cause, "unknown", "account_quota")
+	qs, err := p.retryStore()
+	if err != nil {
+		quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
+		return &runStoppingError{cause: errors.Join(auth.ErrQuotaAccounting, cause, err)}
+	}
+	return p.failClosed(ctx, qs, runID, cause)
+}
+
 func (p *Pipeline) isProductionRunID(ctx context.Context, runID int64) bool {
 	run, err := p.stateStore.GetRun(ctx, runID)
 	return err == nil && p.isProductionRun(run.RunType)

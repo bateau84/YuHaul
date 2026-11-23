@@ -457,10 +457,12 @@ func (s *Service) dispatchScoped(ctx context.Context, b AuthorizationBinding, re
 				if !errors.As(err, &fence) && !errors.Is(err, ErrQuotaRefused) && !errors.Is(err, ErrAccessExpiredBeforeAdmission) &&
 					!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					err = errors.Join(ErrQuotaAccounting, err)
+					quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
 				}
 				if hold != nil {
 					if cleanup := hold.Cancel(); cleanup != nil {
 						err = errors.Join(err, ErrQuotaAccounting, cleanup)
+						quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
 					}
 				}
 				s.mu.Unlock()

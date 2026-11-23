@@ -95,10 +95,13 @@ func LatchRunStop(ctx context.Context, s DispatchStop) {
 	if s != StopAuthorization && s != StopAccountingOrIntegrity {
 		return
 	}
-	sc, ok := ctx.Value(runScopeKey{}).(*runScope)
-	if !ok {
-		return
+	if sc, ok := ctx.Value(runScopeKey{}).(*runScope); ok {
+		sc.raise(s)
 	}
+}
+
+// raise lifts the latch to s and never lowers it.
+func (sc *runScope) raise(s DispatchStop) {
 	for {
 		cur := sc.latch.Load()
 		if cur >= int32(s) || sc.latch.CompareAndSwap(cur, int32(s)) {
@@ -273,7 +276,19 @@ type Hold struct {
 	date   string
 	at     time.Time
 	runID  int64 // run scope at Acquire, 0 if none
+	scope  *runScope
 	state  uint8 // 0 provisional, 1 admitted, 2 finished, 3 accounting uncertain, 4 cancelled
+}
+
+// latchAccountingFault raises the run's in-memory stop for a hold whose
+// attempt row could not be written. The request was admitted (and may have
+// been sent) without a ledger row, so the run must make no further request in
+// this execution (ARS-005 section 6.1.3, writer W3: latch first). It does not
+// depend on which caller later sees the error.
+func (h *Hold) latchAccountingFault() {
+	if h.scope != nil {
+		h.scope.raise(StopAccountingOrIntegrity)
+	}
 }
 
 // AdmissionTime is the UTC timestamp to use in the authorization receipt.
@@ -332,7 +347,8 @@ func (l *Ledger) Acquire(ctx context.Context, op Operation) (*Hold, error) {
 				"run_id", runID, "operation", string(op), "cause", causeLocalBudget)
 			return nil, nil
 		}
-		h := &Hold{ledger: l, op: op, date: date, at: now, runID: runID}
+		sc, _ := ctx.Value(runScopeKey{}).(*runScope)
+		h := &Hold{ledger: l, op: op, date: date, at: now, runID: runID, scope: sc}
 		if l.holds == nil {
 			l.holds = make(map[*Hold]struct{})
 		}
@@ -481,6 +497,7 @@ func (h *Hold) Finalize(ctx context.Context, runID sql.NullInt64, category Outco
 	_, err := l.db.ExecContext(ctx, `INSERT INTO quota_ledger (date, operation_type, units_consumed, call_count, run_id, recorded_at, outcome_category, http_status) VALUES (?, ?, ?, 1, ?, ?, ?, ?)`, h.date, string(h.op), attemptUnits(h.op, category), runID, h.at, string(category), status)
 	if err != nil {
 		h.state = 3
+		h.latchAccountingFault()
 		return fmt.Errorf("quota: record attempt: %w", err)
 	}
 	l.logQuotaStop(ctx, runID, h.op, status, h.date, category)
@@ -548,6 +565,7 @@ func (l *Ledger) RecordCalls(ctx context.Context, runID sql.NullInt64, op Operat
 		date, string(op), units, callCount, runID, time.Now().UTC(),
 	)
 	if err != nil {
+		LatchRunStop(ctx, StopAccountingOrIntegrity)
 		return fmt.Errorf("quota: record %s x%d: %w", op, callCount, err)
 	}
 
@@ -583,6 +601,7 @@ func (l *Ledger) RecordAttempt(ctx context.Context, runID sql.NullInt64, op Oper
 		date, string(op), attemptUnits(op, category), runID, admittedAt.UTC(), string(category), httpStatus,
 	)
 	if err != nil {
+		LatchRunStop(ctx, StopAccountingOrIntegrity)
 		return fmt.Errorf("quota: record attempt: %w", err)
 	}
 	l.logQuotaStop(ctx, runID, op, httpStatus, date, category)

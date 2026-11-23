@@ -206,6 +206,73 @@ func TestDispatchRunDispatchStopIsPerRun(t *testing.T) {
 	}
 }
 
+// W3 at the admission seam: a local accounting fault during admission latches
+// accounting_or_integrity for the run's execution, so the next guarded request
+// of that run makes no renewal, hold or send even though the store is healthy
+// again. Another run is still admitted.
+func TestDispatchAccountingFaultStopsLaterRequestsOfTheRun(t *testing.T) {
+	ctx := context.Background()
+	db := storetest.Open(t)
+	ledger := quota.New(db)
+	runID := seedStopRun(t, db, "")
+	other := seedStopRun(t, db, "")
+	rctx := quota.WithRun(ctx, runID)
+
+	tokenStore := newTestStore(t, newTestKey(t))
+	authorityTestSeed(t, tokenStore, time.Now().Add(time.Hour))
+	s := authorityTestService(t, tokenStore, nil)
+	binding, err := s.Bind(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sends atomic.Int32
+	transport := authorityTestTransport(func(*http.Request) (*http.Response, error) {
+		sends.Add(1)
+		return authorityTestResponse("{}"), nil
+	})
+	request := func(c context.Context) *http.Request {
+		req, err := http.NewRequestWithContext(c, http.MethodGet, "https://example.com/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+
+	// The writer scope refuses with a local storage fault: admission accounting fails.
+	faulty := func(context.Context, func() error) error { return errors.New("writer unavailable") }
+	resp, _, hold, err := s.DispatchWithQuotaScoped(rctx, binding, request(rctx), transport, ledger, quota.OpPlaylistItemsInsert, faulty)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if !errors.Is(err, ErrQuotaAccounting) || hold != nil || sends.Load() != 0 {
+		t.Fatalf("first dispatch: err=%v hold=%v sends=%d; want an accounting fault, no hold, no send", err, hold, sends.Load())
+	}
+
+	// The store is healthy again; the latch alone refuses the next request.
+	resp, _, hold, err = s.DispatchWithQuota(rctx, binding, request(rctx), transport, ledger, quota.OpVideosList)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if !errors.Is(err, ErrQuotaAccounting) || hold != nil || sends.Load() != 0 {
+		t.Fatalf("second dispatch: err=%v hold=%v sends=%d; want the accounting stop, no hold, no send", err, hold, sends.Load())
+	}
+	if got := ledgerRows(t, db); got != 0 {
+		t.Fatalf("ledger rows = %d, want 0", got)
+	}
+
+	octx := quota.WithRun(ctx, other)
+	resp, _, hold, err = s.DispatchWithQuota(octx, binding, request(octx), transport, ledger, quota.OpVideosList)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err != nil || hold == nil || sends.Load() != 1 {
+		t.Fatalf("another run: err=%v hold=%v sends=%d; want admitted", err, hold, sends.Load())
+	}
+	if err := hold.Finalize(octx, sql.NullInt64{}, quota.OutcomeSuccess, sql.NullInt64{Int64: 200, Valid: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // S3 (critic advisory): R0 guards dispatchScoped when a ledger is present. The
 // paths that bypass it are an unguarded token read (ActiveToken), the
 // ledger-less Dispatch, and the legacy discovery Run. This test pins the exact

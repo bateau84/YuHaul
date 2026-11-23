@@ -371,7 +371,10 @@ func (m *Manager) refreshCandidates(ctx context.Context, src candidateSource, wi
 		cost := quota.OpVideosList.UnitCost()
 		ok, _, err := m.ledger.CanAfford(ctx, cost)
 		if err != nil {
-			return refreshed, fmt.Errorf("metadata: check quota for refresh: %w", err)
+			// A preflight read error is a local accounting fault, not a
+			// refusal (ARS-005 section 6.1). It stops the sweep and, through
+			// the run owner, every later provider request of the run.
+			return refreshed, fmt.Errorf("metadata: check quota for refresh: %w", errors.Join(auth.ErrQuotaAccounting, err))
 		}
 		if !ok {
 			m.logger.WarnContext(ctx, "metadata refresh deferred: quota exhausted",
@@ -516,7 +519,7 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 		ok, _, err := m.ledger.CanAfford(ctx, quota.OpVideosList.UnitCost())
 		if err != nil {
 			failAll(missing[i:])
-			return out, fmt.Errorf("metadata: quota preflight for evaluation fetch: %w", err)
+			return out, fmt.Errorf("metadata: quota preflight for evaluation fetch: %w", errors.Join(auth.ErrQuotaAccounting, err))
 		}
 		if !ok {
 			out.Read = &ReadFacts{Err: auth.ErrQuotaRefused, Primary: auth.ErrQuotaRefused, QuotaRefused: true}
@@ -648,6 +651,21 @@ func (m *Manager) runSuspension(ctx context.Context) (ReadFacts, bool) {
 	defer m.suspendMu.Unlock()
 	f, ok := m.suspended[runID]
 	return f, ok
+}
+
+// IsAccountingFault reports whether err carries a local quota accounting or
+// integrity fault: an accounting error from a bound read, a failed quota
+// preflight or a run dispatch stop at the accounting level. It is the run
+// owner's test for failing closed (ARS-005 section 6.1.3, writer W3). A
+// provider refusal, an authorization result and a cancellation are not faults.
+func IsAccountingFault(err error) bool {
+	if err == nil {
+		return false
+	}
+	var fault *ReadFaultError
+	var read *youtube.ReadError
+	return errors.Is(err, auth.ErrQuotaAccounting) || errors.As(err, &fault) ||
+		(errors.As(err, &read) && read.Accounting != nil)
 }
 
 // ReadFaultError reports a metadata read whose local quota accounting failed.

@@ -347,7 +347,7 @@ func (e *Executor) execute(ctx context.Context, runID, decisionRunID, videoID in
 	}
 	ok, remaining, err := e.ledger.CanAfford(ctx, e.insertCost*len(actions))
 	if err != nil {
-		return state.FinalOutcomeFailed, fmt.Errorf("quota check: %w", err)
+		return state.FinalOutcomeFailed, e.preflightFault(ctx, runID, err)
 	}
 	if !ok {
 		e.logger.WarnContext(ctx, "quota exhausted: deferring video actions", "run_id", runID, "video_id", videoID, "remaining", remaining)
@@ -376,7 +376,7 @@ func (e *Executor) execute(ctx context.Context, runID, decisionRunID, videoID in
 		}
 		ok, _, err := e.ledger.CanAfford(ctx, e.insertCost)
 		if err != nil {
-			return state.FinalOutcomeFailed, fmt.Errorf("quota check: %w", err)
+			return state.FinalOutcomeFailed, e.preflightFault(ctx, runID, err)
 		}
 		if !ok {
 			return e.deferActions(ctx, runID, videoID, actions[i:])
@@ -1302,6 +1302,16 @@ func (e *Executor) dispatchStopDisposition(ctx context.Context, runID, videoID i
 		return true, state.FinalOutcomeFailed, e.failClosed(ctx, runID, auth.ErrQuotaAccounting)
 	}
 	return false, "", nil
+}
+
+// preflightFault disposes of a CanAfford read error before a guarded action.
+// The preflight could not be read, so the run's admission is unreliable:
+// writer W3. A cancelled context is not an integrity fault.
+func (e *Executor) preflightFault(ctx context.Context, runID int64, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("quota check: %w", err)
+	}
+	return e.failClosed(ctx, runID, fmt.Errorf("quota check: %w", err))
 }
 
 // failClosed is writer W3 for the executor: latch, then a best-effort stored

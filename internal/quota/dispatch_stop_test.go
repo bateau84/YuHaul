@@ -196,3 +196,55 @@ func TestRunDispatchStopUnknownStoredValue(t *testing.T) {
 		t.Fatalf("stop = %v, want accounting_or_integrity", got)
 	}
 }
+
+// W3 at the ledger: an admitted attempt whose row cannot be written latches
+// accounting_or_integrity on the run it was acquired under, whichever context
+// the caller finalizes with and whichever caller sees the error. Another run
+// and a new execution of the same run are untouched.
+func TestLedgerWriteFailureLatchesAccountingStop(t *testing.T) {
+	op := sql.NullInt64{}
+	for name, fail := range map[string]func(t *testing.T, l *Ledger, rctx context.Context) error{
+		"hold finalize": func(t *testing.T, l *Ledger, rctx context.Context) error {
+			h, err := l.Acquire(rctx, OpVideosList)
+			if err != nil || h == nil {
+				t.Fatalf("acquire: %v, %v", h, err)
+			}
+			if err := h.Admit(rctx); err != nil {
+				t.Fatal(err)
+			}
+			// The caller's context carries no run scope: the hold remembers its own.
+			return h.Finalize(context.Background(), op, OutcomeSuccess, sql.NullInt64{Int64: 200, Valid: true})
+		},
+		"record attempt": func(t *testing.T, l *Ledger, rctx context.Context) error {
+			return l.RecordAttempt(rctx, op, OpVideosList, time.Now(), OutcomeSuccess, sql.NullInt64{Int64: 200, Valid: true})
+		},
+		"record calls": func(t *testing.T, l *Ledger, rctx context.Context) error {
+			return l.RecordCalls(rctx, op, OpVideosList, 1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			l, db := newTestLedger(t)
+			runID := seedRun(t, db)
+			other := seedRun(t, db)
+			rctx := WithRun(ctx, runID)
+			if _, err := db.Exec(`CREATE TRIGGER refuse_row BEFORE INSERT ON quota_ledger BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := fail(t, l, rctx); err == nil {
+				t.Fatal("the attempt row must fail")
+			}
+
+			if got, err := l.RunDispatchStop(rctx); err != nil || got != StopAccountingOrIntegrity {
+				t.Fatalf("RunDispatchStop = %v, %v; want accounting_or_integrity", got, err)
+			}
+			if got, err := l.RunDispatchStop(WithRun(ctx, other)); err != nil || got != StopNone {
+				t.Fatalf("another run = %v, %v; want none", got, err)
+			}
+			if got, err := l.RunDispatchStop(WithRun(ctx, runID)); err != nil || got != StopNone {
+				t.Fatalf("a new execution of the run = %v, %v; want none (the stored write is the caller's)", got, err)
+			}
+		})
+	}
+}

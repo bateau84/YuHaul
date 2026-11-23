@@ -3,13 +3,16 @@ package metadata_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/store"
+	"github.com/bateau84/YuHaul/internal/youtube"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -252,11 +255,9 @@ func TestManager_RefreshOnDemandRestoresDisplay(t *testing.T) {
 	require.True(t, meta.ExpiresAt.After(now))
 }
 
-func TestManager_RefreshRoutedNearExpiry(t *testing.T) {
+func seedRoutedVideo(t *testing.T, s *metadata.Store, now time.Time) {
+	t.Helper()
 	ctx := context.Background()
-	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
-
-	s := openTestDB(t)
 	db := s.DB()
 
 	// Insert a run, route, video, route_decision, and executed_action so the
@@ -296,6 +297,14 @@ func TestManager_RefreshRoutedNearExpiry(t *testing.T) {
 
 	// Metadata nearing expiry for the routed video.
 	require.NoError(t, s.Upsert(ctx, sampleMetadata("routed", "Routed Title", now.Add(-25*24*time.Hour), now.Add(5*24*time.Hour))))
+}
+
+func TestManager_RefreshRoutedNearExpiry(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	s := openTestDB(t)
+	seedRoutedVideo(t, s, now)
 
 	fetcher := &fakeFetcher{
 		returnMap: map[string]metadata.TransientMetadata{
@@ -522,4 +531,57 @@ func TestManager_INV9_Compliance(t *testing.T) {
 	deleted, err = mgr.CleanupExpired(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 0, deleted, "repeated cleanup should be a no-op")
+}
+
+// A quota preflight that cannot be read is a local accounting fault, not a
+// refusal: the sweep stops without a request and the error is classified so
+// the run owner can fail closed (ARS-005 section 6.1, writer W3).
+func TestManager_RefreshPreflightReadErrorIsAnAccountingFault(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	s := openTestDB(t)
+	seedRoutedVideo(t, s, now)
+	fetcher := &countingFetcher{}
+	mgr, _ := newManager(t, s, fetcher, now)
+	_, err := s.DB().ExecContext(ctx, `DROP TABLE quota_ledger`)
+	require.NoError(t, err)
+
+	refreshed, err := mgr.RefreshRoutedNearExpiry(ctx)
+
+	require.Error(t, err)
+	require.True(t, metadata.IsAccountingFault(err), "got %v", err)
+	require.ErrorIs(t, err, auth.ErrQuotaAccounting)
+	require.Zero(t, refreshed)
+	require.Zero(t, fetcher.calls, "no request follows an unreadable preflight")
+}
+
+type countingFetcher struct{ calls int }
+
+func (f *countingFetcher) FetchMetadata(context.Context, []string) ([]metadata.TransientMetadata, error) {
+	f.calls++
+	return nil, nil
+}
+
+func TestIsAccountingFault(t *testing.T) {
+	quotaAPI := &youtube.ReadError{Primary: &youtube.APIError{Status: 403, Reason: "quotaExceeded"}, Status: 403}
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"nil":                       {nil, false},
+		"plain":                     {errors.New("boom"), false},
+		"wrapped accounting":        {fmt.Errorf("fetch: %w", auth.ErrQuotaAccounting), true},
+		"joined accounting":         {errors.Join(errors.New("sweep"), auth.ErrQuotaAccounting), true},
+		"read fault":                {fmt.Errorf("x: %w", &metadata.ReadFaultError{Facts: metadata.ReadFacts{Err: errors.New("e"), Accounting: errors.New("a")}}), true},
+		"read error with account":   {fmt.Errorf("fetch: %w", &youtube.ReadError{Accounting: errors.New("record")}), true},
+		"provider quota refusal":    {fmt.Errorf("fetch: %w", quotaAPI), false},
+		"local refusal":             {auth.ErrQuotaRefused, false},
+		"authorization stop":        {auth.ErrRunAuthorizationStopped, false},
+		"cancellation":              {context.Canceled, false},
+		"read error without a fact": {&youtube.ReadError{Primary: errors.New("p")}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, metadata.IsAccountingFault(tc.err))
+		})
+	}
 }

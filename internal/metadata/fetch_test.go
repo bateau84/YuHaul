@@ -335,6 +335,26 @@ func TestFetchForEvaluationBareAccountingErrorIsAFault(t *testing.T) {
 	assert.Zero(t, out.Attempts, "failed before admission is not an attempt")
 }
 
+// An unreadable minimum-unit preflight is a local accounting fault (ARS-005
+// section 6.1): no call, the unsent inputs take the failing status, and the
+// error classifies as an accounting fault for the run owner.
+func TestFetchForEvaluationPreflightReadErrorIsAnAccountingFault(t *testing.T) {
+	bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) {
+		t.Fatal("no request may follow an unreadable preflight")
+		return metadata.FetchResult{}, nil
+	}}
+	m, ms, _ := newFetchManager(t, bound, 1000)
+	_, err := ms.DB().Exec(`DROP TABLE quota_ledger`)
+	require.NoError(t, err)
+
+	out, err := m.FetchForEvaluation(context.Background(), auth.AuthorizationBinding{}, allInputs("a"))
+
+	require.Error(t, err)
+	assert.True(t, metadata.IsAccountingFault(err), "got %v", err)
+	assert.Equal(t, metadata.FetchFailed, out.Statuses["a"])
+	assert.Empty(t, bound.calls)
+}
+
 func TestFetchForEvaluationCountsOnlyAdmittedSends(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err      error

@@ -429,6 +429,13 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 
 	if p.meta != nil {
 		if err := p.meta.RunLifecycle(ctx); err != nil {
+			if metadata.IsAccountingFault(err) {
+				// A refresh the run admitted could not be accounted for (or its
+				// preflight could not be read). Writer W3: no further run-owned
+				// provider request, then the existing retain-before-fail path.
+				p.failRun(ctx, runID, "metadata lifecycle accounting failed", p.failClosedAtLifecycle(ctx, runID, err))
+				return
+			}
 			logger.WarnContext(ctx, "metadata lifecycle failed", "diagnostic", diag.Encode(err, "unknown", "load_metadata"))
 		}
 	}
