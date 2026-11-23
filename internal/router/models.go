@@ -116,12 +116,17 @@ type RouteExclusion struct {
 }
 
 // VideoContext is the data available when evaluating a video.
+//
+// Description and DurationSeconds are nil when the value is not known (a
+// NULL transient-metadata column). That is different from a real empty
+// description or a real zero duration: a condition on a nil field never
+// matches, whatever its operator or pattern (ARS-005 §6.1.1).
 type VideoContext struct {
 	VideoID         string
 	ChannelID       string
 	Title           string
 	ChannelName     string
-	Description     string
+	Description     *string
 	DurationSeconds *int
 }
 

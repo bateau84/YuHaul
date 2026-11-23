@@ -386,3 +386,71 @@ func TestDryRun_SimulatedActionHasNoAttemptTimestamp(t *testing.T) {
 	assert.Nil(t, actions[0].OutcomeReason,
 		"simulation is identified by not_attempted, not by a no-attempt reason")
 }
+
+// ARS-005 §6.1.1 #7: a NULL description is not a real empty one. Through the
+// real dry-run path, a route on `^$` skips the NULL video and matches the
+// video whose description was observed to be empty.
+func TestDryRun_MissingDescriptionDoesNotMatchEmptyPattern(t *testing.T) {
+	ctx := context.Background()
+	deps, cleanup := setupDryRunPipeline(t)
+	defer cleanup()
+
+	_, err := deps.routerStore.CreateRoute(ctx, &router.Route{
+		Name: "No description", EvaluationOrder: 1, IsEnabled: true, IsFinal: true,
+		ConditionComposition: "AND",
+		Conditions: []router.RouteCondition{
+			{ConditionIndex: 0, Field: router.ConditionFieldDescription, Operator: router.ConditionOperatorMatchesRegex, Value: "^$"},
+		},
+		Actions: []router.RouteAction{{ActionIndex: 0, ActionType: "playlist_insert", TargetPlaylistID: "PLempty"}},
+	})
+	require.NoError(t, err)
+
+	prodRunID, err := deps.stateStore.CreateRun(ctx, &state.Run{StartedAt: time.Now().UTC(), RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	title, empty := "a title", ""
+	seed := func(videoID string, description *string) *state.Video {
+		video, err := deps.machine.DiscoverVideo(ctx, prodRunID, videoID, "ch1")
+		require.NoError(t, err)
+		require.NoError(t, deps.metaStore.Upsert(ctx, metadata.TransientMetadata{
+			VideoID: videoID, Title: &title, Description: description,
+			FetchedAt: now, ExpiresAt: now.Add(30 * 24 * time.Hour), IsActive: true,
+		}))
+		return video
+	}
+	missing := seed("vidmissing", nil)
+	observedEmpty := seed("vidempty", &empty)
+
+	run, err := deps.pipeline.DryRun(ctx, nil)
+	require.NoError(t, err)
+	deps.pipeline.ExecuteDryRun(ctx, run.ID)
+
+	loaded, err := deps.stateStore.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusCompleted, loaded.Status)
+
+	decisionFor := func(v *state.Video) state.RouteDecision {
+		decisions, err := deps.stateStore.GetRouteDecisionsForVideoInRun(ctx, v.ID, run.ID)
+		require.NoError(t, err)
+		require.Len(t, decisions, 1)
+		return decisions[0]
+	}
+
+	d := decisionFor(missing)
+	assert.Equal(t, state.RouteDecisionNotMatched, d.Decision, "a NULL description must not satisfy ^$")
+	audits, err := deps.stateStore.GetConditionAuditsForDecision(ctx, d.ID)
+	require.NoError(t, err)
+	require.Len(t, audits, 1)
+	assert.False(t, audits[0].Matched)
+	assert.Nil(t, audits[0].ActualValue)
+
+	d = decisionFor(observedEmpty)
+	assert.Equal(t, state.RouteDecisionMatched, d.Decision, "an observed empty description keeps normal matching")
+	audits, err = deps.stateStore.GetConditionAuditsForDecision(ctx, d.ID)
+	require.NoError(t, err)
+	require.Len(t, audits, 1)
+	assert.True(t, audits[0].Matched)
+	require.NotNil(t, audits[0].ActualValue)
+	assert.Equal(t, "", *audits[0].ActualValue)
+}

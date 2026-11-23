@@ -1508,9 +1508,7 @@ func videoContextFromMetadata(videoID, channelID string, m *metadata.TransientMe
 	if m.Title != nil {
 		vc.Title = *m.Title
 	}
-	if m.Description != nil {
-		vc.Description = *m.Description
-	}
+	vc.Description = m.Description
 	if m.DurationSeconds != nil {
 		vc.DurationSeconds = m.DurationSeconds
 	}

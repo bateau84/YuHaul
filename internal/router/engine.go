@@ -181,7 +181,7 @@ func (e *Engine) evaluateRoute(route Route, vc VideoContext) (state.RouteDecisio
 			Field:          string(cond.Field),
 			Operator:       string(cond.Operator),
 			ExpectedValue:  cond.Value,
-			ActualValue:    &actual,
+			ActualValue:    actual,
 			Matched:        matched,
 		})
 		conditionResults = append(conditionResults, matched)
@@ -258,29 +258,40 @@ func ExclusionMatch(route Route, vc VideoContext) (*ExclusionMatchResult, *state
 
 func exclusionIntPtr(v int) *int { return &v }
 
-func (e *Engine) evaluateCondition(routeID int64, c RouteCondition, vc VideoContext) (bool, string) {
-	actual := conditionValue(c.Field, vc)
+// evaluateCondition returns whether the condition matches and the value it was
+// compared with. The value is nil when the video has no value for the field;
+// such a condition never matches, so a pattern that accepts the empty string
+// (`^$`, `.*`, contains "") cannot match a missing value.
+func (e *Engine) evaluateCondition(routeID int64, c RouteCondition, vc VideoContext) (bool, *string) {
+	value, present := conditionValue(c.Field, vc)
+	if !present {
+		return false, nil
+	}
+	return e.evaluatePresentCondition(routeID, c, value), &value
+}
+
+func (e *Engine) evaluatePresentCondition(routeID int64, c RouteCondition, actual string) bool {
 	switch c.Operator {
 	case ConditionOperatorContains:
-		return strings.Contains(strings.ToLower(actual), strings.ToLower(c.Value)), actual
+		return strings.Contains(strings.ToLower(actual), strings.ToLower(c.Value))
 	case ConditionOperatorEquals:
 		if c.Field == ConditionFieldDurationSeconds {
-			return compareNumericEquality(actual, c.Value), actual
+			return compareNumericEquality(actual, c.Value)
 		}
-		return strings.EqualFold(actual, c.Value), actual
+		return strings.EqualFold(actual, c.Value)
 	case ConditionOperatorStartsWith:
-		return strings.HasPrefix(strings.ToLower(actual), strings.ToLower(c.Value)), actual
+		return strings.HasPrefix(strings.ToLower(actual), strings.ToLower(c.Value))
 	case ConditionOperatorEndsWith:
-		return strings.HasSuffix(strings.ToLower(actual), strings.ToLower(c.Value)), actual
+		return strings.HasSuffix(strings.ToLower(actual), strings.ToLower(c.Value))
 	case ConditionOperatorMatchesRegex:
 		// Invalid patterns are treated as non-matches; the audit still records
 		// the actual value and matched=false.
 		matched, _ := regexp.MatchString(c.Value, actual)
-		return matched, actual
+		return matched
 	case ConditionOperatorGreaterThan, ConditionOperatorLessThan:
-		return compareNumeric(c.Operator, actual, c.Value), actual
+		return compareNumeric(c.Operator, actual, c.Value)
 	case ConditionOperatorBetween:
-		return compareBetween(actual, c.Value), actual
+		return compareBetween(actual, c.Value)
 	default:
 		// Stored drifted operators (dev-era data) evaluate as non-matching but
 		// are now loud instead of silently non-matching.
@@ -290,26 +301,31 @@ func (e *Engine) evaluateCondition(routeID int64, c RouteCondition, vc VideoCont
 			"operator", string(c.Operator),
 			"field", string(c.Field),
 		)
-		return false, actual
+		return false
 	}
 }
 
-func conditionValue(field ConditionField, vc VideoContext) string {
+// conditionValue returns the field's value and whether the video has one.
+func conditionValue(field ConditionField, vc VideoContext) (string, bool) {
 	switch field {
 	case ConditionFieldTitle:
-		return vc.Title
+		return vc.Title, true
 	case ConditionFieldChannelID:
-		return vc.ChannelID
+		return vc.ChannelID, true
 	case ConditionFieldChannelName:
-		return vc.ChannelName
+		return vc.ChannelName, true
 	case ConditionFieldDescription:
-		return vc.Description
-	case ConditionFieldDurationSeconds:
-		if vc.DurationSeconds != nil {
-			return strconv.Itoa(*vc.DurationSeconds)
+		if vc.Description == nil {
+			return "", false
 		}
+		return *vc.Description, true
+	case ConditionFieldDurationSeconds:
+		if vc.DurationSeconds == nil {
+			return "", false
+		}
+		return strconv.Itoa(*vc.DurationSeconds), true
 	}
-	return ""
+	return "", true
 }
 
 func compareNumeric(op ConditionOperator, actual, expected string) bool {
