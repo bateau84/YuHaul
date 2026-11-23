@@ -258,3 +258,35 @@ func TestReceivingRestoredReceiptsSettleWithoutABinding(t *testing.T) {
 		})
 	}
 }
+
+// Composition of the accounting-stop and authorization corrections: when the
+// run already holds an accounting_or_integrity stop, an authorization-caused
+// bind refusal must not settle its receipts as authorization_pending or lower
+// the stored stop. Accounting outranks authorization (OC-001, ARS-005 6.1.3);
+// the run ends through the ordinary failure path.
+func TestReceivingBindRefusalYieldsToAnAccountingStop(t *testing.T) {
+	ctx := context.Background()
+	rf := newReceivingFixture(t)
+	logs := rf.captureLogs()
+	rf.claimNew(3)
+	_, err := rf.db.Exec(`UPDATE run SET dispatch_stop='accounting_or_integrity', status='interrupted', current_phase=? WHERE id=?`,
+		string(PhaseActionExecution), rf.recvRun)
+	require.NoError(t, err)
+	require.NoError(t, rf.auth.Disconnect(ctx))
+	_, bindErr := rf.auth.Bind(ctx)
+	require.ErrorIs(t, bindErr, auth.ErrNoConnectedAccount)
+
+	tokenCalls := rf.renewals.Load()
+	rf.p.Execute(ctx, rf.recvRun)
+
+	rf.requireNoProviderWork()
+	require.Equal(t, tokenCalls, rf.renewals.Load(), "no renewal during the run")
+	require.Equal(t, "accounting_or_integrity", rf.storedStop(), "the higher stop is never lowered")
+	var n int
+	require.NoError(t, rf.db.QueryRow(`SELECT COUNT(*) FROM run_video_outcome WHERE run_id=? AND deferred_reason='authorization_pending'`, rf.recvRun).Scan(&n))
+	require.Zero(t, n, "no receipt settles as an authorization refusal under an accounting stop")
+	var runStatus string
+	require.NoError(t, rf.db.QueryRow(`SELECT status FROM run WHERE id=?`, rf.recvRun).Scan(&runStatus))
+	require.Equal(t, "failed", runStatus)
+	require.NotContains(t, logs.String(), "run authorization stop")
+}
