@@ -3,10 +3,14 @@ type: Log
 title: Architecture Change Log
 description: Chronological record of changes to the docs/architecture/ bundle.
 tags: [changelog, log, okf, architecture]
-timestamp: 2026-11-22T00:00:00Z
+timestamp: 2026-11-23T00:00:00Z
 ---
 
 # Architecture Update Log
+
+## 2026-11-23
+
+**First accounting fault stops the run's provider requests (`rq-gate-claim` correction).** [Run-initiation ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.1.3 writer W3 and evidence S6 already required zero further requests after an accounting fault. The reviewed build still logged a metadata lifecycle accounting fault and continued. §12 now records the correction: the ledger and admission seam latch the fault, the run owner fails the run closed with its stored stop and a closed diagnostic, preflight read errors count as accounting faults, and the retry path propagates a run-stopping error. No requirement text changed. The assessment's other findings are open.
 
 ## 2026-11-22
 
