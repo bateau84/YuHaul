@@ -190,6 +190,22 @@ func TestEngine_MissingFieldNeverMatchesWhileEmptyValueDoes(t *testing.T) {
 		})
 	}
 
+	// Channel name is the third field the migration clears.
+	for _, tc := range emptyAccepting {
+		t.Run("channel name "+tc.name, func(t *testing.T) {
+			cond := RouteCondition{Field: ConditionFieldChannelName, Operator: tc.op, Value: tc.val}
+
+			matched, actual := engine.evaluateCondition(1, cond, VideoContext{ChannelName: &empty})
+			assert.True(t, matched, "a real empty channel name keeps normal matching")
+			require.NotNil(t, actual)
+			assert.Equal(t, "", *actual)
+
+			matched, actual = engine.evaluateCondition(1, cond, VideoContext{})
+			assert.False(t, matched, "a missing channel name must not match")
+			assert.Nil(t, actual, "the audit records no value, not an empty one")
+		})
+	}
+
 	// Duration is the other field the migration clears; a real 0 is present.
 	for _, tc := range []struct {
 		name string
@@ -243,4 +259,29 @@ func TestEngine_RouteWithMissingDescriptionIsNotMatchedAndAuditHasNoValue(t *tes
 	require.Len(t, audits, 1)
 	require.NotNil(t, audits[0].ActualValue)
 	assert.Equal(t, "", *audits[0].ActualValue)
+}
+
+func TestEngine_RouteWithMissingChannelNameIsNotMatchedAndAuditHasNoValue(t *testing.T) {
+	engine := NewEngine(nil)
+	route := Route{ID: 8, IsEnabled: true, IsFinal: true, ConditionComposition: string(CompositionAll), Conditions: []RouteCondition{
+		{ConditionIndex: 0, Field: ConditionFieldChannelName, Operator: ConditionOperatorMatchesRegex, Value: "^$"},
+	}}
+	empty, named := "", "Some channel"
+
+	decision, audits, matched := engine.evaluateRoute(route, VideoContext{})
+	assert.False(t, matched)
+	assert.Equal(t, state.RouteDecisionNotMatched, decision.Decision)
+	require.Len(t, audits, 1)
+	assert.False(t, audits[0].Matched)
+	assert.Nil(t, audits[0].ActualValue)
+
+	decision, audits, matched = engine.evaluateRoute(route, VideoContext{ChannelName: &empty})
+	assert.True(t, matched)
+	assert.Equal(t, state.RouteDecisionMatched, decision.Decision)
+	require.Len(t, audits, 1)
+	require.NotNil(t, audits[0].ActualValue)
+	assert.Equal(t, "", *audits[0].ActualValue)
+
+	_, _, matched = engine.evaluateRoute(route, VideoContext{ChannelName: &named})
+	assert.False(t, matched, "a non-empty name does not match ^$")
 }

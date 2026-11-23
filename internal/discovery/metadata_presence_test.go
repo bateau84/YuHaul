@@ -14,6 +14,7 @@ import (
 	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/quota"
 	"github.com/bateau84/YuHaul/internal/state"
+	"github.com/bateau84/YuHaul/internal/youtube"
 
 	"github.com/stretchr/testify/require"
 )
@@ -135,6 +136,69 @@ func TestRunBoundKeepsRealZeroDurationAndEmptyDescription(t *testing.T) {
 	require.False(t, bad.description.Valid)
 	require.False(t, bad.duration.Valid)
 	require.Equal(t, "Details title bad1", bad.title.String)
+}
+
+// A by-ID channelTitle that is present but "" is a real value and must reach
+// transient_metadata as an empty string. An absent one falls back to the channels.list name.
+func TestRunBoundKeepsExplicitlyEmptyChannelNameAndFallsBackWhenAbsent(t *testing.T) {
+	h := newBoundHarness(t, []string{"empty1", "absent1"}, jsonItems(
+		detailItem("empty1", map[string]any{"channelTitle": ""}, map[string]any{"duration": "PT1M"}),
+		detailItem("absent1", map[string]any{"channelTitle": nil}, map[string]any{"duration": "PT1M"}),
+	), 100)
+	h.run(t)
+
+	empty := readPresenceRow(t, h.db, "empty1")
+	require.True(t, empty.channel.Valid, "a supplied empty channel name must stay '' and not become NULL")
+	require.Equal(t, "", empty.channel.String)
+
+	absent := readPresenceRow(t, h.db, "absent1")
+	require.Equal(t, "Channel One", absent.channel.String, "an absent by-ID name keeps the channels.list fallback")
+}
+
+// persist keeps presence for the channel name the way it does for description
+// and duration: a supplied value (even "") is stored, anything else is NULL.
+func TestPersistChannelNamePresence(t *testing.T) {
+	ctx := context.Background()
+	runStart := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	eng, st, _, db := newTestEngine(t, "http://unused.invalid", 10_000)
+	runID, err := st.CreateRun(ctx, &state.Run{StartedAt: runStart, RunType: state.RunTypeManual, Status: state.RunStatusRunning})
+	require.NoError(t, err)
+
+	video := func(id, listingName string, d *youtube.VideoDetail) *discoveredVideo {
+		return &discoveredVideo{VideoID: id, ChannelID: "UC1", ChannelName: listingName, Title: "t",
+			PublishedAt: runStart.Add(-time.Hour), Metadata: d}
+	}
+	supplied := func(name string) *youtube.VideoDetail {
+		d := &youtube.VideoDetail{ChannelTitle: name, PublishedAt: runStart.Add(-time.Hour)}
+		d.Present.ChannelTitle = true
+		return d
+	}
+	notSupplied := &youtube.VideoDetail{PublishedAt: runStart.Add(-time.Hour)} // ChannelTitle "" but Present false
+
+	require.NoError(t, eng.persist(ctx, runID, runStart, []*discoveredVideo{
+		video("suppliedEmpty", "Listing", supplied("")),
+		video("suppliedName", "Listing", supplied("Real name")),
+		video("notSupplied", "Listing", notSupplied),
+		video("noDetailBlankListing", "", nil),
+		video("noDetailListing", "Listing", nil),
+	}))
+
+	cases := []struct {
+		id    string
+		valid bool
+		value string
+	}{
+		{"suppliedEmpty", true, ""},
+		{"suppliedName", true, "Real name"},
+		{"notSupplied", true, "Listing"},
+		{"noDetailBlankListing", false, ""},
+		{"noDetailListing", true, "Listing"},
+	}
+	for _, c := range cases {
+		r := readPresenceRow(t, db, c.id)
+		require.Equal(t, c.valid, r.channel.Valid, c.id)
+		require.Equal(t, c.value, r.channel.String, c.id)
+	}
 }
 
 func TestRunBoundQuotaRefusedPrefetchStoresNullAndKeepsPlaylistTitle(t *testing.T) {

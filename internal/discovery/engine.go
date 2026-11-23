@@ -676,6 +676,12 @@ func (e *Engine) persist(ctx context.Context, runID int64, runStart time.Time, v
 		// from details whose Present flag is set; otherwise they are NULL.
 		title := v.Title
 		channelName := v.ChannelName
+		// storedChannelName is nil (NULL) unless a name was supplied. A name
+		// the by-ID response supplied as "" is a real value and stays "".
+		var storedChannelName *string
+		if channelName != "" {
+			storedChannelName = &channelName
+		}
 		publishedAt := v.PublishedAt
 		thumbnail := v.ThumbnailURL
 		var description *string
@@ -687,6 +693,7 @@ func (e *Engine) persist(ctx context.Context, runID int64, runStart time.Time, v
 			}
 			if d.Present.ChannelTitle {
 				channelName = d.ChannelTitle
+				storedChannelName = &d.ChannelTitle
 			}
 			if d.Present.Description {
 				description = &d.Description
@@ -704,7 +711,7 @@ func (e *Engine) persist(ctx context.Context, runID int64, runStart time.Time, v
 			_ = tx.Rollback()
 			return fmt.Errorf("discovery: save fingerprint for %s: %w", v.VideoID, err)
 		}
-		if err := e.upsertTransientMetadata(ctx, tx, v.VideoID, title, channelName, description, duration, thumbnail, publishedAt, runStart); err != nil {
+		if err := e.upsertTransientMetadata(ctx, tx, v.VideoID, title, storedChannelName, description, duration, thumbnail, publishedAt, runStart); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("discovery: save metadata for %s: %w", v.VideoID, err)
 		}
@@ -760,11 +767,12 @@ func (e *Engine) videoExists(ctx context.Context, videoID string) (bool, error) 
 	return true, nil
 }
 
-// upsertTransientMetadata stores the Store A row. A nil description or duration
-// is written as NULL ("not validly supplied"); a non-nil one is a real value,
-// including "" and 0. Blank title, channel name and thumbnail are NULL too.
+// upsertTransientMetadata stores the Store A row. A nil channel name,
+// description or duration is written as NULL ("not validly supplied"); a
+// non-nil one is a real value, including "" and 0. Blank title and thumbnail
+// are NULL too.
 // It also rewrites the video's title search entry in tx.
-func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoID, title, channelName string, description *string,
+func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoID, title string, channelName *string, description *string,
 	duration *int, thumbnailURL string, publishedAt, fetchedAt time.Time) error {
 
 	nullString := func(v string) any {
@@ -773,7 +781,10 @@ func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoI
 		}
 		return v
 	}
-	var descriptionArg, durationArg any
+	var channelNameArg, descriptionArg, durationArg any
+	if channelName != nil {
+		channelNameArg = *channelName
+	}
 	if description != nil {
 		descriptionArg = *description
 	}
@@ -797,7 +808,7 @@ func (e *Engine) upsertTransientMetadata(ctx context.Context, tx *sql.Tx, videoI
 		  refreshed_at = excluded.refreshed_at,
 		  expires_at = excluded.expires_at,
 		  is_active = excluded.is_active;`,
-		videoID, nullString(title), nullString(channelName), descriptionArg, publishedAt.UTC(), durationArg,
+		videoID, nullString(title), channelNameArg, descriptionArg, publishedAt.UTC(), durationArg,
 		nullString(thumbnailURL), fetchedAt.UTC(), fetchedAt.UTC(), expiresAt.UTC(), true,
 	)
 	if err != nil {

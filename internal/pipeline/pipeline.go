@@ -1516,9 +1516,7 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 
 func videoContextFromMetadata(videoID, channelID string, m *metadata.TransientMetadata) router.VideoContext {
 	vc := router.VideoContext{VideoID: videoID, ChannelID: channelID}
-	if m.ChannelName != nil {
-		vc.ChannelName = *m.ChannelName
-	}
+	vc.ChannelName = m.ChannelName
 	if m.Title != nil {
 		vc.Title = *m.Title
 	}

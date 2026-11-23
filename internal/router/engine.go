@@ -313,7 +313,10 @@ func conditionValue(field ConditionField, vc VideoContext) (string, bool) {
 	case ConditionFieldChannelID:
 		return vc.ChannelID, true
 	case ConditionFieldChannelName:
-		return vc.ChannelName, true
+		if vc.ChannelName == nil {
+			return "", false
+		}
+		return *vc.ChannelName, true
 	case ConditionFieldDescription:
 		if vc.Description == nil {
 			return "", false
