@@ -247,17 +247,29 @@ func (p *Pipeline) prepareReceiving(ctx context.Context, qs *queue.Store, runID 
 		return nil, fmt.Errorf("fetch inputs for evaluation: %w", err)
 	}
 	ready := make(map[int64]metadata.FetchStatus, len(out.Statuses))
-	pending := 0
+	pending, failed := 0, 0
 	for text, status := range out.Statuses {
 		id, ok := byText[text]
 		if !ok {
 			continue
 		}
 		ready[id] = status
-		if status == metadata.FetchAuthorizationPending {
+		switch status {
+		case metadata.FetchAuthorizationPending:
 			pending++
 			quota.LatchRunStop(ctx, quota.StopAuthorization)
+		case metadata.FetchFailed:
+			failed++
 		}
+	}
+	if failed > 0 && out.Read != nil {
+		// The read that suspended fetching failed on this call: its inputs are
+		// released unchanged (applyReadiness). One bounded line per failure,
+		// with the closed diagnostic and a count, never provider text or
+		// per-video lines. A later pass that the manager keeps suspended
+		// carries no Read, so the suspension is reported once, here.
+		p.logger.WarnContext(ctx, "receiving metadata read failed; inputs released unchanged", "run_id", runID,
+			"diagnostic", diag.Encode(out.Read.Err, "routing", "load_metadata"), "inputs", failed)
 	}
 	if pending > 0 && out.Read != nil && out.Read.Authorization != "" {
 		// One bounded line per authorization failure of this pass: the vetted
