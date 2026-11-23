@@ -210,7 +210,9 @@ func TestFetchForEvaluationReadFailureKeepsTypedFactsAndStopsFetching(t *testing
 		{"daily", fmt.Errorf("w: %w", &youtube.APIError{Status: 403, Reason: "dailyLimitExceeded"}), metadata.FetchQuotaRefused, nil},
 		{"rate", &youtube.APIError{Status: 429}, metadata.FetchRateLimited, nil},
 		{"rate reason", &youtube.APIError{Status: 403, Reason: "userRateLimitExceeded"}, metadata.FetchRateLimited, nil},
-		{"unauthorized", &youtube.APIError{Status: 401}, metadata.FetchAuthorizationPending, nil},
+		{"unauthorized", &youtube.APIError{Status: 401}, metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Empty(t, f.Authorization, "a bare 401 carries no vetted cause")
+		}},
 		{"renewal", &youtube.ReadError{Primary: &youtube.APIError{Status: 401}, Renewal: renewal, Status: 401}, metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) { assert.Same(t, renewal, f.Renewal) }},
 		{"plain forbidden is not authorization", &youtube.APIError{Status: 403}, metadata.FetchFailed, nil},
 		{"server", &youtube.APIError{Status: 503}, metadata.FetchFailed, nil},
@@ -224,7 +226,23 @@ func TestFetchForEvaluationReadFailureKeepsTypedFactsAndStopsFetching(t *testing
 		}},
 		{"interruption", &youtube.ReadError{Primary: context.Canceled, Interruption: context.Canceled}, metadata.FetchFailed, func(t *testing.T, f *metadata.ReadFacts) { assert.ErrorIs(t, f.Interruption, context.Canceled) }},
 		{"local quota refusal", auth.ErrQuotaRefused, metadata.FetchQuotaRefused, nil},
-		{"changed", auth.ErrAuthorizationChanged, metadata.FetchAuthorizationPending, nil},
+		{"changed", auth.ErrAuthorizationChanged, metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Equal(t, auth.CauseAuthorizationChanged, f.Authorization)
+		}},
+		// The read client hands a pre-admission refusal back as its primary
+		// error, wrapped, with no Renewal fact (nothing was admitted).
+		{"expired before admission", fmt.Errorf("metadata fetcher: %w", fmt.Errorf("execute request: %w", auth.ErrAccessExpiredBeforeAdmission)), metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Equal(t, auth.CauseTemporaryUnavailable, f.Authorization)
+			assert.Nil(t, f.Renewal)
+			assert.False(t, f.Admitted)
+		}},
+		{"run authorization stop", fmt.Errorf("execute request: %w", auth.ErrRunAuthorizationStopped), metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Empty(t, f.Authorization, "a repeated stop has no cause of its own")
+		}},
+		{"accounting keeps the cause", &youtube.ReadError{Primary: &youtube.APIError{Status: 401}, Accounting: acct, Renewal: auth.ErrAuthorizationChanged, Status: 401}, metadata.FetchFailed, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Equal(t, auth.CauseAuthorizationChanged, f.Authorization, "accounting outranks the status, not the cause")
+			assert.Same(t, acct, f.Accounting)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) { return metadata.FetchResult{}, tc.err }}
@@ -248,7 +266,8 @@ func TestFetchForEvaluationReadFailureKeepsTypedFactsAndStopsFetching(t *testing
 			assert.ErrorIs(t, out.Read.Err, tc.err)
 			assert.Len(t, bound.calls, 1, "no call after the failure")
 			wantAttempts := 1
-			if errors.Is(tc.err, auth.ErrQuotaRefused) || errors.Is(tc.err, auth.ErrAuthorizationChanged) {
+			if errors.Is(tc.err, auth.ErrQuotaRefused) || errors.Is(tc.err, auth.ErrAuthorizationChanged) ||
+				errors.Is(tc.err, auth.ErrAccessExpiredBeforeAdmission) || errors.Is(tc.err, auth.ErrRunAuthorizationStopped) {
 				wantAttempts = 0 // refused before admission: not an attempt
 			}
 			assert.Equal(t, wantAttempts, out.Attempts)

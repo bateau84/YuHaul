@@ -485,14 +485,14 @@ func (s *Service) Bind(ctx context.Context) (AuthorizationBinding, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.disconnected {
-		return AuthorizationBinding{}, errors.New("auth: no connected account")
+		return AuthorizationBinding{}, ErrNoConnectedAccount
 	}
 	record, err := s.store.Load(ctx)
 	if err != nil {
 		return AuthorizationBinding{}, fmt.Errorf("auth: failed to bind authorization: %w", err)
 	}
 	if record == nil {
-		return AuthorizationBinding{}, errors.New("auth: no connected account")
+		return AuthorizationBinding{}, ErrNoConnectedAccount
 	}
 	return AuthorizationBinding{authorizationID: record.AuthorizationID}, nil
 }
@@ -552,7 +552,7 @@ func (s *Service) activeToken(ctx context.Context, boundAuthorizationID string) 
 		if boundAuthorizationID != "" {
 			return nil, ErrAuthorizationChanged
 		}
-		return nil, errors.New("auth: no connected account")
+		return nil, ErrNoConnectedAccount
 	}
 	if boundAuthorizationID != "" && record.AuthorizationID != boundAuthorizationID {
 		return nil, ErrAuthorizationChanged
@@ -563,7 +563,7 @@ func (s *Service) activeToken(ctx context.Context, boundAuthorizationID string) 
 		if boundAuthorizationID != "" {
 			return nil, ErrAuthorizationChanged
 		}
-		return nil, errors.New("auth: no connected account")
+		return nil, ErrNoConnectedAccount
 	}
 	current, loadErr := s.store.Load(ctx)
 	if loadErr != nil {
@@ -602,7 +602,7 @@ func (s *Service) activeToken(ctx context.Context, boundAuthorizationID string) 
 	}
 	if record.RefreshToken == "" {
 		s.mu.Unlock()
-		return nil, errors.New("auth: refresh authorization is unavailable")
+		return nil, errRefreshMissing
 	}
 	version := CredentialVersion{record.AuthorizationID, record.CredentialRevision}
 	// The authority check above applies to every return path, including usable tokens.
@@ -756,7 +756,14 @@ func tokenUsable(record *TokenRecord) bool {
 
 var ErrRenewalPersistence = errors.New("auth: renewal credentials could not be persisted")
 
+// ErrNoConnectedAccount means no account is connected (never connected, or
+// disconnected), so a binding cannot be taken. It needs the user to connect.
+var ErrNoConnectedAccount = errors.New("auth: no connected account")
+
 var (
+	// errRefreshMissing: access is unusable and there is no refresh credential,
+	// so nothing can renew it (OC-006 guarantee 6: reconnect-required).
+	errRefreshMissing         = errors.New("auth: refresh authorization is unavailable")
 	errRefreshRejected        = errors.New("auth: refresh authorization was rejected")
 	errTemporaryNetwork       = errors.New("auth: temporary renewal network failure")
 	errTemporaryProvider      = errors.New("auth: temporary renewal provider failure")
@@ -769,6 +776,8 @@ func RenewalFailureCategory(err error) string {
 	switch {
 	case errors.Is(err, errRefreshRejected):
 		return "refresh_rejected"
+	case errors.Is(err, errRefreshMissing):
+		return "refresh_missing"
 	case errors.Is(err, errTemporaryNetwork):
 		return "temporary_network"
 	case errors.Is(err, errTemporaryProvider):
@@ -804,13 +813,43 @@ func IsPreAdmissionAuthorizationRefusal(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	return errors.Is(err, ErrAuthorizationChanged) ||
-		errors.Is(err, ErrRunAuthorizationStopped) ||
-		errors.Is(err, ErrAccessExpiredBeforeAdmission) ||
-		errors.Is(err, errRefreshRejected) ||
-		errors.Is(err, errTemporaryNetwork) ||
-		errors.Is(err, errTemporaryProvider) ||
-		errors.Is(err, ErrRenewalPersistence)
+	return errors.Is(err, ErrRunAuthorizationStopped) || ClassifyAuthorizationCause(err) != ""
+}
+
+// AuthorizationCause is the bounded, vetted reason an authorization refusal
+// gives (OC-006 guarantee 6, run-initiation ARS-005 section 6.1). It carries no
+// provider text, credential or identity.
+type AuthorizationCause string
+
+const (
+	// CauseReconnectRequired: the refresh credential is missing, or the provider
+	// rejected it. Only the user authorizing again recovers it.
+	CauseReconnectRequired AuthorizationCause = "reconnect_required"
+	// CauseTemporaryUnavailable: renewal could not complete now (provider or
+	// network trouble, or the renewed credential could not be saved), or the
+	// access expired before admission. A later call may succeed unaided.
+	CauseTemporaryUnavailable AuthorizationCause = "temporary_unavailable"
+	// CauseAuthorizationChanged: the binding's account was disconnected or
+	// replaced, so the old identity can no longer be used.
+	CauseAuthorizationChanged AuthorizationCause = "authorization_changed"
+)
+
+// ClassifyAuthorizationCause returns the cause of a pre-admission authorization
+// refusal anywhere in err's chain, or "" when err carries none. When several
+// causes are joined the user-actionable one wins: reconnect-required, then
+// temporary, then changed. ErrRunAuthorizationStopped carries no cause of its
+// own: it only repeats a stop whose cause was established earlier.
+func ClassifyAuthorizationCause(err error) AuthorizationCause {
+	switch {
+	case errors.Is(err, errRefreshMissing), errors.Is(err, errRefreshRejected), errors.Is(err, ErrNoConnectedAccount):
+		return CauseReconnectRequired
+	case errors.Is(err, errTemporaryNetwork), errors.Is(err, errTemporaryProvider),
+		errors.Is(err, ErrRenewalPersistence), errors.Is(err, ErrAccessExpiredBeforeAdmission):
+		return CauseTemporaryUnavailable
+	case errors.Is(err, ErrAuthorizationChanged):
+		return CauseAuthorizationChanged
+	}
+	return ""
 }
 
 func classifyRenewalFailure(err error) string {

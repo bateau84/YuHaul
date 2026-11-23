@@ -735,6 +735,9 @@ func classifyRead(err error) (facts ReadFacts, status FetchStatus, suspend bool)
 	if facts.Accounting == nil && errors.Is(err, auth.ErrQuotaAccounting) {
 		facts.Accounting = auth.ErrQuotaAccounting
 	}
+	// The vetted cause is kept apart from the per-input status and survives a
+	// compound accounting fault, which outranks it in the status below.
+	facts.Authorization = auth.ClassifyAuthorizationCause(errors.Join(err, facts.Renewal))
 
 	var invalid *youtube.InvalidResponseError
 	var transport *youtube.ReadTransportError
@@ -752,9 +755,12 @@ func classifyRead(err error) (facts ReadFacts, status FetchStatus, suspend bool)
 		return facts, FetchFailed, true
 	case facts.Renewal != nil || facts.HTTPStatus == http.StatusUnauthorized ||
 		(api != nil && api.Reason == "authError") ||
-		errors.Is(err, auth.ErrAuthorizationChanged) || errors.Is(err, auth.ErrNotConfigured) ||
-		errors.Is(err, auth.ErrRunAuthorizationStopped) ||
-		errors.Is(err, auth.ErrAccessExpiredBeforeAdmission):
+		errors.Is(err, auth.ErrNotConfigured) ||
+		auth.IsPreAdmissionAuthorizationRefusal(err):
+		// A pre-admission refusal (no refresh credential, renewal failed,
+		// account changed, run already stopped) reaches here as the primary
+		// error: nothing was admitted. A renewal observation after a rejected
+		// admitted request arrives in Renewal.
 		return facts, FetchAuthorizationPending, true
 	case facts.HTTPStatus == http.StatusTooManyRequests ||
 		(api != nil && (api.Reason == "rateLimitExceeded" || api.Reason == "userRateLimitExceeded")):

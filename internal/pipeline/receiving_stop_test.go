@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +39,7 @@ type receivingFixture struct {
 	server  *httptest.Server
 	recvRun int64
 	seq     int
+	oauth   roundTripTestFunc // the token endpoint, kept for restarts
 
 	oauthStatus atomic.Int32 // status of the token endpoint
 	renewals    atomic.Int32 // token endpoint hits
@@ -60,14 +62,14 @@ func (b receivingFetcher) FetchMetadataBound(ctx context.Context, binding auth.A
 	runID, _ := quota.RunFromContext(ctx)
 	resp, _, hold, err := f.auth.DispatchWithQuota(ctx, binding, req, http.DefaultTransport, f.ledger, quota.OpVideosList)
 	if err != nil {
-		read := &youtube.ReadError{Primary: err}
-		switch {
-		case errors.Is(err, auth.ErrQuotaAccounting):
-			read.Accounting = auth.ErrQuotaAccounting
-		case auth.IsPreAdmissionAuthorizationRefusal(err):
-			read.Renewal = err
+		if errors.Is(err, auth.ErrQuotaAccounting) {
+			return metadata.FetchResult{}, &youtube.ReadError{Primary: err, Accounting: auth.ErrQuotaAccounting}
 		}
-		return metadata.FetchResult{}, read
+		// A refusal before admission (no refresh credential, failed renewal,
+		// changed account) is not a ReadError in production: the read client
+		// returns it as the wrapped primary error with no renewal observation,
+		// which exists only after an admitted request was rejected.
+		return metadata.FetchResult{}, fmt.Errorf("metadata fetcher: get videos by id: %w", fmt.Errorf("execute request: %w", err))
 	}
 	defer resp.Body.Close()
 	category := quota.OutcomeSuccess
@@ -102,7 +104,13 @@ func (b receivingFetcher) FetchMetadataBound(ctx context.Context, binding auth.A
 
 func newReceivingFixture(t *testing.T) *receivingFixture {
 	t.Helper()
-	ctx := context.Background()
+	return newReceivingFixtureOn(t, storetest.Open(t))
+}
+
+// newReceivingFixtureOn is newReceivingFixture over a caller-supplied database,
+// for tests that close and reopen it.
+func newReceivingFixtureOn(t *testing.T, db *sql.DB) *receivingFixture {
+	t.Helper()
 	rf := &receivingFixture{t: t}
 	rf.oauthStatus.Store(http.StatusOK)
 	rf.listStatus.Store(http.StatusOK)
@@ -124,32 +132,27 @@ func newReceivingFixture(t *testing.T) *receivingFixture {
 	oauth := roundTripTestFunc(func(req *http.Request) (*http.Response, error) {
 		rf.renewals.Add(1)
 		if status := int(rf.oauthStatus.Load()); status != http.StatusOK {
+			if status == http.StatusBadRequest {
+				return responseTest(status, `{"error":"invalid_grant"}`), nil // the refresh credential was rejected
+			}
 			return responseTest(status, `{"error":"temporarily_unavailable"}`), nil
 		}
 		return responseTest(http.StatusOK, `{"access_token":"fresh-access","token_type":"Bearer","expires_in":3600}`), nil
 	})
-	db := storetest.Open(t)
+	rf.oauth = oauth
+	return rf.build(oauth, db)
+}
+
+// build composes the receiving path over db. The receiving run is created here
+// so it exists exactly once per database.
+func (rf *receivingFixture) build(oauth roundTripTestFunc, db *sql.DB) *receivingFixture {
+	t := rf.t
+	ctx := context.Background()
 	rf.guardedProductionFixture = newGuardedProductionFixtureWithOAuth(t, db, []string{"PLreceiving"}, http.StatusOK, oauth)
 	f := rf.guardedProductionFixture
 	t.Cleanup(func() { _ = f.db.Close() })
-
+	rf.compose(discardLogger())
 	routerStore, configStore := router.NewStore(f.db), config.NewStore(f.db)
-	versioner := config.NewService(routerStore, configStore)
-	var err error
-	rf.qs, err = queue.NewStore(f.db)
-	require.NoError(t, err)
-	machine := state.NewMachine(f.state, state.WithLedger(f.ledger))
-	meta := metadata.NewManager(metadata.NewStore(f.db), nil, f.ledger, metadata.WithBoundFetcher(receivingFetcher{rf}), metadata.WithLogger(discardLogger()))
-	rf.p = &Pipeline{
-		db: f.db, stateStore: f.state, machine: machine, queueStore: rf.qs, auth: f.auth,
-		versioner: versioner, configStore: configStore, router: router.NewEngine(routerStore),
-		detector: duplicate.NewDetector(f.db), ledger: f.ledger, meta: meta, broadcast: NewBroadcaster(),
-		logger:   discardLogger(),
-		executor: NewExecutor(f.db, f.ledger, f.auth, WithYouTubeBaseURL(rf.server.URL), WithExecutorLogger(discardLogger())),
-	}
-	rf.p.executionBinding = &f.binding
-	rf.p.router.WithRunRoutesValidator(rf.p.ValidateRunRoutes)
-
 	// The origin run stays open (recording evidence on a terminal run is
 	// refused); the receiving run is a fresh guarded run.
 	cfgID, err := config.NewService(routerStore, configStore).ActiveVersionID(ctx)
@@ -161,6 +164,29 @@ func newReceivingFixture(t *testing.T) *receivingFixture {
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
 	return rf
+}
+
+// compose builds the queue store, metadata manager and pipeline over the
+// fixture's current db, auth service and ledger. A restart calls it again over
+// reopened ones.
+func (rf *receivingFixture) compose(logger *slog.Logger) {
+	f := rf.guardedProductionFixture
+	routerStore, configStore := router.NewStore(f.db), config.NewStore(f.db)
+	versioner := config.NewService(routerStore, configStore)
+	var err error
+	rf.qs, err = queue.NewStore(f.db)
+	require.NoError(rf.t, err)
+	machine := state.NewMachine(f.state, state.WithLedger(f.ledger))
+	meta := metadata.NewManager(metadata.NewStore(f.db), nil, f.ledger, metadata.WithBoundFetcher(receivingFetcher{rf}), metadata.WithLogger(discardLogger()))
+	rf.p = &Pipeline{
+		db: f.db, stateStore: f.state, machine: machine, queueStore: rf.qs, auth: f.auth,
+		versioner: versioner, configStore: configStore, router: router.NewEngine(routerStore),
+		detector: duplicate.NewDetector(f.db), ledger: f.ledger, meta: meta, broadcast: NewBroadcaster(),
+		logger:   logger,
+		executor: NewExecutor(f.db, f.ledger, f.auth, WithYouTubeBaseURL(rf.server.URL), WithExecutorLogger(discardLogger())),
+	}
+	rf.p.executionBinding = &f.binding
+	rf.p.router.WithRunRoutesValidator(rf.p.ValidateRunRoutes)
 }
 
 // ctx is one execution of the receiving run: a fresh in-memory latch.

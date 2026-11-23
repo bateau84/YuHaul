@@ -233,11 +233,18 @@ func (p *Pipeline) prepareReceiving(ctx context.Context, qs *queue.Store, runID 
 	if err != nil {
 		var fault *metadata.ReadFaultError
 		if errors.Is(err, auth.ErrQuotaAccounting) || errors.As(err, &fault) {
+			if fault != nil && fault.Facts.Authorization != "" {
+				// An accounting fault controls the disposition, but the vetted
+				// authorization cause it wraps is not lost.
+				p.logger.WarnContext(ctx, "receiving read failed on authorization and accounting", "run_id", runID,
+					"authorization_cause", string(fault.Facts.Authorization))
+			}
 			return nil, p.failClosed(ctx, qs, runID, err)
 		}
 		return nil, fmt.Errorf("fetch inputs for evaluation: %w", err)
 	}
 	ready := make(map[int64]metadata.FetchStatus, len(out.Statuses))
+	pending := 0
 	for text, status := range out.Statuses {
 		id, ok := byText[text]
 		if !ok {
@@ -245,10 +252,96 @@ func (p *Pipeline) prepareReceiving(ctx context.Context, qs *queue.Store, runID 
 		}
 		ready[id] = status
 		if status == metadata.FetchAuthorizationPending {
+			pending++
 			quota.LatchRunStop(ctx, quota.StopAuthorization)
 		}
 	}
+	if pending > 0 && out.Read != nil && out.Read.Authorization != "" {
+		// One bounded line per authorization failure of this pass: the vetted
+		// cause and a count, never provider text or per-video lines. The stop
+		// itself is stored by the first settlement (writer W1).
+		p.logger.WarnContext(ctx, "run authorization stop", "run_id", runID,
+			"authorization_cause", string(out.Read.Authorization), "inputs", pending)
+	}
 	return ready, nil
+}
+
+// settleOwnedReceiptsWithoutBinding runs when the execution could not take an
+// authorization binding. If the run has a stored authorization stop, or the
+// binding was refused for an authorization cause (OC-006), there is no safe
+// authorized continuation: the run's open and final receipts, including live
+// receipts restored after a restart, settle locally under that stop. Open
+// receipts become authorization_pending with the stop stored in the same
+// transaction as the first of them; final ones reconcile. No provider request
+// is made. Partly-done receipts need a guarded send path that a missing
+// binding cannot give, so they stay live for the run's own retention sweep.
+//
+// Any other bind failure (a local fault) or a quota or accounting stop is left
+// to the caller's ordinary failure path. Errors are logged, never swallowed:
+// the caller fails the run right after, and its sweep retains whatever is left.
+func (p *Pipeline) settleOwnedReceiptsWithoutBinding(ctx context.Context, run *state.Run, resumeAdmitted bool, fresh []queue.RetryGroupReceipt, bindErr error) {
+	runID := run.ID
+	if p.ledger == nil || !p.isProductionRun(run.RunType) {
+		return
+	}
+	fail := func(what string, err error) {
+		p.logger.ErrorContext(ctx, "receiving settlement without a binding failed", "run_id", runID, "step", what,
+			"diagnostic", diag.Encode(err, "routing", "load_metadata"))
+	}
+	qs, err := p.retryStore()
+	if err != nil {
+		fail("store", err)
+		return
+	}
+	stop, err := p.runStop(ctx, qs, runID)
+	if err != nil {
+		fail("stop", err)
+		return
+	}
+	cause := auth.ClassifyAuthorizationCause(bindErr)
+	if stop != quota.StopAuthorization && (stop != quota.StopNone || cause == "") {
+		return
+	}
+	if _, _, err := productionAuthority(ctx, p.db, p.configStore, runID); err != nil {
+		return // the ordinary failure path reports the run; nothing is settled around it
+	}
+	receipts := fresh
+	if receipts == nil && (run.Status == state.RunStatusInterrupted || resumeAdmitted) {
+		if receipts, err = recoverOwnedReceipts(ctx, qs, runID); err != nil {
+			fail("recover", err)
+			return
+		}
+	}
+	var settle []queue.RetryGroupReceipt
+	for _, receipt := range receipts {
+		class, _, err := state.ClassifyVideoTx(ctx, p.db, receipt.VideoID)
+		if err != nil {
+			fail("classify", err)
+			return
+		}
+		if class != state.VideoClassPartlyDone {
+			settle = append(settle, receipt)
+		}
+	}
+	if len(settle) == 0 {
+		return
+	}
+	if run.Status == state.RunStatusInterrupted {
+		if err := p.stateStore.ResumeRun(ctx, runID); err != nil {
+			fail("resume", err)
+			return
+		}
+		run.Status = state.RunStatusRunning
+	}
+	quota.LatchRunStop(ctx, quota.StopAuthorization)
+	source := string(cause)
+	if source == "" {
+		source = "stored_stop"
+	}
+	p.logger.WarnContext(ctx, "run authorization stop", "run_id", runID, "authorization_cause", source, "inputs", len(settle))
+	if err := p.processDeferredItems(ctx, runID, settle, false); err != nil {
+		fail("settle", err)
+	}
 }
 
 // applyReadiness disposes of one open receipt whose inputs are not ready.

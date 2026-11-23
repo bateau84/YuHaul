@@ -128,6 +128,10 @@ type ReadFacts struct {
 	Accounting error
 	// Renewal is a failed authorization-renewal observation, if any.
 	Renewal error
+	// Authorization is the vetted cause of an authorization refusal or
+	// rejection (reconnect-required versus temporary), or "" when the read did
+	// not fail on authorization. It never carries provider text or credentials.
+	Authorization auth.AuthorizationCause
 	// Interruption is a cancellation or deadline seen during the read.
 	Interruption error
 	// HTTPStatus is the response status, 0 when none.

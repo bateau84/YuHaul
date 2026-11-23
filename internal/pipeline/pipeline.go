@@ -381,6 +381,10 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 	if p.isProductionRun(run.RunType) && p.auth != nil {
 		binding, bindErr := p.auth.Bind(ctx)
 		if bindErr != nil {
+			// The run cannot continue, but the receipts it already owns are
+			// not stranded by that: under an authorization stop they settle
+			// locally with no provider work (ARS-005 section 6.2).
+			p.settleOwnedReceiptsWithoutBinding(ctx, run, resumeAdmitted, freshRetries, bindErr)
 			p.failRun(ctx, runID, "authorization binding failed", bindErr)
 			return
 		}
@@ -1417,6 +1421,30 @@ func (p *Pipeline) processRetryBatches(ctx context.Context, runID int64, receipt
 	}
 }
 
+// recoverOwnedReceipts rebuilds the exact claim receipt of every retry video
+// the run still owns, from the stored claim identity.
+func recoverOwnedReceipts(ctx context.Context, qs *queue.Store, runID int64) ([]queue.RetryGroupReceipt, error) {
+	ids, err := qs.ListRetryVideoIDs(ctx, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list deferred items: %w", err)
+	}
+	receipts := make([]queue.RetryGroupReceipt, 0, len(ids))
+	for _, id := range ids {
+		receipt, err := qs.RetryGroupReceiptForRunVideo(ctx, runID, id)
+		if errors.Is(err, queue.ErrRetryProvenance) {
+			// Unfinished work with no trustworthy stored claim identity (legacy,
+			// malformed or unsupported): an integrity refusal, not a failure of
+			// the video. Nothing is dispatched, reset, handed off or retained.
+			return nil, &retryAdmissionRefusal{receipt: queue.RetryGroupReceipt{ReceivingRunID: runID, VideoID: id}, cause: err}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("recover retry video %d receipt: %w", id, err)
+		}
+		receipts = append(receipts, receipt)
+	}
+	return receipts, nil
+}
+
 // processDeferredItems retries pending deferred videos before new discoveries.
 // Items are processed oldest-first (FIFO). Quota checks are delegated to the
 // action executor; if quota is exhausted the remaining items stay pending.
@@ -1431,23 +1459,9 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 	}
 
 	if receipts == nil && recovery {
-		ids, err := qs.ListRetryVideoIDs(ctx, runID)
-		if err != nil {
-			return fmt.Errorf("list deferred items: %w", err)
-		}
-		receipts = make([]queue.RetryGroupReceipt, 0, len(ids))
-		for _, id := range ids {
-			receipt, err := qs.RetryGroupReceiptForRunVideo(ctx, runID, id)
-			if errors.Is(err, queue.ErrRetryProvenance) {
-				// Unfinished work with no trustworthy stored claim identity (legacy,
-				// malformed or unsupported): an integrity refusal, not a failure of
-				// the video. Nothing is dispatched, reset, handed off or retained.
-				return &retryAdmissionRefusal{receipt: queue.RetryGroupReceipt{ReceivingRunID: runID, VideoID: id}, cause: err}
-			}
-			if err != nil {
-				return fmt.Errorf("recover retry video %d receipt: %w", id, err)
-			}
-			receipts = append(receipts, receipt)
+		var err error
+		if receipts, err = recoverOwnedReceipts(ctx, qs, runID); err != nil {
+			return err
 		}
 	}
 	if receipts == nil && !recovery {
