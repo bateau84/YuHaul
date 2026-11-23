@@ -10,6 +10,8 @@ timestamp: 2026-11-24T00:00:00Z
 
 ## 2026-11-24
 
+**Review candidate assembled; Q3 real-handoff proof recorded (`rq-gate-claim`, Action `b820f6ca`).** The saved-decision correction, the real Stop and Discard proof of ARS-003 Q3 and the earlier receiving-path corrections now sit on one local line. [ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §16 records the new proof and its limits, including that a real Discard leaves no second resumable run, so the Discard variant uses a multi-candidate fixture. The status line names the F4 correction. A saved decision under a run dispatch stop still takes the stop's disposition, as before; no new disposition was chosen. Discovery W4 stays with PR-D. No requirement changed. Not independently reviewed, and OKF validation was not run.
+
 **Saved receiving decision is not hydrated (assessment `771112e4` F4, Action `b820f6ca`).** [Run-initiation ARS-005](/docs/architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) §6.2 now says what the plan already required: an open receipt whose receiving run finished its evaluation keeps its decision and settles its outstanding action without a metadata read, so no omission, failure or late expiry can release, fail or re-decide it. An unfinished evaluation still follows readiness, and a run dispatch stop still takes its own disposition. §12 records the built seam and the evidence. No requirement or contract changed.
 
 ## 2026-11-23
