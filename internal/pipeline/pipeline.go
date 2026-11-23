@@ -1337,17 +1337,21 @@ const retryClaimBatch = 500
 
 // processRetryBatches settles the pass the run already owns, then claims and
 // settles further batches in created-at order while the run may still claim
-// (ARS-005 section 5.2, variant K). It leaves quietly when the run is not a
-// Run Now or scheduled run, the context is done, the run's dispatch stop is
-// quota or accounting/integrity, the minimum-unit preflight refuses, the claim
-// finds the run stopped, or no candidate remains. A non-quota provider failure
-// does not end it: claiming and settling are local. A stop or preflight read
-// error is an accounting fault and is returned (writer W3).
+// (ARS-005 section 5.2, variant K). Only the run's creating execution may claim
+// (mayClaim): recovery is true for a resumed execution, which settles only its
+// exact held receipts and then returns, so every other eligible item waits for
+// the next new run (BR-035 AC14, BR-037 AC11). It also leaves quietly when the
+// run is not a Run Now or scheduled run, the context is done, the run's
+// dispatch stop is quota or accounting/integrity, the minimum-unit preflight
+// refuses, the claim finds the run stopped, or no candidate remains. A
+// non-quota provider failure does not end it: claiming and settling are local.
+// A stop or preflight read error is an accounting fault and is returned
+// (writer W3).
 func (p *Pipeline) processRetryBatches(ctx context.Context, runID int64, receipts []queue.RetryGroupReceipt, recovery bool) error {
 	if err := p.processDeferredItems(ctx, runID, receipts, recovery); err != nil {
 		return err
 	}
-	if ctx.Err() != nil {
+	if recovery || ctx.Err() != nil {
 		return nil
 	}
 	run, err := p.stateStore.GetRun(ctx, runID)

@@ -312,22 +312,103 @@ func TestBatchLoopOnlyRunNowAndScheduledClaimMoreB5(t *testing.T) {
 	}
 }
 
-// B3: a resumed Run Now run settles what it holds, then continues in order.
-func TestBatchLoopResumedRunFinishesItsBatchThenContinuesB3(t *testing.T) {
-	rf := newReceivingFixture(t)
-	rf.initiatedBy(state.InitiatedByRunNow)
-	rf.seedPending(7)
-	rf.p.meta = &batchProbe{status: metadata.FetchUnusable}
-	items, err := rf.qs.ListDeferredRetryCandidatesForRun(context.Background(), time.Now(), 0, 3) // the interrupted run held three
-	require.NoError(t, err)
-	var held queue.BatchClaim
-	require.NoError(t, rf.qs.WithRetryTx(context.Background(), func(tx *sql.Tx) error {
-		var err error
-		held, err = rf.qs.ClaimDeferredBatchTx(context.Background(), tx, rf.recvRun, items, time.Now())
-		return err
-	}))
-	require.Len(t, held.Receipts, 3)
+// itemDump renders the full deferred_item rows for byte-for-byte comparison.
+func (rf *receivingFixture) itemDump(ids []int64) string {
+	rf.t.Helper()
+	var out string
+	for _, id := range ids {
+		rows, err := rf.db.Query(`SELECT * FROM deferred_item WHERE id=?`, id)
+		require.NoError(rf.t, err)
+		cols, err := rows.Columns()
+		require.NoError(rf.t, err)
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			require.NoError(rf.t, rows.Scan(ptrs...))
+			for i, v := range vals {
+				if b, ok := v.([]byte); ok {
+					v = string(b)
+				}
+				out += fmt.Sprintf("%s=%v|", cols[i], v)
+			}
+			out += "\n"
+		}
+		require.NoError(rf.t, rows.Close())
+	}
+	return out
+}
 
-	require.NoError(t, rf.p.processRetryBatches(rf.ctx(), rf.recvRun, nil, true))
-	require.Equal(t, 7, rf.memberCount(rf.recvRun), "the resumed run took the rest, in one pass each, once")
+// memberOfItems counts the items whose video is a member of run.
+func (rf *receivingFixture) memberOfItems(run int64, ids []int64) int {
+	rf.t.Helper()
+	n := 0
+	for _, id := range ids {
+		var c int
+		require.NoError(rf.t, rf.db.QueryRow(`SELECT COUNT(*) FROM run_video_outcome o JOIN deferred_item d ON d.video_id=o.video_id WHERE o.run_id=? AND d.id=?`, run, id).Scan(&c))
+		n += c
+	}
+	return n
+}
+
+// setReason turns pending items into the given eligible handoff class: due now,
+// no retry_after, origin run unrelated to the receiving run.
+func (rf *receivingFixture) setReason(ids []int64, reason queue.DeferredReason) {
+	rf.t.Helper()
+	for _, id := range ids {
+		_, err := rf.db.Exec(`UPDATE deferred_item SET deferral_reason=?, retry_after=NULL WHERE id=?`, string(reason), id)
+		require.NoError(rf.t, err)
+	}
+}
+
+// B3 / F7 (ARS-005 section 5.2 mayClaim, section 5.3; BR-035 AC14, BR-037 AC11):
+// a resumed execution settles its exact held receipts and never claims anything
+// else, even after its held pass settled, with time, quota and a working
+// provider left. An unrelated eligible handoff W (Stop, Discard or re-queued;
+// never a member of the run, origin another run) stays byte-identical, and a
+// fresh run claims it.
+//
+// Mutation check (recorded in the F7 handback): with the processRetryBatches
+// early return on recovery removed, this test fails on W's row and on R's
+// membership count.
+func TestBatchLoopResumedRunSettlesHeldWorkAndClaimsNothingElseB3(t *testing.T) {
+	for _, initiator := range []string{state.InitiatedByRunNow, state.InitiatedBySchedule} {
+		for _, reason := range []queue.DeferredReason{queue.DeferredReasonStoppedByUser, queue.DeferredReasonDiscardedByUser, queue.DeferredReasonRequeuedByUser} {
+			t.Run(initiator+"/"+string(reason), func(t *testing.T) {
+				rf := newReceivingFixture(t)
+				rf.initiatedBy(initiator)
+				probe := &batchProbe{status: metadata.FetchUnusable}
+				rf.p.meta = probe
+
+				// X: the three items the interrupted run still holds, claimed
+				// through the real batch claim (the positive recovery control).
+				held := rf.seedPending(3)
+				require.Len(t, rf.claimFirstBatch(rf.recvRun), 3)
+				require.Zero(t, rf.untouched(held), "X is held by the run")
+
+				// W: eligible, due now, unowned, origin another run, no tie to R.
+				w := rf.seedPending(4)
+				rf.setReason(w, reason)
+				require.NotEqual(t, rf.runID, rf.recvRun)
+				require.Equal(t, 4, rf.untouched(w))
+				require.Zero(t, rf.memberOfItems(rf.recvRun, w), "R has no membership for W")
+				before := rf.itemDump(w)
+
+				require.NoError(t, rf.p.processRetryBatches(rf.ctx(), rf.recvRun, nil, true))
+
+				require.Equal(t, []int{3}, probe.passes, "the held pass ran once over exactly X")
+				require.Equal(t, 3, rf.memberCount(rf.recvRun), "R settled X and nothing else")
+				require.Equal(t, 3, rf.memberOfItems(rf.recvRun, held))
+				require.Zero(t, rf.memberOfItems(rf.recvRun, w), "R took no membership for W")
+				require.Equal(t, before, rf.itemDump(w), "W is byte-identical after the resumed execution")
+
+				// A fresh run is not limited: it claims W, once, in order.
+				fresh := rf.newReceivingRun(state.InitiatedBySchedule)
+				require.NoError(t, rf.p.processRetryBatches(rf.runCtx(fresh), fresh, []queue.RetryGroupReceipt{}, false))
+				require.Equal(t, 4, rf.memberOfItems(fresh, w), "the next new run claims W")
+			})
+		}
+	}
 }

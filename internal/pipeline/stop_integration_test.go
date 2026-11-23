@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bateau84/YuHaul/internal/metadata"
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/state"
 )
@@ -405,24 +407,183 @@ func TestQ2_NextRunClaimsHandedOverVideos(t *testing.T) {
 	}
 }
 
-// Q3: a usable resume candidate is resumed and never claims handed-over items.
+// Q3 / F7 (AC14; ARS-005 section 5.2 mayClaim; BR-037 AC11): a usable resume
+// candidate R is resumed and, whatever its held work, never claims an unrelated
+// eligible handoff H that it never held. R keeps its id, settles its exact held
+// claim X once, leaves H byte-identical (no membership, receipt, decision or
+// provider call), and the next new run, scheduled or Run Now, claims H once.
+//
+// H is an unrelated video with no tie to R: its origin is another, stopped
+// production run P, discovery never returns it, it is due now and unowned.
+// V3, seeded below as in the earlier Q3, is a native member of R and so proves
+// nothing about widening (the candidate query excludes it); H and X do.
+//
+// The interruption of R is real (Run Now under a real deadline). X is a claim
+// through the queue's real batch claim, made while R's row is briefly set back
+// to running because an interrupted run cannot claim, and P is a seeded stopped run: a real Stop of a second production run cannot be
+// staged while R is the only resume candidate (reported as a gap in the F7 handoff).
 func TestQ3_ResumeDoesNotClaimHandedOverItems(t *testing.T) {
-	e := newRunNowEnv(t)
-	e.stallOn("V2")
-	first := e.interruptedAtLimit(t, testLimit)
-	v3, err := e.stateStore.GetVideoByExternalID(e.ctx, "V3")
+	cases := []struct {
+		name   string
+		reason queue.DeferredReason
+	}{
+		{"stop", queue.DeferredReasonStoppedByUser},
+		{"discard", queue.DeferredReasonDiscardedByUser},
+		{"requeued", queue.DeferredReasonRequeuedByUser},
+	}
+	for _, tc := range cases {
+		for _, next := range []string{"scheduled", "run_now"} {
+			t.Run(tc.name+"/next_"+next, func(t *testing.T) {
+				e := newRunNowEnv(t)
+				e.stallOn("V2")
+				first := e.interruptedAtLimit(t, testLimit)
+				v3, err := e.stateStore.GetVideoByExternalID(e.ctx, "V3")
+				require.NoError(t, err)
+				qs, err := queue.NewStore(e.db())
+				require.NoError(t, err)
+				_, err = qs.CreateDeferredItem(e.ctx, &queue.DeferredItem{VideoID: v3.ID, RunID: first.RunID(), Reason: queue.DeferredReasonStoppedByUser, Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC()})
+				require.NoError(t, err)
+
+				// X: an item R holds by exact receipt, claimed before H exists.
+				xVideo := e.seedVideo(t, "X-held", first.RunID())
+				xItem := e.seedPendingItem(t, xVideo, first.RunID(), queue.DeferredReasonQuotaExhausted)
+				var claim queue.BatchClaim
+				// A claim needs a running run, so the row is running only for the claim.
+				e.setRunStatus(t, first.RunID(), state.RunStatusRunning)
+				require.NoError(t, qs.WithRetryTx(e.ctx, func(tx *sql.Tx) error {
+					items, err := qs.ListDeferredRetryCandidatesForRun(e.ctx, time.Now(), first.RunID(), retryClaimBatch)
+					if err != nil {
+						return err
+					}
+					for _, it := range items {
+						if it.ID == xItem {
+							claim, err = qs.ClaimDeferredBatchTx(e.ctx, tx, first.RunID(), []queue.DeferredItem{it}, time.Now())
+							return err
+						}
+					}
+					return fmt.Errorf("X item %d is not a candidate", xItem)
+				}))
+				e.setRunStatus(t, first.RunID(), state.RunStatusInterrupted)
+				require.Len(t, claim.Receipts, 1, "R holds X")
+				require.Equal(t, 1, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE id=? AND status='retrying' AND retry_run_id=?`, xItem, first.RunID()))
+
+				// H: an eligible handoff from the unrelated run P.
+				cfg, err := e.pipeline.versioner.ActiveVersionID(e.ctx)
+				require.NoError(t, err)
+				stoppedAt := time.Now().UTC().Add(-time.Hour).Format(state.RunTimestampLayout)
+				// P stopped through the stop transitions: marker first, then stopped.
+				res, err := e.db().ExecContext(e.ctx, `INSERT INTO run (started_at, run_type, status, config_version_id, action_authority_version, mutation_safety_version, initiated_by)
+					VALUES (?, 'scheduled', 'running', ?, 1, 1, 'schedule')`, stoppedAt, cfg)
+				require.NoError(t, err)
+				p, err := res.LastInsertId()
+				require.NoError(t, err)
+				_, err = e.db().ExecContext(e.ctx, `UPDATE run SET stop_requested_at=? WHERE id=?`, stoppedAt, p)
+				require.NoError(t, err)
+				_, err = e.db().ExecContext(e.ctx, `UPDATE run SET status='stopped', completed_at=?, interrupt_reason=? WHERE id=?`, stoppedAt, stopReason, p)
+				require.NoError(t, err)
+				hVideo := e.seedVideo(t, "H-unrelated", p)
+				hItem := e.seedPendingItem(t, hVideo, p, tc.reason)
+				require.Zero(t, e.count(t, `SELECT COUNT(*) FROM run_video_outcome WHERE video_id=?`, hVideo), "R has no tie to H")
+				hRow := e.rowDump(t, `SELECT * FROM deferred_item WHERE id=?`, hItem)
+				require.Contains(t, hRow, "status=pending")
+				require.Zero(t, e.postsFor("H-unrelated"))
+
+				e.stallOn()
+				// The run-now environment has no metadata fetcher, so a claimed
+				// video cannot be settled without this scripted readiness seam.
+				probe := &batchProbe{status: metadata.FetchUnusable}
+				e.pipeline.meta = probe
+				adm, err := e.pipeline.AdmitRunNow(e.ctx)
+				require.NoError(t, err)
+				require.True(t, adm.Resumed())
+				require.Equal(t, first.RunID(), adm.RunID(), "same run id")
+				adm.Execute(e.ctx) // returns only once the resumed execution has gone past X
+				r := e.run(t, first.RunID())
+				require.Equal(t, state.RunStatusCompleted, r.Status, "the resumed run finished: %v", str(r.InterruptReason))
+				require.Equal(t, []int{1}, probe.passes, "the resumed run's one metadata pass covered only X")
+
+				require.Equal(t, 1, e.count(t, `SELECT COUNT(*) FROM run_video_outcome WHERE run_id=? AND video_id=?`, first.RunID(), xVideo), "X settled under R's ownership")
+				require.Zero(t, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE id=? AND status='retrying' AND retry_run_id=?`, xItem, first.RunID()), "X is no longer held")
+				require.Equal(t, hRow, e.rowDump(t, `SELECT * FROM deferred_item WHERE id=?`, hItem), "H is byte-identical")
+				require.Zero(t, e.count(t, `SELECT COUNT(*) FROM run_video_outcome WHERE video_id=?`, hVideo), "no membership, receipt or decision for H")
+				require.Zero(t, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE retry_run_id=? AND video_id=?`, first.RunID(), hVideo))
+
+				var nextID int64
+				if next == "scheduled" {
+					run, err := e.pipeline.StartRun(e.ctx, state.RunTypeScheduled)
+					require.NoError(t, err)
+					nextID = run.ID
+					e.pipeline.Execute(e.ctx, nextID)
+				} else {
+					a, err := e.pipeline.AdmitRunNow(e.ctx)
+					require.NoError(t, err)
+					require.False(t, a.Resumed(), "no resume candidate remains")
+					nextID = a.RunID()
+					a.Execute(e.ctx)
+				}
+				require.NotEqual(t, first.RunID(), nextID)
+				require.Equal(t, 1, e.count(t, `SELECT COUNT(*) FROM run_video_outcome WHERE run_id=? AND video_id=?`, nextID, hVideo), "the next new run claims H once")
+				require.Zero(t, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE status='retrying'`), "no claim is left held")
+			})
+		}
+	}
+}
+
+// setRunStatus rewrites a run's status; the interruption itself stays real.
+func (e *runNowEnv) setRunStatus(t *testing.T, runID int64, status state.RunStatus) {
+	t.Helper()
+	_, err := e.db().ExecContext(e.ctx, `UPDATE run SET status=? WHERE id=?`, string(status), runID)
 	require.NoError(t, err)
-	qs, err := queue.NewStore(e.db())
+}
+
+// seedVideo inserts a video known to the local database but never returned by
+// discovery.
+func (e *runNowEnv) seedVideo(t *testing.T, externalID string, discoveredIn int64) int64 {
+	t.Helper()
+	res, err := e.db().ExecContext(e.ctx, `INSERT INTO video (video_id, channel_id, discovered_in_run_id, processing_state, final_outcome) VALUES (?, 'fixture-channel', ?, 'not_yet_evaluated', 'not_yet_evaluated')`, externalID, discoveredIn)
 	require.NoError(t, err)
-	_, err = qs.CreateDeferredItem(e.ctx, &queue.DeferredItem{VideoID: v3.ID, RunID: first.RunID(), Reason: queue.DeferredReasonStoppedByUser, Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC()})
+	id, err := res.LastInsertId()
 	require.NoError(t, err)
-	e.stallOn()
-	adm, err := e.pipeline.AdmitRunNow(e.ctx)
+	return id
+}
+
+// seedPendingItem inserts a pending, due, unowned deferred item.
+func (e *runNowEnv) seedPendingItem(t *testing.T, video, origin int64, reason queue.DeferredReason) int64 {
+	t.Helper()
+	res, err := e.db().ExecContext(e.ctx, `INSERT INTO deferred_item (video_id, run_id, deferral_reason, retry_count, status, created_at) VALUES (?, ?, ?, 0, 'pending', ?)`,
+		video, origin, string(reason), time.Now().UTC().Add(-48*time.Hour).Format(time.RFC3339))
 	require.NoError(t, err)
-	require.True(t, adm.Resumed())
-	adm.Execute(e.ctx)
-	require.Zero(t, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE retry_run_id IS NOT NULL`), "the resume claimed nothing")
-	require.Equal(t, 1, e.count(t, `SELECT COUNT(*) FROM deferred_item WHERE status='pending' AND deferral_reason='stopped_by_user'`))
+	id, err := res.LastInsertId()
+	require.NoError(t, err)
+	return id
+}
+
+// rowDump renders every column of every row the query returns.
+func (e *runNowEnv) rowDump(t *testing.T, query string, args ...any) string {
+	t.Helper()
+	rows, err := e.db().QueryContext(e.ctx, query, args...)
+	require.NoError(t, err)
+	defer rows.Close()
+	cols, err := rows.Columns()
+	require.NoError(t, err)
+	var b strings.Builder
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		require.NoError(t, rows.Scan(ptrs...))
+		for i, v := range vals {
+			if bs, ok := v.([]byte); ok {
+				v = string(bs)
+			}
+			fmt.Fprintf(&b, "%s=%v|", cols[i], v)
+		}
+		b.WriteString("\n")
+	}
+	require.NoError(t, rows.Err())
+	return b.String()
 }
 
 // outcomeOf reports whether the iteration ended with the run's own outcome or
