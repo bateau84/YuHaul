@@ -123,6 +123,51 @@ func TestFetchForEvaluationRealBoundReadEmptyItemsProvesAbsence(t *testing.T) {
 	}
 }
 
+// ARS-005 §6.1 and D7 through the real bound read: one element with an empty
+// id leaves its identified peers usable, and the two requested ids that have no
+// identifiable return are unusable, never absent. A clean response that omits
+// an id is the control: that one is absent.
+func TestFetchForEvaluationRealBoundReadAnonymousElementKeepsPeersAndProvesNoAbsence(t *testing.T) {
+	item := func(id string) string {
+		return `{"id":"` + id + `","snippet":{"title":"T ` + id + `","channelTitle":"C","description":"d","publishedAt":"2026-01-01T00:00:00Z"},"contentDetails":{"duration":"PT1M"}}`
+	}
+	body := `{"items":[` + item("a") + `,` + item("") + `,` + item("b") + `]}`
+	m, ms, binding, calls, _ := boundMetadataManager(t, 200, body, 10)
+	out, err := m.FetchForEvaluation(context.Background(), binding, evalInputs("a", "gone1", "b", "gone2"))
+	if err != nil || out.Read != nil {
+		t.Fatalf("err=%v read=%v", err, out.Read)
+	}
+	want := map[string]metadata.FetchStatus{"a": metadata.FetchFetched, "b": metadata.FetchFetched, "gone1": metadata.FetchUnusable, "gone2": metadata.FetchUnusable}
+	for id, status := range want {
+		if out.Statuses[id] != status {
+			t.Errorf("%s = %s, want %s", id, out.Statuses[id], status)
+		}
+	}
+	var titles []string
+	rows, err := ms.DB().Query(`SELECT video_id||'='||title FROM transient_metadata ORDER BY video_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		titles = append(titles, s)
+	}
+	if strings.Join(titles, ",") != "a=T a,b=T b" || calls.Load() != 1 || out.Saved != 2 {
+		t.Fatalf("stored=%v calls=%d saved=%d (the nameless element stores nothing)", titles, calls.Load(), out.Saved)
+	}
+
+	// Control: a clean response proves omission.
+	m, _, binding, _, _ = boundMetadataManager(t, 200, `{"items":[`+item("a")+`]}`, 10)
+	out, err = m.FetchForEvaluation(context.Background(), binding, evalInputs("a", "gone1"))
+	if err != nil || out.Statuses["a"] != metadata.FetchFetched || out.Statuses["gone1"] != metadata.FetchAbsent {
+		t.Fatalf("control: status=%v err=%v", out.Statuses, err)
+	}
+}
+
 func TestFetchForEvaluationRealBoundReadInvalidEnvelopeIsNotAbsence(t *testing.T) {
 	for name, body := range map[string]string{"missing items": `{}`, "null items": `{"items":null}`, "token": `{"items":[],"nextPageToken":"x"}`, "truncated": `{"items":[`} {
 		t.Run(name, func(t *testing.T) {

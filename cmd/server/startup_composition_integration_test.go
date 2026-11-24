@@ -84,6 +84,16 @@ type fakeYouTube struct {
 	quotaVideo  string // POST for this video answers 403 quotaExceeded
 	postDelay   time.Duration
 	titleOf     func(id string) string // nil means "Jazz "+id
+	// videosHook, when set, answers every videos.list request instead of the
+	// default listing, so a test controls each response exactly.
+	videosHook func(w http.ResponseWriter, r *http.Request)
+}
+
+// setVideosHook replaces the videos.list answer from now on.
+func (f *fakeYouTube) setVideosHook(h func(w http.ResponseWriter, r *http.Request)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.videosHook = h
 }
 
 func (f *fakeYouTube) title(id string) string {
@@ -212,6 +222,13 @@ func (f *fakeYouTube) handlePlaylistItems(w http.ResponseWriter, r *http.Request
 }
 
 func (f *fakeYouTube) handleVideos(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	hook := f.videosHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook(w, r)
+		return
+	}
 	published := time.Now().UTC().Add(-time.Hour)
 	videos := f.videoList()
 	items := make([]map[string]any, len(videos))

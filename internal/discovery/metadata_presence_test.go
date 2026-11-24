@@ -238,6 +238,26 @@ func TestRunBoundInvalidMetadataResponseDoesNotFailDiscovery(t *testing.T) {
 	}
 }
 
+// ARS-005 §6.1.1 and D7: only receiving may use the identified peers of a
+// response with a nameless element. Ordinary discovery keeps its rule that a
+// batch whose response is not complete supplies nothing: the listing title
+// stays and description and duration stay NULL, even for an identified peer.
+func TestRunBoundNamelessMetadataElementKeepsDiscoveryPrefetchUnusable(t *testing.T) {
+	h := newBoundHarness(t, []string{"vid1", "vid2"}, jsonItems(
+		detailItem("vid1", map[string]any{"description": "d1"}, map[string]any{"duration": "PT1M"}),
+		detailItem("", map[string]any{"description": "nameless"}, map[string]any{"duration": "PT3M"}),
+	), 100)
+	res := h.run(t)
+	require.Equal(t, 2, res.VideosDiscovered)
+	require.Len(t, h.videoIDs, 1)
+	for _, id := range []string{"vid1", "vid2"} {
+		r := readPresenceRow(t, h.db, id)
+		require.Equal(t, "Playlist title "+id, r.title.String, id)
+		require.False(t, r.description.Valid, id)
+		require.False(t, r.duration.Valid, id)
+	}
+}
+
 // The legacy unguarded Run has no production caller; it cannot read presence,
 // so it stores only a non-empty description or non-zero duration.
 func TestLegacyRunStoresUnprovenFieldsAsNull(t *testing.T) {

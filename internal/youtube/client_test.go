@@ -111,6 +111,82 @@ func TestGetVideosWithReturnedIDs(t *testing.T) {
 	}
 }
 
+// ARS-005 §6.1 and D7: an element with an empty id in a valid envelope names no
+// video. The identified peers keep their own attribution and details, but the
+// ID set is not complete, so it proves no omission.
+func TestGetVideosWithReturnedIDsAnonymousElementKeepsIdentifiedPeers(t *testing.T) {
+	good := func(id string) string {
+		return `{"id":"` + id + `","snippet":{"publishedAt":"2024-01-01T00:00:00Z","title":"T ` + id + `"},"contentDetails":{"duration":"PT1M"}}`
+	}
+	nameless := `{"id":"","snippet":{"publishedAt":"2024-01-01T00:00:00Z","title":"nameless"},"contentDetails":{"duration":"PT1M"}}`
+	for _, tc := range []struct {
+		name, items string
+		ids         []string
+		details     []string
+	}{
+		{"before peers", nameless + "," + good("v1") + "," + good("v3"), []string{"v1", "v3"}, []string{"v1", "v3"}},
+		{"between peers", good("v1") + "," + nameless + "," + good("v3"), []string{"v1", "v3"}, []string{"v1", "v3"}},
+		{"after peers", good("v1") + "," + good("v3") + "," + nameless, []string{"v1", "v3"}, []string{"v1", "v3"}},
+		{"two nameless", nameless + "," + good("v1") + "," + nameless, []string{"v1"}, []string{"v1"}},
+		{"only nameless", nameless, []string{}, nil},
+		{"unparseable peer still returned", `{"id":"v1","snippet":{"publishedAt":"bad"}},` + nameless + "," + good("v3"), []string{"v1", "v3"}, []string{"v3"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newAccountedTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"items":[`+tc.items+`]}`)
+			})
+			details, returned, err := c.GetVideosWithReturnedIDs(context.Background(), []string{"v1", "v2", "v3"})
+			require.NoError(t, err)
+			assert.False(t, returned.Complete, "an anonymous element proves no omission")
+			assert.Equal(t, tc.ids, returned.IDs)
+			var got []string
+			for _, d := range details {
+				got = append(got, d.ID)
+				assert.Equal(t, "T "+d.ID, d.Title)
+			}
+			assert.Equal(t, tc.details, got)
+			assert.Len(t, returned.Live, len(tc.ids), "one live entry per identified element, none for the anonymous one")
+			for _, id := range tc.ids {
+				assert.Contains(t, returned.Live, id)
+			}
+		})
+	}
+}
+
+// The anonymous allowance is only for an element that names no ID. A duplicate,
+// foreign, malformed, non-string or missing id, or a broken envelope, still
+// makes the whole response invalid, with the identified peers discarded.
+func TestGetVideosWithReturnedIDsAnonymousElementDoesNotWeakenAmbiguity(t *testing.T) {
+	good := `{"id":"v1","snippet":{"publishedAt":"2024-01-01T00:00:00Z"}}`
+	nameless := `{"id":""}`
+	for name, body := range map[string]string{
+		"duplicate peer":         `{"items":[` + good + `,` + nameless + `,` + good + `]}`,
+		"foreign id":             `{"items":[` + good + `,` + nameless + `,{"id":"v9"}]}`,
+		"malformed id":           `{"items":[` + good + `,` + nameless + `,{"id":"v 3"}]}`,
+		"non-string id":          `{"items":[` + good + `,` + nameless + `,{"id":3}]}`,
+		"missing id":             `{"items":[` + good + `,` + nameless + `,{}]}`,
+		"null id":                `{"items":[` + good + `,` + nameless + `,{"id":null}]}`,
+		"null element":           `{"items":[` + good + `,` + nameless + `,null]}`,
+		"repeated id member":     `{"items":[` + good + `,{"id":"","id":"v3"}]}`,
+		"continuation token":     `{"items":[` + good + `,` + nameless + `],"nextPageToken":"more"}`,
+		"repeated items":         `{"items":[` + good + `,` + nameless + `],"items":[]}`,
+		"truncated after peer":   `{"items":[` + good + `,` + nameless,
+		"items is not an array":  `{"items":{"id":""}}`,
+		"missing items envelope": `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newAccountedTestClient(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) })
+			details, returned, err := c.GetVideosWithReturnedIDs(context.Background(), []string{"v1", "v2", "v3"})
+			var invalid *InvalidResponseError
+			require.ErrorAs(t, err, &invalid)
+			assert.Equal(t, OpVideosList, invalid.Operation())
+			assert.Empty(t, details)
+			assert.Empty(t, returned.IDs)
+			assert.False(t, returned.Complete)
+		})
+	}
+}
+
 func TestGetVideosWithReturnedIDsAmbiguousInputsAndDays(t *testing.T) {
 	for _, tc := range []struct {
 		name, snippet, content string

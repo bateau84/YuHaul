@@ -620,7 +620,15 @@ func (e *Engine) prefetchMetadata(ctx context.Context, client *youtube.Client, v
 		var batch []youtube.VideoDetail
 		var err error
 		if byID {
-			batch, _, err = client.GetVideosWithReturnedIDs(ctx, ids[i:end])
+			var returned youtube.VideoIDs
+			batch, returned, err = client.GetVideosWithReturnedIDs(ctx, ids[i:end])
+			if err == nil && !returned.Complete {
+				// Receiving may use the identified peers of a response with an
+				// anonymous element (ARS-005 §6.1, D7). Discovery keeps its rule
+				// that an unusable response supplies nothing for the batch.
+				e.logger.WarnContext(ctx, "discovery: metadata response unusable", "count", end-i)
+				continue
+			}
 		} else {
 			batch, err = client.GetVideos(ctx, ids[i:end])
 			for j := range batch {
