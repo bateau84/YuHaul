@@ -19,13 +19,14 @@ import (
 	"github.com/bateau84/YuHaul/internal/state"
 )
 
-// V2 of ARS-005 §11.2, step-3 form: the stranded scan does not exist yet, so
-// its blocked set is the shared predicates evaluated the way the scan will
-// evaluate them (HeldSendGuard OR LegacySendVeto with assume_acted = 1, NULL
-// target). The send side is a real scheduled production run on real SQLite
-// against a local fake YouTube: it claims the queued work, evaluates the
-// video against the captured configuration and sends through
-// ClaimPlaylistSend and the guarded dispatch.
+// V2 of ARS-005 §11.2: the real preview and confirm against the real send
+// path. The preview's blocked set is checked against the veto definitions in
+// the seed table, the confirm re-queues every seed the scan did not block, and
+// a real scheduled production run claims the work, evaluates each video
+// against the captured configuration and sends through ClaimPlaylistSend and
+// the guarded dispatch. Blocked seeds are never re-queued, so a pending item
+// is inserted for each directly: it stands in for a hypothetical re-queue of
+// a blocked video and shows that the send safety rules refuse it anyway.
 
 const (
 	v2TargetA = "PLv2targetA"
@@ -62,14 +63,15 @@ func v2Seeds() []v2Seed {
 
 type v2Env struct {
 	*idempotencyTestEnv
-	ctx      context.Context
-	cfgID    int64
-	jazzID   int64
-	routeAID int64
-	ghostID  int64
-	evidence int64 // a version-1 production run that hosts non-vetoing evidence
-	videos   map[string]*state.Video
-	deferred map[string]int64
+	ctx          context.Context
+	cfgID        int64
+	jazzID       int64
+	routeAID     int64
+	ghostID      int64
+	evidence     int64 // a version-1 production run that hosts non-vetoing evidence
+	branch4Retry int64 // the version-0 retry run whose unfinished retry blocks the branch 4 seed
+	videos       map[string]*state.Video
+	deferred     map[string]int64
 
 	mu    sync.Mutex
 	posts []playlistInsertion // every playlist POST the fake YouTube received
@@ -147,15 +149,20 @@ func (e *v2Env) seed(t *testing.T) {
 	v = e.discover(t, "branch3_not_acted_at_scan", r)
 	require.Equal(t, state.VideoStateNotYetEvaluated, v.ProcessingState)
 
-	// Branch 4: a legacy retry run in action_execution holds the video's
-	// retained error entry; the origin run recorded success for A only.
-	// The retry run ended (failed), so the new run may reclaim the video.
+	// Branch 4: a legacy retry run in action_execution left the video's
+	// retry unfinished; the origin run recorded success for A only. The
+	// retry row is INACTIVE (resolved, not retrying and not dismissed), as
+	// ARS-005 §11.2 says: an active row would make the scan report the video
+	// as already queued before it ever checks the veto (§3.1 order), and a
+	// dismissed one as removed by the user. The retry run ended (failed), so
+	// the new run may reclaim the video.
 	retry := e.legacyRun(t, &e.cfgID, string(PhaseActionExecution))
 	e.exec(t, `UPDATE run SET status='failed' WHERE id=?`, retry)
+	e.branch4Retry = retry
 	v = e.discover(t, "branch4_target_a_succeeded", e.evidence)
 	d = e.decision(t, v, e.evidence, e.jazzID, state.RouteDecisionNotMatched)
 	e.exec(t, `INSERT INTO executed_action(route_decision_id,run_id,video_id,action_type,target_playlist_id,outcome) VALUES(?,?,?,'playlist_insert',?,'succeeded')`, d, e.evidence, v.ID, v2TargetA)
-	e.exec(t, `INSERT INTO error_entry(video_id,run_id,error_category,error_message,status,retry_run_id) VALUES(?,?,'runtime','legacy','retrying',?)`, v.ID, e.evidence, retry)
+	e.exec(t, `INSERT INTO error_entry(video_id,run_id,error_category,error_message,status,retry_run_id) VALUES(?,?,'runtime','legacy','resolved',?)`, v.ID, e.evidence, retry)
 	e.exec(t, `INSERT INTO run_video_outcome(run_id,video_id,final_outcome,error_message,updated_at) VALUES(?,?,'failed','legacy failure',?)`, retry, v.ID, time.Now().UTC().Format(time.RFC3339Nano))
 
 	// A held guard on B.
@@ -183,33 +190,6 @@ func (e *v2Env) guard(t *testing.T, v *state.Video, target string, decisionID in
 	t.Helper()
 	e.exec(t, `INSERT INTO playlist_send_guard(video_id,target_playlist_id,action_type,run_id,route_decision_id,authorization_id,prepared_at) VALUES(?,?,'playlist_insert',?,?,'seed-auth',?)`,
 		v.ID, target, e.evidence, decisionID, time.Now().UTC().Format(time.RFC3339Nano))
-}
-
-// scanBlocked evaluates the shared predicates as the scan will (ARS-005 §3.1):
-// the video is unfinished, the target is NULL, and the receiving run will have
-// made it acted (assume_acted). It returns the external ids that are blocked.
-func (e *v2Env) scanBlocked(t *testing.T, assumeActed int) []string {
-	t.Helper()
-	rows, err := e.pipeline.db.QueryContext(e.ctx, `
-SELECT subject.youtube_video_id FROM (
-  SELECT v.id AS video_id, v.video_id AS youtube_video_id, CAST(NULL AS TEXT) AS target_playlist_id,
-         0 AS receiving_run_id, ?1 AS assume_acted
-  FROM video v
-  WHERE v.processing_state <> 'completed'
-    AND (v.final_outcome IS NULL OR v.final_outcome = 'not_yet_evaluated')) subject
-WHERE EXISTS (`+state.HeldSendGuard+`)
-   OR EXISTS (SELECT 1 FROM run old_run WHERE `+state.LegacySendVeto+`)
-ORDER BY subject.youtube_video_id`, assumeActed)
-	require.NoError(t, err)
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id string
-		require.NoError(t, rows.Scan(&id))
-		out = append(out, id)
-	}
-	require.NoError(t, rows.Err())
-	return out
 }
 
 func (e *v2Env) postsFor(externalID, playlist string) int {
@@ -285,27 +265,65 @@ func TestV2_ScanAndSendTimeVetoAgree(t *testing.T) {
 	require.NotEmpty(t, wantBlocked)
 	require.NotEmpty(t, wantUnblocked)
 
-	// 1. The scan-side predicate (assume_acted = 1).
-	blocked := e.scanBlocked(t, 1)
-	require.Equal(t, wantBlocked, blocked, "scan-side blocked set")
+	// The guarded evidence run is interrupted until it ends, and an unended run
+	// still owns its videos (BR-037 AC14): its two unblocked seeds would be
+	// counted under it, not stranded. A blocked seed outranks that category.
+	e.exec(t, `UPDATE run SET status='failed' WHERE id=?`, e.evidence)
+
+	// 1. The real preview (assume_acted = 1 inside the scan).
+	requests := e.server.Requests()
+	preview, err := e.pipeline.PreviewStranded(e.ctx)
+	require.NoError(t, err)
+	require.True(t, preview.Available, "unavailable: %s", preview.UnavailableReason)
+	var blocked []string
+	reasonOf := map[string]BlockReason{}
+	for _, item := range preview.Blocked.Items {
+		blocked = append(blocked, item.YouTubeVideoID)
+		reasonOf[item.YouTubeVideoID] = item.Reasons[0]
+	}
+	sort.Strings(blocked)
+	require.Equal(t, wantBlocked, blocked, "preview blocked set")
+	require.Equal(t, len(wantUnblocked), preview.Requeue)
+	require.Zero(t, preview.AlreadyQueued.Videos, "the branch 4 retry row is inactive, so the video is blocked, not queued")
+	require.Zero(t, preview.NotEnded.Videos)
+	b4 := e.videos["branch4_target_a_succeeded"]
+	require.Equal(t, BlockReason{Reason: BlockAmbiguousLegacyEvidence, RunID: e.branch4Retry}, reasonOf[b4.VideoID],
+		"branch 4 is blocked by the unfinished retry of the version-0 retry run")
 
 	// Branch 3 is blocked only because the scan assumes the receiving run will
-	// have acted the video: with the live (not acted) state it is not blocked.
+	// have acted the video: it is not acted now.
 	b3 := e.videos["branch3_not_acted_at_scan"]
 	require.Contains(t, blocked, b3.VideoID)
-	require.NotContains(t, e.scanBlocked(t, 0), b3.VideoID, "branch 3 seed must not be acted at scan time")
 	live, err := e.stateStore.GetVideo(e.ctx, b3.ID)
 	require.NoError(t, err)
 	require.NotEqual(t, state.VideoStateActed, live.ProcessingState)
 
-	// 2. A pending deferred item for every seed, inserted directly. The
-	// blocked ones stand in for a hypothetical unblocked re-queue so they
-	// reach the send path (ARS-005 §11.2); the confirm does not exist yet.
+	// 2. The real confirm re-queues exactly the unblocked seeds, with no
+	// provider request.
+	res, err := e.pipeline.RequeueStranded(e.ctx, &preview.Requeue)
+	require.NoError(t, err)
+	require.Equal(t, len(wantUnblocked), res.Requeued)
+	require.Zero(t, res.SkippedConcurrently)
+	require.Equal(t, requests, e.server.Requests(), "the preview and the confirm made no provider request")
 	qs, err := queue.NewStore(e.pipeline.db)
 	require.NoError(t, err)
 	var origin int64
 	for _, s := range v2Seeds() {
 		v := e.videos[s.name]
+		var items int
+		require.NoError(t, e.pipeline.db.QueryRowContext(e.ctx, `SELECT COUNT(*) FROM deferred_item WHERE video_id=?`, v.ID).Scan(&items))
+		if !s.blocked {
+			// Re-queued by the confirm: one pending item, eligible at once.
+			require.Equal(t, 1, items, s.name)
+			var id int64
+			require.NoError(t, e.pipeline.db.QueryRowContext(e.ctx,
+				`SELECT id FROM deferred_item WHERE video_id=? AND deferral_reason='requeued_by_user' AND status='pending' AND retry_after IS NULL`, v.ID).Scan(&id), s.name)
+			e.deferred[s.name] = id
+			continue
+		}
+		// Blocked: the confirm gave it nothing. A pending item stands in for a
+		// hypothetical re-queue so the video reaches the send path.
+		require.Zero(t, items, "the confirm must not re-queue the blocked seed %s", s.name)
 		require.NoError(t, e.pipeline.db.QueryRowContext(e.ctx, `SELECT discovered_in_run_id FROM video WHERE id=?`, v.ID).Scan(&origin))
 		id, err := qs.CreateDeferredItem(e.ctx, &queue.DeferredItem{VideoID: v.ID, RunID: origin, Reason: queue.DeferredReasonRequeuedByUser, Status: queue.DeferredStatusPending, CreatedAt: time.Now().UTC()})
 		require.NoError(t, err)
@@ -367,7 +385,6 @@ func TestV2_ScanAndSendTimeVetoAgree(t *testing.T) {
 	}
 
 	// Branch 4: target A is already completed (no send), target B is refused.
-	b4 := e.videos["branch4_target_a_succeeded"]
 	require.Zero(t, e.postsFor(b4.VideoID, v2TargetA), "A already succeeded; it must not be sent again")
 	require.Zero(t, e.postsFor(b4.VideoID, v2TargetB))
 	require.Equal(t, 0, count(`SELECT COUNT(*) FROM executed_action WHERE run_id=? AND video_id=? AND target_playlist_id=? AND outcome IN ('failed','deferred')`, run.ID, b4.ID, v2TargetA))

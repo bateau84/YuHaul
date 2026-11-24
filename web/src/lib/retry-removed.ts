@@ -34,5 +34,4 @@ export interface RemovalNoticeData {
   id: number
   target?: string
   runId?: number
-  focus: boolean
 }

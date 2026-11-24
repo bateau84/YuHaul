@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/bateau84/YuHaul/internal/auth"
@@ -29,7 +30,16 @@ type Manager struct {
 	ttl       time.Duration
 	batchSize int
 	now       func() time.Time
+
+	// suspended is the run-long fetch suspension (ARS-005 section 6.2, B7),
+	// keyed by the run in the context's quota scope.
+	suspendMu sync.Mutex
+	suspended map[int64]ReadFacts
 }
+
+// maxSuspendedRuns bounds suspended. Run IDs only grow, so the lowest is the
+// oldest run and the first to go.
+const maxSuspendedRuns = 32
 
 // Option configures a Manager.
 type Option func(*Manager)
@@ -361,7 +371,10 @@ func (m *Manager) refreshCandidates(ctx context.Context, src candidateSource, wi
 		cost := quota.OpVideosList.UnitCost()
 		ok, _, err := m.ledger.CanAfford(ctx, cost)
 		if err != nil {
-			return refreshed, fmt.Errorf("metadata: check quota for refresh: %w", err)
+			// A preflight read error is a local accounting fault, not a
+			// refusal (ARS-005 section 6.1). It stops the sweep and, through
+			// the run owner, every later provider request of the run.
+			return refreshed, fmt.Errorf("metadata: check quota for refresh: %w", errors.Join(auth.ErrQuotaAccounting, err))
 		}
 		if !ok {
 			m.logger.WarnContext(ctx, "metadata refresh deferred: quota exhausted",
@@ -474,13 +487,39 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 			}
 			continue
 		}
+		// R5: the run's effective dispatch stop precedes the minimum-unit
+		// preflight and every provider call, for this and every later chunk.
+		if stop, err := m.ledger.RunDispatchStop(ctx); err != nil {
+			failAll(missing[i:])
+			return out, fmt.Errorf("metadata: run dispatch stop for evaluation fetch: %w", errors.Join(auth.ErrQuotaAccounting, err))
+		} else if stop != quota.StopNone {
+			out.Stop = max(out.Stop, stop)
+			status := stopStatus(stop)
+			for _, id := range chunk {
+				out.Statuses[id] = status
+			}
+			if stop == quota.StopAccountingOrIntegrity {
+				failAll(missing[i:])
+				return out, fmt.Errorf("metadata: run dispatch stopped for integrity: %w", auth.ErrQuotaAccounting)
+			}
+			continue
+		}
+		// A generic provider failure earlier in this run still suspends
+		// fetching here. It comes after the stop, so a stop always wins.
+		if facts, ok := m.runSuspension(ctx); ok {
+			status := readStatus(&facts)
+			for _, id := range chunk {
+				out.Statuses[id] = status
+			}
+			continue
+		}
 		// Known insufficiency refuses with zero attempts. A preflight error is a
 		// local fault, not a refusal. The positive answer never replaces the
 		// admission inside the read.
 		ok, _, err := m.ledger.CanAfford(ctx, quota.OpVideosList.UnitCost())
 		if err != nil {
 			failAll(missing[i:])
-			return out, fmt.Errorf("metadata: quota preflight for evaluation fetch: %w", err)
+			return out, fmt.Errorf("metadata: quota preflight for evaluation fetch: %w", errors.Join(auth.ErrQuotaAccounting, err))
 		}
 		if !ok {
 			out.Read = &ReadFacts{Err: auth.ErrQuotaRefused, Primary: auth.ErrQuotaRefused, QuotaRefused: true}
@@ -501,6 +540,7 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 			}
 			if suspend {
 				out.Read = &facts
+				m.suspendRun(ctx, facts, status)
 			} else {
 				m.logger.WarnContext(ctx, "metadata fetch response unusable", "ids", len(chunk))
 			}
@@ -571,6 +611,82 @@ func (m *Manager) FetchForEvaluation(ctx context.Context, binding auth.Authoriza
 	return out, nil
 }
 
+// suspendRun makes a generic provider failure (a 5xx, a transport failure or a
+// non-quota rate limit) suspend fetching for the rest of the run, not only the
+// current call. Quota, authorization, accounting and interruption outcomes are
+// not kept: the run dispatch stop and the ledger already carry them and are
+// read before every chunk. A call without a run scope keeps the suspension to
+// the call.
+func (m *Manager) suspendRun(ctx context.Context, f ReadFacts, status FetchStatus) {
+	runID, ok := quota.RunFromContext(ctx)
+	if !ok || f.QuotaRefused || f.Accounting != nil || f.Interruption != nil ||
+		(status != FetchFailed && status != FetchRateLimited) {
+		return
+	}
+	m.suspendMu.Lock()
+	defer m.suspendMu.Unlock()
+	if m.suspended == nil {
+		m.suspended = make(map[int64]ReadFacts)
+	}
+	if _, held := m.suspended[runID]; held {
+		return
+	}
+	if len(m.suspended) >= maxSuspendedRuns {
+		oldest := runID
+		for id := range m.suspended {
+			oldest = min(oldest, id)
+		}
+		delete(m.suspended, oldest)
+	}
+	m.suspended[runID] = f
+}
+
+// runSuspension returns the suspension recorded for ctx's run.
+func (m *Manager) runSuspension(ctx context.Context) (ReadFacts, bool) {
+	runID, ok := quota.RunFromContext(ctx)
+	if !ok {
+		return ReadFacts{}, false
+	}
+	m.suspendMu.Lock()
+	defer m.suspendMu.Unlock()
+	f, ok := m.suspended[runID]
+	return f, ok
+}
+
+// IsAccountingFault reports whether err carries a local quota accounting or
+// integrity fault: an accounting error from a bound read, a failed quota
+// preflight or a run dispatch stop at the accounting level. It is the run
+// owner's test for failing closed (ARS-005 section 6.1.3, writer W3). A
+// provider refusal, an authorization result and a cancellation are not faults.
+func IsAccountingFault(err error) bool {
+	if err == nil {
+		return false
+	}
+	var fault *ReadFaultError
+	var read *youtube.ReadError
+	return errors.Is(err, auth.ErrQuotaAccounting) || errors.As(err, &fault) ||
+		(errors.As(err, &read) && read.Accounting != nil)
+}
+
+// AccountingCause returns the accounting part of an error for which
+// IsAccountingFault is true, so a classifier sees the typed storage fact the
+// read wrapper keeps beside its primary cause. youtube.ReadError unwraps only
+// its Primary, which would hide an accounting SQLite error and let a provider
+// or generic result be reported for an accounting stop. A fault that is not
+// carried in a read wrapper (a failed preflight, an accounting error already
+// in the chain) is returned unchanged.
+func AccountingCause(err error) error {
+	var fault *ReadFaultError
+	if errors.As(err, &fault) && fault.Facts.Accounting != nil {
+		return fault.Facts.Accounting
+	}
+	var read *youtube.ReadError
+	if errors.As(err, &read) && read.Accounting != nil {
+		return read.Accounting
+	}
+	return err
+}
+
 // ReadFaultError reports a metadata read whose local quota accounting failed.
 // It carries the typed facts and unwraps to the original read error. Its text
 // is fixed so no provider or store detail reaches a log through it.
@@ -601,6 +717,18 @@ func detailSupplies(d TransientMetadata, r InputRequirement) bool {
 		(!r.Duration || d.DurationSeconds != nil)
 }
 
+// stopStatus is the status of an input that a run dispatch stop kept unsent.
+func stopStatus(stop quota.DispatchStop) FetchStatus {
+	switch stop {
+	case quota.StopAuthorization:
+		return FetchAuthorizationPending
+	case quota.StopQuota:
+		return FetchQuotaRefused
+	default:
+		return FetchFailed
+	}
+}
+
 // readStatus is the status unsent inputs take after a suspending read failure.
 func readStatus(f *ReadFacts) FetchStatus {
 	_, status, _ := classifyRead(f.Err)
@@ -626,6 +754,9 @@ func classifyRead(err error) (facts ReadFacts, status FetchStatus, suspend bool)
 	if facts.Accounting == nil && errors.Is(err, auth.ErrQuotaAccounting) {
 		facts.Accounting = auth.ErrQuotaAccounting
 	}
+	// The vetted cause is kept apart from the per-input status and survives a
+	// compound accounting fault, which outranks it in the status below.
+	facts.Authorization = auth.ClassifyAuthorizationCause(errors.Join(err, facts.Renewal))
 
 	var invalid *youtube.InvalidResponseError
 	var transport *youtube.ReadTransportError
@@ -643,8 +774,12 @@ func classifyRead(err error) (facts ReadFacts, status FetchStatus, suspend bool)
 		return facts, FetchFailed, true
 	case facts.Renewal != nil || facts.HTTPStatus == http.StatusUnauthorized ||
 		(api != nil && api.Reason == "authError") ||
-		errors.Is(err, auth.ErrAuthorizationChanged) || errors.Is(err, auth.ErrNotConfigured) ||
-		errors.Is(err, auth.ErrAccessExpiredBeforeAdmission):
+		errors.Is(err, auth.ErrNotConfigured) ||
+		auth.IsPreAdmissionAuthorizationRefusal(err):
+		// A pre-admission refusal (no refresh credential, renewal failed,
+		// account changed, run already stopped) reaches here as the primary
+		// error: nothing was admitted. A renewal observation after a rejected
+		// admitted request arrives in Renewal.
 		return facts, FetchAuthorizationPending, true
 	case facts.HTTPStatus == http.StatusTooManyRequests ||
 		(api != nil && (api.Reason == "rateLimitExceeded" || api.Reason == "userRateLimitExceeded")):

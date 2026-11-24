@@ -81,7 +81,7 @@ func TestRunStatusCheckWidenedByWritableSchemaStep(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&n))
 	require.Zero(t, n)
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name LIKE 'run_%'`).Scan(&n))
-	require.Equal(t, 10, n, "six 024 triggers, three 025 triggers and run_video_outcome_final_immutable from 028")
+	require.Equal(t, 11, n, "six 024 triggers, three 025 triggers, run_video_outcome_final_immutable from 028 and run_dispatch_stop_raise_only from 032")
 }
 
 // M4: the step is idempotent and bumps schema_version once.

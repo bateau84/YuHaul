@@ -129,7 +129,7 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 	p.executionBinding = &binding
 	defer func() { p.executionBinding = nil }()
 	if err := p.processDeferredItems(ctx, run.ID, []queue.RetryGroupReceipt{claimedReceipt}, false); err != nil {
-		p.failRun(ctx, run.ID, "manual retry failed", err)
+		p.failRun(ctx, run.ID, "manual retry failed", p.receivingEnding(ctx, run.ID, err))
 		if stopOwnsEnding(ctx) || errors.Is(err, state.ErrPlaylistSendStopped) {
 			return nil // the user stopped this retry; finishRun settles it
 		}
@@ -141,13 +141,31 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 
 // retryAdmissionRefusal preserves the original claim for run-ending settlement.
 // It must not be interpreted as permission to mutate any of its rows.
+//
+// fault is set only when a real storage fault accompanied the refusal
+// (withStorageFault). The refusal keeps its identity for protected retention
+// (receipt, cause), but its chain then exposes only the fault, so no sentinel
+// test (isRetryAdmissionRefusal, withIntegrityCode) mistakes it for a pure
+// refusal and the run's reason is the storage fault's.
 type retryAdmissionRefusal struct {
 	receipt queue.RetryGroupReceipt
 	cause   error
+	fault   error
 }
 
-func (e *retryAdmissionRefusal) Error() string { return e.cause.Error() }
-func (e *retryAdmissionRefusal) Unwrap() error { return e.cause }
+func (e *retryAdmissionRefusal) Error() string {
+	if e.fault != nil {
+		return "retry admission refused beside a storage fault"
+	}
+	return e.cause.Error()
+}
+
+func (e *retryAdmissionRefusal) Unwrap() error {
+	if e.fault != nil {
+		return e.fault
+	}
+	return e.cause
+}
 
 // endRefusedRetry transfers the original receipt to the run-ending boundary.
 // A stop marker may be observed by the guard before the execution context is
@@ -282,6 +300,24 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 	if err != nil {
 		return err
 	}
+	// The readiness backstop (§6.2): with a readiness seam, an open video's
+	// evaluation readers return errInputsUnavailable instead of substituting
+	// an empty value for an input that expired or is missing.
+	if _, ok := p.meta.(evaluationFetcher); ok && class != state.VideoClassPartlyDone && v.FinalOutcome == state.FinalOutcomeNotYetEvaluated {
+		routes, err := p.productionRoutes(ctx, runID)
+		if err != nil {
+			return err
+		}
+		ctx = context.WithValue(ctx, requireInputsKey{}, inputRequirement(routes, v.VideoID))
+	}
+	// A saved decision is neither hydrated nor rerouted (§6.2): the evaluation
+	// below is skipped and only its outstanding action runs.
+	saved := false
+	if class == state.VideoClassOpen {
+		if saved, err = p.receivingDecisionSaved(ctx, runID, videoID); err != nil {
+			return err
+		}
+	}
 	var workErr error
 	switch class {
 	case state.VideoClassPartlyDone:
@@ -289,7 +325,7 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 		// are sent, under the original run's decision.
 		workErr = p.continueOriginalDecision(ctx, runID, v)
 	default:
-		if v.FinalOutcome == state.FinalOutcomeNotYetEvaluated {
+		if v.FinalOutcome == state.FinalOutcomeNotYetEvaluated && !saved {
 			var survivors []*state.Video
 			routes, err := p.productionRoutes(ctx, runID)
 			if err != nil {
@@ -313,8 +349,23 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 			}
 		}
 	}
+	// No binding under an authorization stop (§6.2): the matched decision is
+	// kept and the exact receipt settles as authorization_pending. No Errors
+	// entry, action or provider request is made.
+	if errors.Is(workErr, errSendBlocked) {
+		err := p.settleAuthorizationPending(ctx, qs, runID, receipt)
+		if err != nil && isRetryAdmissionRefusal(err) {
+			return &retryAdmissionRefusal{receipt: receipt, cause: err}
+		}
+		return err
+	}
 	// The retained message carries the vetted bounded summary, not the raw
 	// chain (ARD-001); only bounded auxiliary facts reach the log below.
+	if errors.Is(workErr, errInputsUnavailable) {
+		// A late input loss: the effective stop decides the disposition, then
+		// the receipt is released unchanged.
+		return p.settleInputsLost(ctx, qs, runID, receipt)
+	}
 	message := diag.Reason(workErr, "retry failed")
 	var accountingErr *postCommitAccountingError
 	if isRetryAdmissionRefusal(workErr) {
@@ -325,6 +376,13 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 		return &retryAdmissionRefusal{receipt: receipt, cause: workErr}
 	}
 	if errors.As(workErr, &accountingErr) {
+		return workErr
+	}
+	var stopping *runStoppingError
+	if errors.As(workErr, &stopping) {
+		// A fail-closed accounting or integrity stop (writer W3) ends the run.
+		// The receipt stays live until the run-level retention sweep; this
+		// video takes neither FinishRetryFailureTx nor an Errors entry.
 		return workErr
 	}
 	var writerFault *admissionWriterFault

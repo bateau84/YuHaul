@@ -335,6 +335,40 @@ var ErrQuotaRefused = errors.New("auth: quota admission refused")
 var ErrAccessExpiredBeforeAdmission = errors.New("auth: access expired before admission")
 var ErrQuotaAccounting = errors.New("auth: quota admission accounting failed")
 
+// ErrRunAuthorizationStopped means the run has a stored authorization dispatch
+// stop. It is a pre-admission authorization refusal: nothing was renewed,
+// held or sent.
+var ErrRunAuthorizationStopped = errors.New("auth: run authorization stop")
+
+// runDispatchStopRefusal maps the run's effective dispatch stop to the
+// pre-admission error dispatch returns. Without a ledger or a run scope there
+// is no stop to read. A stop read error fails closed: it is latched for this
+// execution so a later call cannot pass on a lucky read, and it is joined
+// with ErrQuotaAccounting.
+func runDispatchStopRefusal(ctx context.Context, ledger *quota.Ledger) error {
+	if ledger == nil {
+		return nil
+	}
+	stop, err := ledger.RunDispatchStop(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr // cancellation is not an integrity fault
+		}
+		quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
+		return errors.Join(ErrQuotaAccounting, err)
+	}
+	switch stop {
+	case quota.StopNone:
+		return nil
+	case quota.StopAuthorization:
+		return ErrRunAuthorizationStopped
+	case quota.StopQuota:
+		return ErrQuotaRefused
+	default:
+		return fmt.Errorf("%w: run dispatch stopped (%s)", ErrQuotaAccounting, stop)
+	}
+}
+
 // DispatchWithQuotaScoped is DispatchWithQuota with a local scope held across
 // the provisional to admitted transition, in the order auth, quota, scope. The
 // scope is released before RoundTrip. A refusal from the scope should be
@@ -360,6 +394,12 @@ func (s *Service) dispatchScoped(ctx context.Context, b AuthorizationBinding, re
 		return nil, AdmissionReceipt{}, nil, err
 	}
 	for {
+		// R0 (run-initiation ARS-005 section 6.1.3): the run's effective
+		// dispatch stop is checked before Resolve, so a stopped run starts no
+		// renewal, hold or request.
+		if err := runDispatchStopRefusal(ctx, ledger); err != nil {
+			return nil, AdmissionReceipt{}, nil, err
+		}
 		_, err := s.Resolve(ctx, b)
 		if err != nil {
 			return nil, AdmissionReceipt{}, nil, err
@@ -417,10 +457,12 @@ func (s *Service) dispatchScoped(ctx context.Context, b AuthorizationBinding, re
 				if !errors.As(err, &fence) && !errors.Is(err, ErrQuotaRefused) && !errors.Is(err, ErrAccessExpiredBeforeAdmission) &&
 					!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					err = errors.Join(ErrQuotaAccounting, err)
+					quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
 				}
 				if hold != nil {
 					if cleanup := hold.Cancel(); cleanup != nil {
 						err = errors.Join(err, ErrQuotaAccounting, cleanup)
+						quota.LatchRunStop(ctx, quota.StopAccountingOrIntegrity)
 					}
 				}
 				s.mu.Unlock()
@@ -443,14 +485,14 @@ func (s *Service) Bind(ctx context.Context) (AuthorizationBinding, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.disconnected {
-		return AuthorizationBinding{}, errors.New("auth: no connected account")
+		return AuthorizationBinding{}, ErrNoConnectedAccount
 	}
 	record, err := s.store.Load(ctx)
 	if err != nil {
 		return AuthorizationBinding{}, fmt.Errorf("auth: failed to bind authorization: %w", err)
 	}
 	if record == nil {
-		return AuthorizationBinding{}, errors.New("auth: no connected account")
+		return AuthorizationBinding{}, ErrNoConnectedAccount
 	}
 	return AuthorizationBinding{authorizationID: record.AuthorizationID}, nil
 }
@@ -510,7 +552,7 @@ func (s *Service) activeToken(ctx context.Context, boundAuthorizationID string) 
 		if boundAuthorizationID != "" {
 			return nil, ErrAuthorizationChanged
 		}
-		return nil, errors.New("auth: no connected account")
+		return nil, ErrNoConnectedAccount
 	}
 	if boundAuthorizationID != "" && record.AuthorizationID != boundAuthorizationID {
 		return nil, ErrAuthorizationChanged
@@ -521,7 +563,7 @@ func (s *Service) activeToken(ctx context.Context, boundAuthorizationID string) 
 		if boundAuthorizationID != "" {
 			return nil, ErrAuthorizationChanged
 		}
-		return nil, errors.New("auth: no connected account")
+		return nil, ErrNoConnectedAccount
 	}
 	current, loadErr := s.store.Load(ctx)
 	if loadErr != nil {
@@ -560,7 +602,7 @@ func (s *Service) activeToken(ctx context.Context, boundAuthorizationID string) 
 	}
 	if record.RefreshToken == "" {
 		s.mu.Unlock()
-		return nil, errors.New("auth: refresh authorization is unavailable")
+		return nil, errRefreshMissing
 	}
 	version := CredentialVersion{record.AuthorizationID, record.CredentialRevision}
 	// The authority check above applies to every return path, including usable tokens.
@@ -714,7 +756,14 @@ func tokenUsable(record *TokenRecord) bool {
 
 var ErrRenewalPersistence = errors.New("auth: renewal credentials could not be persisted")
 
+// ErrNoConnectedAccount means no account is connected (never connected, or
+// disconnected), so a binding cannot be taken. It needs the user to connect.
+var ErrNoConnectedAccount = errors.New("auth: no connected account")
+
 var (
+	// errRefreshMissing: access is unusable and there is no refresh credential,
+	// so nothing can renew it (OC-006 guarantee 6: reconnect-required).
+	errRefreshMissing         = errors.New("auth: refresh authorization is unavailable")
 	errRefreshRejected        = errors.New("auth: refresh authorization was rejected")
 	errTemporaryNetwork       = errors.New("auth: temporary renewal network failure")
 	errTemporaryProvider      = errors.New("auth: temporary renewal provider failure")
@@ -727,6 +776,8 @@ func RenewalFailureCategory(err error) string {
 	switch {
 	case errors.Is(err, errRefreshRejected):
 		return "refresh_rejected"
+	case errors.Is(err, errRefreshMissing):
+		return "refresh_missing"
 	case errors.Is(err, errTemporaryNetwork):
 		return "temporary_network"
 	case errors.Is(err, errTemporaryProvider):
@@ -762,12 +813,43 @@ func IsPreAdmissionAuthorizationRefusal(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	return errors.Is(err, ErrAuthorizationChanged) ||
-		errors.Is(err, ErrAccessExpiredBeforeAdmission) ||
-		errors.Is(err, errRefreshRejected) ||
-		errors.Is(err, errTemporaryNetwork) ||
-		errors.Is(err, errTemporaryProvider) ||
-		errors.Is(err, ErrRenewalPersistence)
+	return errors.Is(err, ErrRunAuthorizationStopped) || ClassifyAuthorizationCause(err) != ""
+}
+
+// AuthorizationCause is the bounded, vetted reason an authorization refusal
+// gives (OC-006 guarantee 6, run-initiation ARS-005 section 6.1). It carries no
+// provider text, credential or identity.
+type AuthorizationCause string
+
+const (
+	// CauseReconnectRequired: the refresh credential is missing, or the provider
+	// rejected it. Only the user authorizing again recovers it.
+	CauseReconnectRequired AuthorizationCause = "reconnect_required"
+	// CauseTemporaryUnavailable: renewal could not complete now (provider or
+	// network trouble, or the renewed credential could not be saved), or the
+	// access expired before admission. A later call may succeed unaided.
+	CauseTemporaryUnavailable AuthorizationCause = "temporary_unavailable"
+	// CauseAuthorizationChanged: the binding's account was disconnected or
+	// replaced, so the old identity can no longer be used.
+	CauseAuthorizationChanged AuthorizationCause = "authorization_changed"
+)
+
+// ClassifyAuthorizationCause returns the cause of a pre-admission authorization
+// refusal anywhere in err's chain, or "" when err carries none. When several
+// causes are joined the user-actionable one wins: reconnect-required, then
+// temporary, then changed. ErrRunAuthorizationStopped carries no cause of its
+// own: it only repeats a stop whose cause was established earlier.
+func ClassifyAuthorizationCause(err error) AuthorizationCause {
+	switch {
+	case errors.Is(err, errRefreshMissing), errors.Is(err, errRefreshRejected), errors.Is(err, ErrNoConnectedAccount):
+		return CauseReconnectRequired
+	case errors.Is(err, errTemporaryNetwork), errors.Is(err, errTemporaryProvider),
+		errors.Is(err, ErrRenewalPersistence), errors.Is(err, ErrAccessExpiredBeforeAdmission):
+		return CauseTemporaryUnavailable
+	case errors.Is(err, ErrAuthorizationChanged):
+		return CauseAuthorizationChanged
+	}
+	return ""
 }
 
 func classifyRenewalFailure(err error) string {

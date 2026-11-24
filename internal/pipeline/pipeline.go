@@ -69,7 +69,9 @@ type Pipeline struct {
 	// WithRetryTx; tests substitute it to simulate commit failures.
 	discardTx func(context.Context, func(*sql.Tx) error) error
 	// endTx is the same seam for EndLegacyRun (ARS-004 §2.2).
-	endTx      func(context.Context, func(*sql.Tx) error) error
+	endTx func(context.Context, func(*sql.Tx) error) error
+	// requeueTx is the same seam for RequeueStranded's write (ARS-005 §4).
+	requeueTx  func(context.Context, func(*sql.Tx) error) error
 	db         *sql.DB
 	machine    *state.Machine
 	stateStore *state.Store
@@ -256,7 +258,7 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 	if afford, err := p.canAffordMinimum(ctx); err != nil {
 		return fmt.Errorf("pipeline: check quota before claiming: %w", err)
 	} else if afford {
-		items, err = qs.ListDeferredRetryCandidates(ctx, time.Now())
+		items, err = qs.ListDeferredRetryCandidatesForRun(ctx, time.Now(), 0, retryClaimBatch)
 		if err != nil {
 			return err
 		}
@@ -268,18 +270,9 @@ func (p *Pipeline) createClaimedRunLocked(ctx context.Context, run *state.Run) e
 			return err
 		}
 		run.ID = id
-		for _, item := range items {
-			receipt, _, result, err := qs.ClaimDeferredGroupResultTx(ctx, tx, item.ID, id, time.Now())
-			if err != nil {
-				return err
-			}
-			if result == queue.ClaimTaken {
-				receipt.Deferred = append([]queue.RetryRowRef(nil), receipt.Deferred...)
-				receipt.Errors = append([]queue.RetryRowRef(nil), receipt.Errors...)
-				receipts = append(receipts, receipt)
-			}
-		}
-		return nil
+		claim, err := qs.ClaimDeferredBatchTx(ctx, tx, id, items, time.Now())
+		receipts = append(receipts, claim.Receipts...)
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("pipeline: create and claim run: %w", err)
@@ -390,6 +383,17 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 	if p.isProductionRun(run.RunType) && p.auth != nil {
 		binding, bindErr := p.auth.Bind(ctx)
 		if bindErr != nil {
+			// The run cannot continue, but the receipts it already owns are
+			// not stranded by that: under an authorization stop they settle
+			// locally with no provider work (ARS-005 section 6.2).
+			if fault := p.settleOwnedReceiptsWithoutBinding(ctx, run, resumeAdmitted, freshRetries, bindErr); fault != nil {
+				// A failed read or write of local state while settling governs
+				// the ending, not the binding error: writer W3 stops dispatch,
+				// attempts the stored integrity stop and the run keeps the
+				// classified storage fault as its reason (ARS-005 6.1.3).
+				p.failRun(ctx, runID, "authorization settlement failed", p.failClosedAtReceiving(ctx, runID, fault))
+				return
+			}
 			p.failRun(ctx, runID, "authorization binding failed", bindErr)
 			return
 		}
@@ -438,14 +442,24 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 
 	if p.meta != nil {
 		if err := p.meta.RunLifecycle(ctx); err != nil {
+			if metadata.IsAccountingFault(err) {
+				// A refresh the run admitted could not be accounted for (or its
+				// preflight could not be read). Writer W3: no further run-owned
+				// provider request, then the existing retain-before-fail path.
+				p.failRun(ctx, runID, "metadata lifecycle accounting failed", p.failClosedAtLifecycle(ctx, runID, err))
+				return
+			}
 			logger.WarnContext(ctx, "metadata lifecycle failed", "diagnostic", diag.Encode(err, "unknown", "load_metadata"))
 		}
 	}
 
 	// Owned retries precede dispatch even when a crash left an actions checkpoint
 	// before the receiving run's first decision.
-	if err := p.processDeferredItems(ctx, runID, freshRetries, isResume); err != nil {
-		p.failRun(ctx, runID, "retry processing failed", err)
+	if err := p.processRetryBatches(ctx, runID, freshRetries, isResume); err != nil {
+		// A storage fault of the receiving pass (the authorization stop's own
+		// write, a settlement transaction) ends the run through W3 with a valid
+		// binding as it does without one.
+		p.failRun(ctx, runID, "retry processing failed", p.receivingEnding(ctx, runID, err))
 		return
 	}
 
@@ -752,10 +766,16 @@ func (p *Pipeline) detectVideos(ctx context.Context, runID int64, videos []*stat
 			continue
 		}
 
-		meta, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
+		meta, err := p.evaluationMetadata(ctx, v)
 		if err != nil {
-			p.logger.DebugContext(ctx, "duplicate detection using degraded metadata", "diagnostic", diag.Encode(err, "duplicate_detection", "load_metadata"))
-			meta = &metadata.TransientMetadata{VideoID: v.VideoID}
+			return err
+		}
+		if meta == nil {
+			meta, err = p.meta.GetDisplayMetadata(ctx, v.VideoID)
+			if err != nil {
+				p.logger.DebugContext(ctx, "duplicate detection using degraded metadata", "diagnostic", diag.Encode(err, "duplicate_detection", "load_metadata"))
+				meta = &metadata.TransientMetadata{VideoID: v.VideoID}
+			}
 		}
 		title := ""
 		if meta.Title != nil {
@@ -798,7 +818,7 @@ func (p *Pipeline) routeVideos(ctx context.Context, runID int64, videos []*state
 		}
 		// Decisions alone are not a completion marker: an interruption can
 		// leave only a prefix of the ordered routes persisted.
-		if run.ActionAuthorityVersion == 1 && v.ProcessingState != state.VideoStateNotYetEvaluated && v.ProcessingState != state.VideoStateEvaluating {
+		if evaluationFinished(run, v) {
 			for _, d := range decisions {
 				if d.Decision == state.RouteDecisionMatched {
 					routed = append(routed, v)
@@ -808,6 +828,12 @@ func (p *Pipeline) routeVideos(ctx context.Context, runID int64, videos []*state
 			continue
 		}
 
+		// The readiness backstop runs before the video moves to evaluating, so
+		// a late input loss leaves its state untouched.
+		backstopMeta, err := p.evaluationMetadata(ctx, v)
+		if err != nil {
+			return nil, err
+		}
 		// Move into evaluating before route conditions are checked.
 		if v.ProcessingState == state.VideoStateNotYetEvaluated {
 			if _, err := p.machine.TransitionVideoState(ctx, v.ID,
@@ -816,10 +842,13 @@ func (p *Pipeline) routeVideos(ctx context.Context, runID int64, videos []*state
 			}
 		}
 
-		meta, err := p.meta.GetDisplayMetadata(ctx, v.VideoID)
-		if err != nil {
-			p.logger.DebugContext(ctx, "routing using degraded metadata", "diagnostic", diag.Encode(err, "routing", "load_metadata"))
-			meta = &metadata.TransientMetadata{VideoID: v.VideoID}
+		meta := backstopMeta
+		if meta == nil {
+			meta, err = p.meta.GetDisplayMetadata(ctx, v.VideoID)
+			if err != nil {
+				p.logger.DebugContext(ctx, "routing using degraded metadata", "diagnostic", diag.Encode(err, "routing", "load_metadata"))
+				meta = &metadata.TransientMetadata{VideoID: v.VideoID}
+			}
 		}
 
 		vc := videoContextFromMetadata(v.VideoID, v.ChannelID, meta)
@@ -972,6 +1001,12 @@ func (p *Pipeline) executeDecision(ctx context.Context, runID int64, v *state.Vi
 		if allComplete {
 			return state.FinalOutcomeAccepted, nil
 		}
+	}
+
+	// No binding under an authorization stop: nothing can be sent and the
+	// executor would fail the video. The caller settles the receipt.
+	if ctx.Value(sendBlockedKey{}) != nil {
+		return "", errSendBlocked
 	}
 
 	// Transition into acted before executing. If resuming at action execution,
@@ -1318,6 +1353,116 @@ func (p *Pipeline) videosWithMatchedDecisions(ctx context.Context, runID int64, 
 	return routed, nil
 }
 
+// retryClaimBatch is the most deferred groups one claim transaction takes
+// (ARS-005 section 5.2).
+const retryClaimBatch = 500
+
+// processRetryBatches settles the pass the run already owns, then claims and
+// settles further batches in created-at order while the run may still claim
+// (ARS-005 section 5.2, variant K). Only the run's creating execution may claim
+// (mayClaim): recovery is true for a resumed execution, which settles only its
+// exact held receipts and then returns, so every other eligible item waits for
+// the next new run (BR-035 AC14, BR-037 AC11). It also leaves quietly when the
+// run is not a Run Now or scheduled run, the context is done, the run's
+// dispatch stop is quota or accounting/integrity, the minimum-unit preflight
+// refuses, the claim finds the run stopped, or no candidate remains. A
+// non-quota provider failure does not end it: claiming and settling are local.
+// A stop or preflight read error is an accounting fault and is returned
+// (writer W3).
+func (p *Pipeline) processRetryBatches(ctx context.Context, runID int64, receipts []queue.RetryGroupReceipt, recovery bool) error {
+	if err := p.processDeferredItems(ctx, runID, receipts, recovery); err != nil {
+		return err
+	}
+	if recovery || ctx.Err() != nil {
+		return nil
+	}
+	run, err := p.stateStore.GetRun(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("load run %d for batch claiming: %w", runID, err)
+	}
+	if run.InitiatedBy == nil || (*run.InitiatedBy != state.InitiatedByRunNow && *run.InitiatedBy != state.InitiatedBySchedule) {
+		return nil
+	}
+	qs, err := p.retryStore()
+	if err != nil {
+		return err
+	}
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		// R1: the effective stop, then the local minimum-unit budget.
+		stop, err := p.runStop(ctx, qs, runID)
+		if err != nil {
+			return err
+		}
+		if stop == quota.StopQuota || stop == quota.StopAccountingOrIntegrity {
+			return nil
+		}
+		afford, err := p.canAffordMinimum(ctx)
+		if err != nil {
+			return p.failClosed(ctx, qs, runID, fmt.Errorf("check quota before claiming: %w", err))
+		}
+		if !afford {
+			return nil
+		}
+		items, err := qs.ListDeferredRetryCandidatesForRun(ctx, time.Now(), runID, retryClaimBatch)
+		if err != nil {
+			return fmt.Errorf("list deferred retry candidates: %w", err)
+		}
+		if len(items) == 0 {
+			return nil
+		}
+		var claim queue.BatchClaim
+		err = qs.WithRetryTx(ctx, func(tx *sql.Tx) error {
+			var err error
+			claim, err = qs.ClaimDeferredBatchTx(ctx, tx, runID, items, time.Now())
+			return err
+		})
+		if errors.Is(err, queue.ErrRunNotClaiming) || errors.Is(err, queue.ErrRunDispatchStopped) {
+			return nil // R2: nothing was claimed; the stop settles elsewhere.
+		}
+		if err != nil {
+			return fmt.Errorf("claim deferred batch: %w", err)
+		}
+		if len(claim.Receipts) == 0 {
+			if claim.ClosedFinal == 0 {
+				// Every candidate was lost to a live owner: claiming again
+				// would list the same items.
+				return nil
+			}
+			continue // closed rows left the candidate list; try the next batch
+		}
+		if err := p.processDeferredItems(ctx, runID, claim.Receipts, false); err != nil {
+			return err
+		}
+	}
+}
+
+// recoverOwnedReceipts rebuilds the exact claim receipt of every retry video
+// the run still owns, from the stored claim identity.
+func recoverOwnedReceipts(ctx context.Context, qs *queue.Store, runID int64) ([]queue.RetryGroupReceipt, error) {
+	ids, err := qs.ListRetryVideoIDs(ctx, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list deferred items: %w", err)
+	}
+	receipts := make([]queue.RetryGroupReceipt, 0, len(ids))
+	for _, id := range ids {
+		receipt, err := qs.RetryGroupReceiptForRunVideo(ctx, runID, id)
+		if errors.Is(err, queue.ErrRetryProvenance) {
+			// Unfinished work with no trustworthy stored claim identity (legacy,
+			// malformed or unsupported): an integrity refusal, not a failure of
+			// the video. Nothing is dispatched, reset, handed off or retained.
+			return nil, &retryAdmissionRefusal{receipt: queue.RetryGroupReceipt{ReceivingRunID: runID, VideoID: id}, cause: err}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("recover retry video %d receipt: %w", id, err)
+		}
+		receipts = append(receipts, receipt)
+	}
+	return receipts, nil
+}
+
 // processDeferredItems retries pending deferred videos before new discoveries.
 // Items are processed oldest-first (FIFO). Quota checks are delegated to the
 // action executor; if quota is exhausted the remaining items stay pending.
@@ -1332,23 +1477,9 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 	}
 
 	if receipts == nil && recovery {
-		ids, err := qs.ListRetryVideoIDs(ctx, runID)
-		if err != nil {
-			return fmt.Errorf("list deferred items: %w", err)
-		}
-		receipts = make([]queue.RetryGroupReceipt, 0, len(ids))
-		for _, id := range ids {
-			receipt, err := qs.RetryGroupReceiptForRunVideo(ctx, runID, id)
-			if errors.Is(err, queue.ErrRetryProvenance) {
-				// Unfinished work with no trustworthy stored claim identity (legacy,
-				// malformed or unsupported): an integrity refusal, not a failure of
-				// the video. Nothing is dispatched, reset, handed off or retained.
-				return &retryAdmissionRefusal{receipt: queue.RetryGroupReceipt{ReceivingRunID: runID, VideoID: id}, cause: err}
-			}
-			if err != nil {
-				return fmt.Errorf("recover retry video %d receipt: %w", id, err)
-			}
-			receipts = append(receipts, receipt)
+		var err error
+		if receipts, err = recoverOwnedReceipts(ctx, qs, runID); err != nil {
+			return err
 		}
 	}
 	if receipts == nil && !recovery {
@@ -1359,6 +1490,27 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 		if len(ids) != 0 {
 			return fmt.Errorf("retry video %d missing exact receipt: %w", ids[0], queue.ErrWorkNotOwned)
 		}
+	}
+	// §6.2: make the inputs of the pass's open videos current under the run's
+	// dispatch stop before any of them is evaluated.
+	ready, err := p.prepareReceiving(ctx, qs, runID, receipts)
+	if err != nil {
+		return err
+	}
+	// A receipt held by an unresolved send guard keeps its disposition and
+	// protects only itself: the other receipts of the pass are still settled.
+	// Its error is returned after the pass so the run still ends and retains it.
+	var guardedErr error
+	keepGuarded := func(id int64, err error) bool {
+		if !isPureGuardVeto(err) {
+			return false
+		}
+		p.logger.WarnContext(ctx, "receipt keeps its disposition: unresolved send guard", "run_id", runID, "video_id", id,
+			"diagnostic", diag.Encode(err, "action_execution", "execute_action"))
+		if guardedErr == nil {
+			guardedErr = fmt.Errorf("retry video %d: %w", id, err)
+		}
+		return true
 	}
 	for _, receipt := range receipts {
 		id := receipt.VideoID
@@ -1375,25 +1527,45 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 			}
 			return fmt.Errorf("validate retry video %d: %w", id, err)
 		}
+		if status, ok := ready[id]; ok {
+			handled, err := p.applyReadiness(ctx, qs, runID, receipt, status)
+			if err != nil {
+				if keepGuarded(id, err) {
+					continue
+				}
+				if refusal, ok := refusalBesideFault(receipt, err); ok {
+					return refusal
+				}
+				if isRetryAdmissionRefusal(err) {
+					return &retryAdmissionRefusal{receipt: receipt, cause: err}
+				}
+				return fmt.Errorf("settle retry video %d inputs: %w", id, err)
+			}
+			if handled {
+				continue
+			}
+		}
 		retryCtx := context.WithValue(ctx, guardedRetryGroupKey{}, receipt)
 		if err := p.processRetryVideo(retryCtx, runID, id); err != nil {
+			if keepGuarded(id, err) {
+				continue
+			}
+			if refusal, ok := refusalBesideFault(receipt, err); ok {
+				return refusal
+			}
 			return fmt.Errorf("process retry video %d: %w", id, err)
 		}
 	}
-	return nil
+	return guardedErr
 }
 
 func videoContextFromMetadata(videoID, channelID string, m *metadata.TransientMetadata) router.VideoContext {
 	vc := router.VideoContext{VideoID: videoID, ChannelID: channelID}
-	if m.ChannelName != nil {
-		vc.ChannelName = *m.ChannelName
-	}
+	vc.ChannelName = m.ChannelName
 	if m.Title != nil {
 		vc.Title = *m.Title
 	}
-	if m.Description != nil {
-		vc.Description = *m.Description
-	}
+	vc.Description = m.Description
 	if m.DurationSeconds != nil {
 		vc.DurationSeconds = m.DurationSeconds
 	}

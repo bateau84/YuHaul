@@ -76,13 +76,24 @@ type fakeYouTube struct {
 	subHold     chan struct{}
 	subReached  chan struct{}
 	postHold    chan struct{}
-	holdVideo   string // when set, only this video's POST is held
-	requests    int    // every request the endpoint received
+	holdVideo   string   // when set, only this video's POST is held
+	requests    int      // every request the endpoint received
+	paths       []string // method and path of every request, in arrival order
 	postReached chan string
 	posts       map[string]int
 	quotaVideo  string // POST for this video answers 403 quotaExceeded
 	postDelay   time.Duration
 	titleOf     func(id string) string // nil means "Jazz "+id
+	// videosHook, when set, answers every videos.list request instead of the
+	// default listing, so a test controls each response exactly.
+	videosHook func(w http.ResponseWriter, r *http.Request)
+}
+
+// setVideosHook replaces the videos.list answer from now on.
+func (f *fakeYouTube) setVideosHook(h func(w http.ResponseWriter, r *http.Request)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.videosHook = h
 }
 
 func (f *fakeYouTube) title(id string) string {
@@ -108,6 +119,7 @@ func newFakeYouTube(t *testing.T, videos ...string) *fakeYouTube {
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.requests++
+		f.paths = append(f.paths, r.Method+" "+r.URL.Path)
 		f.mu.Unlock()
 		mux.ServeHTTP(w, r)
 	}))
@@ -196,8 +208,9 @@ func (f *fakeYouTube) handlePlaylistItems(w http.ResponseWriter, r *http.Request
 		return
 	}
 	published := time.Now().UTC().Add(-time.Hour)
-	items := make([]map[string]any, len(f.videos))
-	for i, id := range f.videos {
+	videos := f.videoList()
+	items := make([]map[string]any, len(videos))
+	for i, id := range videos {
 		items[i] = map[string]any{"snippet": map[string]any{
 			"title": f.title(id), "channelId": "UC1",
 			"publishedAt": published.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano),
@@ -209,9 +222,17 @@ func (f *fakeYouTube) handlePlaylistItems(w http.ResponseWriter, r *http.Request
 }
 
 func (f *fakeYouTube) handleVideos(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	hook := f.videosHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook(w, r)
+		return
+	}
 	published := time.Now().UTC().Add(-time.Hour)
-	items := make([]map[string]any, len(f.videos))
-	for i, id := range f.videos {
+	videos := f.videoList()
+	items := make([]map[string]any, len(videos))
+	for i, id := range videos {
 		items[i] = map[string]any{"id": id,
 			"snippet": map[string]any{
 				"title": f.title(id), "channelId": "UC1", "channelTitle": "Test Channel", "description": "jazz",
@@ -260,6 +281,27 @@ func (f *fakeYouTube) requestCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.requests
+}
+
+// requestsSince returns the method and path of every request after the first
+// n requests.
+func (f *fakeYouTube) requestsSince(n int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.paths[n:]...)
+}
+
+func (f *fakeYouTube) videoList() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.videos...)
+}
+
+// setVideos replaces the videos the fake lists and describes from now on.
+func (f *fakeYouTube) setVideos(videos ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.videos = videos
 }
 
 func (f *fakeYouTube) postCount(video string) int {

@@ -511,6 +511,7 @@ func TestRetryQueueEntry_CapturesClaimedRetrySelection(t *testing.T) {
 	require.NoError(t, err)
 	video, err := machine.DiscoverVideo(ctx, originID, "retry_vid", "retry_ch")
 	require.NoError(t, err)
+	seedCurrentMetadata(t, db, "retry_vid")
 	_, err = machine.TransitionVideoState(ctx, video.ID,
 		state.VideoStateNotYetEvaluated, state.VideoStateEvaluating)
 	require.NoError(t, err)

@@ -2,6 +2,7 @@ package metadata_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -209,7 +210,9 @@ func TestFetchForEvaluationReadFailureKeepsTypedFactsAndStopsFetching(t *testing
 		{"daily", fmt.Errorf("w: %w", &youtube.APIError{Status: 403, Reason: "dailyLimitExceeded"}), metadata.FetchQuotaRefused, nil},
 		{"rate", &youtube.APIError{Status: 429}, metadata.FetchRateLimited, nil},
 		{"rate reason", &youtube.APIError{Status: 403, Reason: "userRateLimitExceeded"}, metadata.FetchRateLimited, nil},
-		{"unauthorized", &youtube.APIError{Status: 401}, metadata.FetchAuthorizationPending, nil},
+		{"unauthorized", &youtube.APIError{Status: 401}, metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Empty(t, f.Authorization, "a bare 401 carries no vetted cause")
+		}},
 		{"renewal", &youtube.ReadError{Primary: &youtube.APIError{Status: 401}, Renewal: renewal, Status: 401}, metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) { assert.Same(t, renewal, f.Renewal) }},
 		{"plain forbidden is not authorization", &youtube.APIError{Status: 403}, metadata.FetchFailed, nil},
 		{"server", &youtube.APIError{Status: 503}, metadata.FetchFailed, nil},
@@ -223,7 +226,23 @@ func TestFetchForEvaluationReadFailureKeepsTypedFactsAndStopsFetching(t *testing
 		}},
 		{"interruption", &youtube.ReadError{Primary: context.Canceled, Interruption: context.Canceled}, metadata.FetchFailed, func(t *testing.T, f *metadata.ReadFacts) { assert.ErrorIs(t, f.Interruption, context.Canceled) }},
 		{"local quota refusal", auth.ErrQuotaRefused, metadata.FetchQuotaRefused, nil},
-		{"changed", auth.ErrAuthorizationChanged, metadata.FetchAuthorizationPending, nil},
+		{"changed", auth.ErrAuthorizationChanged, metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Equal(t, auth.CauseAuthorizationChanged, f.Authorization)
+		}},
+		// The read client hands a pre-admission refusal back as its primary
+		// error, wrapped, with no Renewal fact (nothing was admitted).
+		{"expired before admission", fmt.Errorf("metadata fetcher: %w", fmt.Errorf("execute request: %w", auth.ErrAccessExpiredBeforeAdmission)), metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Equal(t, auth.CauseTemporaryUnavailable, f.Authorization)
+			assert.Nil(t, f.Renewal)
+			assert.False(t, f.Admitted)
+		}},
+		{"run authorization stop", fmt.Errorf("execute request: %w", auth.ErrRunAuthorizationStopped), metadata.FetchAuthorizationPending, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Empty(t, f.Authorization, "a repeated stop has no cause of its own")
+		}},
+		{"accounting keeps the cause", &youtube.ReadError{Primary: &youtube.APIError{Status: 401}, Accounting: acct, Renewal: auth.ErrAuthorizationChanged, Status: 401}, metadata.FetchFailed, func(t *testing.T, f *metadata.ReadFacts) {
+			assert.Equal(t, auth.CauseAuthorizationChanged, f.Authorization, "accounting outranks the status, not the cause")
+			assert.Same(t, acct, f.Accounting)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) { return metadata.FetchResult{}, tc.err }}
@@ -247,7 +266,8 @@ func TestFetchForEvaluationReadFailureKeepsTypedFactsAndStopsFetching(t *testing
 			assert.ErrorIs(t, out.Read.Err, tc.err)
 			assert.Len(t, bound.calls, 1, "no call after the failure")
 			wantAttempts := 1
-			if errors.Is(tc.err, auth.ErrQuotaRefused) || errors.Is(tc.err, auth.ErrAuthorizationChanged) {
+			if errors.Is(tc.err, auth.ErrQuotaRefused) || errors.Is(tc.err, auth.ErrAuthorizationChanged) ||
+				errors.Is(tc.err, auth.ErrAccessExpiredBeforeAdmission) || errors.Is(tc.err, auth.ErrRunAuthorizationStopped) {
 				wantAttempts = 0 // refused before admission: not an attempt
 			}
 			assert.Equal(t, wantAttempts, out.Attempts)
@@ -334,6 +354,26 @@ func TestFetchForEvaluationBareAccountingErrorIsAFault(t *testing.T) {
 	assert.Zero(t, out.Attempts, "failed before admission is not an attempt")
 }
 
+// An unreadable minimum-unit preflight is a local accounting fault (ARS-005
+// section 6.1): no call, the unsent inputs take the failing status, and the
+// error classifies as an accounting fault for the run owner.
+func TestFetchForEvaluationPreflightReadErrorIsAnAccountingFault(t *testing.T) {
+	bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) {
+		t.Fatal("no request may follow an unreadable preflight")
+		return metadata.FetchResult{}, nil
+	}}
+	m, ms, _ := newFetchManager(t, bound, 1000)
+	_, err := ms.DB().Exec(`DROP TABLE quota_ledger`)
+	require.NoError(t, err)
+
+	out, err := m.FetchForEvaluation(context.Background(), auth.AuthorizationBinding{}, allInputs("a"))
+
+	require.Error(t, err)
+	assert.True(t, metadata.IsAccountingFault(err), "got %v", err)
+	assert.Equal(t, metadata.FetchFailed, out.Statuses["a"])
+	assert.Empty(t, bound.calls)
+}
+
 func TestFetchForEvaluationCountsOnlyAdmittedSends(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err      error
@@ -360,4 +400,165 @@ func TestFetchForEvaluationCountsOnlyAdmittedSends(t *testing.T) {
 			assert.Equal(t, tc.attempts, out.Attempts)
 		})
 	}
+}
+
+// R5 (run-initiation ARS-005 section 6.1.3): the run's effective dispatch stop
+// is read before every chunk's preflight. Each level keeps the unsent inputs
+// unsent with zero attempts, and the manager never writes the stop.
+func TestFetchForEvaluationHonoursRunDispatchStop(t *testing.T) {
+	ids := make([]string, 120) // three chunks
+	for i := range ids {
+		ids[i] = fmt.Sprintf("v%03d", i)
+	}
+	cases := []struct {
+		name    string
+		stored  string
+		quota   bool
+		want    metadata.FetchStatus
+		wantErr bool
+		stop    quota.DispatchStop
+	}{
+		{name: "authorization", stored: "authorization", want: metadata.FetchAuthorizationPending, stop: quota.StopAuthorization},
+		{name: "quota", quota: true, want: metadata.FetchQuotaRefused, stop: quota.StopQuota},
+		{name: "accounting", stored: "accounting_or_integrity", want: metadata.FetchFailed, wantErr: true, stop: quota.StopAccountingOrIntegrity},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) {
+				t.Fatal("a stopped run made a provider call")
+				return metadata.FetchResult{}, nil
+			}}
+			m, ms, ledger := newFetchManager(t, bound, 1000)
+			db := ms.DB()
+			res, err := db.Exec(`INSERT INTO run (started_at, run_type, status) VALUES (?, 'manual', 'running')`, evalNow)
+			require.NoError(t, err)
+			runID, err := res.LastInsertId()
+			require.NoError(t, err)
+			ctx := quota.WithRun(context.Background(), runID)
+			if c.stored != "" {
+				_, err = db.Exec(`UPDATE run SET dispatch_stop=? WHERE id=?`, c.stored, runID)
+				require.NoError(t, err)
+			}
+			if c.quota {
+				h, err := ledger.Acquire(ctx, quota.OpVideosList)
+				require.NoError(t, err)
+				require.NotNil(t, h)
+				require.NoError(t, h.Admit(ctx))
+				require.NoError(t, h.Finalize(ctx, sqlNullInt(runID), quota.OutcomeQuota, sqlNullInt(403)))
+			}
+			rowsBefore := ledgerRowCount(t, ms)
+
+			out, err := m.FetchForEvaluation(ctx, auth.AuthorizationBinding{}, allInputs(ids...))
+			if c.wantErr {
+				require.ErrorIs(t, err, auth.ErrQuotaAccounting)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Zero(t, out.Attempts)
+			assert.Empty(t, bound.calls)
+			assert.Equal(t, c.stop, out.Stop)
+			for _, id := range ids[:50] {
+				assert.Equal(t, c.want, out.Statuses[id], id)
+			}
+			if !c.wantErr {
+				assert.Len(t, out.Statuses, len(ids), "every unsent input has a status")
+				for _, id := range ids {
+					assert.Equal(t, c.want, out.Statuses[id], id)
+				}
+			}
+			assert.Equal(t, rowsBefore, ledgerRowCount(t, ms), "no ledger row, no debit")
+			var stored *string
+			require.NoError(t, db.QueryRow(`SELECT dispatch_stop FROM run WHERE id=?`, runID).Scan(&stored))
+			if c.stored == "" {
+				assert.Nil(t, stored, "the manager never writes the stop")
+			}
+		})
+	}
+}
+
+func sqlNullInt(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+
+func ledgerRowCount(t *testing.T, ms *metadata.Store) int {
+	t.Helper()
+	var n int
+	require.NoError(t, ms.DB().QueryRow(`SELECT count(*) FROM quota_ledger`).Scan(&n))
+	return n
+}
+
+// B7 at the manager: a generic provider failure suspends fetching for the rest
+// of the run, across calls, and only for that run.
+func TestFetchForEvaluationGenericFailureSuspendsTheRun(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want metadata.FetchStatus
+	}{
+		"server":     {&youtube.APIError{Status: 500}, metadata.FetchFailed},
+		"rate limit": {&youtube.APIError{Status: 429}, metadata.FetchRateLimited},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) { return metadata.FetchResult{}, tc.err }}
+			m, ms, _ := newFetchManager(t, bound, 1000)
+			run7 := quota.WithRun(context.Background(), 7)
+
+			out, err := m.FetchForEvaluation(run7, auth.AuthorizationBinding{}, allInputs("a1", "a2"))
+			require.NoError(t, err)
+			require.NotNil(t, out.Read)
+			require.Len(t, bound.calls, 1)
+
+			// A later call of the same run, with new IDs, sends nothing.
+			out, err = m.FetchForEvaluation(run7, auth.AuthorizationBinding{}, allInputs("b1", "b2"))
+			require.NoError(t, err)
+			assert.Len(t, bound.calls, 1, "no request after the failure, for the rest of the run")
+			assert.Zero(t, out.Attempts)
+			assert.Equal(t, tc.want, out.Statuses["b1"])
+			assert.Equal(t, tc.want, out.Statuses["b2"])
+			assert.Zero(t, countRows(t, ms))
+
+			// Another run, and a call with no run scope, still fetch.
+			_, err = m.FetchForEvaluation(quota.WithRun(context.Background(), 8), auth.AuthorizationBinding{}, allInputs("c1"))
+			require.NoError(t, err)
+			assert.Len(t, bound.calls, 2)
+			_, err = m.FetchForEvaluation(context.Background(), auth.AuthorizationBinding{}, allInputs("d1"))
+			require.NoError(t, err)
+			assert.Len(t, bound.calls, 3)
+		})
+	}
+}
+
+// Only a generic failure outlives the call. The stop and the ledger carry the
+// others, and an unusable response never suspends.
+func TestFetchForEvaluationOtherFailuresDoNotSuspendTheRun(t *testing.T) {
+	for name, err := range map[string]error{
+		"unusable":     fmt.Errorf("get videos: %w", &youtube.InvalidResponseError{}),
+		"quota":        &youtube.APIError{Status: 403, Reason: "quotaExceeded"},
+		"unauthorized": &youtube.APIError{Status: 401},
+		"interruption": &youtube.ReadError{Primary: context.Canceled, Interruption: context.Canceled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) { return metadata.FetchResult{}, err }}
+			m, _, _ := newFetchManager(t, bound, 1000)
+			run := quota.WithRun(context.Background(), 7)
+			_, _ = m.FetchForEvaluation(run, auth.AuthorizationBinding{}, allInputs("a1"))
+			_, _ = m.FetchForEvaluation(run, auth.AuthorizationBinding{}, allInputs("b1"))
+			assert.Len(t, bound.calls, 2, "the next call of the run is not suspended")
+		})
+	}
+}
+
+// A run dispatch stop wins over the suspension (ARS-005 section 6.2).
+func TestFetchForEvaluationStopWinsOverRunSuspension(t *testing.T) {
+	bound := &fakeBound{do: func(int, []string) (metadata.FetchResult, error) {
+		return metadata.FetchResult{}, &youtube.APIError{Status: 500}
+	}}
+	m, _, _ := newFetchManager(t, bound, 1000)
+	run := quota.WithRun(context.Background(), 7)
+	_, err := m.FetchForEvaluation(run, auth.AuthorizationBinding{}, allInputs("a1"))
+	require.NoError(t, err)
+
+	quota.LatchRunStop(run, quota.StopAuthorization)
+	out, err := m.FetchForEvaluation(run, auth.AuthorizationBinding{}, allInputs("b1"))
+	require.NoError(t, err)
+	assert.Equal(t, quota.StopAuthorization, out.Stop)
+	assert.Equal(t, metadata.FetchAuthorizationPending, out.Statuses["b1"])
+	assert.Len(t, bound.calls, 1)
 }

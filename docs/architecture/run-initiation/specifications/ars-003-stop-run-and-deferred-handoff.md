@@ -3,12 +3,14 @@ type: specification
 title: ARS-003 — Stop Run and Deferred Handoff — Migration 025, Interfaces, HTTP and Tests
 description: Exact migration 025 and schema step, run-control and stop interfaces, the shared deferred-queue handoff, claim-ownership changes, startup classification changes, run-read fields, HTTP contracts and the full conformance test list for Stop and the amended Discard.
 tags: [architecture, specification, runs, stop, discard, deferred-queue, migration, api, concurrency]
-timestamp: 2026-11-18T00:00:00Z
+timestamp: 2026-11-23T00:00:00Z
 ---
 
 **Status:** accepted — exact implementation contract. Implemented, review pending (2026-11-10; see §9). It realizes [ADR-004](../decisions/adr-004-stop-active-run-and-deferred-handoff.md) and amends [ARS-002](ars-002-discard-unusable-time-limit-run.md) §2.4 (Discard uses the handoff).
 
 **2026-11-18 amendment:** The [receipt-aware handoff](#21-claim-ownership) replaces owner-wide updates for in-process Stop, startup Stop and eligible run Discard. This amendment is not implemented or verified.
+
+**2026-11-23 correction (F7):** test Q3 (§7.3) now requires an unrelated eligible handoff from another run and a check across the whole resumed execution. Its expected result is unchanged: a Run Now resume claims nothing new. The rule is in [ARS-005 §5.2](ars-005-requeue-stranded-videos.md#52-run-loop-variant-k--decided-2026-11-11).
 
 ## What the two sides agree on
 
@@ -332,7 +334,11 @@ Real migrated SQLite unless marked *unit*. "Controlled provider" = the counting 
 
 10. **Q1 stopped owner reclaimable:** a retrying row owned by a `stopped` run does not fail `StartRun`, `AdmitRunNow` (new) or `RetryQueueEntry`, and is claimed by the new run.
 11. **Q2 next run claims (AC14):** after a stop with handed-over videos, a scheduled `StartRun` whose discovery returns none of them claims every item, evaluates and acts on each, lists them in `GET /api/runs/{id}/videos`, adds the formerly unsent target, and sends zero POSTs to the uncertain target. Repeat with a Run Now new run, and with a discard instead of a stop.
-12. **Q3 resume does not claim:** with a usable time-limit candidate, Run Now resumes it and the handed-over items stay `pending`.
+12. **Q3 resume does not claim:** with a usable time-limit candidate, Run Now resumes it and the handed-over items stay `pending`. *Fixture strengthened 2026-11-23 (F7; [ARS-005](ars-005-requeue-stranded-videos.md) §5.2, §16). The expected result is unchanged.*
+    - **Resumed run.** R is a Run Now run interrupted by a real time-limit expiry, with a usable checkpoint. It holds at least one exact live claim X, which is the positive recovery control.
+    - **Handoff.** H is an unrelated, eligible handoff from a real Stop of a *different* production run P. Repeat with a Discard handoff (BR-017 AC17). H must never have been tied to R: R has no `run_video_outcome` row, receipt, native origin or decision for H. Before the press, H is `pending`, has no owner and is due now. No guard, final outcome, quota refusal or time limit prevents its claim. Discovery does not return H. R has enough time and quota and a working provider. A handoff for a video that R already holds or held does not count: the candidate query's membership exclusion drops it whatever the resume rule is.
+    - **Expected.** Wait until the resumed execution has returned, past X, not only for the acknowledgement. R keeps its id and snapshot. X is settled once under R's original ownership. H's row is unchanged: id, video, origin, reason, `retry_after`, `status`, owner and `retry_count`. R has no membership, receipt, decision or outcome for H, and makes no provider request for H. This holds at admission and for the whole resumed execution.
+    - **Then.** A later new run claims H once and processes it without rediscovery, as in Q2. Check a scheduled run and, separately, a Run Now press with no resume candidate.
 
 ### 7.4 Stop (`internal/pipeline`, `-race`)
 

@@ -7,11 +7,14 @@ import { ApiError } from '../api/core'
 import * as queueApi from '../api/queue'
 import * as deferredPageApi from '../api/deferred-page'
 import type { DeferredItem, DeferredPage, ErrorEntry } from '../types'
+import { expectUnfocusedAlert } from '../test/unfocused-alert'
 
 // Admin UI design 3a: a manual Retry whose run ended because the person's own
 // Dismiss won answers 409 retry_work_removed. The UI branches on the code; no
-// toast of either kind; a persistent role="alert" notice; the row becomes a
-// removed row, or the notice sits at the top when the row is already gone.
+// toast of either kind; a persistent role="alert" notice that is never focused;
+// the row becomes a removed row and focus moves to its View video link (to the
+// list heading when there is no row or link), or the notice sits at the top with
+// no focus move when the row is already gone.
 
 const NOTICE =
   'This item was removed while its retry was running. The retry may already have sent playlist additions to YouTube. It will not be retried again.'
@@ -119,7 +122,7 @@ describe('Errors: Retry ended with retry_work_removed', () => {
     call.resolve(errorEntry())
   })
 
-  it('shows the notice in the row place, a removed row, no toast, focus on the notice and a lower count', async () => {
+  it('shows the unfocused notice in the row place, a removed row, no toast, focus on its View video link and a lower count', async () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue([errorEntry(), errorEntry({ id: 428, video_id: 13, video_title: 'Other', external_video_id: 'other' })])
     vi.spyOn(queueApi, 'retryError').mockRejectedValue(removed({ ...errorEntry(), status: 'dismissed', retry_run_id: 77 }))
     renderErrors()
@@ -130,7 +133,9 @@ describe('Errors: Retry ended with retry_work_removed', () => {
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(NOTICE)
     expect(within(alert).getByRole('link', { name: 'View run 77' })).toHaveAttribute('href', '/runs/77')
-    expect(document.activeElement).toBe(alert)
+    expectUnfocusedAlert(alert)
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(screen.getByRole('link', { name: 'View video: Removed Video' })).toHaveFocus()
     // No toast of either kind.
     expect(screen.queryByText('Error queued for retry')).toBeNull()
     expect(screen.queryByText(/Failed to retry/)).toBeNull()
@@ -155,16 +160,18 @@ describe('Errors: Retry ended with retry_work_removed', () => {
     expect(alert).toHaveTextContent(NOTICE)
     expect(within(alert).queryByRole('link')).toBeNull()
     expect(alert.textContent).not.toMatch(/check|nothing/i)
+    expectUnfocusedAlert(alert)
   })
 
-  it('without a usable entry takes the row out, keeps the focused notice and counts it out', async () => {
+  it('without a usable entry takes the row out, keeps the unfocused notice, focuses the heading and counts it out', async () => {
     vi.spyOn(queueApi, 'listErrors').mockResolvedValue([errorEntry()])
     vi.spyOn(queueApi, 'retryError').mockRejectedValue(removed(undefined))
     renderErrors()
     fireEvent.click(within((await screen.findByText('Removed Video')).closest('tr')!).getByRole('button', { name: 'Retry Removed Video' }))
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(`Removed Video: ${NOTICE}`)
-    expect(document.activeElement).toBe(alert)
+    expectUnfocusedAlert(alert)
+    expect(screen.getByRole('heading', { name: 'Errors & Deferred' })).toHaveFocus()
     expect(screen.queryByRole('link', { name: 'View video: Removed Video' })).toBeNull()
     expect(screen.getByRole('tab', { name: 'Errors (0)' })).toBeInTheDocument()
   })
@@ -224,7 +231,8 @@ describe('Deferred: Retry ended with retry_work_removed', () => {
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(NOTICE)
     expect(within(alert).getByRole('link', { name: 'View run 31' })).toHaveAttribute('href', '/runs/31')
-    expect(document.activeElement).toBe(alert)
+    expectUnfocusedAlert(alert)
+    expect(screen.getByRole('link', { name: 'View video: Video 1' })).toHaveFocus()
     const row = screen.getByText('Video 1').closest('tr')!
     expect(within(row).getByText('Removed')).toBeInTheDocument()
     expect(within(row).getByText(REMOVED_ROW)).toBeInTheDocument()
@@ -234,6 +242,18 @@ describe('Deferred: Retry ended with retry_work_removed', () => {
     expect(screen.getByText('Showing 1–1 of 119 items.')).toBeInTheDocument()
     expect(screen.queryByText(/queued for retry|Failed to retry/)).toBeNull()
     expect(within(screen.getByText('Video 2').closest('tr')!).getByRole('button', { name: /^Retry now: / })).toBeInTheDocument()
+  })
+
+  it('without a usable entry takes the row out, keeps the unfocused notice and focuses the list heading', async () => {
+    const items = [deferredItem(1), deferredItem(2)]
+    await openWith(items, 2)
+    vi.spyOn(queueApi, 'retryDeferred').mockRejectedValue(removed(undefined))
+    fireEvent.click(within(screen.getByText('Video 1').closest('tr')!).getByRole('button', { name: /^Retry now: / }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(`Video 1: ${NOTICE}`)
+    expectUnfocusedAlert(alert)
+    expect(screen.getByRole('heading', { name: 'Deferred queue' })).toHaveFocus()
+    expect(screen.queryByText('Video 1', { selector: 'td' })).toBeNull()
   })
 
   it('pending Retry: "Retrying…", aria-disabled; Dismiss then asks with the pending-only first line, and the notice leads with the target once the row is gone', async () => {

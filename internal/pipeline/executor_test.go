@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
+	"github.com/bateau84/YuHaul/internal/auth"
 	"github.com/bateau84/YuHaul/internal/config"
 	"github.com/bateau84/YuHaul/internal/queue"
 	"github.com/bateau84/YuHaul/internal/quota"
@@ -221,6 +222,40 @@ func TestExecutor_DeferredWhenQuotaExhausted(t *testing.T) {
 	assert.Equal(t, "quota_exhausted", *actions[0].OutcomeReason)
 	assert.Nil(t, actions[0].ExecutedAt,
 		"a quota deferral must not carry an attempt timestamp")
+}
+
+// A CanAfford read error before a guarded action is a local accounting fault
+// (ARS-005 section 6.1.3, writer W3), not a video failure: no guard and no
+// send, the run's stop is latched and stored, and the error stops the run.
+func TestExecutor_PreflightReadErrorFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	db, stateStore, ledger, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	routeID := createRoute(t, ctx, db, "Jazz", 1)
+	createRouteAction(t, ctx, db, routeID, "PLjazz")
+	runID, videoID, _ := createRunAndVideo(t, ctx, db, stateStore)
+	decisionID := createRouteDecision(t, ctx, stateStore, videoID, runID, routeID, 1, state.RouteDecisionMatched)
+	_, err := db.Exec(`INSERT OR REPLACE INTO quota_settings (key, value) VALUES ('daily_limit', 'not-a-number')`)
+	require.NoError(t, err)
+
+	inserter := &recordingInserter{}
+	exec := newTestExecutor(t, db, ledger, inserter)
+	rctx := quota.WithRun(ctx, runID)
+
+	_, err = exec.Execute(rctx, runID, videoID, []RouteMatch{{RouteDecisionID: decisionID, RouteID: routeID}})
+
+	require.ErrorIs(t, err, auth.ErrQuotaAccounting)
+	var stopping *runStoppingError
+	require.ErrorAs(t, err, &stopping)
+	assert.False(t, isHandledVideoFailure(err), "the run cannot continue past it")
+	assert.Empty(t, inserter.calls)
+	got, readErr := ledger.RunDispatchStop(rctx)
+	require.NoError(t, readErr)
+	assert.Equal(t, quota.StopAccountingOrIntegrity, got, "latched for this execution")
+	var stored sql.NullString
+	require.NoError(t, db.QueryRow(`SELECT dispatch_stop FROM run WHERE id=?`, runID).Scan(&stored))
+	assert.Equal(t, "accounting_or_integrity", stored.String, "and stored for a later resume")
 }
 
 func TestExecutor_WithYouTubeBaseURLUsesOverrideURL(t *testing.T) {

@@ -146,12 +146,142 @@ func TestEngine_InvalidRegexDoesNotPanic(t *testing.T) {
 	engine := NewEngine(nil)
 	matched, actual := engine.evaluateCondition(1, RouteCondition{Field: ConditionFieldTitle, Operator: ConditionOperatorMatchesRegex, Value: "(unclosed"}, VideoContext{Title: "any title"})
 	assert.False(t, matched)
-	assert.Equal(t, "any title", actual)
+	require.NotNil(t, actual)
+	assert.Equal(t, "any title", *actual)
 }
 
 func TestEngine_UnknownOperatorLogsWarningAndReturnsFalse(t *testing.T) {
 	engine := NewEngine(nil)
 	matched, actual := engine.evaluateCondition(1, RouteCondition{Field: ConditionFieldTitle, Operator: "gt", Value: "100"}, VideoContext{Title: "any title"})
 	assert.False(t, matched)
-	assert.Equal(t, "any title", actual)
+	require.NotNil(t, actual)
+	assert.Equal(t, "any title", *actual)
+}
+
+// A missing value (nil) is not an empty one: ARS-005 §6.1.1 #7 says a
+// condition on a NULL field never matches, even if its pattern accepts "".
+func TestEngine_MissingFieldNeverMatchesWhileEmptyValueDoes(t *testing.T) {
+	engine := NewEngine(nil)
+	empty, zero := "", 0
+	emptyAccepting := []struct {
+		name string
+		op   ConditionOperator
+		val  string
+	}{
+		{"regex anchored empty", ConditionOperatorMatchesRegex, "^$"},
+		{"regex any", ConditionOperatorMatchesRegex, ".*"},
+		{"contains empty", ConditionOperatorContains, ""},
+		{"starts_with empty", ConditionOperatorStartsWith, ""},
+		{"ends_with empty", ConditionOperatorEndsWith, ""},
+		{"equals empty", ConditionOperatorEquals, ""},
+	}
+	for _, tc := range emptyAccepting {
+		t.Run("description "+tc.name, func(t *testing.T) {
+			cond := RouteCondition{Field: ConditionFieldDescription, Operator: tc.op, Value: tc.val}
+
+			matched, actual := engine.evaluateCondition(1, cond, VideoContext{Description: &empty})
+			assert.True(t, matched, "a real empty description keeps normal matching")
+			require.NotNil(t, actual)
+			assert.Equal(t, "", *actual)
+
+			matched, actual = engine.evaluateCondition(1, cond, VideoContext{})
+			assert.False(t, matched, "a missing description must not match")
+			assert.Nil(t, actual, "the audit records no value, not an empty one")
+		})
+	}
+
+	// Channel name is the third field the migration clears.
+	for _, tc := range emptyAccepting {
+		t.Run("channel name "+tc.name, func(t *testing.T) {
+			cond := RouteCondition{Field: ConditionFieldChannelName, Operator: tc.op, Value: tc.val}
+
+			matched, actual := engine.evaluateCondition(1, cond, VideoContext{ChannelName: &empty})
+			assert.True(t, matched, "a real empty channel name keeps normal matching")
+			require.NotNil(t, actual)
+			assert.Equal(t, "", *actual)
+
+			matched, actual = engine.evaluateCondition(1, cond, VideoContext{})
+			assert.False(t, matched, "a missing channel name must not match")
+			assert.Nil(t, actual, "the audit records no value, not an empty one")
+		})
+	}
+
+	// Duration is the other field the migration clears; a real 0 is present.
+	for _, tc := range []struct {
+		name string
+		op   ConditionOperator
+		val  string
+	}{
+		{"regex zero", ConditionOperatorMatchesRegex, "^0$"},
+		{"regex any", ConditionOperatorMatchesRegex, ".*"},
+		{"contains empty", ConditionOperatorContains, ""},
+		{"equals zero", ConditionOperatorEquals, "0"},
+	} {
+		t.Run("duration "+tc.name, func(t *testing.T) {
+			cond := RouteCondition{Field: ConditionFieldDurationSeconds, Operator: tc.op, Value: tc.val}
+
+			matched, actual := engine.evaluateCondition(1, cond, VideoContext{DurationSeconds: &zero})
+			assert.True(t, matched, "a real zero duration keeps normal matching")
+			require.NotNil(t, actual)
+			assert.Equal(t, "0", *actual)
+
+			matched, actual = engine.evaluateCondition(1, cond, VideoContext{})
+			assert.False(t, matched, "a missing duration must not match")
+			assert.Nil(t, actual)
+		})
+	}
+
+	t.Run("other fields are always present", func(t *testing.T) {
+		matched, actual := engine.evaluateCondition(1,
+			RouteCondition{Field: ConditionFieldTitle, Operator: ConditionOperatorMatchesRegex, Value: "^$"}, VideoContext{})
+		assert.True(t, matched)
+		require.NotNil(t, actual)
+	})
+}
+
+func TestEngine_RouteWithMissingDescriptionIsNotMatchedAndAuditHasNoValue(t *testing.T) {
+	engine := NewEngine(nil)
+	route := Route{ID: 7, IsEnabled: true, ConditionComposition: string(CompositionAll), Conditions: []RouteCondition{
+		{ConditionIndex: 0, Field: ConditionFieldDescription, Operator: ConditionOperatorMatchesRegex, Value: "^$"},
+	}}
+	empty := ""
+
+	decision, audits, matched := engine.evaluateRoute(route, VideoContext{})
+	assert.False(t, matched)
+	assert.Equal(t, state.RouteDecisionNotMatched, decision.Decision)
+	require.Len(t, audits, 1)
+	assert.False(t, audits[0].Matched)
+	assert.Nil(t, audits[0].ActualValue)
+
+	decision, audits, matched = engine.evaluateRoute(route, VideoContext{Description: &empty})
+	assert.True(t, matched)
+	assert.Equal(t, state.RouteDecisionMatched, decision.Decision)
+	require.Len(t, audits, 1)
+	require.NotNil(t, audits[0].ActualValue)
+	assert.Equal(t, "", *audits[0].ActualValue)
+}
+
+func TestEngine_RouteWithMissingChannelNameIsNotMatchedAndAuditHasNoValue(t *testing.T) {
+	engine := NewEngine(nil)
+	route := Route{ID: 8, IsEnabled: true, IsFinal: true, ConditionComposition: string(CompositionAll), Conditions: []RouteCondition{
+		{ConditionIndex: 0, Field: ConditionFieldChannelName, Operator: ConditionOperatorMatchesRegex, Value: "^$"},
+	}}
+	empty, named := "", "Some channel"
+
+	decision, audits, matched := engine.evaluateRoute(route, VideoContext{})
+	assert.False(t, matched)
+	assert.Equal(t, state.RouteDecisionNotMatched, decision.Decision)
+	require.Len(t, audits, 1)
+	assert.False(t, audits[0].Matched)
+	assert.Nil(t, audits[0].ActualValue)
+
+	decision, audits, matched = engine.evaluateRoute(route, VideoContext{ChannelName: &empty})
+	assert.True(t, matched)
+	assert.Equal(t, state.RouteDecisionMatched, decision.Decision)
+	require.Len(t, audits, 1)
+	require.NotNil(t, audits[0].ActualValue)
+	assert.Equal(t, "", *audits[0].ActualValue)
+
+	_, _, matched = engine.evaluateRoute(route, VideoContext{ChannelName: &named})
+	assert.False(t, matched, "a non-empty name does not match ^$")
 }

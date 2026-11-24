@@ -615,7 +615,10 @@ type VideoDetailPresence struct {
 	Title, ChannelID, ChannelTitle, Description, Duration bool
 }
 
-// VideoIDs reports identities in a fully validated by-ID response.
+// VideoIDs reports the identifiable requested IDs of a validated by-ID
+// response. An element with an explicit empty-string id names no video and is
+// skipped, which leaves Complete false; every other identity defect makes the
+// whole response invalid.
 type VideoIDs struct {
 	IDs      []string
 	Complete bool
@@ -696,6 +699,14 @@ func classifyLive(item map[string]json.RawMessage, duplicateItem map[string]bool
 
 // GetVideosWithReturnedIDs fetches at most 50 distinct IDs and validates the
 // complete response before allowing callers to infer an omitted ID.
+//
+// An invalid envelope, or an element whose identity is duplicate, unrequested,
+// malformed or ambiguous, is an invalid response: nothing is returned. An
+// element in a valid envelope whose ID is the empty string names no video. It
+// is skipped, the other elements keep their own attribution, and Complete is
+// false, so a caller may use the identified peers but must not infer any
+// omission (ARS-005 §6.1). Callers that cannot use partial results must treat
+// Complete=false as unusable.
 func (c *Client) GetVideosWithReturnedIDs(ctx context.Context, videoIDs []string) ([]VideoDetail, VideoIDs, error) {
 	transport, guarded := c.httpClient.Transport.(authorizationTransport)
 	if (c.readRecorder == nil && !c.quotaReads) || !guarded || transport.dispatch == nil {
@@ -743,12 +754,22 @@ func (c *Client) GetVideosWithReturnedIDs(ctx context.Context, videoIDs []string
 	result := VideoIDs{IDs: make([]string, 0, len(rawItems)), Live: make(map[string]LiveStatus, len(rawItems))}
 	details := make([]VideoDetail, 0, len(rawItems))
 	seen := make(map[string]bool, len(rawItems))
+	// anonymous is true when an element of a valid envelope names no ID at all
+	// (an empty string). It attributes nothing, so it cannot make another
+	// element ambiguous, but it may be the one a requested ID is missing from:
+	// the set of returned IDs is then not complete and proves no omission
+	// (ARS-005 §6.1, D7).
+	anonymous := false
 	for _, raw := range rawItems {
 		item, duplicateItem, ok := readJSONObject(raw)
 		if !ok || duplicateItem["id"] {
 			return invalid()
 		}
 		id, valid := jsonString(item["id"])
+		if valid && id == "" {
+			anonymous = true
+			continue
+		}
 		if !valid || !validVideoID(id) || !requested[id] || seen[id] {
 			return invalid()
 		}
@@ -786,7 +807,7 @@ func (c *Client) GetVideosWithReturnedIDs(ctx context.Context, videoIDs []string
 		d.ThumbnailURL = bestThumbnail(thumbs)
 		details = append(details, d)
 	}
-	result.Complete = true
+	result.Complete = !anonymous
 	return details, result, nil
 }
 

@@ -753,3 +753,43 @@ button.bottom-nav-link:focus-visible {
   word-break: break-word;
   user-select: text;
 }
+
+/* Stranded-video preview counts (design: "Re-queue Stranded Videos"). A real
+   table with row headers; at narrow widths each row stacks label over helper. */
+.requeue-counts caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 12px 0 4px;
+}
+
+.requeue-counts th[scope='row'] {
+  color: var(--color-text-primary);
+  font-size: 1rem;
+  vertical-align: top;
+}
+
+.requeue-counts td {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+
+.requeue-counts__sub th[scope='row'] {
+  padding-left: 32px;
+  font-weight: 400;
+}
+
+@media (max-width: 767px) {
+  .requeue-counts caption,
+  .requeue-counts th[scope='row'] {
+    display: block;
+  }
+
+  .requeue-counts__sub th[scope='row'] {
+    padding-left: 16px;
+  }
+
+  .requeue-counts th[scope='row'] {
+    border: none;
+    padding: 0 0 4px;
+  }
+}
