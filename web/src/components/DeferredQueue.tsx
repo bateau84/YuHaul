@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import * as api from '../api/client'
 import { ApiError } from '../api/core'
 import type { DeferredPageQuery } from '../api/deferred-page'
@@ -411,38 +411,47 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         <RemovalAlert key={n.id} target={n.target} runId={n.runId} focus={n.focus} />
       ))}
 
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          applyFilter()
-        }}
-        style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap', marginBottom: 12 }}
-      >
-        <div>
-          <label htmlFor="deferred-reason" style={{ display: 'block' }}>
-            Reason
-          </label>
-          <select
-            id="deferred-reason"
-            className="form-select"
-            value={reasonDraft}
-            onChange={(e) => setReasonDraft(e.target.value)}
-          >
-            <option value="">All reasons</option>
-            {deferredReasons.map((r) => (
-              <option key={r} value={r}>
-                {deferredReasonLabels[r]}
-              </option>
-            ))}
-          </select>
-        </div>
-        <button type="submit" className="button">
-          Apply filter
-        </button>
-        <button type="button" className="button" onClick={clearFilter}>
-          Clear filter
-        </button>
-      </form>
+      {/* The Deferred toolbar (design: "Re-queue Stranded Videos and the Paged
+          Deferred Tab"). The control opens the preview page; opening it changes
+          nothing and calls nothing. It shows for an empty queue too, because a
+          stranded video is by definition in no queue. */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'end', justifyContent: 'space-between', flexWrap: 'wrap', marginBottom: 12 }}>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            applyFilter()
+          }}
+          style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}
+        >
+          <div>
+            <label htmlFor="deferred-reason" style={{ display: 'block' }}>
+              Reason
+            </label>
+            <select
+              id="deferred-reason"
+              className="form-select"
+              value={reasonDraft}
+              onChange={(e) => setReasonDraft(e.target.value)}
+            >
+              <option value="">All reasons</option>
+              {deferredReasons.map((r) => (
+                <option key={r} value={r}>
+                  {deferredReasonLabels[r]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button type="submit" className="button">
+            Apply filter
+          </button>
+          <button type="button" className="button" onClick={clearFilter}>
+            Clear filter
+          </button>
+        </form>
+        <Link to="/errors/deferred/requeue" className="button" style={{ textDecoration: 'none' }}>
+          Re-queue stranded videos
+        </Link>
+      </div>
       {unknownReason && <p>Unknown reason filter. Showing all reasons.</p>}
 
       {queueEmpty ? (

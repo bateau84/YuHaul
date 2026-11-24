@@ -13,6 +13,7 @@ import { VideoView } from './views/VideoView'
 import { AnalyticsView } from './views/AnalyticsView'
 import { ChannelsView } from './views/ChannelsView'
 import { ErrorsView } from './views/ErrorsView'
+import { RequeueStrandedView } from './views/RequeueStrandedView'
 import { BacktestView } from './views/BacktestView'
 import { HistoryView } from './views/HistoryView'
 import { SettingsView } from './views/SettingsView'
@@ -73,6 +74,7 @@ function AppRoutes() {
       <Route path="/analytics/channels" element={<ChannelsView />} />
       <Route path="/analytics/channels/:channelId" element={<ChannelsView />} />
       <Route path="/errors" element={<ErrorsView />} />
+      <Route path="/errors/deferred/requeue" element={<RequeueStrandedView />} />
       <Route path="/backtest" element={<BacktestView />} />
       <Route path="/history" element={<HistoryView />} />
       <Route path="/history/:versionId" element={<HistoryView />} />
