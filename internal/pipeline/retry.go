@@ -141,13 +141,31 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 
 // retryAdmissionRefusal preserves the original claim for run-ending settlement.
 // It must not be interpreted as permission to mutate any of its rows.
+//
+// fault is set only when a real storage fault accompanied the refusal
+// (withStorageFault). The refusal keeps its identity for protected retention
+// (receipt, cause), but its chain then exposes only the fault, so no sentinel
+// test (isRetryAdmissionRefusal, withIntegrityCode) mistakes it for a pure
+// refusal and the run's reason is the storage fault's.
 type retryAdmissionRefusal struct {
 	receipt queue.RetryGroupReceipt
 	cause   error
+	fault   error
 }
 
-func (e *retryAdmissionRefusal) Error() string { return e.cause.Error() }
-func (e *retryAdmissionRefusal) Unwrap() error { return e.cause }
+func (e *retryAdmissionRefusal) Error() string {
+	if e.fault != nil {
+		return "retry admission refused beside a storage fault"
+	}
+	return e.cause.Error()
+}
+
+func (e *retryAdmissionRefusal) Unwrap() error {
+	if e.fault != nil {
+		return e.fault
+	}
+	return e.cause
+}
 
 // endRefusedRetry transfers the original receipt to the run-ending boundary.
 // A stop marker may be observed by the guard before the execution context is

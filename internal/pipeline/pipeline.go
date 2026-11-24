@@ -1532,6 +1532,9 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 				if keepGuarded(id, err) {
 					continue
 				}
+				if refusal, ok := refusalBesideFault(receipt, err); ok {
+					return refusal
+				}
 				if isRetryAdmissionRefusal(err) {
 					return &retryAdmissionRefusal{receipt: receipt, cause: err}
 				}
@@ -1545,6 +1548,9 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 		if err := p.processRetryVideo(retryCtx, runID, id); err != nil {
 			if keepGuarded(id, err) {
 				continue
+			}
+			if refusal, ok := refusalBesideFault(receipt, err); ok {
+				return refusal
 			}
 			return fmt.Errorf("process retry video %d: %w", id, err)
 		}

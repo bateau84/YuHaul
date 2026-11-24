@@ -79,6 +79,47 @@ func (e *receiptGuardedError) Error() string {
 // Unwrap gives the closed mutation_application_uncertain diagnostic.
 func (e *receiptGuardedError) Unwrap() error { return errGuardBlocked() }
 
+// withStorageFault is a receipt-local disposition (a claim-integrity refusal or
+// a guard veto) that happened beside a real storage fault, for example the
+// authorization stop that could not be stored after the settlement rolled back.
+// Its chain exposes only the fault, so a sentinel test on the chain never takes
+// it for the pure disposition. The disposition stays reachable for protected
+// retention (see refusalBesideFault).
+//
+// This is the one rule of the no-binding settlement path: a pure refusal, guard
+// veto or cancellation keeps its ordinary ending; any accompanying storage
+// fault governs the ending (writer W3, ARS-005 section 6.1.3).
+type withStorageFault struct{ disposition, fault error }
+
+func (e *withStorageFault) Error() string { return "storage fault beside a receipt disposition" }
+func (e *withStorageFault) Unwrap() error { return e.fault }
+
+// accompanyingFault returns the storage fault that governs err, or nil when err
+// has none.
+func accompanyingFault(err error) error {
+	var refusal *retryAdmissionRefusal
+	if errors.As(err, &refusal) && refusal.fault != nil {
+		return refusal.fault
+	}
+	var beside *withStorageFault
+	if errors.As(err, &beside) {
+		return beside.fault
+	}
+	return nil
+}
+
+// refusalBesideFault turns a refusal that happened beside a storage fault into
+// the refusal of receipt that carries the fault. It reports false for any other
+// error, including a guard veto beside a fault (nothing to protect: the guarded
+// work stays live) and a pure refusal.
+func refusalBesideFault(receipt queue.RetryGroupReceipt, err error) (error, bool) {
+	var beside *withStorageFault
+	if errors.As(err, &beside) && isRetryAdmissionRefusal(beside.disposition) {
+		return &retryAdmissionRefusal{receipt: receipt, cause: beside.disposition, fault: beside.fault}, true
+	}
+	return nil, false
+}
+
 // isPureGuardVeto reports whether err is a receipt-local guard veto and nothing
 // else. It follows single wraps only: an error joined with another fault (a
 // failed stop write, a rollback failure) is not pure, so the pass never
@@ -98,13 +139,21 @@ func isPureGuardVeto(err error) bool {
 }
 
 // governingSettlementFault is the fault of a no-binding settlement that must
-// end the run instead of being logged and dropped: a failed write or read of
-// local state. Not governing: a cancelled execution (the run is resumable), a
+// end the run instead of being logged and dropped: a failed read or write of
+// local state, alone or beside a refusal or guard veto (withStorageFault).
+// Not governing: a cancelled execution (the run is resumable; a fault that
+// only the cancellation caused cannot be told apart from it), a pure
 // claim-integrity refusal (removed, lost or unverifiable work keeps its own
-// protected retention), and a pure guard veto (the guarded receipt keeps its
+// protected retention) and a pure guard veto (the guarded receipt keeps its
 // disposition).
 func governingSettlementFault(ctx context.Context, err error) error {
-	if err == nil || ctx.Err() != nil || isRetryAdmissionRefusal(err) || isPureGuardVeto(err) {
+	if err == nil {
+		return nil
+	}
+	if accompanyingFault(err) != nil {
+		return err
+	}
+	if ctx.Err() != nil || isRetryAdmissionRefusal(err) || isPureGuardVeto(err) {
 		return nil
 	}
 	return err
@@ -595,18 +644,13 @@ func (p *Pipeline) settleAuthorizationPending(ctx context.Context, qs *queue.Sto
 		}
 		return p.deferForInputsTx(ctx, tx, qs, runID, receipt, queue.DeferredReasonAuthorizationPending)
 	})
-	vetoed := isPureGuardVeto(err)
-	if errors.Is(err, queue.ErrWorkRemoved) || vetoed {
+	if errors.Is(err, queue.ErrWorkRemoved) || isPureGuardVeto(err) {
 		// The settlement rolled back, and with it the stored stop. The stop is
-		// still a fact about the run: store it on its own.
+		// still a fact about the run: store it on its own. If that fails too,
+		// the disposition (removal or veto) is kept beside the real fault, which
+		// governs the ending.
 		if raiseErr := p.raiseStoredStop(ctx, qs, runID, quota.StopAuthorization); raiseErr != nil {
-			if vetoed {
-				// The guarded receipt stays live either way. What governs now is
-				// that the stop could not be stored: a storage fault, not a
-				// receipt-local veto, so it must not be matched as one.
-				return fmt.Errorf("store authorization stop beside a guarded receipt: %w", raiseErr)
-			}
-			return errors.Join(err, raiseErr)
+			return &withStorageFault{disposition: err, fault: fmt.Errorf("store authorization stop: %w", raiseErr)}
 		}
 	}
 	if err == nil {
