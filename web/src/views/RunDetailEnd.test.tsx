@@ -119,6 +119,11 @@ describe('Run Detail — mark a legacy run as ended', () => {
     expect(screen.queryByText(/deferred queue/)).toBeNull()
     expect(screen.queryByRole('button', { name: /Mark run|Stop run|Discard run/ })).toBeNull()
     expect(screen.getByText(/Marked as ended:/)).toBeInTheDocument()
+    // The acknowledgement names re-queue as the next step and links to the Deferred tab;
+    // the persistent Run Detail display carries no re-queue sentence (design ~1124).
+    expect(screen.getByRole('link', { name: 'Go to the Deferred tab' })).toHaveAttribute('href', '/errors?tab=deferred')
+    expect(screen.getAllByText(/re-queue/i)).toHaveLength(1)
+    expect(ack.closest('[role="status"]')).toHaveTextContent('Their videos can be re-queued later from the Deferred tab.')
   })
 
   it('re-reads the run after a refusal and withdraws the button when the run is no longer endable', async () => {

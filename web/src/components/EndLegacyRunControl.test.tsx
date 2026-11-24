@@ -39,7 +39,9 @@ describe('EndLegacyRunControl', () => {
     const dialog = screen.getByRole('dialog', { name: 'Mark run 14 as ended?' })
     expect(dialog).toHaveTextContent('Run 14 was created by an older version of YuHaul. Its saved status is interrupted, but nothing is executing it and it cannot be resumed.')
     expect(dialog).toHaveTextContent('Run 14 will be marked failed. It will never be resumed.')
-    expect(dialog).toHaveTextContent('Its unfinished videos will not be processed.')
+    expect(dialog).toHaveTextContent('Its unfinished videos will not be processed. Unlike stopping or discarding a run, this does not add them to the deferred queue or the Error Queue. You can re-queue them afterwards from the Deferred tab.')
+    // Text only: the modal dialog carries no link; the acknowledgement does.
+    expect(within(dialog).queryByRole('link')).toBeNull()
     expect(dialog).toHaveTextContent('This does not start or resume any run. The schedule is not affected.')
     expect(spy).not.toHaveBeenCalled()
   })
@@ -74,11 +76,14 @@ describe('EndLegacyRunControl', () => {
 
     resolve(jsonResponse(endOk, 200))
     const ack = await screen.findByRole('status')
-    expect(ack).toHaveTextContent('Marked as ended: run 14 is now marked failed. You ended it as a legacy run, and it will not be resumed. Its unfinished videos were not processed and were not added to any queue. Nothing was sent to YouTube.')
+    expect(ack).toHaveTextContent('Marked as ended: run 14 is now marked failed. You ended it as a legacy run, and it will not be resumed. Its unfinished videos were not processed and were not added to any queue. Nothing was sent to YouTube. Their videos can be re-queued later from the Deferred tab.')
     expect(ack).toHaveFocus()
     expect(screen.queryByRole('button', { name: 'Mark run 14 as ended' })).toBeNull()
     expect(onSettled).toHaveBeenCalledWith(endOk)
-    expect(screen.getByRole('link', { name: 'View runs' })).toHaveAttribute('href', '/runs')
+    expect(within(ack).getAllByRole('link').map((l) => [l.textContent, l.getAttribute('href')])).toEqual([
+      ['View runs', '/runs'],
+      ['Go to the Deferred tab', '/errors?tab=deferred'],
+    ])
   })
 
   // Dialog closes: the message is a persistent page alert and the run is re-read.

@@ -125,10 +125,11 @@ export function EndLegacyRunControl({ runId, savedStatus, available = true, onSe
         <p>
           <strong>Marked as ended:</strong> run {runId} is now marked failed. You ended it as a legacy run, and it will
           not be resumed. Its unfinished videos were not processed and were not added to any queue. Nothing was sent to
-          YouTube.
+          YouTube. Their videos can be re-queued later from the Deferred tab.
         </p>
         <p>
-          <Link to="/runs">View runs</Link>
+          <Link to="/runs">View runs</Link>{' '}
+          <Link to="/errors?tab=deferred">Go to the Deferred tab</Link>
         </p>
       </div>
     )
@@ -159,7 +160,7 @@ export function EndLegacyRunControl({ runId, savedStatus, available = true, onSe
                 <li>Run {runId} will be marked failed. It will never be resumed.</li>
                 <li>
                   Its unfinished videos will not be processed. Unlike stopping or discarding a run, this does not add
-                  them to the deferred queue or the Error Queue.
+                  them to the deferred queue or the Error Queue. You can re-queue them afterwards from the Deferred tab.
                 </li>
                 <li>
                   Nothing else changes. Its saved results, playlist records, send guards and queue items stay as they
