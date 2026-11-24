@@ -3,10 +3,10 @@ type: guide
 title: Upgrade Notes
 description: Operator steps for releases that change the YuHaul database, including backups and rollback.
 tags: [operations, upgrade, rollback, migration, release-notes]
-timestamp: 2026-11-20T00:00:00Z
+timestamp: 2026-11-24T00:00:00Z
 ---
 
-**Status:** current for releases up to and including database version 31 (migration `031`). Migration `030` ships in PR #4 (`2930a2d`; on `main` as `eed90f1`). Release check `6d65f7ef` proved the version 30 steps on real binaries, upgrading over a `debad57` (version 29) database and rolling back to `debad57`. Migration `031` ships in PR #5; release check `df803f9f` passed for it.
+**Status:** current for releases up to and including database version 31 (migration `031`). Migration `030` ships in PR #4 (`2930a2d`; on `main` as `eed90f1`). Release check `6d65f7ef` proved the version 30 steps on real binaries, upgrading over a `debad57` (version 29) database and rolling back to `debad57`. Migration `031` ships in PR #5; release check `df803f9f` passed for it. The **database version 32** section below is written for the re-queue release candidate. That release is not shipped, and no release check has yet proved its upgrade or rollback steps (2026-11-24).
 
 YuHaul upgrades its SQLite database automatically when a new image starts. Some upgrades cannot be undone by starting the older image again. This page lists those upgrades and what to do.
 
@@ -168,3 +168,31 @@ Anything recorded after the backup was taken, including runs, decisions, playlis
 - **Never edit `schema_migrations` by hand** to make an older image start or to skip a migration. The database would then claim a version whose changes are missing or present, and neither image would be safe.
 
 Technical contract: [run-initiation ARS-005 section 5.1.1](../architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md#511-durable-retry-claim-provenance) and [section 6.1.1](../architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md).
+
+## Database version 32: run dispatch stop, and re-queue of stranded videos (release candidate)
+
+This section describes the re-queue release candidate. It is not shipped. Its upgrade and rollback steps below follow the version 30 and 31 pattern and have **not** been rehearsed on real binaries; the release check must prove them before they are relied on (2026-11-24).
+
+**What changes.** Migration `032` adds one nullable column, `run.dispatch_stop`, with a check that allows only `authorization` or `accounting_or_integrity`, and a trigger that refuses to lower or clear a stored value. Every existing run reads empty (`NULL`); nothing is filled in afterwards. The release also adds the **Re-queue stranded videos** action on the Errors page, Deferred tab, and changes the Mark as ended text so that it says the videos can be re-queued afterwards. Re-queue uses the schema that version 30 already carries (migration `026`); no other table changes.
+
+**Deploy only onto a version 31 database** written by `d1eba51` (PR #5) or `8d7e009` (PR #6, which added no migration), or an equivalent build.
+
+**Upgrade steps.**
+
+1. Stop YuHaul, so no run is writing.
+2. Copy `yuhaul.db` together with its `yuhaul.db-wal` and `yuhaul.db-shm` files, if present, to a safe place. The default location is `/data/yuhaul.db` (`YUHAUL_DB_PATH`). Copy all three files from the same stopped state. Label the copy with the image it belongs to and `version 31`.
+3. Deploy the new image.
+4. Check that the startup log has **no** `startup recovery blocked` line, and that the database is at version 32 and not dirty, with YuHaul stopped or on a copy: `sqlite3 /data/yuhaul.db "SELECT version, dirty FROM schema_migrations;"` should print `32|0`.
+
+**Rollback.** Migration `032` has no down file. An image that does not know version 32 is expected to refuse to start with `no migration found for version 32`, as `debad57` did for version 30 and `967df28` for version 31. The database would stay at version 32 and not be damaged. Rolling back the image alone does not work. To roll back, stop YuHaul, restore all three files from the backup exactly as copied (removing any newer `-wal` and `-shm` files), and start the older image. Anything recorded after the backup, including runs, decisions, playlist actions and re-queued items, is not in the restored database. Do not edit `schema_migrations` by hand to make an older image start.
+
+**Warnings.**
+
+- **A run that was stopped for authorization on a version 31 build and then resumed on version 32 has no stored stop.** It meets the authorization check again and the normal rules decide again ([ARS-005 section 6.1.3](../architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md)).
+- **A video that YouTube no longer returns can end as `unavailable on YouTube`.** That outcome and everything that reads it shipped with migration `026` in PR #4, so images from `967df28` on know it. The earlier note in ARS-005 section 1.2 ("do not run an older binary once a row holds it") applies to images built before PR #4. This is read from the source at `8d7e009` and was not exercised in a rollback.
+
+**Before using Re-queue for the first time.** A run that has not ended holds its unfinished videos, and the preview lists them as held ("Run {id} has not ended"). Run 14 is such a run: it is a version 0 run still saved as `running`. End it first with **Mark run 14 as ended** on its Run Detail page, or its videos stay held. Re-queue only adds items to the Deferred queue. It sends nothing to YouTube and starts no run; the next new run processes the items, as far as each day's quota allows. It is refused while a production run is active or startup recovery is in progress.
+
+**Not yet established.** (1) The one-off count of old deferred rows with a future `retry_after` ([ADR-006 decision 5](../architecture/run-initiation/decisions/adr-006-requeue-stranded-videos.md)) has no recorded result; if it is not zero, the claim order must be revisited before release. (2) Neither the upgrade from version 31 nor the rollback has been run on real binaries. (3) The re-queue timing targets were measured on a synthetic fixture on one development host, not on the production database.
+
+Technical contract: [run-initiation ARS-005](../architecture/run-initiation/specifications/ars-005-requeue-stranded-videos.md) sections 4, 6.1.3, 11.9 and 12.

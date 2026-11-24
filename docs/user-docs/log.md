@@ -3,10 +3,14 @@ type: Log
 title: User and Operator Documentation Change Log
 description: Changes to the user and operator documentation bundle.
 tags: [changelog, user-docs, operations]
-timestamp: 2026-11-20T00:00:00Z
+timestamp: 2026-11-24T00:00:00Z
 ---
 
 # User and Operator Documentation Change Log
+
+## 2026-11-24
+
+**Updated:** [Upgrade notes](/docs/user-docs/upgrade-notes.md). New database version 32 section for the re-queue release candidate: migration `032` (no down file), the backup and rollback expectation, ending run 14 before first use of Re-queue, and what is not yet established. Its steps are not rehearsed on real binaries.
 
 ## 2026-11-20
 

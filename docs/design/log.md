@@ -6,6 +6,10 @@ tags: [design, documentation, change-log]
 timestamp: 2026-11-10T00:00:00Z
 ---
 
+## 2026-11-24
+
+- Updated the [admin interface design](/docs/design/yuhaul-admin-ui-design.md) for the settled re-queue wording (designer handoff `566422b5`; browser recheck `4569478a` passed M1 and M2 on `cbd171a`): the Mark as ended confirmation and walkthrough say the videos can be re-queued afterwards from the Deferred tab; held runs show one neutral line with `Open run {id}` (no per-run `endable` or "End run {id} first."; that is optional and not accepted scope); the re-queue control is a link styled as a button and is shown for an empty or full queue; link targets, the zero-count announcement and the preview read-failure copy are stated. Wording only; no behavior, API or requirement changed. M3 link contrast and the minor findings were not rechecked.
+
 ## 2026-11-21
 
 - Updated the Analytics counting-basis status in the [admin interface design](/docs/design/yuhaul-admin-ui-design.md) (PR #6): the two minors from recheck `b9eb9f9c` (Discovered cell showed `0` instead of `No data`; the no-data tooltip text never appeared) are fixed and covered by web tests. Status text only; no design change.
