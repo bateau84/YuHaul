@@ -31,11 +31,12 @@ jobs:
       - run: go vet ./...
       - run: go test -count=1 ./...
       - run: go test -tags=integration -count=1 ./e2e/...
-      # The re-queue J1 and G2 journeys need the real-process harness in
-      # cmd/server (package main), which ./e2e cannot import. J1 takes about
-      # two minutes (the real scheduler checks once a minute).
-      - name: Re-queue J1 and G2 journeys (real server process)
-        run: go test -tags=integration -count=1 -timeout 10m -run '^Test(J1|G2)_' ./cmd/server
+      # The re-queue J1 and G2 journeys and the final-outcomes K18 journey need
+      # the real-process harness in cmd/server (package main), which ./e2e
+      # cannot import. J1 takes about two minutes and K18 about one (the real
+      # scheduler checks once a minute).
+      - name: Re-queue J1, G2 and final-outcomes K18 journeys (real server process)
+        run: go test -tags=integration -count=1 -timeout 10m -run '^Test(J1|G2|K18)_' ./cmd/server
 
   verify-web:
     runs-on: ubuntu-latest

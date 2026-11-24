@@ -20,7 +20,7 @@ package main
 // harness (serverProcess, the loopback fake, SIGTERM and restart) lives in
 // package main, which ./e2e cannot import, so the fixtures live beside it:
 //
-//	go test -tags=integration -count=1 -run '^Test(J1|G2)' ./cmd/server
+//	go test -tags=integration -count=1 -timeout 10m -run '^Test(J1|G2|K18)_' ./cmd/server
 //
 // J1 takes about two minutes: the real scheduler checks once a minute and
 // fires on the first check after each process start. Quota-day rollover is not
