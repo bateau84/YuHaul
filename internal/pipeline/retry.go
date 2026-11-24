@@ -331,6 +331,16 @@ func (p *Pipeline) processRetryVideo(ctx context.Context, runID, videoID int64) 
 			}
 		}
 	}
+	// No binding under an authorization stop (§6.2): the matched decision is
+	// kept and the exact receipt settles as authorization_pending. No Errors
+	// entry, action or provider request is made.
+	if errors.Is(workErr, errSendBlocked) {
+		err := p.settleAuthorizationPending(ctx, qs, runID, receipt)
+		if err != nil && isRetryAdmissionRefusal(err) {
+			return &retryAdmissionRefusal{receipt: receipt, cause: err}
+		}
+		return err
+	}
 	// The retained message carries the vetted bounded summary, not the raw
 	// chain (ARD-001); only bounded auxiliary facts reach the log below.
 	if errors.Is(workErr, errInputsUnavailable) {

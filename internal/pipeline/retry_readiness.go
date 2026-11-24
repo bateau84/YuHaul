@@ -64,6 +64,17 @@ func inputRequirement(routes []router.Route, videoID string) metadata.InputRequi
 	return req
 }
 
+// sendBlockedKey marks a context whose execution holds no authorization
+// binding under an authorization stop (settleOwnedReceiptsWithoutBinding).
+// Evaluation is local and still runs, but a video with a matched decision
+// stops before its actions: executeDecision returns errSendBlocked and
+// processRetryVideo settles the exact receipt as authorization_pending.
+type sendBlockedKey struct{}
+
+// errSendBlocked is returned by executeDecision before any lifecycle write
+// when the context is send-blocked and the video has matched decisions.
+var errSendBlocked = errors.New("pipeline: send blocked by authorization stop")
+
 // requiredInputs returns the readiness requirement carried by ctx.
 func requiredInputs(ctx context.Context) (metadata.InputRequirement, bool) {
 	req, ok := ctx.Value(requireInputsKey{}).(metadata.InputRequirement)
@@ -398,6 +409,9 @@ func (p *Pipeline) settleOwnedReceiptsWithoutBinding(ctx context.Context, run *s
 		source = "stored_stop"
 	}
 	p.logger.WarnContext(ctx, "run authorization stop", "run_id", runID, "authorization_cause", source, "inputs", len(settle))
+	// Without a binding no action can be sent, so a matched video must not
+	// reach the executor, which would fail it as an ordinary action failure.
+	ctx = context.WithValue(ctx, sendBlockedKey{}, struct{}{})
 	if err := p.processDeferredItems(ctx, runID, settle, false); err != nil {
 		fail("settle", err)
 	}
@@ -570,7 +584,9 @@ func (p *Pipeline) broadcastReceiptOutcome(runID, videoID int64, outcome state.V
 
 // deferForInputsTx is §6.2's deferRetryForInputsTx, in the caller's single
 // writer transaction. The item keeps its original deferral_reason; the run
-// outcome records reason. Nothing is evaluated, sent or attempted.
+// outcome records reason. Nothing is evaluated, sent or attempted. A video that
+// already holds a saved decision goes evaluated or acted to deferred on the
+// same edge, so its outcome is recorded too.
 func (p *Pipeline) deferForInputsTx(ctx context.Context, tx *sql.Tx, qs *queue.Store, runID int64, receipt queue.RetryGroupReceipt, reason queue.DeferredReason) error {
 	owned, err := qs.ValidateRetryReceiptTx(ctx, tx, receipt)
 	if err != nil {
@@ -590,9 +606,24 @@ func (p *Pipeline) deferForInputsTx(ctx context.Context, tx *sql.Tx, qs *queue.S
 		}
 		video.ProcessingState = state.VideoStateEvaluating
 	}
-	if video.ProcessingState == state.VideoStateEvaluating {
+	switch video.ProcessingState {
+	case state.VideoStateEvaluated, state.VideoStateActed:
+		// A saved decision whose action cannot be sent keeps that decision and
+		// its audit: only the lifecycle and the run outcome change. An
+		// unresolved send guard means a mutation may already have been issued;
+		// that disposition is never reinterpreted here, so the receipt stays
+		// live for the run's retention sweep.
+		var guarded bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM playlist_send_guard WHERE video_id = ?)`, receipt.VideoID).Scan(&guarded); err != nil {
+			return fmt.Errorf("read send guards of video %d: %w", receipt.VideoID, err)
+		}
+		if guarded {
+			return guardedRetryHandoffError{cause: errGuardBlocked()}
+		}
+		fallthrough
+	case state.VideoStateEvaluating:
 		if _, err := p.machine.TransitionRunVideoStateTx(ctx, tx, runID, receipt.VideoID,
-			state.VideoStateEvaluating, state.VideoStateDeferred, state.FinalOutcomeDeferred, &reasonText, nil); err != nil {
+			video.ProcessingState, state.VideoStateDeferred, state.FinalOutcomeDeferred, &reasonText, nil); err != nil {
 			return err
 		}
 	}

@@ -991,6 +991,12 @@ func (p *Pipeline) executeDecision(ctx context.Context, runID int64, v *state.Vi
 		}
 	}
 
+	// No binding under an authorization stop: nothing can be sent and the
+	// executor would fail the video. The caller settles the receipt.
+	if ctx.Value(sendBlockedKey{}) != nil {
+		return "", errSendBlocked
+	}
+
 	// Transition into acted before executing. If resuming at action execution,
 	// the video may already be in acted, evaluated, or deferred state; use the
 	// current state as the from-state so retries work for deferred videos.
