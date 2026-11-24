@@ -248,8 +248,9 @@ func TestStrandedP1Scale(t *testing.T) {
 	require.Zero(t, result.SkippedConcurrently)
 	require.Equal(t, p1Stranded, result.Report.Requeue)
 	require.True(t, writer.started.Before(lockHeld), "the writer started while phase B held the lock")
-	// It had to wait for the lock: it cannot have finished well before phase B did.
-	require.GreaterOrEqual(t, writer.waited, lockedFor/2, "the writer overlapped phase B (waited %s of %s)", writer.waited, lockedFor)
+	// It had to wait for the lock: it cannot have finished well before phase B
+	// did. busy_timeout caps the wait when phase B is longer than it.
+	require.GreaterOrEqual(t, writer.waited, min(lockedFor, p1BusyTimeout)/2, "the writer overlapped phase B (waited %s of %s)", writer.waited, lockedFor)
 	if raceEnabled {
 		// Under the detector phase B outlasts busy_timeout, so SQLITE_BUSY is
 		// the correct answer for the writer; only the target run asserts it.
