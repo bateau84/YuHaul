@@ -389,11 +389,7 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 				// the ending, not the binding error: writer W3 stops dispatch,
 				// attempts the stored integrity stop and the run keeps the
 				// classified storage fault as its reason (ARS-005 6.1.3).
-				var stopping *runStoppingError
-				if !errors.As(fault, &stopping) {
-					fault = p.failClosedAtLifecycle(ctx, runID, fault)
-				}
-				p.failRun(ctx, runID, "authorization settlement failed", fault)
+				p.failRun(ctx, runID, "authorization settlement failed", p.failClosedAtReceiving(ctx, runID, fault))
 				return
 			}
 			p.failRun(ctx, runID, "authorization binding failed", bindErr)
@@ -458,7 +454,10 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 	// Owned retries precede dispatch even when a crash left an actions checkpoint
 	// before the receiving run's first decision.
 	if err := p.processRetryBatches(ctx, runID, freshRetries, isResume); err != nil {
-		p.failRun(ctx, runID, "retry processing failed", err)
+		// A storage fault of the receiving pass (the authorization stop's own
+		// write, a settlement transaction) ends the run through W3 with a valid
+		// binding as it does without one.
+		p.failRun(ctx, runID, "retry processing failed", p.receivingEnding(ctx, runID, err))
 		return
 	}
 

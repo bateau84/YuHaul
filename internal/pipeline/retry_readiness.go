@@ -159,6 +159,53 @@ func governingSettlementFault(ctx context.Context, err error) error {
 	return err
 }
 
+// governingStorageFault reports whether err, returned by a receiving pass that
+// held a valid binding, is a real storage fault that must end the run through
+// writer W3 (ARS-005 section 6.1.3: a fault that prevents reliable settlement).
+// It is the bound-execution counterpart of governingSettlementFault: here an
+// ordinary ending already reports the fault, so only a classified SQLite fault
+// (alone or beside a refusal or veto) is routed, and only the stored integrity
+// stop is added. Not routed: a run already ended by W3, a cancelled execution,
+// a pure refusal, a pure guard veto, a user Stop, and any non-storage error
+// (provider, quota and accounting outcomes keep their own handling).
+func governingStorageFault(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	var stopping *runStoppingError
+	if errors.As(err, &stopping) {
+		return false // W3 already ran
+	}
+	if accompanyingFault(err) != nil {
+		return true
+	}
+	if isRetryAdmissionRefusal(err) || isPureGuardVeto(err) || errors.Is(err, state.ErrPlaylistSendStopped) {
+		return false
+	}
+	return diag.Classify(err, "unknown", "unknown").Code == "sqlite_error"
+}
+
+// failClosedAtReceiving is the one W3 boundary of the receiving settlement
+// path: latch, a best-effort stored accounting_or_integrity stop, and the
+// classified fault (with any protected refusal it carries) as the run's
+// reason. A fault that already went through W3 is returned unchanged.
+func (p *Pipeline) failClosedAtReceiving(ctx context.Context, runID int64, fault error) error {
+	var stopping *runStoppingError
+	if errors.As(fault, &stopping) {
+		return fault
+	}
+	return p.failClosedAtLifecycle(ctx, runID, fault)
+}
+
+// receivingEnding is the error a run ends with after a receiving pass failed
+// with err: err itself, or, for a governing storage fault, err through W3.
+func (p *Pipeline) receivingEnding(ctx context.Context, runID int64, err error) error {
+	if governingStorageFault(ctx, err) {
+		return p.failClosedAtReceiving(ctx, runID, err)
+	}
+	return err
+}
+
 // sendBlockedKey marks a context whose execution holds no authorization
 // binding under an authorization stop (settleOwnedReceiptsWithoutBinding).
 // Evaluation is local and still runs, but a video with a matched decision

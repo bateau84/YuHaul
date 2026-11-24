@@ -129,7 +129,7 @@ func (p *Pipeline) RetryQueueEntry(ctx context.Context, entryID int64, errorQueu
 	p.executionBinding = &binding
 	defer func() { p.executionBinding = nil }()
 	if err := p.processDeferredItems(ctx, run.ID, []queue.RetryGroupReceipt{claimedReceipt}, false); err != nil {
-		p.failRun(ctx, run.ID, "manual retry failed", err)
+		p.failRun(ctx, run.ID, "manual retry failed", p.receivingEnding(ctx, run.ID, err))
 		if stopOwnsEnding(ctx) || errors.Is(err, state.ErrPlaylistSendStopped) {
 			return nil // the user stopped this retry; finishRun settles it
 		}
