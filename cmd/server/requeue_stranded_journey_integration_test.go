@@ -625,6 +625,15 @@ func TestG2_DeferredPagingWhileARunClaimsAndTheConfirmInserts(t *testing.T) {
 		return scalar[string](t, db, `SELECT status FROM run WHERE id = ?`, run) != "running"
 	})
 	require.Equal(t, "completed", scalar[string](t, db, `SELECT status FROM run WHERE id = ?`, run), srv.out.String())
+	// The run is stored as completed before it releases its producer slot
+	// (completeRun runs the advisories and the completion event, and finishRun
+	// unregisters the run, afterwards), so a confirm sent now could still meet
+	// the real 409 production_run_active. The preview's own availability is the
+	// contract the confirm is gated on: wait for it.
+	eventually(t, g2RunBudget, "the preview to report the run's producer slot released", func() bool {
+		status, body := srv.do(http.MethodGet, "/api/stranded-videos")
+		return status == http.StatusOK && jsonMap(t, body)["available"] == true
+	})
 
 	// The run claimed exactly the 1,000 oldest, read each once, spent exactly
 	// the budget, sent nothing and left every witness row as it was.
