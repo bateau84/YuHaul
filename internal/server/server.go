@@ -45,6 +45,8 @@ type Pipeline interface {
 	EndLegacyRun(ctx context.Context, runID int64) (*pipeline.EndResult, error)
 	EndableRuns(ctx context.Context) (map[int64]bool, error)
 	ExecutingRuns() map[int64]bool
+	PreviewStranded(ctx context.Context) (*pipeline.StrandedPreview, error)
+	RequeueStranded(ctx context.Context, expected *int) (*pipeline.RequeueResult, error)
 }
 
 // ConfigHandler is the subset of config.Handler used by the server.
@@ -556,6 +558,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{id}/stop", s.handleStopRun)
 	mux.HandleFunc("POST /api/runs/{id}/discard", s.handleDiscardRun)
 	mux.HandleFunc("POST /api/runs/{id}/end", s.handleEndRun)
+	// Re-queue stranded videos (ARS-005 §8). Registered with the paged
+	// GET /api/deferred below and never without it (ARS-005 §0, test X3).
+	mux.HandleFunc("GET /api/stranded-videos", s.handleStrandedPreview)
+	mux.HandleFunc("POST /api/stranded-videos/requeue", s.handleRequeueStranded)
 	mux.HandleFunc("POST /api/runs/dry-run", s.handleDryRun)
 	mux.HandleFunc("POST /api/runs/replay", s.handleReplay)
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)

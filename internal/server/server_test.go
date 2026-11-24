@@ -84,6 +84,17 @@ type fakePipeline struct {
 	endable        map[int64]bool
 	endableErr     error
 	executing      map[int64]bool
+
+	previewRes      *pipeline.StrandedPreview
+	previewErr      error
+	requeueRes      *pipeline.RequeueResult
+	requeueErr      error
+	requeueCalls    int
+	requeueExpected *int
+	// requeueEntered and requeueRelease, when set, hold RequeueStranded open:
+	// it sends its context on requeueEntered, then waits for requeueRelease.
+	requeueEntered chan context.Context
+	requeueRelease chan struct{}
 }
 
 func newFakePipeline(run *state.Run) *fakePipeline {
@@ -175,6 +186,20 @@ func (f *fakePipeline) EndableRuns(ctx context.Context) (map[int64]bool, error) 
 }
 
 func (f *fakePipeline) ExecutingRuns() map[int64]bool { return f.executing }
+
+func (f *fakePipeline) PreviewStranded(ctx context.Context) (*pipeline.StrandedPreview, error) {
+	return f.previewRes, f.previewErr
+}
+
+func (f *fakePipeline) RequeueStranded(ctx context.Context, expected *int) (*pipeline.RequeueResult, error) {
+	f.requeueCalls++
+	f.requeueExpected = expected
+	if f.requeueEntered != nil {
+		f.requeueEntered <- ctx
+		<-f.requeueRelease
+	}
+	return f.requeueRes, f.requeueErr
+}
 
 type fakeOverviewProvider struct {
 	overview *Overview

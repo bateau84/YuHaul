@@ -124,6 +124,14 @@ func (f *fakePipeline) EndableRuns(ctx context.Context) (map[int64]bool, error) 
 
 func (f *fakePipeline) ExecutingRuns() map[int64]bool { return map[int64]bool{} }
 
+func (f *fakePipeline) PreviewStranded(ctx context.Context) (*pipeline.StrandedPreview, error) {
+	return nil, errors.New("fake pipeline cannot preview stranded videos")
+}
+
+func (f *fakePipeline) RequeueStranded(ctx context.Context, expected *int) (*pipeline.RequeueResult, error) {
+	return nil, errors.New("fake pipeline cannot re-queue stranded videos")
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))
 }
