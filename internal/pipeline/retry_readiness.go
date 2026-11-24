@@ -64,6 +64,21 @@ func inputRequirement(routes []router.Route, videoID string) metadata.InputRequi
 	return req
 }
 
+// receiptGuardedError is the disposition of one receipt whose video holds an
+// unresolved send guard: a mutation may already have been issued, so the
+// receipt keeps its established disposition and is neither deferred nor
+// released here. The veto belongs to that receipt alone. processDeferredItems
+// still settles the pass's other receipts, then returns this error so the run
+// ends and its retention sweep keeps the guarded work live.
+type receiptGuardedError struct{ videoID int64 }
+
+func (e *receiptGuardedError) Error() string {
+	return fmt.Sprintf("receipt of video %d keeps its disposition: unresolved send guard", e.videoID)
+}
+
+// Unwrap gives the closed mutation_application_uncertain diagnostic.
+func (e *receiptGuardedError) Unwrap() error { return errGuardBlocked() }
+
 // sendBlockedKey marks a context whose execution holds no authorization
 // binding under an authorization stop (settleOwnedReceiptsWithoutBinding).
 // Evaluation is local and still runs, but a video with a matched decision
@@ -549,7 +564,8 @@ func (p *Pipeline) settleAuthorizationPending(ctx context.Context, qs *queue.Sto
 		}
 		return p.deferForInputsTx(ctx, tx, qs, runID, receipt, queue.DeferredReasonAuthorizationPending)
 	})
-	if errors.Is(err, queue.ErrWorkRemoved) {
+	var guarded *receiptGuardedError
+	if errors.Is(err, queue.ErrWorkRemoved) || errors.As(err, &guarded) {
 		// The settlement rolled back, and with it the stored stop. The stop is
 		// still a fact about the run: store it on its own.
 		if raiseErr := p.raiseStoredStop(ctx, qs, runID, quota.StopAuthorization); raiseErr != nil {
@@ -618,7 +634,7 @@ func (p *Pipeline) deferForInputsTx(ctx context.Context, tx *sql.Tx, qs *queue.S
 			return fmt.Errorf("read send guards of video %d: %w", receipt.VideoID, err)
 		}
 		if guarded {
-			return guardedRetryHandoffError{cause: errGuardBlocked()}
+			return &receiptGuardedError{videoID: receipt.VideoID}
 		}
 		fallthrough
 	case state.VideoStateEvaluating:

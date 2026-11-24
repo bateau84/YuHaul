@@ -1485,6 +1485,22 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 	if err != nil {
 		return err
 	}
+	// A receipt held by an unresolved send guard keeps its disposition and
+	// protects only itself: the other receipts of the pass are still settled.
+	// Its error is returned after the pass so the run still ends and retains it.
+	var guardedErr error
+	keepGuarded := func(id int64, err error) bool {
+		var guarded *receiptGuardedError
+		if !errors.As(err, &guarded) {
+			return false
+		}
+		p.logger.WarnContext(ctx, "receipt keeps its disposition: unresolved send guard", "run_id", runID, "video_id", id,
+			"diagnostic", diag.Encode(err, "action_execution", "execute_action"))
+		if guardedErr == nil {
+			guardedErr = fmt.Errorf("retry video %d: %w", id, err)
+		}
+		return true
+	}
 	for _, receipt := range receipts {
 		id := receipt.VideoID
 		if receipt.ReceivingRunID != runID || id == 0 {
@@ -1503,6 +1519,9 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 		if status, ok := ready[id]; ok {
 			handled, err := p.applyReadiness(ctx, qs, runID, receipt, status)
 			if err != nil {
+				if keepGuarded(id, err) {
+					continue
+				}
 				if isRetryAdmissionRefusal(err) {
 					return &retryAdmissionRefusal{receipt: receipt, cause: err}
 				}
@@ -1514,10 +1533,13 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 		}
 		retryCtx := context.WithValue(ctx, guardedRetryGroupKey{}, receipt)
 		if err := p.processRetryVideo(retryCtx, runID, id); err != nil {
+			if keepGuarded(id, err) {
+				continue
+			}
 			return fmt.Errorf("process retry video %d: %w", id, err)
 		}
 	}
-	return nil
+	return guardedErr
 }
 
 func videoContextFromMetadata(videoID, channelID string, m *metadata.TransientMetadata) router.VideoContext {
