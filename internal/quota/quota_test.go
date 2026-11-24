@@ -239,6 +239,15 @@ func TestRecordAndConsumed(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newTestLedger(t)
 
+	// Record buckets by the ledger's schedule (default: Pacific, see
+	// TestDefaultResetIsPacific), not by the UTC calendar date, so the expected
+	// day must come from the same bucketing. Record reads the wall clock, so
+	// sample the bucket before and after: if the quota day rolls over mid-test,
+	// the rows are split across exactly those two days.
+	first, err := l.bucketDate(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("bucket date before: %v", err)
+	}
 	if err := l.Record(ctx, sql.NullInt64{}, OpVideosList); err != nil {
 		t.Fatalf("record videos.list: %v", err)
 	}
@@ -248,15 +257,26 @@ func TestRecordAndConsumed(t *testing.T) {
 	if err := l.Record(ctx, sql.NullInt64{}, OpSubscriptionsList); err != nil {
 		t.Fatalf("record background subscription list: %v", err)
 	}
-
-	date := time.Now().UTC().Format("2006-01-02")
-	consumed, err := l.ConsumedOn(ctx, date)
+	last, err := l.bucketDate(ctx, time.Now())
 	if err != nil {
-		t.Fatalf("consumed: %v", err)
+		t.Fatalf("bucket date after: %v", err)
+	}
+
+	dates := []string{first}
+	if last != first {
+		dates = append(dates, last)
+	}
+	consumed := 0
+	for _, date := range dates {
+		n, err := l.ConsumedOn(ctx, date)
+		if err != nil {
+			t.Fatalf("consumed on %s: %v", date, err)
+		}
+		consumed += n
 	}
 	want := 1 + 50 + 1
 	if consumed != want {
-		t.Errorf("consumed = %d, want %d", consumed, want)
+		t.Errorf("consumed on %v = %d, want %d", dates, consumed, want)
 	}
 }
 
