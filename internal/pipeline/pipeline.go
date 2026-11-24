@@ -384,7 +384,18 @@ func (p *Pipeline) executeHeld(ctx context.Context, runID int64, resumeAdmitted 
 			// The run cannot continue, but the receipts it already owns are
 			// not stranded by that: under an authorization stop they settle
 			// locally with no provider work (ARS-005 section 6.2).
-			p.settleOwnedReceiptsWithoutBinding(ctx, run, resumeAdmitted, freshRetries, bindErr)
+			if fault := p.settleOwnedReceiptsWithoutBinding(ctx, run, resumeAdmitted, freshRetries, bindErr); fault != nil {
+				// A failed read or write of local state while settling governs
+				// the ending, not the binding error: writer W3 stops dispatch,
+				// attempts the stored integrity stop and the run keeps the
+				// classified storage fault as its reason (ARS-005 6.1.3).
+				var stopping *runStoppingError
+				if !errors.As(fault, &stopping) {
+					fault = p.failClosedAtLifecycle(ctx, runID, fault)
+				}
+				p.failRun(ctx, runID, "authorization settlement failed", fault)
+				return
+			}
 			p.failRun(ctx, runID, "authorization binding failed", bindErr)
 			return
 		}
@@ -1490,8 +1501,7 @@ func (p *Pipeline) processDeferredItems(ctx context.Context, runID int64, receip
 	// Its error is returned after the pass so the run still ends and retains it.
 	var guardedErr error
 	keepGuarded := func(id int64, err error) bool {
-		var guarded *receiptGuardedError
-		if !errors.As(err, &guarded) {
+		if !isPureGuardVeto(err) {
 			return false
 		}
 		p.logger.WarnContext(ctx, "receipt keeps its disposition: unresolved send guard", "run_id", runID, "video_id", id,

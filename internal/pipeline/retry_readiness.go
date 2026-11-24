@@ -79,6 +79,37 @@ func (e *receiptGuardedError) Error() string {
 // Unwrap gives the closed mutation_application_uncertain diagnostic.
 func (e *receiptGuardedError) Unwrap() error { return errGuardBlocked() }
 
+// isPureGuardVeto reports whether err is a receipt-local guard veto and nothing
+// else. It follows single wraps only: an error joined with another fault (a
+// failed stop write, a rollback failure) is not pure, so the pass never
+// continues past a storage fault because a veto happens to be inside it.
+func isPureGuardVeto(err error) bool {
+	for err != nil {
+		if _, ok := err.(*receiptGuardedError); ok {
+			return true
+		}
+		next, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = next.Unwrap()
+	}
+	return false
+}
+
+// governingSettlementFault is the fault of a no-binding settlement that must
+// end the run instead of being logged and dropped: a failed write or read of
+// local state. Not governing: a cancelled execution (the run is resumable), a
+// claim-integrity refusal (removed, lost or unverifiable work keeps its own
+// protected retention), and a pure guard veto (the guarded receipt keeps its
+// disposition).
+func governingSettlementFault(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() != nil || isRetryAdmissionRefusal(err) || isPureGuardVeto(err) {
+		return nil
+	}
+	return err
+}
+
 // sendBlockedKey marks a context whose execution holds no authorization
 // binding under an authorization stop (settleOwnedReceiptsWithoutBinding).
 // Evaluation is local and still runs, but a video with a matched decision
@@ -362,59 +393,58 @@ func (p *Pipeline) prepareReceiving(ctx context.Context, qs *queue.Store, runID 
 // binding cannot give, so they stay live for the run's own retention sweep.
 //
 // Any other bind failure (a local fault) or a quota or accounting stop is left
-// to the caller's ordinary failure path. Errors are logged, never swallowed:
-// the caller fails the run right after, and its sweep retains whatever is left.
-func (p *Pipeline) settleOwnedReceiptsWithoutBinding(ctx context.Context, run *state.Run, resumeAdmitted bool, fresh []queue.RetryGroupReceipt, bindErr error) {
+// to the caller's ordinary failure path, and so are claim-integrity refusals and
+// a pure guard veto (see governingSettlementFault). A failed read or write of
+// local state while settling is not left there: it is returned, and the caller
+// ends the run through writer W3 with that fault (ARS-005 section 6.1.3), not
+// with the binding error. Every error is also logged.
+func (p *Pipeline) settleOwnedReceiptsWithoutBinding(ctx context.Context, run *state.Run, resumeAdmitted bool, fresh []queue.RetryGroupReceipt, bindErr error) error {
 	runID := run.ID
 	if p.ledger == nil || !p.isProductionRun(run.RunType) {
-		return
+		return nil
 	}
-	fail := func(what string, err error) {
+	fail := func(what string, err error) error {
 		p.logger.ErrorContext(ctx, "receiving settlement without a binding failed", "run_id", runID, "step", what,
 			"diagnostic", diag.Encode(err, "routing", "load_metadata"))
+		return governingSettlementFault(ctx, err)
 	}
 	qs, err := p.retryStore()
 	if err != nil {
-		fail("store", err)
-		return
+		return fail("store", err)
 	}
 	stop, err := p.runStop(ctx, qs, runID)
 	if err != nil {
-		fail("stop", err)
-		return
+		return fail("stop", err)
 	}
 	cause := auth.ClassifyAuthorizationCause(bindErr)
 	if stop != quota.StopAuthorization && (stop != quota.StopNone || cause == "") {
-		return
+		return nil
 	}
 	if _, _, err := productionAuthority(ctx, p.db, p.configStore, runID); err != nil {
-		return // the ordinary failure path reports the run; nothing is settled around it
+		return nil // the ordinary failure path reports the run; nothing is settled around it
 	}
 	receipts := fresh
 	if receipts == nil && (run.Status == state.RunStatusInterrupted || resumeAdmitted) {
 		if receipts, err = recoverOwnedReceipts(ctx, qs, runID); err != nil {
-			fail("recover", err)
-			return
+			return fail("recover", err)
 		}
 	}
 	var settle []queue.RetryGroupReceipt
 	for _, receipt := range receipts {
 		class, _, err := state.ClassifyVideoTx(ctx, p.db, receipt.VideoID)
 		if err != nil {
-			fail("classify", err)
-			return
+			return fail("classify", err)
 		}
 		if class != state.VideoClassPartlyDone {
 			settle = append(settle, receipt)
 		}
 	}
 	if len(settle) == 0 {
-		return
+		return nil
 	}
 	if run.Status == state.RunStatusInterrupted {
 		if err := p.stateStore.ResumeRun(ctx, runID); err != nil {
-			fail("resume", err)
-			return
+			return fail("resume", err)
 		}
 		run.Status = state.RunStatusRunning
 	}
@@ -428,8 +458,9 @@ func (p *Pipeline) settleOwnedReceiptsWithoutBinding(ctx context.Context, run *s
 	// reach the executor, which would fail it as an ordinary action failure.
 	ctx = context.WithValue(ctx, sendBlockedKey{}, struct{}{})
 	if err := p.processDeferredItems(ctx, runID, settle, false); err != nil {
-		fail("settle", err)
+		return fail("settle", err)
 	}
+	return nil
 }
 
 // applyReadiness disposes of one open receipt whose inputs are not ready.
@@ -564,11 +595,17 @@ func (p *Pipeline) settleAuthorizationPending(ctx context.Context, qs *queue.Sto
 		}
 		return p.deferForInputsTx(ctx, tx, qs, runID, receipt, queue.DeferredReasonAuthorizationPending)
 	})
-	var guarded *receiptGuardedError
-	if errors.Is(err, queue.ErrWorkRemoved) || errors.As(err, &guarded) {
+	vetoed := isPureGuardVeto(err)
+	if errors.Is(err, queue.ErrWorkRemoved) || vetoed {
 		// The settlement rolled back, and with it the stored stop. The stop is
 		// still a fact about the run: store it on its own.
 		if raiseErr := p.raiseStoredStop(ctx, qs, runID, quota.StopAuthorization); raiseErr != nil {
+			if vetoed {
+				// The guarded receipt stays live either way. What governs now is
+				// that the stop could not be stored: a storage fault, not a
+				// receipt-local veto, so it must not be matched as one.
+				return fmt.Errorf("store authorization stop beside a guarded receipt: %w", raiseErr)
+			}
 			return errors.Join(err, raiseErr)
 		}
 	}
