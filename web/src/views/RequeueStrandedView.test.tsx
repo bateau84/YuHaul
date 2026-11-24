@@ -210,10 +210,27 @@ describe('Preview page', () => {
     ]) {
       expect(table).toHaveTextContent(helper)
     }
-    // A run that cannot be told apart from a live one: the response carries no
-    // per-run endable, so every run reads "has not ended" (design gap 2).
-    expect(table).toHaveTextContent('Run 52: 12 videos. Run 52 has not ended and can still continue them.')
+    expect(table).toHaveTextContent(
+      'Run 52: 12 videos. Run 52 has not ended. Open it to see whether it is still running, can be resumed, or can be marked as ended.',
+    )
     expect(within(table).getByRole('link', { name: 'Open run 52' })).toHaveAttribute('href', '/runs/52')
+  })
+
+  it('describes a held run neutrally: never says it can continue, and makes no per-run request', async () => {
+    // Run 14 is an older-version run saved as running that nothing executes. The report
+    // carries only its id and count (ARS-005 §8.1), so the line must not imply it can resume.
+    onGet = () => ({ body: preview({ not_ended: { videos: 19615, runs: [{ run_id: 14, videos: 19615 }] } }) })
+    renderAt()
+    await ready()
+    const item = screen.getByRole('link', { name: 'Open run 14' }).closest('li') as HTMLElement
+    expect(item).toHaveTextContent(
+      'Run 14: 19,615 videos. Run 14 has not ended. Open it to see whether it is still running, can be resumed, or can be marked as ended. Open run 14',
+    )
+    expect(item.textContent).not.toMatch(/can still continue|End run 14 first|stuck as/)
+    expect(screen.getByRole('link', { name: 'Open run 14' })).toHaveAttribute('href', '/runs/14')
+    const urls = vi.mocked(globalThis.fetch).mock.calls.map(([input]) => (typeof input === 'string' ? input : String(input)))
+    expect(urls.filter((u) => u.startsWith('/api/runs'))).toEqual([])
+    expect(gets()).toHaveLength(1)
   })
 
   it('keeps a zero row visible and never hides a category', async () => {

@@ -35,6 +35,10 @@ interface CountRow {
   extra?: ReactNode
 }
 
+// The report names a held run and its video count only (ARS-005 §8.1): it does not say whether
+// the run is executing, resumable or a stuck older-version run such as run 14. The line therefore
+// claims nothing about what the run can do and sends the person to Run Detail, which reads the
+// run's own state and offers "Mark as ended" when it applies.
 function HeldRuns({ runs }: { runs: Report['not_ended']['runs'] }) {
   const [all, setAll] = useState(false)
   const shown = all ? runs : runs.slice(0, RUNS_SHOWN)
@@ -44,7 +48,8 @@ function HeldRuns({ runs }: { runs: Report['not_ended']['runs'] }) {
       <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
         {shown.map((r) => (
           <li key={r.run_id}>
-            Run {r.run_id}: {videosText(r.videos)}. Run {r.run_id} has not ended and can still continue them.{' '}
+            Run {r.run_id}: {videosText(r.videos)}. Run {r.run_id} has not ended. Open it to see whether it is still running, can be
+            resumed, or can be marked as ended.{' '}
             <Link to={`/runs/${r.run_id}`}>Open run {r.run_id}</Link>
           </li>
         ))}
