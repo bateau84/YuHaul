@@ -31,11 +31,18 @@ const requeueChunk = 2000
 // is a primary-key lookup. With a plain JOIN the planner drives from the video
 // table's final_outcome index (the unfinished test is an OR) and rescans the
 // whole pair list for every video, which is quadratic in the plan.
-const insertRequeuedSQL = `INSERT INTO deferred_item (video_id, run_id, deferral_reason, retry_after, retry_count, status, created_at)
+//
+// MATERIALIZED decodes the JSON once per pair. Without it SQLite inlines
+// subject into the query and repeats json_extract at every use of
+// subject.video_id, in the join and in each shared predicate, which is
+// measurable at 100,000 pairs (ARS-005 §11.9 P1, phase B within 2 s).
+const insertRequeuedSQL = `WITH subject(video_id, origin_run_id) AS MATERIALIZED (
+  SELECT CAST(json_extract(j.value, '$[0]') AS INTEGER),
+         CAST(json_extract(j.value, '$[1]') AS INTEGER)
+  FROM json_each(?1) j)
+INSERT INTO deferred_item (video_id, run_id, deferral_reason, retry_after, retry_count, status, created_at)
 SELECT subject.video_id, subject.origin_run_id, 'requeued_by_user', NULL, 0, 'pending', ?2
-FROM (SELECT CAST(json_extract(j.value, '$[0]') AS INTEGER) AS video_id,
-             CAST(json_extract(j.value, '$[1]') AS INTEGER) AS origin_run_id
-      FROM json_each(?1) j) subject
+FROM subject
 CROSS JOIN video v ON v.id = subject.video_id
 WHERE v.processing_state <> 'completed'
   AND (v.final_outcome IS NULL OR v.final_outcome = 'not_yet_evaluated')

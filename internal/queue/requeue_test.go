@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -185,10 +186,13 @@ func TestInsertRequeuedTxEmptyPlanAndMissingTransaction(t *testing.T) {
 	}
 }
 
-// The insert must walk the pairs and look each video up by primary key. With a
-// plain JOIN the planner drives from the video table instead and rescans the
-// pair list per video: 4,001 pairs took 27 s, and 100,000 would not finish
-// (ARS-005 §11.9 P1 asks for phase B within 2 s).
+// The insert must decode the pairs once, walk them, and look each video up by
+// primary key. With a plain JOIN the planner drives from the video table
+// instead and rescans the pair list per video: 4,001 pairs took 27 s, and
+// 100,000 would not finish (ARS-005 §11.9 P1 asks for phase B within 2 s).
+// Without MATERIALIZED the pair list is inlined and json_extract runs again at
+// every use of subject.video_id; the plan then scans the virtual table j
+// instead of the materialized subject.
 func TestInsertRequeuedSQLWalksThePairsThenLooksUpEachVideo(t *testing.T) {
 	db := newTestStore(t).db
 	rows, err := db.Query(`EXPLAIN QUERY PLAN `+insertRequeuedSQL, `[[1,1]]`, "x")
@@ -196,13 +200,14 @@ func TestInsertRequeuedSQLWalksThePairsThenLooksUpEachVideo(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rows.Close()
-	var top []string
+	var top, all []string
 	for rows.Next() {
 		var id, parent, unused int
 		var detail string
 		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
 			t.Fatal(err)
 		}
+		all = append(all, detail)
 		if parent == 0 {
 			top = append(top, detail)
 		}
@@ -211,9 +216,27 @@ func TestInsertRequeuedSQLWalksThePairsThenLooksUpEachVideo(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(top, "\n")
-	if len(top) == 0 || !strings.HasPrefix(top[0], "SCAN j VIRTUAL TABLE") ||
-		!strings.Contains(joined, "SEARCH v USING INTEGER PRIMARY KEY") ||
-		strings.Contains(joined, "MULTI-INDEX") || strings.Contains(joined, "SCAN v") {
-		t.Fatalf("join order changed; top-level plan: %q", top)
+	scan := slices.Index(top, "SCAN subject")
+	search := slices.Index(top, "SEARCH v USING INTEGER PRIMARY KEY (rowid=?)")
+	decodes := 0
+	for _, d := range all {
+		if strings.HasPrefix(d, "SCAN j VIRTUAL TABLE") {
+			decodes++
+		}
+	}
+	switch {
+	// With the pairs materialized the planner keeps them as the outer loop
+	// even for a plain JOIN on an empty database (checked by mutation), so the
+	// plan alone no longer proves the hint; its text is pinned as well.
+	case !strings.Contains(insertRequeuedSQL, "\nCROSS JOIN video v ON v.id = subject.video_id"):
+		t.Fatal("the video join is no longer a CROSS JOIN from the pairs")
+	case len(top) == 0 || top[0] != "MATERIALIZE subject":
+		t.Fatalf("the pairs are no longer decoded once into a materialized subject; top-level plan: %q", top)
+	case scan < 0 || search < 0 || scan > search:
+		t.Fatalf("join order changed: want SCAN subject before SEARCH v; top-level plan: %q", top)
+	case decodes != 1:
+		t.Fatalf("the JSON is decoded %d times, want once; plan: %q", decodes, all)
+	case strings.Contains(joined, "MULTI-INDEX") || strings.Contains(joined, "SCAN v"):
+		t.Fatalf("video is not a primary-key lookup; top-level plan: %q", top)
 	}
 }
