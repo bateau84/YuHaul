@@ -10,6 +10,8 @@ timestamp: 2026-11-24T00:00:00Z
 
 ## 2026-11-24
 
+**Updated:** [Upgrade notes](/docs/user-docs/upgrade-notes.md). Database version 32 section: replaced the "not rehearsed" and "no recorded result" statements with the recorded evidence and its limits. The operator reported production `31|0` and zero future-dated pending retries at query time (Loom `99e5468f`, not a backup or approval). A synthetic-data rehearsal of 031 to 032 and restore to 031 on real binaries passed (Loom `f1c41ded`). Still not established: a production-copy rehearsal, a published image, hosted CI, the full release check and user approval. Backup and preflight instructions are unchanged.
+
 **Updated:** [Upgrade notes](/docs/user-docs/upgrade-notes.md). New database version 32 section for the re-queue release candidate: migration `032` (no down file), the backup and rollback expectation, ending run 14 before first use of Re-queue, and what is not yet established. Its steps are not rehearsed on real binaries.
 
 ## 2026-11-20
