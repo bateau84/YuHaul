@@ -615,7 +615,10 @@ type VideoDetailPresence struct {
 	Title, ChannelID, ChannelTitle, Description, Duration bool
 }
 
-// VideoIDs reports identities in a fully validated by-ID response.
+// VideoIDs reports the identifiable requested IDs of a validated by-ID
+// response. An element with an explicit empty-string id names no video and is
+// skipped, which leaves Complete false; every other identity defect makes the
+// whole response invalid.
 type VideoIDs struct {
 	IDs      []string
 	Complete bool
