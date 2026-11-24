@@ -132,6 +132,7 @@ func TestStrandedScanV2SeedsBlockedWithReasonAndRun(t *testing.T) {
 		"branch1_missing_route":         {{BlockAmbiguousLegacyEvidence, runOf("branch1_missing_route")}},
 		"branch2_unresolved_action":     {{BlockAmbiguousLegacyEvidence, runOf("branch2_unresolved_action")}},
 		"branch3_not_acted_at_scan":     {{BlockAmbiguousLegacyEvidence, runOf("branch3_not_acted_at_scan")}},
+		"branch4_target_a_succeeded":    {{BlockAmbiguousLegacyEvidence, e.branch4Retry}},
 		"held_guard":                    {{BlockUnresolvedSendGuard, e.evidence}},
 		"uncertain_addition_with_guard": {{BlockUncertainAddition, e.evidence}},
 	}
@@ -153,12 +154,10 @@ func TestStrandedScanV2SeedsBlockedWithReasonAndRun(t *testing.T) {
 		require.Equal(t, e.videos[name].VideoID, found.YouTubeVideoID, name)
 		require.Equal(t, reasons, reasonPairs(*found), name)
 	}
-	require.Equal(t, map[string]int{BlockAmbiguousLegacyEvidence: 5, BlockUnresolvedSendGuard: 1, BlockUncertainAddition: 1}, report.Blocked.ByReason)
-	// Branch 4's video is blocked by its legacy retry, but it also holds a
-	// retrying Errors entry. An active queue item is the first category, so the
-	// scan reports it as already queued (in the Errors queue), not blocked.
-	require.Equal(t, 1, report.AlreadyQueued.Videos)
-	require.Equal(t, 1, report.AlreadyQueued.InErrorsQueue)
+	require.Equal(t, map[string]int{BlockAmbiguousLegacyEvidence: 6, BlockUnresolvedSendGuard: 1, BlockUncertainAddition: 1}, report.Blocked.ByReason)
+	// Branch 4's retry row is inactive (resolved), so no queue item takes the
+	// video before the veto is read: it is blocked by the retry run's evidence.
+	require.Zero(t, report.AlreadyQueued.Videos)
 	require.Empty(t, plan)
 	require.Equal(t, 2, report.NotEnded.Videos)
 	require.Equal(t, []RunVideos{{RunID: e.evidence, Videos: 2}}, report.NotEnded.Runs)

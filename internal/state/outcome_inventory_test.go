@@ -75,6 +75,7 @@ var outcomeInventory = []outcomeSite{
 	{"internal/pipeline/exclusion.go", `FinalOutcomeExcluded`, inventoryNotApplicable, "excluded-specific check"},
 	{"internal/pipeline/stranded.go", `v\.final_outcome IS NULL OR v\.final_outcome = 'not_yet_evaluated'`, inventoryNotApplicable, "the scan's definition of unfinished (BR-037): a video with any committed outcome, including unavailable_on_youtube, is finished and falls out of every category (TestStrandedScanCategoriesPartitionUnfinishedVideos, f-unavailable)"},
 	{"internal/pipeline/stranded.go", `final_outcome IN \('deferred','failed'\)`, inventoryNotApplicable, "BR-037 AC4 counts only committed deferred or failed videos without a queue item; unavailable_on_youtube is a separate final outcome and is deliberately in no count"},
+	{"internal/queue/requeue.go", `v\.final_outcome IS NULL OR v\.final_outcome = 'not_yet_evaluated'`, inventoryNotApplicable, "the confirm's recheck of unfinished under the writer (BR-037 AC3): a video with any committed outcome, including unavailable_on_youtube, is finished and gets no item (TestRequeueFinalVideosGetNoItem, TestInsertRequeuedTxRechecksEachVideoUnderTheWriter)"},
 
 	// internal/videosearch
 	{"internal/videosearch/service.go", `final_outcome IS NOT NULL AND final_outcome <> 'not_yet_evaluated'`, inventoryHandled, "a run that stored any committed outcome, including unavailable_on_youtube, is listed in the video view (ARS-001 §6.4)"},
