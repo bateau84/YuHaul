@@ -6,7 +6,7 @@ tags: [architecture, specification, outcomes, lifecycle, retry, deferred-queue, 
 timestamp: 2026-11-18T00:00:00Z
 ---
 
-**Status:** accepted — exact implementation contract; steps 1, 2a, 2b, 3 and 4 (§1, §2–§7) implemented; the K-series tests K6, K18, K20 and K21 not yet (§12). It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
+**Status:** accepted — exact implementation contract; steps 1, 2a, 2b, 3 and 4 (§1, §2–§7) implemented; K6 implemented by `rq-confirm` (§12); the K-series tests K18, K20 and K21 not yet. It realizes [ADR-007](../decisions/adr-007-final-outcomes-are-never-reprocessed.md) for [BR-039](../../../requirements/yuhaul/br-039-final-outcomes-are-never-reprocessed.md). Revised 2026-11-12 after critic review `ses_e2e6c22cfffeEhvwlTXJINOyx1` (see §11).
 
 It amends:
 
@@ -556,7 +556,7 @@ Real migrated SQLite and the counting controlled provider unless marked *unit*. 
 
 **Deviation (K22).** K22 runs the pre-BR-039 claim reset statement, copied verbatim, against the migrated schema. It does not check out and run the old binary. The statement is the only part of the old claim code that touches the trigger.
 
-Not implemented: the K-series tests K6, K18 and K20. K20 applies only if the interim hold ships, which it did not. K21 (statistics regression) is also not written.
+K6 (the BR-037 preview counts and the confirm inserts no final video) is implemented by `TestRequeueFinalVideosGetNoItem` and `TestRequeueConfirmWritesOnlyTheStrandedItems` (`internal/pipeline/requeue_confirm_integration_test.go`; ARS-005 §12). Not implemented: the K-series tests K18 and K20. K20 applies only if the interim hold ships, which it did not. K21 (statistics regression) is also not written.
 
 **Deviation.** `FinalVideo` wraps the column in `COALESCE(v.final_outcome, '')`. `video.final_outcome` is nullable, and without it a NULL outcome makes `FinalVideo`, `NOT FinalVideo` and `PartlyDoneVideo` NULL, so `RoutableByRun` would drop every video with a NULL outcome. Classification is otherwise as specified.
 
