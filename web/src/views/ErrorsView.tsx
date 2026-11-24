@@ -11,6 +11,7 @@ import { ChannelScanErrors } from '../components/ChannelScanErrors'
 import { FetchErrorRegion } from '../components/FetchErrorRegion'
 import { useToast } from '../hooks/useToast'
 import { categoryLabel, offersAccountStatus } from '../lib/failure-reason'
+import { useLinkFocusOnce } from '../lib/focus'
 import { duplicateTitles, targetName, videoIdSuffix } from '../lib/same-title'
 import {
   diagCode,
@@ -55,6 +56,7 @@ export function ErrorsView() {
   const [removals, setRemovals] = useState<Record<number, { runId?: number }>>({})
   // The same notice for an item whose row is already gone, at the top of the list.
   const [topNotices, setTopNotices] = useState<RemovalNoticeData[]>([])
+  const linkFocus = useLinkFocusOnce()
   const errorsRef = useRef<ErrorEntry[]>([])
   errorsRef.current = errors
   const [confirmDismiss, setConfirmDismiss] = useState<ErrorEntry | null>(null)
@@ -141,16 +143,21 @@ export function ErrorsView() {
         const runId = retryRunOf(err.entry)
         const onScreen = errorsRef.current.some((e) => e.id === id)
         if (onScreen && entry) {
+          // Focus goes to the removed row's View video link, or the heading when it has none.
+          if ({ ...errorsRef.current.find((e) => e.id === id), ...entry }.external_video_id) linkFocus.arm(id)
+          else headingRef.current?.focus()
           setRemovals((prev) => ({ ...prev, [id]: { runId } }))
           setErrors((prev) => prev.map((e) => (e.id === id ? { ...e, ...entry } : e)))
         } else if (onScreen) {
-          // No usable entry: take the row out and keep the notice, focused,
-          // because the Retry that held focus is gone.
+          // No usable entry: take the row out and keep the notice. The Retry
+          // that held focus is gone and there is no row link, so focus goes to
+          // the page heading.
           setErrors((prev) => prev.filter((e) => e.id !== id))
-          setTopNotices((prev) => [...prev.filter((n) => n.id !== id), { id, target, runId, focus: true }])
+          setTopNotices((prev) => [...prev.filter((n) => n.id !== id), { id, target, runId }])
+          headingRef.current?.focus()
         } else {
           // The row is already gone (dismissed in this tab): no second toast, no focus move.
-          setTopNotices((prev) => [...prev.filter((n) => n.id !== id), { id, target, runId, focus: false }])
+          setTopNotices((prev) => [...prev.filter((n) => n.id !== id), { id, target, runId }])
         }
         return
       }
@@ -159,6 +166,10 @@ export function ErrorsView() {
         const entry = usableEntry<ErrorEntry>(err.entry, id)
         const outcome = err.finalOutcome ?? (entry ? entry.video_final_outcome : undefined)
         setRefusals((prev) => ({ ...prev, [id]: outcome }))
+        // Focus goes to the closed row's View video link; a row with no video
+        // link has none to take it, so the heading does.
+        if ({ ...errorsRef.current.find((e) => e.id === id), ...entry }.external_video_id) linkFocus.arm(id)
+        else headingRef.current?.focus()
         if (entry) {
           setErrors((prev) => prev.map((e) => (e.id === id ? { ...e, ...entry } : e)))
         } else {
@@ -231,7 +242,7 @@ export function ErrorsView() {
           <section className="card" aria-labelledby="video-errors-heading">
             <h2 id="video-errors-heading" className="section-title">Video errors</h2>
             {topNotices.map((n) => (
-              <RemovalAlert key={n.id} target={n.target} runId={n.runId} focus={n.focus} />
+              <RemovalAlert key={n.id} target={n.target} runId={n.runId} />
             ))}
             {loading ? (
               <div className="empty-state" role="status">Loading queue...</div>
@@ -264,7 +275,7 @@ export function ErrorsView() {
                           {e.id in removals && (
                             <tr>
                               <td colSpan={4}>
-                                <RemovalAlert runId={removals[e.id].runId} focus />
+                                <RemovalAlert runId={removals[e.id].runId} />
                               </td>
                             </tr>
                           )}
@@ -301,9 +312,9 @@ export function ErrorsView() {
                             </td>
                             <td data-label="Actions">
                               {closed ? (
-                                <ClosedNotice outcome={e.video_final_outcome} videoId={videoKey} target={target} />
+                                <ClosedNotice outcome={e.video_final_outcome} videoId={videoKey} target={target} linkRef={linkFocus.refFor(e.id)} />
                               ) : removed ? (
-                                <RemovedNotice videoId={videoKey} target={target} />
+                                <RemovedNotice videoId={videoKey} target={target} linkRef={linkFocus.refFor(e.id)} />
                               ) : unreadable ? (
                                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                                   <button

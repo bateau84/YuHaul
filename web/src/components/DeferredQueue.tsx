@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { useLinkFocusOnce } from '../lib/focus'
 import { Link, useSearchParams } from 'react-router-dom'
 import * as api from '../api/client'
 import { ApiError } from '../api/core'
@@ -139,6 +140,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
   const [announcement, setAnnouncement] = useState('')
   const [confirmDismiss, setConfirmDismiss] = useState<{ item: DeferredItem; index: number } | null>(null)
 
+  const linkFocus = useLinkFocusOnce()
   const headingRef = useRef<HTMLHeadingElement>(null)
   const bodyRef = useRef<HTMLTableSectionElement>(null)
   const retryRef = useRef<HTMLButtonElement>(null)
@@ -303,15 +305,21 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
           const current = dataRef.current
           if (current && !(d.id in removedHere)) onQueueTotal(current.queue_total - closedHereCount - 1)
           if (entry) {
+            // Focus goes to the removed row's View video link, or the heading when it has none.
+            if ({ ...d, ...entry }.external_video_id) linkFocus.arm(d.id)
+            else headingRef.current?.focus()
             setRemovedHere((prev) => ({ ...prev, [d.id]: { item: { ...d, ...entry }, runId } }))
           } else {
-            // No usable entry: take the row out and keep the notice, focused.
-            setTopNotices((prev) => [...prev.filter((n) => n.id !== d.id), { id: d.id, target, runId, focus: true }])
+            // No usable entry: take the row out and keep the notice. The Retry
+            // that held focus is gone and there is no row link, so focus goes to
+            // the list heading.
+            setTopNotices((prev) => [...prev.filter((n) => n.id !== d.id), { id: d.id, target, runId }])
+            headingRef.current?.focus()
             setRemovedHere((prev) => ({ ...prev, [d.id]: { item: { ...d, status: 'discarded' }, runId, hidden: true } }))
           }
         } else {
           // The row is already gone (dismissed in this tab): no second toast, no focus move.
-          setTopNotices((prev) => [...prev.filter((n) => n.id !== d.id), { id: d.id, target, runId, focus: false }])
+          setTopNotices((prev) => [...prev.filter((n) => n.id !== d.id), { id: d.id, target, runId }])
         }
         return
       }
@@ -319,6 +327,10 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         const entry = usableEntry<DeferredItem>(err.entry, d.id)
         // The item is closed now, so it is no longer part of the queue total.
         if (data && !(d.id in closedHere)) onQueueTotal(data.queue_total - closedHereCount - 1)
+        // Focus goes to the closed row's View video link; a row with no video
+        // link has none to take it, so the heading does.
+        if ({ ...d, ...entry }.external_video_id) linkFocus.arm(d.id)
+        else headingRef.current?.focus()
         if (entry) {
           setClosedHere((prev) => ({ ...prev, [d.id]: { ...d, ...entry } }))
         } else {
@@ -408,7 +420,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
         {announcement}
       </div>
       {topNotices.map((n) => (
-        <RemovalAlert key={n.id} target={n.target} runId={n.runId} focus={n.focus} />
+        <RemovalAlert key={n.id} target={n.target} runId={n.runId} />
       ))}
 
       {/* The Deferred toolbar (design: "Re-queue Stranded Videos and the Paged
@@ -496,7 +508,7 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                     {removedRow && !topNotices.some((n) => n.id === row.id) && (
                       <tr>
                         <td colSpan={4}>
-                          <RemovalAlert runId={removedRow.runId} focus />
+                          <RemovalAlert runId={removedRow.runId} />
                         </td>
                       </tr>
                     )}
@@ -524,9 +536,9 @@ export function DeferredQueue({ active, onQueueTotal }: Props) {
                       <td data-label="Retry after">{closed || removedRow ? '' : eligibilityText(d)}</td>
                       <td data-label="Actions">
                         {closed ? (
-                          <ClosedNotice outcome={d.video_final_outcome} videoId={d.external_video_id} target={target} />
+                          <ClosedNotice outcome={d.video_final_outcome} videoId={d.external_video_id} target={target} linkRef={linkFocus.refFor(row.id)} />
                         ) : removedRow ? (
-                          <RemovedNotice videoId={d.external_video_id} target={target} />
+                          <RemovedNotice videoId={d.external_video_id} target={target} linkRef={linkFocus.refFor(row.id)} />
                         ) : (
                           <div style={{ display: 'flex', gap: 8 }}>
                             <button
