@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { fmt, videosText } from '../lib/stranded'
 import type { StrandedBlockReason, StrandedBlockedVideo, StrandedReport as Report } from '../types'
@@ -43,11 +43,20 @@ function HeldRuns({ runs }: { runs: Report['not_ended']['runs'] }) {
   const [all, setAll] = useState(false)
   const shown = all ? runs : runs.slice(0, RUNS_SHOWN)
   const hidden = runs.length - shown.length
+  // "Show k more runs" unmounts when it is pressed, which would drop keyboard focus to
+  // <body>. Focus goes to the first run it revealed, whose line is read in full.
+  const firstRevealed = useRef<HTMLLIElement>(null)
+  const revealing = useRef(false)
+  useLayoutEffect(() => {
+    if (!all || !revealing.current) return
+    revealing.current = false
+    firstRevealed.current?.focus()
+  }, [all])
   return (
     <>
       <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
-        {shown.map((r) => (
-          <li key={r.run_id}>
+        {shown.map((r, i) => (
+          <li key={r.run_id} ref={i === RUNS_SHOWN ? firstRevealed : undefined} tabIndex={i === RUNS_SHOWN ? -1 : undefined}>
             Run {r.run_id}: {videosText(r.videos)}. Run {r.run_id} has not ended. Open it to see whether it is still running, can be
             resumed, or can be marked as ended.{' '}
             <Link to={`/runs/${r.run_id}`}>Open run {r.run_id}</Link>
@@ -55,7 +64,15 @@ function HeldRuns({ runs }: { runs: Report['not_ended']['runs'] }) {
         ))}
       </ul>
       {hidden > 0 && (
-        <button type="button" className="button" style={{ marginTop: 8 }} onClick={() => setAll(true)}>
+        <button
+          type="button"
+          className="button"
+          style={{ marginTop: 8 }}
+          onClick={() => {
+            revealing.current = true
+            setAll(true)
+          }}
+        >
           Show {fmt(hidden)} more {hidden === 1 ? 'run' : 'runs'}
         </button>
       )}

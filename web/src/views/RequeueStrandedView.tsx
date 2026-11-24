@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import * as api from '../api/client'
@@ -116,6 +116,11 @@ export function RequeueStrandedView() {
   const h1Ref = useRef<HTMLHeadingElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const confirmRef = useRef<HTMLButtonElement>(null)
+  const titleRef = useRef<HTMLHeadingElement>(null)
+  // Set when a refusal keeps the dialog open: the confirm button is re-enabled in
+  // the commit that clears `pending`, and focus is handed back to it there.
+  const refocusConfirm = useRef(false)
   const titleId = useId()
   const descId = useId()
   const unavailableId = useId()
@@ -159,6 +164,16 @@ export function RequeueStrandedView() {
     }
   }, [load])
 
+  // A browser drops focus to <body> when the focused button becomes disabled, and
+  // the modal's Tab trap only runs for key events that start inside the dialog. So
+  // while the request is pending focus waits on the dialog title (see confirm), and
+  // when a refusal re-enables the buttons it returns to the one that was pressed.
+  useLayoutEffect(() => {
+    if (pending || !refocusConfirm.current) return
+    refocusConfirm.current = false
+    confirmRef.current?.focus()
+  }, [pending])
+
   function closeDialog() {
     if (inFlight.current) return
     setOpen(false)
@@ -171,6 +186,8 @@ export function RequeueStrandedView() {
     if (inFlight.current || !preview) return
     inFlight.current = true
     const previewed = preview.requeue
+    // Move focus off the buttons before they are disabled: it stays inside the dialog.
+    titleRef.current?.focus()
     setPending(true)
     setDialogFailure(null)
     setPageFailure(null)
@@ -186,6 +203,7 @@ export function RequeueStrandedView() {
       setPending(false)
       const refusal = refusalFor(err)
       if (refusal.stay) {
+        refocusConfirm.current = true
         setDialogFailure(refusal.body)
       } else {
         setOpen(false)
@@ -264,7 +282,15 @@ export function RequeueStrandedView() {
         )}
         <p style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <span>Counts read at {readAt?.toLocaleTimeString()}. They are checked again when you confirm.</span>
-          <button type="button" className="button" disabled={refreshing} onClick={() => void load('refresh')}>
+          {/* aria-disabled, not disabled: a disabled button drops keyboard focus to <body>. */}
+          <button
+            type="button"
+            className="button"
+            aria-disabled={refreshing ? true : undefined}
+            onClick={() => {
+              if (!refreshing) void load('refresh')
+            }}
+          >
             {refreshing && <Loader2 size={16} className="spinner" aria-hidden="true" />}
             {refreshing ? 'Counting videos…' : 'Refresh counts'}
           </button>
@@ -296,8 +322,15 @@ export function RequeueStrandedView() {
         <BlockedVideos blocked={preview.blocked} />
         {open && n > 0 && (
           <ModalDialog labelledBy={titleId} describedBy={descId} initialFocusRef={cancelRef} onCancel={closeDialog}>
-            <div aria-busy={pending}>
-              <h2 id={titleId} className="modal-title">
+            <div
+              aria-busy={pending}
+              onKeyDown={(e) => {
+                // Both buttons are disabled while pending, so nothing in the dialog is
+                // tabbable: keep focus where it is rather than let Tab leave the modal.
+                if (pending && e.key === 'Tab') e.preventDefault()
+              }}
+            >
+              <h2 id={titleId} ref={titleRef} tabIndex={-1} className="modal-title">
                 Re-queue {videosText(n)}?
               </h2>
               <div id={descId}>
@@ -327,7 +360,7 @@ export function RequeueStrandedView() {
                 <button type="button" ref={cancelRef} className="button" disabled={pending} onClick={closeDialog}>
                   Cancel
                 </button>
-                <button type="button" className="button button--primary" disabled={pending} onClick={() => void confirm()}>
+                <button type="button" ref={confirmRef} className="button button--primary" disabled={pending} onClick={() => void confirm()}>
                   {pending ? 'Re-queuing…' : `Re-queue ${videosText(n)}`}
                 </button>
               </div>

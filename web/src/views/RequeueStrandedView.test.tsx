@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { ErrorsView } from './ErrorsView'
 import { RequeueStrandedView } from './RequeueStrandedView'
@@ -613,6 +613,215 @@ describe('Confirmation', () => {
     expect([...requeueRefusalCodes].sort()).toEqual(
       ['invalid_body', 'production_run_active', 'requeue_failed', 'requeue_outcome_unknown', 'shutting_down', 'startup_recovery_active'].sort(),
     )
+  })
+})
+
+// Keyboard focus (design check a7de6912, finding M2). jsdom neither moves focus when
+// the focused button becomes disabled nor follows Tab, so these tests add the two
+// browser behaviours that decide the outcome and then assert on where focus really is:
+//  - a focused button that becomes disabled loses focus to <body> (focus fixup);
+//  - an unhandled Tab moves to the next tabbable element in document order.
+describe('Keyboard focus', () => {
+  const TABBABLE = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+  // The fixup is applied synchronously, as a browser does when the element is disabled,
+  // not in a later observer callback that a quick state change could outrun.
+  let restoreFocusModel: () => void
+
+  beforeEach(() => {
+    // jsdom's blur() does nothing for a disabled element, so focus is moved to a
+    // throwaway element that is then removed, which leaves <body> active.
+    const dropFocusIfDisabled = (el: Element) => {
+      if (el !== document.activeElement || !el.matches(':disabled')) return
+      const sink = document.createElement('div')
+      sink.tabIndex = -1
+      document.body.append(sink)
+      sink.focus()
+      sink.remove()
+    }
+    const proto = HTMLButtonElement.prototype
+    const original = Object.getOwnPropertyDescriptor(proto, 'disabled') as PropertyDescriptor
+    const setAttribute = Element.prototype.setAttribute
+    Object.defineProperty(proto, 'disabled', {
+      ...original,
+      set(this: HTMLButtonElement, value: boolean) {
+        original.set?.call(this, value)
+        dropFocusIfDisabled(this)
+      },
+    })
+    Element.prototype.setAttribute = function (this: Element, name: string, value: string) {
+      setAttribute.call(this, name, value)
+      if (name === 'disabled') dropFocusIfDisabled(this)
+    }
+    restoreFocusModel = () => {
+      Object.defineProperty(proto, 'disabled', original)
+      Element.prototype.setAttribute = setAttribute
+    }
+  })
+  afterEach(() => restoreFocusModel())
+
+  const settle = () => act(async () => void (await Promise.resolve()))
+
+  // Sends Tab (or Shift+Tab) to the focused element. If nothing handled it, the
+  // browser moves focus to the neighbouring tabbable element, wrapping at the ends.
+  function pressTab(shift = false): Element | null {
+    const from = document.activeElement ?? document.body
+    if (!fireEvent.keyDown(from, { key: 'Tab', shiftKey: shift })) return document.activeElement
+    const tabbables = Array.from(document.querySelectorAll<HTMLElement>(TABBABLE))
+    const before = (el: HTMLElement) => !!(from.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
+    const after = (el: HTMLElement) => !!(from.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)
+    const fromBody = from === document.body
+    const next = shift
+      ? (fromBody ? tabbables.at(-1) : tabbables.filter(before).at(-1)) ?? tabbables.at(-1)
+      : (fromBody ? tabbables[0] : tabbables.find(after)) ?? tabbables[0]
+    next?.focus()
+    return document.activeElement
+  }
+
+  const confirmName = 'Re-queue 69,000 videos'
+  const inside = (dialog: HTMLElement) => (el: Element | null) => !!el && dialog.contains(el)
+
+  it.each([['Cancel'], [confirmName]])(
+    'while the request is pending, focus stays in the dialog and Tab and Shift+Tab cannot leave it (confirm pressed with focus on %s)',
+    async (startOn) => {
+      let finish!: (r: Reply) => void
+      onPost = () => new Promise<Reply>((r) => (finish = r)) as never
+      renderAt()
+      await ready()
+      const dialog = openDialog()
+      const isIn = inside(dialog)
+      within(dialog).getByRole('button', { name: startOn }).focus()
+      fireEvent.click(within(dialog).getByRole('button', { name: confirmName }))
+      await waitFor(() => expect(posts()).toHaveLength(1))
+      await settle()
+      expect(within(dialog).getByRole('button', { name: 'Re-queuing…' })).toBeDisabled()
+      expect(isIn(document.activeElement)).toBe(true)
+      expect(isIn(pressTab())).toBe(true)
+      expect(isIn(pressTab(true))).toBe(true)
+      expect(posts()).toHaveLength(1)
+      finish({ body: result() })
+      await screen.findByText(/^Re-queued 69,000 videos\./)
+    },
+  )
+
+  it.each([
+    [409, 'production_run_active'],
+    [503, 'startup_recovery_active'],
+    [503, 'shutting_down'],
+    [503, undefined],
+    [500, 'requeue_failed'],
+  ])('after a %i %s refusal that keeps the dialog open, focus is on the confirm button and Tab cycles inside the dialog', async (status, code) => {
+    let finish!: (r: Reply) => void
+    onPost = () => new Promise<Reply>((r) => (finish = r)) as never
+    renderAt()
+    await ready()
+    const dialog = openDialog()
+    const isIn = inside(dialog)
+    const confirm = () => within(dialog).getByRole('button', { name: confirmName })
+    confirm().focus()
+    fireEvent.click(confirm())
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    finish({ status, body: { error: 'unrelated text', ...(code ? { code } : {}) } })
+    await within(dialog).findByRole('alert')
+    await settle()
+
+    expect(confirm()).toBeEnabled()
+    expect(confirm()).toHaveFocus()
+    // From the last control Tab wraps to the first (the alert's "View runs" link for a 409,
+    // otherwise Cancel), and Shift+Tab goes back; neither leaves the modal.
+    expect(pressTab()).toBe(dialog.querySelector('a[href], button'))
+    expect(pressTab(true)).toBe(confirm())
+    expect(isIn(pressTab(true))).toBe(true)
+  })
+
+  it('after a refusal the same button confirms again exactly once, and Escape still closes the dialog and returns focus to the page button', async () => {
+    let attempt = 0
+    onPost = () => (++attempt === 1 ? { status: 409, body: { error: 'x', code: 'production_run_active' } } : { body: result() })
+    renderAt()
+    await ready()
+    const dialog = openDialog()
+    fireEvent.click(within(dialog).getByRole('button', { name: confirmName }))
+    await within(dialog).findByRole('alert')
+    await settle()
+    expect(within(dialog).getByRole('button', { name: confirmName })).toHaveFocus()
+
+    fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await waitFor(() => expect(screen.getByRole('button', { name: confirmName })).toHaveFocus())
+    expect(posts()).toHaveLength(1)
+
+    const again = openDialog()
+    fireEvent.click(within(again).getByRole('button', { name: confirmName }))
+    await screen.findByText(/^Re-queued 69,000 videos\./)
+    expect(posts()).toHaveLength(2)
+    expect(screen.getByText(/^Re-queued 69,000 videos\./).closest('[role="status"]')).toHaveFocus()
+  })
+
+  it('when the outcome is unknown the dialog closes and focus returns to the page button', async () => {
+    onPost = () => ({ status: 500, body: { error: 'x', code: 'requeue_outcome_unknown' } })
+    renderAt()
+    await ready()
+    // The page button had focus when the dialog was opened from the keyboard.
+    screen.getByRole('button', { name: confirmName }).focus()
+    const dialog = openDialog()
+    const confirm = within(dialog).getByRole('button', { name: confirmName })
+    confirm.focus()
+    fireEvent.click(confirm)
+    await screen.findByRole('alert')
+    await settle()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('button', { name: confirmName })).toHaveFocus()
+  })
+
+  it.each([
+    ['succeeds', () => ({ body: preview({ requeue: 68000 }) })],
+    ['fails', () => ({ status: 500, body: { error: 'x', code: 'preview_failed' } })],
+  ])('Refresh counts keeps keyboard focus while counting and when the read %s, and a second press sends nothing', async (_name, next) => {
+    let release!: (r: Reply) => void
+    renderAt()
+    await ready()
+    const refresh = screen.getByRole('button', { name: 'Refresh counts' })
+    refresh.focus()
+    onGet = () => new Promise<Reply>((r) => (release = r))
+    fireEvent.click(refresh)
+    await waitFor(() => expect(gets()).toHaveLength(2))
+    await settle()
+    const busy = screen.getByRole('button', { name: 'Counting videos…' })
+    expect(busy).toBe(refresh)
+    expect(busy).toHaveAttribute('aria-disabled', 'true')
+    expect(busy).toHaveFocus()
+    fireEvent.click(busy)
+    expect(gets()).toHaveLength(2)
+
+    release(next())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh counts' })).not.toHaveAttribute('aria-disabled'))
+    await settle()
+    expect(screen.getByRole('button', { name: 'Refresh counts' })).toHaveFocus()
+    expect(gets()).toHaveLength(2)
+    expect(posts()).toHaveLength(0)
+  })
+
+  it('"Show k more runs" hands focus to the first run it reveals, and a later refresh does not take it back', async () => {
+    const runs = Array.from({ length: 12 }, (_, i) => ({ run_id: i + 1, videos: i + 1 }))
+    onGet = () => ({ body: preview({ not_ended: { videos: 78, runs } }) })
+    renderAt()
+    await ready()
+    const show = screen.getByRole('button', { name: 'Show 2 more runs' })
+    show.focus()
+    fireEvent.click(show)
+    await settle()
+    expect(screen.queryByRole('button', { name: /more runs/ })).toBeNull()
+    const revealed = screen.getByRole('link', { name: 'Open run 11' }).closest('li') as HTMLElement
+    expect(revealed).toHaveTextContent('Run 11: 11 videos.')
+    expect(revealed).toHaveFocus()
+    // Tab continues from there: into the revealed line's own link, not back to the top of the page.
+    expect(pressTab()).toBe(screen.getByRole('link', { name: 'Open run 11' }))
+
+    const refresh = screen.getByRole('button', { name: 'Refresh counts' })
+    refresh.focus()
+    fireEvent.click(refresh)
+    await waitFor(() => expect(gets()).toHaveLength(2))
+    await settle()
+    expect(screen.getByRole('button', { name: 'Refresh counts' })).toHaveFocus()
   })
 })
 
